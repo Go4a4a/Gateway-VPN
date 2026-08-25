@@ -53,6 +53,27 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	}
 }
 
+func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{
+		`sed -E -e "s|^([[:space:]]*)lan_interface:.*|\1lan_interface: $LAN_INTERFACE|"`,
+		`grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml`,
+		`"$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml`,
+		"systemctl restart gateway-vpn-network-broker.socket",
+		"systemctl is-active --quiet gateway-vpn-network-broker.socket",
+		"systemctl is-active --quiet gateway-vpn-network-broker.service",
+		"[[ -S /run/gateway-vpn/network-broker.sock ]]",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer LAN/broker readiness contract missing %q", required)
+		}
+	}
+	if strings.Contains(installer, `s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|192.168.200.1/24|$LAN_ADDRESS|g" -e "s|192.168.200.1|$LAN_IP|g" "$ROOT_DIR/config.example.yaml"`) {
+		t.Fatal("Gateway installer still expects a nonexistent LAN placeholder in config.example.yaml")
+	}
+}
+
 func TestGatewayServicesUseBoundedJournaldNamespace(t *testing.T) {
 	root := repositoryRoot(t)
 	entries, err := os.ReadDir(filepath.Join(root, "packaging", "systemd"))

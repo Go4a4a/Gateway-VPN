@@ -241,6 +241,7 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   [[ $(sha256sum /etc/gateway-vpn/update-signing.pub | awk '{print $1}') == $(sha256sum "$TRUSTED_UPDATE_KEY" | awk '{print $1}') ]] || { echo "Existing Gateway trusted update key differs from the requested key" >&2; exit 1; }
   "$DEST/bin/gateway-vpnctl" release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn/update-signing.pub --current-version 0.0.0 --current-schema 1
   "$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml
+  grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { echo "Existing Gateway runtime LAN interface differs; explicit reconfiguration is required" >&2; exit 1; }
   nft --check --file /etc/gateway-vpn/nftables/boot.nft
   grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN interface differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
@@ -276,7 +277,10 @@ if ((EXISTING)); then
   fi
   systemctl is-active --quiet gateway-vpn-firewall.service
   systemctl is-active --quiet gateway-vpn-firewall-guard.service
+  systemctl is-active --quiet gateway-vpn-network-broker.socket
+  systemctl is-active --quiet gateway-vpn-network-broker.service
   systemctl is-active --quiet gateway-vpn.service
+  [[ -S /run/gateway-vpn/network-broker.sock ]]
   if ((ENABLE_DHCP)); then
     systemctl is-active --quiet gateway-vpn-dnsmasq.service
   fi
@@ -369,10 +373,12 @@ done < <(find "$RELEASE_DIR" -type f -print0 | sort -z)
 "$DEST/bin/gateway-vpnctl" release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn/update-signing.pub --current-version 0.0.0 --current-schema 1
 
 if [[ ! -e /etc/gateway-vpn/config.yaml ]]; then
-  sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|192.168.200.1/24|$LAN_ADDRESS|g" -e "s|192.168.200.1|$LAN_IP|g" "$ROOT_DIR/config.example.yaml" >/etc/gateway-vpn/config.yaml
+  sed -E -e "s|^([[:space:]]*)lan_interface:.*|\1lan_interface: $LAN_INTERFACE|" -e "s|192.168.200.1/24|$LAN_ADDRESS|g" -e "s|192.168.200.1|$LAN_IP|g" "$ROOT_DIR/config.example.yaml" >/etc/gateway-vpn/config.yaml
   chown root:gateway-vpn /etc/gateway-vpn/config.yaml
   chmod 0640 /etc/gateway-vpn/config.yaml
 fi
+grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { echo "Generated Gateway runtime LAN interface verification failed" >&2; exit 1; }
+"$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml
 
 for unit in gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
@@ -395,6 +401,7 @@ systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service
 systemctl restart gateway-vpn-update-recovery.service
 systemctl restart gateway-vpn-network-recovery.service
+systemctl restart gateway-vpn-network-broker.socket
 systemctl restart gateway-vpn.service
 
 if ((ENABLE_DHCP)); then
@@ -415,7 +422,10 @@ GATEWAY_RUNTIME_READY=0
 for _ in {1..20}; do
   if systemctl is-active --quiet gateway-vpn-firewall.service &&
      systemctl is-active --quiet gateway-vpn-firewall-guard.service &&
+     systemctl is-active --quiet gateway-vpn-network-broker.socket &&
+     systemctl is-active --quiet gateway-vpn-network-broker.service &&
      systemctl is-active --quiet gateway-vpn.service &&
+     [[ -S /run/gateway-vpn/network-broker.sock ]] &&
      nft list table inet gateway_vpn >/dev/null 2>&1 &&
      [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] &&
      ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}' | grep -Fxq "$LAN_ADDRESS" &&
