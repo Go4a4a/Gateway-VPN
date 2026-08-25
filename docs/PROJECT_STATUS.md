@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** GitHub zero-to-ready distribution: clean local source baseline `dd60f31`, independent bootstrap, Gateway/VPS/deploy artifacts, signed channel, typed two-host SSH orchestration, local-only WireGuard key lifecycle и durable role recovery готовы; trusted Linux build, первый immutable GitHub release и реальные Linux/VPS gates впереди
+**Текущий этап:** GitHub zero-to-ready distribution: clean source baseline `28ad0c7`, deterministic signed bundle, secret-free full-SHA GitHub CI, draft-only publisher, independent bootstrap, Gateway/VPS/deploy artifacts, typed two-host SSH orchestration и local-only WireGuard key lifecycle готовы; первый remote Linux CI, immutable GitHub release и реальные Linux/VPS gates впереди
 
-**Оценка прогресса:** около `93%` программной реализации и около `65%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные GitHub install, Ubuntu/systemd/nftables/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить unit-тестами или cross-build.
+**Оценка прогресса:** около `94%` программной реализации и около `66%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные GitHub install, Ubuntu/systemd/nftables/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить unit-тестами или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -31,7 +31,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
-| Репозиторий | `LOCAL_COMMIT_PASS / REMOTE_NOT_RUN` | Первый clean local commit `dd60f31` создан после полного pre-commit gate; remote GitHub repository/release ещё не проверялись |
+| Репозиторий | `LOCAL_COMMIT_PASS / REMOTE_NOT_RUN` | Clean release/CI baseline `28ad0c7` создан после полного gate; remote GitHub repository/Actions/release ещё не проверялись |
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
 | Этап 1: bootstrap | `CODE_PASS / LINUX_NOT_RUN` | Config, SQLite/bootstrap lifecycle, HTTPS runtime, clean-host dependencies, private LAN/host-overlap preflight, fail-closed first-install recovery и persistent networkd policy готовы; Linux host validation ещё не выполнена |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | SQLite Online Backup snapshots, corruption recovery, Argon2id+AES-GCM `.gvpn`, strict staging, root-owned journal, pre-restore snapshot, migration/session revoke, all-path rollback и WebUI покрыты success/adversarial/power-loss simulation tests; реальный root/systemd restore на Ubuntu ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `GATEWAY_VPS_DEPLOY_CODE_PASS / GITHUB_LINUX_NOT_RUN` | Hash-pinned bootstrap/deploy, exact Gateway/VPS roles, signed channel, two-host preflight/apply, local-only keys, generated one-command и redacted readiness покрыты tests/syntax; реальный release/GitHub/SSH/install не запускался |
+| Packaging | `GATEWAY_VPS_DEPLOY_CI_DRAFT_CODE_PASS / GITHUB_LINUX_NOT_RUN` | Canonical commit-time bundle, strict official Mihomo fetch, local artifact re-hash, executable scripts, full-SHA secret-free CI и draft-only publisher покрыты tests/syntax; реальный release/GitHub/SSH/install не запускался |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `PASS` | `go test ./...`, `go vet ./...`, shell/JS syntax и `linux/amd64 CGO_ENABLED=0` builds `gateway-vpn`, `gateway-vpnctl`, `gateway-vpn-bootstrap`, `gateway-vpn-deploy` прошли на Go 1.26.7 |
+| Автоматические тесты | `LOCAL_PASS / GITHUB_CI_NOT_RUN` | `go test ./...`, `go vet ./...`, shell/JS syntax и `linux/amd64 CGO_ENABLED=0` builds четырёх entrypoints прошли; GitHub Ubuntu 24.04 race/netns workflow определён, но ещё не запускался |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: получить clean checkout exact commit `dd60f31` на trusted Linux builder, собрать и подписать test release, опубликовать immutable GitHub assets и выполнить реальную двухмашинную dry-run/apply/resume/reboot matrix. Найденные integration defects исправляются до перехода к nft/netns, update/restore/recovery и hardware gates. Bootstrap/channel/deploy уже готовы только на synthetic уровне; GitHub redirects, OpenSSH, sudo, systemd, nftables, WireGuard handshake и WebUI bind фактически не запускались.
+Следующий инкремент: push exact commit `28ad0c7` в remote, получить PASS GitHub Ubuntu 24.04 race/netns CI, затем на trusted Linux builder собрать/подписать bundle, создать draft, вручную опубликовать его после включения release immutability и выполнить реальную двухмашинную dry-run/apply/resume/reboot matrix. Найденные integration defects исправляются до перехода к update/restore/recovery и hardware gates. GitHub redirects, OpenSSH, sudo, systemd, nftables, WireGuard handshake и WebUI bind фактически не запускались.
 
 ## Критический путь до release
 
@@ -68,7 +68,7 @@
 3. Docker CLI установлен, однако Docker Engine не запущен; локальные образы недоступны.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Clean local source baseline `dd60f31` создан. Remote GitHub repository/release credentials и trusted Linux builder в текущей среде не предоставлены; synthetic channel smoke не заменяет реальный GitHub Release.
+6. Clean release/CI baseline `28ad0c7` создан. Remote GitHub repository, release credentials и trusted Linux builder в текущей среде не предоставлены; workflow и publisher ещё не запускались, а synthetic channel smoke не заменяет реальный GitHub Release.
 7. Gateway installer/recovery/dependency/networkd code не запускался на Ubuntu 24.04: реальное поведение APT, systemd conditions, nftables ordering, sysctl, HTTPS bind, recovery/reboot и uninstall остаётся `NOT_RUN`.
 8. VPS installer/recovery/dependency code не запускался на Ubuntu/Debian: реальное поведение APT, systemd, nftables, WireGuard, reboot и provider firewall остаётся `NOT_RUN`.
 
@@ -173,8 +173,55 @@
 | DEV-095 | 2026-08-25 | Deploy exit code `0` разрешён только при свежем expected WireGuard handshake и `PATH_ACTIVE`; безопасно установленные роли без модема/подписки возвращают code `3` и `INSTALLED_NOT_READY` | Active systemd units и наличие файлов не доказывают management/data readiness, но отсутствие пользовательской конфигурации после clean install не является rollback-worthy corruption |
 | DEV-096 | 2026-08-25 | Внешний orchestrated dependency dry-run использует отдельный `DEPENDENCY_GATE_PASSED_OR_REFRESH_REQUIRED`; APT refresh остаётся только apply-фазе с повторной simulation | Устаревший package index не должен блокировать clean-host one-command до разрешённой apply, но невозможность полного preflight при отсутствующих packages нельзя называть обычным `PASSED` |
 | DEV-097 | 2026-08-25 | Первый release разрешено строить только из exact clean commit; локальный baseline `dd60f31` фиксирует проверенную source identity, но сам по себе не считается trusted Linux/GitHub release | Untracked workspace нельзя воспроизводимо связать с build metadata, SBOM, provenance и immutable artifacts |
+| DEV-098 | 2026-08-25 | Signed role/channel metadata использует canonical commit timestamp; bundle повторно проверяет Gateway/VPS signatures и re-hash всех четырёх local channel artifacts | Invocation time не должен менять signed identity, а валидная подпись старого manifest не доказывает, что локальный upload file после build не был заменён |
+| DEV-099 | 2026-08-25 | GitHub CI не получает release secrets, использует official Actions только по full commit SHA и отдельно запускает race suite и root netns fail-closed gate на Ubuntu 24.04 | PR/CI automation не должна иметь путь к long-lived signing key; Windows cross-build не заменяет реальный nft/netns run |
+| DEV-100 | 2026-08-25 | Long-lived Ed25519 key остаётся только на trusted builder; GitHub publisher создаёт exact draft и никогда не публикует его автоматически | GitHub Actions secret расширил бы signing trust boundary, а release immutability применяется только при публикации и требует прикрепить все assets к draft заранее |
+| DEV-101 | 2026-08-25 | Все shell entrypoints и netns harness фиксируются в Git как executable `100755` | Документированные `./scripts/...` и CI `./test/netns/...` иначе ломаются сразу после clean Linux checkout |
 
 ## Журнал разработки
+
+### Сессия 033 — deterministic release bundle, secret-free Linux CI и immutable draft — 2026-08-25
+
+**Сделано:**
+
+- добавлен `.github/workflows/ci.yml`: Ubuntu 24.04, `go test -race`, vet, gofmt, четыре Linux/amd64 CGO-free builds, JS/shell syntax и отдельный root nft/netns failure-recovery job;
+- `actions/checkout v7.0.1` и `actions/setup-go v7.0.0` закреплены полными official commit SHA; workflow имеет только `contents: read`, не использует `pull_request_target` и не читает secrets;
+- добавлен review-only Dependabot feed для GitHub Action pins;
+- build timestamps Gateway/VPS/deploy/channel теперь канонически выводятся из commit timestamp, а не wall-clock invocation time;
+- `channel-verify` получил optional complete `--artifact ROLE=FILE` gate: каждый из четырёх signed artifacts повторно проверяется по exact filename/size/SHA-256, duplicate/missing/modified file блокируется;
+- `release-verify --initial-install` позволяет trusted builder повторно проверить signed Gateway tree без выдуманной already-installed версии/схемы;
+- добавлен `fetch-mihomo-release.sh`: только official MetaCubeX compatible amd64-v1 asset, HTTPS-only redirect, 64 MiB download и 128 MiB decompression bounds, archive SHA-256 до decompression/version probe;
+- добавлен `build-release-bundle.sh`, который одной командой собирает Gateway/VPS/bootstrap/deploy/channel, закрепляет binary Mihomo SHA-256 и повторно проверяет все signatures/artifacts;
+- добавлен `create-github-release-draft.sh`: перед external write verifier пересобирается из clean tagged source, local/remote tag и exact assets сверяются, затем создаётся только draft через `gh release create --draft --verify-tag`;
+- все существующие и новые shell entrypoints, включая netns harness, переведены из ошибочного Git mode `100644` в `100755`;
+- Operations/README дополнены точным trusted-builder → draft → manual immutable publish workflow.
+
+**Найдено и исправлено:**
+
+- прежние примеры `./scripts/...` не работали бы после clean Linux checkout из-за mode `100644`;
+- одна лишь проверка channel signature не замечала замену локального artifact между build и upload; добавлен complete local re-hash и негативный тест подмены deploy binary;
+- wall-clock build/channel dates делали exact-commit bundle зависимым от времени запуска; metadata привязана к commit time;
+- перенос long-lived release key в GitHub Actions был отвергнут как расширение trust boundary: CI полностью secret-free, signing остаётся на отдельном builder;
+- автоматическая публикация была отвергнута: GitHub immutability действует только для будущей публикации, поэтому publisher останавливается на полностью наполненном draft.
+
+**Проверено:**
+
+- targeted `cmd/gateway-vpnctl` и packaging tests, включая modified local artifact rejection — PASS;
+- `go test ./... -count=1` — PASS;
+- `go vet ./...` — PASS;
+- Linux/amd64 `CGO_ENABLED=0` builds четырёх entrypoints — PASS;
+- `node --check internal/webapi/static/app.js` и Git Bash `bash -n scripts/*.sh test/netns/*.sh` — PASS;
+- workflow YAML parsing, full-SHA Action count, no-secrets/no-`pull_request_target`, fixed permissions и netns command проверяются packaging tests;
+- release/CI code зафиксирован commit `28ad0c7`.
+
+**Не выполнено и не считается PASS:**
+
+- GitHub workflow ещё не запускался; `go test -race` и root nft/netns остаются `GITHUB_CI_NOT_RUN`;
+- strict Mihomo fetch, signed bundle и `gh` draft не запускались на Linux trusted builder;
+- release immutability не включалась и GitHub release не создан;
+- реальные Gateway/VPS install, SSH, reboot и hardware gates не изменили статус `NOT_RUN`.
+
+**Следующий шаг:** push `28ad0c7`, добиться зелёного GitHub CI, затем exact-tag trusted build/draft/immutable publish и двухмашинная acceptance matrix.
 
 ### Сессия 032 — первый clean commit и перевод на Linux release gate — 2026-08-25
 
