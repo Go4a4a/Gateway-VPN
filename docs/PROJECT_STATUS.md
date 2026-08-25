@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Routing fix собран из exact commit `d591be0` в воспроизводимый signed bundle `0.1.0-systemd.12`. Clean s012 one-command deploy безопасно остановился до SSH/role mutation: локальный admin config parent отсутствовал, а launcher не создавал его, что нарушало zero-from-scratch contract. Исправление теперь создаёт недостающую защищённую directory chain без symlink traversal и отвергает shared-writable boundary; Windows и нативные Linux tests прошли. Следующий шаг — commit, signed `.13` и полностью clean exact повтор
+**Текущий этап:** Exact commit `b6e0610` собран в воспроизводимый signed bundle `0.1.0-systemd.13`. Полностью clean admin/Gateway/VPS one-command deploy создал защищённый admin config с нуля, применил обе роли и сохранил fail-closed SSH boundary; неизменённый установленный signed Gateway затем прошёл synthetic modem policy-routing и двусторонний WireGuard handshake через production root broker. Следующий шаг — реальный signed update acceptance, затем restore/recovery и interruption/power-loss simulations
 
-**Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `95%` программной реализации и около `82%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -32,12 +32,12 @@
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
 | Репозиторий | `LOCAL_AHEAD / PUSH_PENDING` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; local `main` содержит проверяемые commits сверх `origin/main`. Push остаётся отдельным внешним действием и не выполняется без явного разрешения пользователя |
-| Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
+| Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Signed Ubuntu 24.04 installer прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
 | Firewall / routing | `DOCKER_SYSTEMD_NETNS_AND_SYNTHETIC_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и nft guard прошли netns; production broker на Ubuntu 24.04 создал table/rule `1101`, exact endpoint route и nft tuple после исправления реального iproute2 JSON decoder. Реальный host packet capture ещё не выполнен |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
-| WireGuard management | `SYNTHETIC_DOCKER_HANDSHAKE_PASS / HOST_NOT_RUN` | VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04; production Gateway broker через synthetic modem получил endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
+| WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
 | SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_ZERO_FROM_SCRATCH_FIX_PENDING_RESIGN` | Signed `.12` double-build совпал byte-for-byte, но clean admin выявил отсутствующее безопасное создание parent для локального WireGuard config; роли остались clean. Source fix прошёл tests и требует signed `.13`. Permanent key и production tag/assets не выполнены |
+| Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build совпал byte-for-byte; полностью clean one-command deploy и exact installed-binary synthetic handshake прошли. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...`, нативные Linux dataplane и deploy security suites прошли. Signed `.11` подтвердил ControlMaster orchestration; signed `.12` воспроизвёл новый clean-admin defect до role mutation. Удалённый CI ещё не выполнен |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...`, нативные Linux dataplane и deploy security suites прошли. Exact signed `.13` подтвердила clean-admin creation, ControlMaster orchestration, production broker routing и WireGuard handshake. Удалённый CI ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: commit safe admin config directory creation, собрать signed `.13` из exact commit и на полностью чистом admin/Gateway/VPS стенде повторить one-command orchestration без предварительного `mkdir`; затем повторить synthetic modem/broker handshake на неизменённом signed installed binary. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: выполнить реальный systemd signed update на установленной `.13` с exact candidate, проверить atomic `current`/`recovery`, migration/health decision и rollback без потери fail-closed boundary; затем выполнить restore/recovery и interruption/power-loss simulations. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -68,7 +68,7 @@
 3. Docker Desktop `4.87.0`, Engine `29.7.2`, Linux/amd64 context `desktop-linux` запущен; Ubuntu 24.04 privileged nftables/netns gate прошёл. Docker не заменяет реальный systemd host, reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Disposable signed rehearsal на head `9eca9bb` прошёл, но отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены; CI не получает release secrets.
+6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact disposable signed rehearsal `.13` на head `b6e0610` прошёл clean orchestration и synthetic handshake, но отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены; CI не получает release secrets.
 7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS прошёл privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs + пустой `/run` + новый PID 1. Это не заменяет реальный host reboot, APT dependency installation на произвольной машине, uninstall, USB hotplug или power cut.
 8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
@@ -191,6 +191,45 @@
 | DEV-113 | 2026-08-26 | `gateway-vpn-deploy` сам создаёт отсутствующие компоненты parent directory для локального admin WireGuard config с mode `0700`; каждый существующий component проверяется через `Lstat`, symlink запрещён, а первая missing boundary не может находиться непосредственно под group/other-writable parent | Сгенерированная «одна команда» на clean admin host завершалась до SSH, если `~/.config/gateway-vpn` ещё не существовал. Ручной `mkdir` противоречит zero-from-scratch contract; обычный `MkdirAll` мог бы пройти через symlink/shared writable path |
 
 ## Журнал разработки
+
+### Сессия 043 — exact signed `.13`, clean one-command и WireGuard acceptance — 2026-08-26
+
+**Воспроизводимый signed bundle:**
+
+- exact source commit — `b6e0610056e72938d7d00f768882a0f2f0565567`, version — `0.1.0-systemd.13`, Mihomo — pinned `v1.19.30`;
+- две независимые offline-сборки с `GOPROXY=off` и read-only local module cache совпали byte-for-byte; disposable Ed25519 private key находился только в `noexec` tmpfs, не экспортировался и уничтожен;
+- signer — `31c8040b71d979a9531912beb54f7035c0e29f53c89d539eb526542e115fc422`, channel manifest SHA-256 — `ae9a6af65f644b9add9b17683c04f162f15e0f9f3249046950f6618085e499a2`;
+- Gateway/VPS archive SHA-256 — `03eb82539b2899fe88b571bcdf32e5ab02d0fe6688c16c231b070d215126df93` / `62855cb9a1966705b0c818717aa6f2d98bfb3b7e427267428f3b60a7faf86a99`; bootstrap/deploy — `dc41fe3aefd10389af75c8baf846bf1cfa31f8c676d10157ecc552bc5308b5f6` / `4b8b4311f401703ac7e07ff519b800862d3396f6ffd47bfbf4e0ac6b8016419c`.
+
+**Полностью clean one-command acceptance:**
+
+- новый s013 stand стартовал без `/root/.config/gateway-vpn` на admin host и без managed paths на Gateway/VPS; CA/channel hash и pinned SSH host fingerprints совпали до запуска;
+- exact launcher сам создал `/root/.config` и `/root/.config/gateway-vpn` с mode `0700`, а `admin.conf` — `0600`; `.pending`, ControlMaster sockets/directories и живые mux processes после завершения отсутствовали;
+- Gateway и VPS роли применились, WireGuard config был сформирован без вывода private material. Итог ожидаемо был `INSTALLED_NOT_READY`: `wireguard_configured=true`, но до synthetic modem отсутствовали handshake и internet path; единственные diagnostics — `WIREGUARD_HANDSHAKE_PENDING` и `MODEM_SUBSCRIPTION_PATH_PENDING`;
+- оба installed artifacts сообщили exact version/commit `.13`/`b6e0610`; Gateway WebUI локально возвращал HTTP 200, VPS firewall и `wg-quick@wg-mgmt` были active;
+- новый TCP/22 к Gateway получил timeout. Следовательно, workflow сохранил доступ через заранее установленный pinned ControlMaster, но не открыл SSH hole в nftables;
+- `gateway-vpn-dnsmasq.service` остался inactive, потому что custom two-host fixture намеренно не передал `--enable-dhcp`; DHCP policy по контракту является явным install choice, поэтому это не дефект роли.
+
+**Exact installed-binary synthetic acceptance:**
+
+- helper собран текущим portable Go 1.26.7 из current source с `GOPROXY=off`, `CGO_ENABLED=0`, `-mod=readonly` и `-trimpath`; SHA-256 внутри/снаружи контейнера совпал: `5d035744ddeb634f6d44f932efb67768eaac77525ad6fe99db27fef09ef8e359`;
+- остановлен только непривилегированный `gateway-vpn.service`, чтобы Docker `eth1` не был возвращён Modem Manager в offline; production broker/socket, boot firewall и firewall guard оставались active, installed signed binaries не заменялись;
+- helper от UID `gateway-vpn` через штатные SQLite repository и root broker создал `synthetic-modem-a`: `eth1`, `8.8.8.0/24`, gateway/DNS `8.8.8.1`, table `1101`, fwmark `0x1101`, `MODEM_READY`, management state `REACHABLE`;
+- numeric rule observer увидел priority/table `1101`, fwmark `0x1101`, protocol `186`; table 1101 содержала default, link и exact endpoint route через `eth1`, а marked lookups для `1.1.1.1` и `8.8.8.8` выбрали table 1101, gateway `8.8.8.1`, source `8.8.8.2`. Owned protocol-186 routes в main table отсутствовали;
+- nftables set содержал только exact tuple `"eth1" . 0x00001101 . 8.8.8.8`; `active_tun_interfaces` оставался пустым, поэтому без subscription/Mihomo internet path не открылся;
+- Gateway `wg-mgmt` получил `10.80.0.2/32`, endpoint `8.8.8.8:51821`, fwmark `0x1101`, fresh handshake и snapshot transfer `92 B received / 360 B sent`;
+- VPS `10.80.0.1/24` видел peer endpoint `8.8.8.2:54393`, allowed IP `10.80.0.2/32`, fresh handshake и snapshot transfer `244 B received / 92 B sent`; `ip route get 10.80.0.2` выбрал `wg-mgmt`. Второй admin peer `10.80.0.10/32` ожидаемо оставался без handshake;
+- после apply production broker/socket, firewall и guard сохранили `active`.
+
+**Стендовые особенности, не являющиеся production-дефектами:**
+
+- системного Go в Windows `PATH` нет; helper успешно пересобран зафиксированным portable toolchain из `.tools`;
+- первый `docker cp` с Windows-style relative path сообщил code 0, но не создал ожидаемый `/run` file; повтор с POSIX-style path в `/tmp` с последующей проверкой SHA-256 сработал;
+- четыре zombie `ssh` process не имели sockets/resources: fixture admin PID 1 — `sleep infinity`, который не reaps children. Живых SSH master processes не было.
+
+**Не считается выполненным:** synthetic Docker network не заменяет реальный HiLink/operator/public VPS UDP и packet capture; пустой TUN gate не доказывает internet path через Mihomo/subscription; update, restore/power-cut и production GitHub release ещё не прошли фактический acceptance.
+
+**Следующий шаг:** exact signed update acceptance на systemd стенде, затем restore/recovery и interruption/power-loss simulations.
 
 ### Сессия 042 — signed `.12` и clean-admin zero-to-ready boundary — 2026-08-26
 
