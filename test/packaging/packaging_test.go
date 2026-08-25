@@ -454,6 +454,28 @@ func TestGitHubCIUsesPinnedUbuntuSystemdGate(t *testing.T) {
 	}
 }
 
+func TestSystemdRehearsalImageIsPinnedAndTargetScoped(t *testing.T) {
+	root := repositoryRoot(t)
+	dockerfile := read(t, filepath.Join(root, "test", "systemd", "Dockerfile.ubuntu24"))
+	for _, required := range []string{
+		"FROM ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+		"systemd-networkd.service",
+		"systemd-timesyncd.service",
+		"dbus",
+		"wireguard-tools",
+		"CMD [\"/sbin/init\"]",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Errorf("systemd rehearsal image missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"FROM ubuntu:24.04", "apt-get upgrade", "apt-get dist-upgrade", "curl |"} {
+		if strings.Contains(dockerfile, forbidden) {
+			t.Errorf("systemd rehearsal image contains forbidden %q", forbidden)
+		}
+	}
+}
+
 func TestMihomoServiceConditionAndPermissionsAreFailClosed(t *testing.T) {
 	root := repositoryRoot(t)
 	service := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-mihomo.service"))
