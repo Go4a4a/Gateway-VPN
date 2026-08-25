@@ -1,0 +1,39 @@
+[Unit]
+Description=Gateway VPN privileged network broker
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+Requires=gateway-vpn-network-broker.socket gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+After=gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Wants=gateway-vpn-database-restore.service
+
+[Service]
+LogNamespace=gateway-vpn
+Type=simple
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn network-broker --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/network-transactions --apply
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE CAP_CHOWN
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/gateway-vpn -/var/lib/gateway-vpn/secrets/wireguard.yaml
+ReadWritePaths=/etc/gateway-vpn /etc/systemd/journald@gateway-vpn.conf.d /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn/state.db -/var/lib/gateway-vpn/state.db-wal -/var/lib/gateway-vpn/state.db-shm /var/lib/gateway-vpn/dnsmasq /run
+
+[Install]
+WantedBy=multi-user.target

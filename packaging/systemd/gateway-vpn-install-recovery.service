@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover interrupted Gateway VPN first installation
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn.service
+
+[Service]
+Type=oneshot
+LogNamespace=gateway-vpn
+ExecStart=/usr/libexec/gateway-vpn-install-recovery
+TimeoutStartSec=3min
+
+[Install]
+WantedBy=multi-user.target

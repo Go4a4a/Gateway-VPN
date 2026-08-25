@@ -1,0 +1,11 @@
+[Unit]
+Description=Gateway VPN rollback deadline for network apply %i
+
+[Timer]
+OnActiveSec=60s
+AccuracySec=1s
+Persistent=true
+Unit=gateway-vpn-network-rollback@%i.service
+
+[Install]
+WantedBy=timers.target

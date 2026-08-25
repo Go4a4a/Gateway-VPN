@@ -1,0 +1,33 @@
+[Unit]
+Description=Recover failed Gateway VPN update and resume management
+Documentation=file:///opt/gateway-vpn/recovery/share/doc/OPERATIONS.md
+After=gateway-vpn-update.service gateway-vpn-update-finalize.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart gateway-vpn-update-recovery.service
+ExecStart=/usr/bin/systemctl start gateway-vpn-network-broker.socket
+ExecStart=/usr/bin/systemctl start gateway-vpn.service
+TimeoutStartSec=25min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native

@@ -1,0 +1,193 @@
+package update
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"gateway-vpn/internal/platformexec"
+)
+
+const (
+	controlUnit = "gateway-vpn.service"
+	brokerUnit  = "gateway-vpn-network-broker.socket"
+	mihomoUnit  = "gateway-vpn-mihomo.service"
+	dnsmasqUnit = "gateway-vpn-dnsmasq.service"
+	guardUnit   = "gateway-vpn-firewall-guard.service"
+)
+
+type SystemRuntime struct {
+	Executor     platformexec.Executor
+	Systemctl    string
+	ReleaseRoot  string
+	RecoveryOnly bool
+}
+
+func (runtime SystemRuntime) Observe(ctx context.Context) (ManagedRuntimeState, error) {
+	if err := runtime.validate(); err != nil {
+		return ManagedRuntimeState{}, err
+	}
+	mihomo, err := runtime.unitActive(ctx, mihomoUnit)
+	if err != nil {
+		return ManagedRuntimeState{}, err
+	}
+	dnsmasq, err := runtime.unitActive(ctx, dnsmasqUnit)
+	if err != nil {
+		return ManagedRuntimeState{}, err
+	}
+	return ManagedRuntimeState{MihomoActive: mihomo, DNSMasqActive: dnsmasq}, nil
+}
+
+func (runtime SystemRuntime) Quiesce(ctx context.Context) error {
+	if err := runtime.validate(); err != nil {
+		return err
+	}
+	_, err := runtime.Executor.Run(ctx, platformexec.Request{
+		Executable:     runtime.Systemctl,
+		Arguments:      []string{"stop", controlUnit, "gateway-vpn-network-broker.service", brokerUnit, mihomoUnit, dnsmasqUnit},
+		MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		return fmt.Errorf("quiesce Gateway VPN managed services: %w", err)
+	}
+	return nil
+}
+
+func (runtime SystemRuntime) OfflineCheck(ctx context.Context, candidateBinary, databasePath, configPath, expectedVersion, expectedMihomo string, expectedSchema int64) (OfflineResult, error) {
+	if err := runtime.validate(); err != nil {
+		return OfflineResult{}, err
+	}
+	if !filepath.IsAbs(candidateBinary) || !pathInside(filepath.Join(runtime.ReleaseRoot, "releases"), candidateBinary) || !filepath.IsAbs(databasePath) || !filepath.IsAbs(configPath) || !versionPattern.MatchString(expectedVersion) || !mihomoVersionPattern.MatchString(expectedMihomo) || expectedSchema < 1 {
+		return OfflineResult{}, errors.New("candidate offline check arguments are outside the fixed update contract")
+	}
+	result, err := runtime.Executor.Run(ctx, platformexec.Request{
+		Executable: candidateBinary,
+		Arguments: []string{
+			"update-offline-check", "--database", databasePath, "--config", configPath,
+			"--expected-version", expectedVersion, "--expected-mihomo-version", expectedMihomo,
+			"--expected-schema", strconv.FormatInt(expectedSchema, 10), "--json",
+		},
+		MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		return OfflineResult{}, fmt.Errorf("candidate offline compatibility process failed: %w", err)
+	}
+	var offline OfflineResult
+	if err := decodeStrict([]byte(result.Stdout), &offline); err != nil {
+		return OfflineResult{}, errors.New("candidate offline compatibility output is invalid")
+	}
+	if err := verifyOfflineResult(offline, expectedSchema); err != nil {
+		return OfflineResult{}, err
+	}
+	return offline, nil
+}
+
+func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion, databasePath string, previous ManagedRuntimeState) error {
+	if err := runtime.validate(); err != nil {
+		return err
+	}
+	if !versionPattern.MatchString(expectedVersion) || !filepath.IsAbs(databasePath) {
+		return errors.New("expected release version and database path are required")
+	}
+	if runtime.RecoveryOnly {
+		return runtime.checkVersionAndState(ctx, expectedVersion, databasePath)
+	}
+	units := []string{brokerUnit, controlUnit}
+	if previous.MihomoActive {
+		units = append(units, mihomoUnit)
+	}
+	if previous.DNSMasqActive {
+		units = append(units, dnsmasqUnit)
+	}
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: append([]string{"start"}, units...), MaxOutputBytes: 64 << 10}); err != nil {
+		return fmt.Errorf("start switched Gateway VPN services: %w", err)
+	}
+	required := []string{guardUnit, brokerUnit, controlUnit}
+	if previous.MihomoActive {
+		required = append(required, mihomoUnit)
+	}
+	if previous.DNSMasqActive {
+		required = append(required, dnsmasqUnit)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	consecutive := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		allActive := true
+		for _, unit := range required {
+			active, err := runtime.unitActive(ctx, unit)
+			if err != nil {
+				return err
+			}
+			if !active {
+				allActive = false
+				break
+			}
+		}
+		if allActive {
+			if err := runtime.checkVersionAndState(ctx, expectedVersion, databasePath); err == nil {
+				consecutive++
+				if consecutive == 3 {
+					return nil
+				}
+			} else {
+				consecutive = 0
+			}
+		} else {
+			consecutive = 0
+		}
+		if time.Now().After(deadline) {
+			return errors.New("switched Gateway VPN services did not remain healthy")
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (runtime SystemRuntime) checkVersionAndState(ctx context.Context, expectedVersion, databasePath string) error {
+	binary := filepath.Join(runtime.ReleaseRoot, "current", "bin", "gateway-vpn")
+	result, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: binary, Arguments: []string{"--version"}, MaxOutputBytes: 16 << 10})
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(result.Stdout), "gateway-vpn "+expectedVersion+" (") {
+		return errors.New("current Gateway binary version does not match the update journal")
+	}
+	controller := filepath.Join(runtime.ReleaseRoot, "current", "bin", "gateway-vpnctl")
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: controller, Arguments: []string{"status", "--database", databasePath, "--json"}, MaxOutputBytes: 1 << 20}); err != nil {
+		return errors.New("current Gateway state command failed")
+	}
+	return nil
+}
+
+func (runtime SystemRuntime) unitActive(ctx context.Context, unit string) (bool, error) {
+	result, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: []string{"is-active", "--quiet", unit}, MaxOutputBytes: 16 << 10})
+	if err == nil {
+		return true, nil
+	}
+	if result.ExitCode > 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect managed systemd unit %s: %w", unit, err)
+}
+
+func (runtime SystemRuntime) validate() error {
+	if runtime.Executor == nil || !filepath.IsAbs(runtime.Systemctl) || !filepath.IsAbs(runtime.ReleaseRoot) {
+		return errors.New("system update runtime requires fixed absolute executables and release root")
+	}
+	return nil
+}
+
+func pathInside(root, path string) bool {
+	root, path = filepath.Clean(root), filepath.Clean(path)
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}

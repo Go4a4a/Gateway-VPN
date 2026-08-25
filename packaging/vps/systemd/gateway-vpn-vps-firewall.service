@@ -1,0 +1,39 @@
+[Unit]
+Description=Gateway VPN VPS owned management firewall
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+Before=wg-quick@wg-mgmt.service
+ConditionPathExists=/etc/gateway-vpn-vps/firewall.nft
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/sbin/nft --check --file /etc/gateway-vpn-vps/firewall.nft
+ExecStart=/usr/sbin/nft --file /etc/gateway-vpn-vps/firewall.nft
+ExecStop=-/usr/sbin/nft delete table inet gateway_vpn_vps
+RemainAfterExit=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/gateway-vpn-vps/firewall.nft
+
+[Install]
+WantedBy=multi-user.target

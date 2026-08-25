@@ -1,0 +1,40 @@
+version: 1
+
+system:
+  state_dir: /var/lib/gateway-vpn
+  database: /var/lib/gateway-vpn/state.db
+  # Temporary DEBUG is enabled only in WebUI with a 5m..24h TTL.
+  log_level: INFO
+
+network:
+  lan_interface: enp2s0
+  lan_address: 192.168.200.1/24
+  ipv6_mode: disabled
+
+modems:
+  type: hilink
+  auto_discover: true
+  require_adoption: true
+  require_unique_management_subnets: true
+  routing_table_start: 1101
+  fwmark_start: 4353
+
+mihomo:
+  binary: /opt/gateway-vpn/current/libexec/mihomo
+  tun_name: gateway-vpn-tun
+  stack: mixed
+  api_address: 127.0.0.1:9090
+  probe_address: 127.0.0.1:17890
+  api_secret_file: /var/lib/gateway-vpn/secrets/mihomo-api-secret
+  bootstrap_dns:
+    - 1.1.1.1
+  transport_probe_url: https://cp.cloudflare.com/generate_204
+  transport_probe_timeout_seconds: 8
+  transport_expected_status: "204"
+
+api:
+  listen:
+    - 192.168.200.1:8443
+    - 10.80.0.2:8443
+  tls_cert: /var/lib/gateway-vpn/tls/cert.pem
+  tls_key: /var/lib/gateway-vpn/tls/key.pem

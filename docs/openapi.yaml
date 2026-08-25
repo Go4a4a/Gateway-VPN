@@ -1,0 +1,949 @@
+openapi: 3.1.0
+info:
+  title: Gateway VPN Management API
+  version: 1.0.0-dev
+  description: |
+    Локальный HTTPS API Gateway VPN. Все маршруты, кроме login, требуют
+    защищённую session cookie. Все изменяющие запросы дополнительно требуют
+    session-bound CSRF header. Секреты никогда не возвращаются клиенту.
+servers:
+  - url: https://192.168.200.1:8443
+    description: Transit LAN по умолчанию
+  - url: https://10.80.0.2:8443
+    description: WireGuard management
+tags:
+  - name: Auth
+  - name: Gateway
+  - name: Modems
+  - name: Subscriptions
+  - name: Nodes
+  - name: Paths
+  - name: Targets
+  - name: Matchers
+  - name: Health
+  - name: Logging
+  - name: System
+  - name: Traffic
+  - name: Network
+  - name: WireGuard
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Создать локальную административную сессию
+      security: []
+      requestBody:
+        $ref: '#/components/requestBodies/Login'
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Отозвать текущую сессию
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/session:
+    get:
+      tags: [Auth]
+      operationId: getSession
+      summary: Получить текущую сессию и новый CSRF token
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/password:
+    put:
+      tags: [Auth]
+      operationId: changeOwnPassword
+      summary: Изменить собственный пароль и отозвать другие сессии
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PasswordChange'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/users:
+    get:
+      tags: [Auth]
+      operationId: listUsers
+      summary: Перечислить локальных администраторов без секретов
+      responses:
+        '200': {$ref: '#/components/responses/UserList'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Auth]
+      operationId: createUser
+      summary: Создать локального администратора с временным паролем
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/UserCreate'}
+      responses:
+        '201': {$ref: '#/components/responses/User'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/users/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Auth]
+      operationId: updateUser
+      summary: Переименовать, включить или отключить администратора
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/UserUpdate'}
+      responses:
+        '200': {$ref: '#/components/responses/User'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Auth]
+      operationId: deleteDisabledUser
+      summary: Удалить заранее отключённого администратора
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/users/{id}/password:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Auth]
+      operationId: resetUserPassword
+      summary: Сбросить чужой пароль и отозвать все сессии пользователя
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PasswordReset'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/sessions:
+    get:
+      tags: [Auth]
+      operationId: listSessions
+      summary: Перечислить активные сессии
+      responses:
+        '200': {$ref: '#/components/responses/SessionList'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/auth/sessions/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [Auth]
+      operationId: revokeSession
+      summary: Отозвать выбранную сессию
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/v1/gateway/status:
+    get:
+      tags: [Gateway]
+      operationId: getGatewayStatus
+      summary: Текущее состояние fail-closed control plane
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/gateway/diagnostics:
+    get:
+      tags: [Gateway]
+      operationId: describeDiagnostics
+      summary: Описать возможности диагностического архива
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/gateway/reconcile:
+    post:
+      tags: [Gateway]
+      operationId: reconcileGateway
+      summary: Запустить согласование desired и observed state
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/wireguard/status:
+    get:
+      tags: [WireGuard]
+      operationId: getWireGuardStatus
+      summary: Состояние management WireGuard и modem reachability
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/wireguard:
+    get:
+      tags: [WireGuard]
+      operationId: getWireGuardSettings
+      summary: Получить настройки без private key
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [WireGuard]
+      operationId: updateWireGuardSettings
+      summary: Сохранить защищённые настройки и синхронизировать root runtime
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/modems:
+    get:
+      tags: [Modems]
+      operationId: listModems
+      summary: Перечислить настроенные модемы 1..N
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/priorities:
+    put:
+      tags: [Modems]
+      operationId: reorderModems
+      summary: Атомарно изменить полный порядок включённых модемов
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/OrderedIDs'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/discovered:
+    get:
+      tags: [Modems]
+      operationId: listDiscoveredModems
+      summary: Перечислить обнаруженные USB-Ethernet устройства
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{discovery_id}/adopt:
+    parameters: [{$ref: '#/components/parameters/DiscoveryID'}]
+    post:
+      tags: [Modems]
+      operationId: adoptModem
+      summary: Принять обнаруженный модем в управляемый список
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Modems]
+      operationId: updateModem
+      summary: Изменить имя или operator label
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Modems]
+      operationId: forgetModem
+      summary: Забыть offline или disabled модем
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/enable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Modems]
+      operationId: enableModem
+      summary: Включить настроенный модем
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/disable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Modems]
+      operationId: disableModem
+      summary: Отключить модем и безопасно пересогласовать path
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/probe:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Modems]
+      operationId: probeModem
+      summary: Проверить модем и его подписки
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/recover:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Modems]
+      operationId: recoverModem
+      summary: Запустить bounded recovery модема
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/replace-identity:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Modems]
+      operationId: replaceModemIdentity
+      summary: Привязать offline запись к новому физическому устройству
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/subscriptions:
+    get:
+      tags: [Subscriptions]
+      operationId: listSubscriptions
+      summary: Перечислить подписки без URL и tokens
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Subscriptions]
+      operationId: createSubscription
+      summary: Создать подписку и начать проверяемый refresh
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/priorities:
+    put:
+      tags: [Subscriptions]
+      operationId: reorderSubscriptions
+      summary: Атомарно изменить порядок включённых подписок
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/OrderedIDs'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Subscriptions]
+      operationId: updateSubscription
+      summary: Изменить метаданные, secret URL или fallback policy
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Subscriptions]
+      operationId: deleteSubscription
+      summary: Удалить отключённую подписку и защищённые payloads
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/{id}/enable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Subscriptions]
+      operationId: enableSubscription
+      summary: Включить подписку
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/{id}/disable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Subscriptions]
+      operationId: disableSubscription
+      summary: Отключить подписку и безопасно пересогласовать path
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/{id}/refresh:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Subscriptions]
+      operationId: refreshSubscription
+      summary: Выполнить принудительный LKG refresh
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/nodes:
+    get:
+      tags: [Nodes]
+      operationId: listNodes
+      summary: Перечислить VPN nodes с фильтрами и pagination
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/nodes/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Nodes]
+      operationId: updateNodeOverride
+      summary: Изменить manual include/exclude узла
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/paths/matrix:
+    get:
+      tags: [Paths]
+      operationId: getPathMatrix
+      summary: Каноническая modem × subscription матрица
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/nodes:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [Paths]
+      operationId: listPathNodes
+      summary: Узлы и evidence конкретной path cell
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/qualify:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Paths]
+      operationId: qualifyPath
+      summary: Квалифицировать path cell
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/activate:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Paths]
+      operationId: activatePath
+      summary: Активировать свежий qualified node выбранной cell
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/nodes/{node_id}/probe:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/NodeID'}]
+    post:
+      tags: [Paths]
+      operationId: probePathNode
+      summary: Выполнить transport probe узла через конкретный модем
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/nodes/{node_id}/qualify:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/NodeID'}]
+    post:
+      tags: [Paths]
+      operationId: qualifyPathNode
+      summary: Проверить все required targets узла через конкретный модем
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/paths/{id}/nodes/{node_id}/targets:
+    parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/NodeID'}]
+    get:
+      tags: [Paths]
+      operationId: listPathNodeTargets
+      summary: Lazy-load target evidence узла
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/bypass-targets:
+    get:
+      tags: [Targets]
+      operationId: listBypassTargets
+      summary: Перечислить ordered bypass targets
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Targets]
+      operationId: createBypassTarget
+      summary: Создать target и начать policy transition
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/bypass-targets/priorities:
+    put:
+      tags: [Targets]
+      operationId: reorderBypassTargets
+      summary: Атомарно изменить порядок targets
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/OrderedIDs'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/bypass-targets/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Targets]
+      operationId: updateBypassTarget
+      summary: Изменить target и начать policy transition
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Targets]
+      operationId: deleteBypassTarget
+      summary: Удалить target
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/bypass-targets/{id}/probe:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Targets]
+      operationId: probeBypassTarget
+      summary: Проверить target по доступным path candidates
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/node-matchers:
+    get:
+      tags: [Matchers]
+      operationId: listNodeMatchers
+      summary: Перечислить ordered node-name matchers
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Matchers]
+      operationId: createNodeMatcher
+      summary: Создать matcher с RE2 semantics
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/node-matchers/priorities:
+    put:
+      tags: [Matchers]
+      operationId: reorderNodeMatchers
+      summary: Атомарно изменить порядок matchers
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/OrderedIDs'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/node-matchers/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Matchers]
+      operationId: updateNodeMatcher
+      summary: Изменить matcher и начать reclassification
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Matchers]
+      operationId: deleteNodeMatcher
+      summary: Удалить matcher и начать reclassification
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/node-matchers/preview:
+    post:
+      tags: [Matchers]
+      operationId: previewNodeMatcher
+      summary: Предпросмотр matcher без изменения policy generation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/events:
+    get:
+      tags: [Health]
+      operationId: listEvents
+      summary: Перечислить redacted audit и state events
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/health/periodic:
+    get:
+      tags: [Health]
+      operationId: getPeriodicHealth
+      summary: Получить durable schedule, results и per-modem budgets
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/settings/logging:
+    get:
+      tags: [Logging]
+      operationId: getLoggingSettings
+      summary: Получить desired/applied logging policy
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [Logging]
+      operationId: updateLoggingSettings
+      summary: Изменить уровни, debug TTL и retention
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/logs:
+    get:
+      tags: [Logging]
+      operationId: listLogs
+      summary: Читать bounded page namespaced journald
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/system/diagnostics:
+    post:
+      tags: [System]
+      operationId: downloadDiagnostics
+      summary: Создать redacted in-memory diagnostic ZIP
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '200': {$ref: '#/components/responses/ZIP'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/system/backups:
+    get:
+      tags: [System]
+      operationId: listBackups
+      summary: Перечислить verified локальные SQLite snapshots
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/backups/snapshot:
+    post:
+      tags: [System]
+      operationId: createDatabaseSnapshot
+      summary: Создать ручной SQLite Online Backup snapshot
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/backup:
+    post:
+      tags: [System]
+      operationId: downloadEncryptedBackup
+      summary: Создать и скачать encrypted portable backup
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PortableBackup'}
+      responses:
+        '200': {$ref: '#/components/responses/PortableBackup'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/system/restore:
+    get:
+      tags: [System]
+      operationId: getRestoreStatus
+      summary: Получить verified staging status
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [System]
+      operationId: stageRestore
+      summary: Загрузить, расшифровать и проверить portable backup во staging
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/RestoreUpload'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [System]
+      operationId: discardRestore
+      summary: Удалить verified staging без изменения live state
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/restore/apply:
+    post:
+      tags: [System]
+      operationId: applyRestore
+      summary: Запустить root all-or-rollback restore
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update:
+    get:
+      tags: [System]
+      operationId: getSignedUpdateStatus
+      summary: Получить состояние staging и sanitized root-owned update transaction
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [System]
+      operationId: stageSignedUpdate
+      summary: Загрузить и проверить Ed25519 signed immutable release без установки
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/UpdateUpload'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [System]
+      operationId: discardSignedUpdate
+      summary: Удалить verified staged release без изменения live state
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/apply:
+    post:
+      tags: [System]
+      operationId: applySignedUpdate
+      summary: Закрыть data path и запустить fixed root update transaction
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/traffic/current:
+    get:
+      tags: [Traffic]
+      operationId: getCurrentTraffic
+      summary: Текущая общая скорость и authoritative counters
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/traffic/daily:
+    get:
+      tags: [Traffic]
+      operationId: getDailyTraffic
+      summary: Дневные общие VPN totals без per-subscription attribution
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/traffic/monthly:
+    get:
+      tags: [Traffic]
+      operationId: getMonthlyTraffic
+      summary: Месячные общие VPN totals
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/traffic/export.csv:
+    get:
+      tags: [Traffic]
+      operationId: exportTrafficCSV
+      summary: Скачать общую traffic history в CSV
+      responses:
+        '200': {$ref: '#/components/responses/CSV'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/v1/settings/network:
+    get:
+      tags: [Network]
+      operationId: getNetworkSettings
+      summary: Получить transit LAN и safe-apply status
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/network/apply:
+    post:
+      tags: [Network]
+      operationId: stageNetworkApply
+      summary: Проверить candidate, создать snapshot и вооружить rollback timer
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/network/apply/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [Network]
+      operationId: getNetworkApplyStatus
+      summary: Получить durable transaction status без confirmation token
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/network/apply/{id}/confirm:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Network]
+      operationId: confirmNetworkApply
+      summary: Подтвердить candidate только через new local address или WireGuard
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: gateway_vpn_session
+      description: Secure, HttpOnly, SameSite=Strict opaque session token.
+  parameters:
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Session-bound token returned by login or auth/session.
+      schema: {type: string, minLength: 32, maxLength: 256}
+    DestructiveConfirmation:
+      name: X-Confirm-Destructive
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+    NodeID:
+      name: node_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+    DiscoveryID:
+      name: discovery_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 200}
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: {type: string, maxLength: 1024}
+  requestBodies:
+    JSON:
+      required: true
+      content:
+        application/json:
+          schema: {type: object, additionalProperties: true}
+    Login:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [username, password]
+            properties:
+              username: {type: string, minLength: 1, maxLength: 128}
+              password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+    PasswordChange:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [current_password, new_password, password_confirmation]
+            properties:
+              current_password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+              new_password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+              password_confirmation: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+    PasswordReset:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [password, password_confirmation]
+            properties:
+              password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+              password_confirmation: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+    UserCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [username, password, password_confirmation]
+            properties:
+              username: {$ref: '#/components/schemas/Username'}
+              password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+              password_confirmation: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+    UserUpdate:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            minProperties: 1
+            properties:
+              username: {$ref: '#/components/schemas/Username'}
+              enabled: {type: boolean}
+    OrderedIDs:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [ids]
+            properties:
+              ids:
+                type: array
+                uniqueItems: true
+                items: {type: string, minLength: 1, maxLength: 256}
+    PortableBackup:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [passphrase, passphrase_confirmation]
+            properties:
+              passphrase: {type: string, minLength: 12, maxLength: 256, writeOnly: true}
+              passphrase_confirmation: {type: string, minLength: 12, maxLength: 256, writeOnly: true}
+    RestoreUpload:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [passphrase, backup]
+            properties:
+              passphrase: {type: string, minLength: 12, maxLength: 256, writeOnly: true}
+              backup: {type: string, format: binary}
+    UpdateUpload:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [release]
+            properties:
+              release: {type: string, format: binary}
+  responses:
+    JSON:
+      description: Успешный JSON response соответствующего read model.
+      content:
+        application/json:
+          schema: {type: object, additionalProperties: true}
+    User:
+      description: Secret-free локальный администратор.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/User'}
+    UserList:
+      description: Локальные администраторы и модель авторизации MVP.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items, authorization_model]
+            properties:
+              items: {type: array, items: {$ref: '#/components/schemas/User'}}
+              authorization_model: {const: all_local_users_are_administrators}
+    Session:
+      description: Сессия; bearer cookie остаётся только в Set-Cookie.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Session'}
+    SessionList:
+      description: Активные сессии; ID является SHA-256 digest случайного bearer token и сам не авторизует запросы.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items: {type: array, items: {$ref: '#/components/schemas/SessionInfo'}}
+    NoContent: {description: Операция выполнена, response body отсутствует.}
+    Error:
+      description: Machine-readable error envelope без внутренних ошибок и секретов.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    ZIP:
+      description: Redacted diagnostic ZIP.
+      content:
+        application/zip:
+          schema: {type: string, format: binary}
+    PortableBackup:
+      description: Зашифрованный Gateway VPN backup.
+      content:
+        application/vnd.gateway-vpn.backup:
+          schema: {type: string, format: binary}
+    CSV:
+      description: UTF-8 CSV с общей traffic history.
+      content:
+        text/csv:
+          schema: {type: string}
+  schemas:
+    Username:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$'
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, enabled, must_change_password, active_sessions, created_at, updated_at]
+      properties:
+        id: {type: string}
+        username: {$ref: '#/components/schemas/Username'}
+        enabled: {type: boolean}
+        must_change_password: {type: boolean}
+        active_sessions: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Session:
+      type: object
+      additionalProperties: false
+      required: [user_id, user, session_id, csrf_token, must_change_password, expires_at]
+      properties:
+        user_id: {type: string}
+        user: {$ref: '#/components/schemas/Username'}
+        session_id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        csrf_token: {type: string, minLength: 32, maxLength: 256, writeOnly: true}
+        must_change_password: {type: boolean}
+        expires_at: {type: string, format: date-time}
+    SessionInfo:
+      type: object
+      additionalProperties: false
+      required: [id, user_id, username, created_at, expires_at, last_seen_at, current]
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        user_id: {type: string}
+        username: {$ref: '#/components/schemas/Username'}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+        current: {type: boolean}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string, pattern: '^[A-Z0-9_]+$'}
+            message: {type: string}
+security:
+  - cookieAuth: []

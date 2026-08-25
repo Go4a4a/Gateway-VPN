@@ -1,0 +1,10 @@
+table inet gateway_vpn_vps {
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        iifname "wg-mgmt" oifname "wg-mgmt" ip saddr 10.80.0.10 ip daddr 10.80.0.2 ct state new tcp dport { __GATEWAY_TCP_PORTS__ } counter accept comment "gateway-vpn admin management"
+        iifname "wg-mgmt" oifname "wg-mgmt" ip saddr 10.80.0.10 ip daddr 10.80.0.2 icmp type echo-request counter accept comment "gateway-vpn admin diagnostic ping"
+        iifname "wg-mgmt" oifname "wg-mgmt" ip saddr 10.80.0.2 ip daddr 10.80.0.10 ct state established,related counter accept comment "gateway-vpn management replies"
+        iifname "wg-mgmt" oifname "wg-mgmt" counter reject with icmpx type admin-prohibited comment "gateway-vpn deny other peer forwarding"
+    }
+}

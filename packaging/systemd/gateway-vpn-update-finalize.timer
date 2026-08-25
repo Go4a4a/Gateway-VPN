@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically evaluate Gateway VPN update stability window
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+Unit=gateway-vpn-update-finalize.service
+
+[Install]
+WantedBy=timers.target

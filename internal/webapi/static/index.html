@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gateway VPN</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <section id="login-view" class="login-shell" hidden>
+    <form id="login-form" class="login-card">
+      <div class="brand-mark">GV</div>
+      <h1>Gateway VPN</h1>
+      <p>Управление модемами, подписками и проверенными VPN-путями</p>
+      <label>Пользователь<input name="username" autocomplete="username" value="admin" required></label>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Войти</button>
+      <div id="login-notice" class="notice" role="status" hidden></div>
+      <div id="login-error" class="error" role="alert"></div>
+    </form>
+  </section>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside>
+      <div class="brand"><span class="brand-mark small">GV</span><span><strong>Gateway VPN</strong><small>Control plane</small></span></div>
+      <nav id="navigation" aria-label="Разделы">
+        <button data-tab="overview" class="active">Обзор</button>
+        <button data-tab="modems">Модемы</button>
+        <button data-tab="subscriptions">Подписки</button>
+        <button data-tab="matrix">Матрица путей</button>
+        <button data-tab="targets">Серверы проверки</button>
+        <button data-tab="matchers">Правила отбора</button>
+        <button data-tab="nodes">VPN-серверы</button>
+        <button data-tab="health">Состояние и события</button>
+        <button data-tab="traffic">Трафик</button>
+        <button data-tab="remote">Удалённый доступ</button>
+        <button data-tab="network">Сеть</button>
+        <button data-tab="system">Система и безопасность</button>
+      </nav>
+      <button id="logout" class="logout">Выйти</button>
+    </aside>
+    <main>
+      <header><div><p class="eyebrow">GATEWAY CONTROL</p><h1 id="page-title">Обзор</h1></div><div id="gateway-badge" class="badge neutral">Загрузка</div></header>
+      <div id="notice" class="notice" hidden></div>
+      <section id="content" aria-live="polite"></section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

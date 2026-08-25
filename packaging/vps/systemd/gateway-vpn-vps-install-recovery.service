@@ -1,0 +1,13 @@
+[Unit]
+Description=Recover interrupted Gateway VPN VPS first installation
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/gateway-vpn-vps-install-recovery
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

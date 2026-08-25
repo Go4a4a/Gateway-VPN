@@ -1,0 +1,48 @@
+[Unit]
+Description=Gateway VPN management and control plane
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+After=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service systemd-networkd.service network-online.target
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service systemd-networkd.service
+Wants=network-online.target gateway-vpn-network-broker.socket gateway-vpn-database-restore.service
+ConditionPathExists=/etc/gateway-vpn/config.yaml
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
+
+[Service]
+LogNamespace=gateway-vpn
+Type=simple
+User=gateway-vpn
+Group=gateway-vpn
+UMask=0077
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn serve --config /etc/gateway-vpn/config.yaml
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=60s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/gateway-vpn
+ReadOnlyPaths=/etc/gateway-vpn /opt/gateway-vpn
+
+[Install]
+WantedBy=multi-user.target

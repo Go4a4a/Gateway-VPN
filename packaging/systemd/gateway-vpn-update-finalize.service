@@ -1,0 +1,36 @@
+[Unit]
+Description=Finalize stable Gateway VPN release update
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+After=gateway-vpn-update-recovery.service gateway-vpn.service
+Requires=gateway-vpn-update-recovery.service
+OnFailure=gateway-vpn-update-resume.service
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+Environment=GATEWAY_VPN_UPDATE_FINALIZE_UNIT=1
+ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-finalize --config /etc/gateway-vpn/config.yaml --apply
+TimeoutStartSec=20min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/gateway-vpn /usr
+ReadWritePaths=/opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run

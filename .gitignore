@@ -1,0 +1,24 @@
+# Build output
+/bin/
+/dist/
+/coverage/
+*.test
+*.out
+
+# Runtime state and secrets
+/state/
+/var/
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.pem
+.env
+
+# Local tooling
+/.tools/
+/.cache/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

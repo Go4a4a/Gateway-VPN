@@ -1,0 +1,41 @@
+[Unit]
+Description=Recover or roll back unfinished Gateway VPN release update
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Before=gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn.service
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+RemainAfterExit=yes
+Environment=GATEWAY_VPN_UPDATE_RECOVERY_UNIT=1
+ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover --config /etc/gateway-vpn/config.yaml --apply
+TimeoutStartSec=20min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/gateway-vpn /usr
+ReadWritePaths=/opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run
+
+[Install]
+WantedBy=multi-user.target

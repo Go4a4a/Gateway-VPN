@@ -1,0 +1,31 @@
+[Unit]
+Description=Gateway VPN boot-time fail-closed firewall
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+Before=network-pre.target gateway-vpn-firewall-guard.service gateway-vpn-network-recovery.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
+Wants=network-pre.target
+ConditionPathExists=/etc/gateway-vpn/config.yaml
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+ExecReload=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+SystemCallFilter=@system-service
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

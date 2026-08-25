@@ -1,0 +1,38 @@
+[Unit]
+Description=Gateway VPN verified signed release update
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service
+ConditionPathExists=/var/lib/gateway-vpn/update-staging/pending-update.json
+OnFailure=gateway-vpn-update-resume.service
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+Environment=GATEWAY_VPN_UPDATE_UNIT=1
+ExecStartPre=/opt/gateway-vpn/recovery/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn update-apply --config /etc/gateway-vpn/config.yaml --apply
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/gateway-vpn /usr
+ReadWritePaths=/opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run

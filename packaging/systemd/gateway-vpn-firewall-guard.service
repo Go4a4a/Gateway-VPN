@@ -1,0 +1,47 @@
+[Unit]
+Description=Gateway VPN nftables integrity guard
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target gateway-vpn-firewall.service
+Requires=gateway-vpn-firewall.service
+Before=network-pre.target gateway-vpn-network-recovery.service gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
+ConditionPathExists=/etc/gateway-vpn/config.yaml
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
+
+[Service]
+LogNamespace=gateway-vpn
+Type=simple
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn firewall-guard --config /etc/gateway-vpn/config.yaml --apply
+Restart=always
+RestartSec=2s
+UMask=0077
+RuntimeDirectory=gateway-vpn-firewall-guard
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/gateway-vpn /etc/gateway-vpn
+ReadWritePaths=/run/gateway-vpn-firewall-guard
+
+[Install]
+WantedBy=multi-user.target
