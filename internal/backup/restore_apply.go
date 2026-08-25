@@ -60,13 +60,18 @@ type RestoreApplier struct {
 	OwnerGID        int
 	Now             func() time.Time
 	AfterActivate   func(int) error
+	setOwnership    func(string, int, int) error
+	validateOwner   func(os.FileInfo) error
 }
 
 func NewRestoreApplier(manager *RestoreManager, transactionRoot string, ownerUID, ownerGID int) (*RestoreApplier, error) {
 	if manager == nil || !filepath.IsAbs(transactionRoot) || ownerUID < -1 || ownerGID < -1 {
 		return nil, errors.New("restore applier requires a manager, absolute root, and valid ownership")
 	}
-	return &RestoreApplier{Manager: manager, TransactionRoot: filepath.Clean(transactionRoot), OwnerUID: ownerUID, OwnerGID: ownerGID}, nil
+	return &RestoreApplier{
+		Manager: manager, TransactionRoot: filepath.Clean(transactionRoot), OwnerUID: ownerUID, OwnerGID: ownerGID,
+		setOwnership: applyOwnership, validateOwner: validateRestoreTransactionOwnership,
+	}, nil
 }
 
 // Apply performs a fail-closed, durable, all-or-rollback restore. The caller
@@ -195,7 +200,7 @@ func (applier *RestoreApplier) createPreRestoreSnapshot(ctx context.Context, res
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := applyPrivateTreeMetadata(snapshot.Path, 0o700, 0o600, applier.OwnerUID, applier.OwnerGID); err != nil {
+	if err := applyPrivateTreeMetadata(snapshot.Path, 0o700, 0o600, applier.OwnerUID, applier.OwnerGID, applier.setOwnership); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -213,14 +218,14 @@ func (applier *RestoreApplier) prepareCandidates(ctx context.Context, verified V
 		}
 		item.OriginalExists = exists
 	}
-	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "config", "config.yaml"), items[0].Candidate, 0o640, 0, applier.OwnerGID); err != nil {
+	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "config", "config.yaml"), items[0].Candidate, 0o640, 0, applier.OwnerGID, applier.setOwnership); err != nil {
 		return err
 	}
 	restoredConfiguration, err := config.Load(items[0].Candidate)
 	if err != nil || applier.Manager.validateRestoredConfig(restoredConfiguration) != nil {
 		return errors.New("prepared restore configuration failed fixed-path validation")
 	}
-	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "database", "state.db"), items[1].Candidate, 0o600, applier.OwnerUID, applier.OwnerGID); err != nil {
+	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "database", "state.db"), items[1].Candidate, 0o600, applier.OwnerUID, applier.OwnerGID, applier.setOwnership); err != nil {
 		return err
 	}
 	schemaVersion, sessionsRevoked, err := applier.prepareDatabase(ctx, items[1].Candidate, verified.Operation, result.PreRestoreSnapshot)
@@ -241,7 +246,7 @@ func (applier *RestoreApplier) prepareCandidates(ctx context.Context, verified V
 		{6, "state/mihomo/state", 0o700, 0o600},
 	}
 	for _, directory := range directories {
-		if err := copyPrivateTree(ctx, filepath.Join(verified.TreeRoot, filepath.FromSlash(directory.source)), items[directory.index].Candidate, directory.dirMode, directory.fileMode, applier.OwnerUID, applier.OwnerGID); err != nil {
+		if err := copyPrivateTree(ctx, filepath.Join(verified.TreeRoot, filepath.FromSlash(directory.source)), items[directory.index].Candidate, directory.dirMode, directory.fileMode, applier.OwnerUID, applier.OwnerGID, applier.setOwnership); err != nil {
 			return err
 		}
 	}
@@ -311,7 +316,7 @@ func (applier *RestoreApplier) prepareDatabase(ctx context.Context, filename str
 	if err := os.Chmod(filename, 0o600); err != nil {
 		return 0, 0, err
 	}
-	if err := applyOwnership(filename, applier.OwnerUID, applier.OwnerGID); err != nil {
+	if err := applier.setOwnership(filename, applier.OwnerUID, applier.OwnerGID); err != nil {
 		return 0, 0, err
 	}
 	return schemaVersion, sessionsRevoked, nil
@@ -510,10 +515,10 @@ func (applier *RestoreApplier) restoreItems(verified VerifiedRestore) []restoreS
 }
 
 func (applier *RestoreApplier) validate() error {
-	if applier == nil || applier.Manager == nil || !filepath.IsAbs(applier.TransactionRoot) {
+	if applier == nil || applier.Manager == nil || !filepath.IsAbs(applier.TransactionRoot) || applier.setOwnership == nil || applier.validateOwner == nil {
 		return errors.New("restore applier is not initialized")
 	}
-	if err := secureRootTransactionDirectory(applier.TransactionRoot); err != nil {
+	if err := secureRootTransactionDirectory(applier.TransactionRoot, applier.validateOwner); err != nil {
 		return err
 	}
 	for _, directory := range []string{filepath.Dir(applier.Manager.ConfigurationPath), applier.Manager.StateDirectory, filepath.Join(applier.Manager.StateDirectory, "mihomo")} {
@@ -624,7 +629,7 @@ func validateRestoreDestination(filename, kind string) (bool, error) {
 	return true, nil
 }
 
-func copyPrivateFile(ctx context.Context, source, destination string, mode os.FileMode, uid, gid int) error {
+func copyPrivateFile(ctx context.Context, source, destination string, mode os.FileMode, uid, gid int, setOwnership func(string, int, int) error) error {
 	info, err := os.Lstat(source)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > MaximumPortablePlainBytes {
 		return errors.New("restore file source is unsafe")
@@ -652,13 +657,13 @@ func copyPrivateFile(ctx context.Context, source, destination string, mode os.Fi
 	if err := os.Chmod(destination, mode); err != nil {
 		return err
 	}
-	if err := applyOwnership(destination, uid, gid); err != nil {
+	if err := setOwnership(destination, uid, gid); err != nil {
 		return err
 	}
 	return syncDirectory(filepath.Dir(destination))
 }
 
-func copyPrivateTree(ctx context.Context, source, destination string, directoryMode, fileMode os.FileMode, uid, gid int) error {
+func copyPrivateTree(ctx context.Context, source, destination string, directoryMode, fileMode os.FileMode, uid, gid int, setOwnership func(string, int, int) error) error {
 	info, err := os.Lstat(source)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("restore tree source is unsafe")
@@ -695,15 +700,15 @@ func copyPrivateTree(ctx context.Context, source, destination string, directoryM
 		}
 		files++
 		bytesCopied += entryInfo.Size()
-		return copyPrivateFile(ctx, current, target, fileMode, uid, gid)
+		return copyPrivateFile(ctx, current, target, fileMode, uid, gid, setOwnership)
 	})
 	if err != nil {
 		return err
 	}
-	return applyPrivateTreeMetadata(destination, directoryMode, fileMode, uid, gid)
+	return applyPrivateTreeMetadata(destination, directoryMode, fileMode, uid, gid, setOwnership)
 }
 
-func applyPrivateTreeMetadata(root string, directoryMode, fileMode os.FileMode, uid, gid int) error {
+func applyPrivateTreeMetadata(root string, directoryMode, fileMode os.FileMode, uid, gid int, setOwnership func(string, int, int) error) error {
 	paths := []string{}
 	if err := filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -720,7 +725,7 @@ func applyPrivateTreeMetadata(root string, directoryMode, fileMode os.FileMode, 
 		if err := os.Chmod(current, mode); err != nil {
 			return err
 		}
-		if err := applyOwnership(current, uid, gid); err != nil {
+		if err := setOwnership(current, uid, gid); err != nil {
 			return err
 		}
 		paths = append(paths, current)
@@ -799,7 +804,7 @@ func validateRealDirectory(directory string) error {
 	return nil
 }
 
-func secureRootTransactionDirectory(directory string) error {
+func secureRootTransactionDirectory(directory string, validateOwnership func(os.FileInfo) error) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
@@ -807,7 +812,7 @@ func secureRootTransactionDirectory(directory string) error {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("restore transaction root is unsafe")
 	}
-	if err := validateRestoreTransactionOwnership(info); err != nil {
+	if err := validateOwnership(info); err != nil {
 		return err
 	}
 	return os.Chmod(directory, 0o700)

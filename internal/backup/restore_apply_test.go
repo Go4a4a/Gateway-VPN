@@ -277,6 +277,11 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Unit tests exercise the ownership plan without requiring a root test
+	// process. Production constructors retain the real root/chown functions;
+	// the root netns/host gate validates those privileged boundaries.
+	applier.validateOwner = func(os.FileInfo) error { return nil }
+	applier.setOwnership = func(string, int, int) error { return nil }
 	applier.Now = func() time.Time { return time.Date(2026, 8, 24, 20, 0, 0, 0, time.UTC) }
 	return restoreApplyFixture{ctx: ctx, restorer: restorer, applier: applier, operation: operation, stateDirectory: stateDirectory, databasePath: databasePath, configurationPath: configurationPath}
 }

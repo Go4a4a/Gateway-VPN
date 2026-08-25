@@ -49,6 +49,7 @@ type Engine struct {
 	StabilityWindow time.Duration
 	Now             func() time.Time
 	AfterState      func(TransactionState) error
+	setOwnership    func(string, int, int) error
 }
 
 type ApplyResult struct {
@@ -155,7 +156,7 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	if err := copyExclusiveFile(filepath.Join(snapshot.Path, "state.db"), candidatePath, 0o600, MaximumFileBytes); err != nil {
 		return failed("CANDIDATE_DB_COPY_FAILED", err)
 	}
-	if err := setFileOwnership(candidatePath, engine.StateUID, engine.StateGID); err != nil {
+	if err := engine.applyOwnership(candidatePath); err != nil {
 		return failed("CANDIDATE_DB_OWNERSHIP_FAILED", err)
 	}
 	candidateBinary := filepath.Join(installedRoot, "bin", "gateway-vpn")
@@ -190,7 +191,7 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	if err := replaceFile(candidatePath, engine.DatabasePath); err != nil {
 		return failed("LIVE_DB_ATOMIC_REPLACE_FAILED", err)
 	}
-	if err := setFileOwnership(engine.DatabasePath, engine.StateUID, engine.StateGID); err != nil {
+	if err := engine.applyOwnership(engine.DatabasePath); err != nil {
 		return failed("LIVE_DB_OWNERSHIP_FAILED", err)
 	}
 	if err := syncDirectoryPath(filepath.Dir(engine.DatabasePath)); err != nil {
@@ -350,7 +351,7 @@ func (engine *Engine) rollback(ctx context.Context, journal *Journal, code strin
 			_ = engine.markRollbackFailed(journal, "ROLLBACK_DB_COPY_FAILED")
 			return err
 		}
-		if err := setFileOwnership(candidate, engine.StateUID, engine.StateGID); err != nil {
+		if err := engine.applyOwnership(candidate); err != nil {
 			_ = engine.markRollbackFailed(journal, "ROLLBACK_DB_OWNERSHIP_FAILED")
 			return err
 		}
@@ -362,7 +363,7 @@ func (engine *Engine) rollback(ctx context.Context, journal *Journal, code strin
 			_ = engine.markRollbackFailed(journal, "ROLLBACK_DB_REPLACE_FAILED")
 			return err
 		}
-		if err := setFileOwnership(engine.DatabasePath, engine.StateUID, engine.StateGID); err != nil {
+		if err := engine.applyOwnership(engine.DatabasePath); err != nil {
 			_ = engine.markRollbackFailed(journal, "ROLLBACK_DB_FINAL_OWNERSHIP_FAILED")
 			return err
 		}
@@ -685,6 +686,13 @@ func (engine *Engine) now() time.Time {
 		return engine.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (engine *Engine) applyOwnership(path string) error {
+	if engine.setOwnership != nil {
+		return engine.setOwnership(path, engine.StateUID, engine.StateGID)
+	}
+	return setFileOwnership(path, engine.StateUID, engine.StateGID)
 }
 
 func (engine *Engine) stabilityWindow() time.Duration {

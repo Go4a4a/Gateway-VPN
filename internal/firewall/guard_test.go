@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 type guardExecutor struct {
+	mu       sync.Mutex
 	healthy  bool
 	schema   bool
 	lanUp    bool
@@ -23,6 +25,8 @@ type guardExecutor struct {
 }
 
 func (executor *guardExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
 	executor.requests = append(executor.requests, request)
 	arguments := strings.Join(request.Arguments, " ")
 	switch request.Executable + " " + arguments {
@@ -63,6 +67,12 @@ func (executor *guardExecutor) Run(_ context.Context, request platformexec.Reque
 	default:
 		return platformexec.Result{}, fmt.Errorf("unexpected guard request %s %s", request.Executable, arguments)
 	}
+}
+
+func (executor *guardExecutor) setHealthy(healthy bool) {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	executor.healthy = healthy
 }
 
 func TestFirewallGuardHealthyTableDoesNotTouchLAN(t *testing.T) {
@@ -169,7 +179,7 @@ func TestFirewallGuardRunnerReactsToMonitorEvent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx) }()
 	<-monitor.started
-	executor.healthy = false
+	executor.setHealthy(false)
 	monitor.events <- struct{}{}
 	select {
 	case result := <-recovered:
@@ -199,7 +209,7 @@ func TestFirewallGuardRunnerPollingRecoversWhenMonitorIsSilent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx) }()
 	<-monitor.started
-	executor.healthy = false
+	executor.setHealthy(false)
 	select {
 	case <-recovered:
 	case <-time.After(time.Second):

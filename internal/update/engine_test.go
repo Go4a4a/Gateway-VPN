@@ -355,7 +355,8 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		Stager: stager, Store: JournalStore{Root: filepath.Join(t.TempDir(), "gateway-vpn-privileged", "update-transactions")}, Runtime: runtime,
 		ReleaseRoot: releaseRoot, StateDir: stateDir, DatabasePath: databasePath, ConfigPath: configPath,
 		CurrentVersion: "1.1.0", StateUID: 0, StateGID: 0, StabilityWindow: time.Hour,
-		Now: func() time.Time { return fixture.clock },
+		Now:          func() time.Time { return fixture.clock },
+		setOwnership: func(string, int, int) error { return nil },
 	}
 	return fixture
 }
