@@ -157,7 +157,10 @@ type observedRoute struct {
 }
 
 func (backend RoutingBackend) observe(ctx context.Context) (observedRouting, error) {
-	rulesResult, err := backend.Executor.Run(ctx, platformexec.Request{Executable: backend.IP, Arguments: []string{"-json", "-4", "rule", "show"}})
+	// iproute2 renders protocol 186 as the symbolic name "bgp" by default.
+	// Numeric mode keeps ownership fields stable across distributions and
+	// /etc/iproute2 protocol-name mappings.
+	rulesResult, err := backend.Executor.Run(ctx, platformexec.Request{Executable: backend.IP, Arguments: []string{"-N", "-json", "-4", "rule", "show"}})
 	if err != nil {
 		return observedRouting{}, fmt.Errorf("observe IPv4 policy rules: %w", err)
 	}
@@ -331,9 +334,15 @@ func decodeOwnedBaseRoutes(payload []byte) ([]observedRoute, error) {
 	}
 	result := make([]observedRoute, 0)
 	for _, row := range rows {
-		protocol, ok := parseUint(row["protocol"])
-		if !ok || protocol != routing.OwnedProtocol {
-			continue
+		// `ip route show ... protocol 186` performs the ownership filter in
+		// the kernel query but omits the protocol field from JSON on Ubuntu's
+		// iproute2. If a version does return the field, reject anything other
+		// than the owned protocol rather than broadening ownership.
+		if len(row["protocol"]) != 0 {
+			protocol, ok := parseUint(row["protocol"])
+			if !ok || protocol != routing.OwnedProtocol {
+				continue
+			}
 		}
 		table, ok := parseUint(row["table"])
 		if !ok || table < 256 || table > 0xffffffff {

@@ -2,7 +2,7 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Signed bundle `0.1.0-systemd.10` подтвердил strict bootstrap archive fix на clean Gateway. Полный SSH deploy прошёл оба role preflight и применил Gateway, затем доказанно потерял новое SSH-соединение после fail-closed firewall до `GATEWAY_KEY_PREPARE`; VPS остался clean. Deploy теперь использует заранее аутентифицированные private OpenSSH ControlMaster sessions, не открывая TCP/22 в firewall; Windows и Linux tests прошли. Следующий шаг — commit, signed `.11` и полный clean orchestration rerun до WireGuard handshake
+**Текущий этап:** Signed bundle `0.1.0-systemd.11` прошёл clean двухмашинный SSH deploy с Gateway/VPS `APPLIED`, WireGuard configuration и полным удалением OpenSSH ControlMaster state; ожидаемое состояние без модема/подписки — `INSTALLED_NOT_READY`. Synthetic production-broker gate обнаружил несовместимость observer с реальным iproute2 JSON (`protocol 186` отображается как `bgp`, а filtered route JSON не повторяет protocol), исправление прошло Windows/Linux tests и фактический Gateway↔VPS handshake. Следующий шаг — commit, signed `.12` и clean exact повтор без временной замены бинарника
 
 **Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
@@ -35,9 +35,9 @@
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
 | Этап 1: bootstrap | `DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Signed Ubuntu 24.04 installer прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
-| Firewall / routing | `DOCKER_SYSTEMD_AND_NETNS_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и nft guard прошли netns; signed install/fresh boot подтвердил boot `PATH_BLOCKED`, `lan0` runtime ruleset, guard и отсутствие direct DNS; реальный host packet capture ещё не выполнен |
+| Firewall / routing | `DOCKER_SYSTEMD_NETNS_AND_SYNTHETIC_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и nft guard прошли netns; production broker на Ubuntu 24.04 создал table/rule `1101`, exact endpoint route и nft tuple после исправления реального iproute2 JSON decoder. Реальный host packet capture ещё не выполнен |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
-| WireGuard management | `VPS_DOCKER_SYSTEMD_PASS / GATEWAY_HOST_NOT_RUN` | VPS `wg-mgmt`, два exact peer AllowedIPs, routes, firewall ordering, restart и fresh boot прошли на Ubuntu 22.04/24.04/26.04; Gateway↔VPS handshake и modem-priority selector на реальных hosts ещё не запускались |
+| WireGuard management | `SYNTHETIC_DOCKER_HANDSHAKE_PASS / HOST_NOT_RUN` | VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04; production Gateway broker через synthetic modem получил endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
 | SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_STRICT_BOOTSTRAP_PASS / ORCHESTRATION_PARTIAL` | Pinned builder создал signed `.10`; оба archives не содержат root entry, Gateway exact bootstrap dry-run прошёл 43 signed files и host preflight. Gateway apply прошёл, но post-firewall SSH continuity fix ещё не собран в signed artifact. Permanent key и production tag/assets не выполнены |
+| Packaging | `SIGNED_ORCHESTRATION_PASS_TO_READINESS / FIX_PENDING_RESIGN` | Signed `.11` применил обе роли и завершился ожидаемым code 3 `INSTALLED_NOT_READY`; private ControlMaster lifecycle полностью очищен. Найденный затем iproute2 decoder fix проверен временным бинарником, но ещё должен пройти новый clean signed `.12`. Permanent key и production tag/assets не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...` прошёл; Linux container tests для deploy/packaging и private ControlMaster options прошли. Signed `.10` воспроизвёл post-firewall SSH defect; исправленный deploy ещё не прошёл signed orchestration и удалённый CI |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...` и нативный Linux dataplane suite прошли после iproute2 fix. Signed `.11` подтвердил ControlMaster orchestration; новый signed `.12` и удалённый CI ещё не выполнены |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: commit ControlMaster continuity fix, собрать новый disposable channel и на полностью чистом стенде повторить bootstrap + SSH orchestrator Gateway/VPS, затем доказать WireGuard handshake. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: commit iproute2 observer fix, собрать signed `.12` из exact commit и на полностью чистом стенде повторить bootstrap + SSH orchestrator, затем повторить synthetic modem/broker handshake без временной замены installed binary. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -187,8 +187,40 @@
 | DEV-109 | 2026-08-25 | Все generated bootstrap/deploy shell commands запускают Bash как `bash --norc -ceu` | `sshd` remote command может заставить Bash читать стандартный Ubuntu `.bashrc`; при `nounset` обращение `/etc/bash.bashrc` к unset `PS1` останавливало signed preflight до mutation. Доверенный workflow не должен зависеть от dotfiles удалённого пользователя |
 | DEV-110 | 2026-08-25 | Gateway/VPS release archives перечисляют явные top-level entries и никогда не включают отдельную tar-запись `.`/`./` | Bootstrap и runtime update используют один strict extractor, который отвергает standalone archive root entry. Старый `tar ... .` создавал structurally invalid artifact, хотя проверка уже распакованного signed tree проходила |
 | DEV-111 | 2026-08-26 | Two-host deploy создаёт private `0700` OpenSSH ControlMaster directory и переиспользует заранее pinned established sessions через Gateway/VPS firewall apply; в конце masters закрываются через `-O exit`, sockets проверяются и directory удаляется | Каждый прежний `SSHExecutor.Run` открывал новый TCP connection. Gateway installer правильно закрыл TCP/22, поэтому следующий key-preparation phase был недостижим. Открывать SSH hole в fail-closed firewall нельзя; multiplexing сохраняет существующую authenticated connection без ослабления ruleset |
+| DEV-112 | 2026-08-26 | Policy-rule observer запускает `ip -N -json`, а decoder filtered owned routes допускает отсутствующее поле `protocol`, проверяя его строго при наличии | Ubuntu iproute2 выводит protocol 186 как symbolic `bgp`; при `route show ... protocol 186` kernel-side filter работает, но JSON вообще опускает поле protocol. Прежний decoder не видел только что применённые owned rule/routes и ошибочно завершал verification |
 
 ## Журнал разработки
+
+### Сессия 041 — signed `.11`, реальный iproute2 defect и synthetic WireGuard handshake — 2026-08-26
+
+**Clean signed orchestration завершён:**
+
+- из commit `d3c0cf0090b9a2ec743e7390ff4e7dfd5e2c4c14` собран disposable bundle `0.1.0-systemd.11`; signer — `8a893b99b382f8fda4a78a9d03b54368b7a7faa111ebf8665ef0fc54e779e4ed0`, channel manifest SHA-256 — `54928e57ac53817fd18259db1a027478033c1ae53ed18c272d67f5bab9df90d4`;
+- Gateway/VPS archive SHA-256 — `d22fa99b0cce4013d910390495c3932430881d4fbf0092a2c16f46d8445af655` / `415e2a3e6cb2826117de5e6adb1f6569b7abb492216905ccdc2d54b80f887863`; bootstrap/deploy SHA-256 — `c97c2a0fd89041681ea81913d56a92f0a3210d045dd3099e16458c4847c3fa79` / `3827bca59bb272266937f0ce96f3141be814923d8d8793ffee7ef91b1ff91b12`;
+- exact deploy на полностью новых s011 Gateway/VPS прошёл оба preflight, применил обе роли, создал/обменял ключи без вывода private material и настроил WireGuard; итог ожидаемо вернул code 3 и `INSTALLED_NOT_READY`, потому что реальный модем и subscription/path отсутствовали;
+- readiness report: Gateway/VPS `APPLIED`, `wireguard_configured=true`, `wireguard_handshake=false`, `internet_path_active=false`, admin config `CONFIGURED`; diagnostic codes — только `WIREGUARD_HANDSHAKE_PENDING` и `MODEM_SUBSCRIPTION_PATH_PENDING`;
+- private ControlMaster sockets/directories и mux processes после workflow отсутствовали; новый TCP/22 на Gateway по-прежнему получал timeout, то есть continuity исправлена без firewall hole;
+- Gateway admin/secret files и VPS `wg-mgmt.conf` имели ожидаемых владельцев и mode `0600`; install reports не содержали private keys.
+
+**Synthetic modem gate и найденный дефект:**
+
+- ignored helper, собранный из текущего source, открыл production SQLite API от пользователя `gateway-vpn`, вызвал `modem.Repository.Adopt`/`ApplyLease` и создал одну запись: `eth1`, `8.8.8.0/24`, gateway `8.8.8.1`, table `1101`, fwmark `4353`, `MODEM_READY`;
+- обычный Modem Manager правильно вернул эту запись в offline, поскольку Docker `eth1` не является USB/HiLink discovery device. Для изолированного backend gate остановлен только непривилегированный `gateway-vpn.service`; root broker, socket, nft guard и fail-closed firewall оставались active;
+- helper от штатного UID вызвал production broker `SyncRouting`; backend создал правильные route/rule, но вернул `ROUTING_SYNC_FAILED`. Фактический `ip -json -4 rule show` показал `protocol:"bgp"`, а `ip -json -4 route show table all protocol 186` вернул уже отфильтрованные owned routes без поля `protocol`;
+- observer переведён на numeric rule output `ip -N -json`; filtered route decoder принимает отсутствующее поле protocol как контракт kernel-side filter, но при наличии по-прежнему принимает только exact 186. Unit fixtures теперь содержат фактическую Ubuntu JSON форму.
+
+**Фактическая проверка исправления:**
+
+- временный Linux/amd64 бинарник с fix заменил только broker binary в disposable s011; это проверка кандидата, а не signed acceptance;
+- повторный helper завершился с `management_reachability_state=REACHABLE`;
+- Gateway имел rule `fwmark 0x1101 lookup 1101 proto bgp`, table 1101 с default/link/endpoint routes через `eth1`, а `ip route get` для `1.1.1.1` и endpoint с mark `0x1101` выбрал table 1101 и source `8.8.8.2`;
+- nft set содержал exact tuple `"eth1" . 0x00001101 . 8.8.8.8`; `wg-mgmt` получил `10.80.0.2/32`, endpoint `8.8.8.8:51821`, fwmark `0x1101`, свежий handshake и ненулевой двусторонний transfer;
+- VPS видел тот же Gateway peer с endpoint `8.8.8.2:<ephemeral>`, fresh handshake, `10.80.0.2/32` и route через `wg-mgmt`; второй admin peer оставался без handshake, как и ожидается для не поднятого fixture;
+- Windows `go test ./...`, `go vet ./...` и нативный Ubuntu/Linux `internal/dataplane` test binary — PASS.
+
+**Не считается выполненным:** exact signed `.12` ещё не собран; synthetic `eth1` и временная остановка Modem Manager не заменяют реальные USB hot-plug/HiLink/operator/VPS/provider-firewall gates. Internet path остаётся blocked без подписки и квалифицированного Mihomo node.
+
+**Следующий шаг:** commit fix, signed `.12`, новый clean orchestration и повтор synthetic handshake уже на неизменённом signed installed binary; затем update/restore/recovery acceptance.
 
 ### Сессия 040 — post-firewall SSH continuity и private ControlMaster lifecycle — 2026-08-26
 

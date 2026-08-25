@@ -29,7 +29,7 @@ func (executor *serviceExecutor) Run(_ context.Context, request platformexec.Req
 	arguments := strings.Join(request.Arguments, " ")
 	if request.Executable == "/usr/sbin/ip" {
 		switch arguments {
-		case "-json -4 rule show":
+		case "-N -json -4 rule show":
 			return platformexec.Result{Stdout: desiredRulesJSON}, nil
 		case "-json -4 route show table all protocol 186":
 			return platformexec.Result{Stdout: desiredRoutesJSON}, nil

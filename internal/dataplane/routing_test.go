@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	desiredRulesJSON  = `[{"priority":1101,"fwmark":"0x1101","fwmask":"0xffffffff","table":1101,"protocol":186}]`
+	desiredRulesJSON  = `[{"priority":1101,"src":"all","fwmark":"0x1101","table":"1101","protocol":"186"}]`
 	desiredRoutesJSON = `[
-  {"dst":"192.168.8.0/24","dev":"enx0001","scope":"link","table":1101,"protocol":186},
-  {"dst":"default","gateway":"192.168.8.1","dev":"enx0001","table":1101,"protocol":186},
-  {"dst":"203.0.113.10/32","gateway":"192.168.8.1","dev":"enx0001","table":1101,"protocol":186}
+  {"dst":"192.168.8.0/24","dev":"enx0001","scope":"link","table":"1101"},
+  {"dst":"default","gateway":"192.168.8.1","dev":"enx0001","table":"1101"},
+  {"dst":"203.0.113.10/32","gateway":"192.168.8.1","dev":"enx0001","table":"1101"}
 ]`
 )
 
@@ -45,7 +45,7 @@ func (executor *routingExecutor) Run(_ context.Context, request platformexec.Req
 	executor.requests = append(executor.requests, request)
 	arguments := strings.Join(request.Arguments, " ")
 	switch arguments {
-	case "-json -4 rule show":
+	case "-N -json -4 rule show":
 		executor.cycle++
 		if executor.cycle == 1 {
 			return platformexec.Result{Stdout: executor.beforeRules}, nil
@@ -71,11 +71,11 @@ func TestRoutingBackendReplacesStaleBaseStateAndPreservesEndpointRoutes(t *testi
 	defer closeDatabase()
 	gate := &routingGate{}
 	executor := &routingExecutor{
-		beforeRules: `[{"priority":1102,"fwmark":"0x1102","fwmask":"0xffffffff","table":1102,"protocol":186}]`,
+		beforeRules: `[{"priority":1102,"fwmark":"0x1102","fwmask":"0xffffffff","table":"1102","protocol":"186"}]`,
 		beforeRoutes: `[
-  {"dst":"192.168.9.0/24","dev":"enxgone","scope":"link","table":1102,"protocol":186},
-  {"dst":"default","gateway":"192.168.9.1","dev":"enxgone","table":1102,"protocol":186},
-  {"dst":"203.0.113.10/32","gateway":"192.168.9.1","dev":"enxgone","table":1102,"protocol":186}
+  {"dst":"192.168.9.0/24","dev":"enxgone","scope":"link","table":"1102"},
+  {"dst":"default","gateway":"192.168.9.1","dev":"enxgone","table":"1102"},
+  {"dst":"203.0.113.10/32","gateway":"192.168.9.1","dev":"enxgone","table":"1102"}
 ]`,
 		afterRules: desiredRulesJSON, afterRoutes: desiredRoutesJSON,
 	}
