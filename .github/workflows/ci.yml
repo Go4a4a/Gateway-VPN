@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           node --check internal/webapi/static/app.js
-          bash -n scripts/*.sh test/netns/*.sh
+          bash -n scripts/*.sh test/netns/*.sh test/systemd/*.sh
 
   netns:
     name: Linux nftables fail-closed gate
@@ -84,3 +84,11 @@ jobs:
         run: go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns
+      - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 \
+            /workspace/test/systemd/verify_units.sh

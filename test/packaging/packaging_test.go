@@ -434,6 +434,26 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 	}
 }
 
+func TestGitHubCIUsesPinnedUbuntuSystemdGate(t *testing.T) {
+	root := repositoryRoot(t)
+	workflow := read(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	script := read(t, filepath.Join(root, "test", "systemd", "verify_units.sh"))
+	for _, required := range []string{
+		"ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+		"/workspace/test/systemd/verify_units.sh",
+		"systemd-analyze verify",
+		"wg-quick@.service",
+		"packaging/vps/systemd",
+	} {
+		if !strings.Contains(workflow+script, required) {
+			t.Errorf("pinned systemd CI gate missing %q", required)
+		}
+	}
+	if strings.Contains(workflow, "ubuntu:24.04") {
+		t.Fatal("systemd CI gate uses a mutable Ubuntu image tag")
+	}
+}
+
 func TestMihomoServiceConditionAndPermissionsAreFailClosed(t *testing.T) {
 	root := repositoryRoot(t)
 	service := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-mihomo.service"))
