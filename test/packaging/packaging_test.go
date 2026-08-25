@@ -476,6 +476,27 @@ func TestSystemdRehearsalImageIsPinnedAndTargetScoped(t *testing.T) {
 	}
 }
 
+func TestInstallersPreserveReleaseVersionAcrossOSRelease(t *testing.T) {
+	root := repositoryRoot(t)
+	bareVersion := regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_])VERSION=|\$VERSION(?:[^_A-Za-z0-9]|$)`)
+	for _, name := range []string{"install-gateway.sh", "install-vps.sh"} {
+		installer := read(t, filepath.Join(root, "scripts", name))
+		for _, required := range []string{
+			`RELEASE_VERSION=""`,
+			`--version) RELEASE_VERSION=${2:?}`,
+			`source /etc/os-release`,
+			`releases/v$RELEASE_VERSION`,
+		} {
+			if !strings.Contains(installer, required) {
+				t.Errorf("%s does not preserve release identity across os-release: missing %q", name, required)
+			}
+		}
+		if match := bareVersion.FindString(installer); match != "" {
+			t.Errorf("%s reuses os-release's reserved VERSION variable: %q", name, match)
+		}
+	}
+}
+
 func TestMihomoServiceConditionAndPermissionsAreFailClosed(t *testing.T) {
 	root := repositoryRoot(t)
 	service := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-mihomo.service"))

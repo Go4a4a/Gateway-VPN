@@ -11,7 +11,7 @@ DEPENDENCY_PREFLIGHT_ONLY=0
 ALLOW_GATEWAY_SSH=0
 RELEASE_DIR=""
 TRUSTED_UPDATE_KEY=""
-VERSION=""
+RELEASE_VERSION=""
 PUBLIC_ENDPOINT=""
 GATEWAY_PUBLIC_KEY=""
 ADMIN_PUBLIC_KEY=""
@@ -25,7 +25,7 @@ while (($#)); do
   case "$1" in
     --release-dir) RELEASE_DIR=${2:?}; shift 2 ;;
     --trusted-update-key) TRUSTED_UPDATE_KEY=${2:?}; shift 2 ;;
-    --version) VERSION=${2:?}; shift 2 ;;
+    --version) RELEASE_VERSION=${2:?}; shift 2 ;;
     --public-endpoint) PUBLIC_ENDPOINT=${2:?}; shift 2 ;;
     --gateway-public-key) GATEWAY_PUBLIC_KEY=${2:?}; shift 2 ;;
     --admin-public-key) ADMIN_PUBLIC_KEY=${2:?}; shift 2 ;;
@@ -39,9 +39,9 @@ while (($#)); do
 done
 
 [[ $EUID -eq 0 ]] || { echo "VPS preflight and apply require root" >&2; exit 1; }
-[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$VERSION" && -n "$PUBLIC_ENDPOINT" && -n "$GATEWAY_PUBLIC_KEY" && -n "$ADMIN_PUBLIC_KEY" ]] || { usage >&2; exit 2; }
+[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$PUBLIC_ENDPOINT" && -n "$GATEWAY_PUBLIC_KEY" && -n "$ADMIN_PUBLIC_KEY" ]] || { usage >&2; exit 2; }
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "Invalid VPS release version" >&2; exit 2; }
+[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "Invalid VPS release version" >&2; exit 2; }
 
 validate_wg_public_key() {
   local key=$1 decoded canonical
@@ -68,7 +68,7 @@ case "${ID:-}:${VERSION_ID:-}" in
   *) echo "Unsupported VPS OS profile: ${ID:-unknown} ${VERSION_ID:-unknown}" >&2; exit 1 ;;
 esac
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN VPS release requires x86_64" >&2; exit 1; }
-"$RELEASE_DIR/bin/gateway-vpnctl" vps-release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --release-version "$VERSION" --profile "$PROFILE"
+"$RELEASE_DIR/bin/gateway-vpnctl" vps-release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --release-version "$RELEASE_VERSION" --profile "$PROFILE"
 
 for command in systemctl base64 sha256sum realpath sed awk grep getent timedatectl apt-get dpkg-query find sort sync date df wc cat readlink install mktemp mv rm stat uname flock; do
   command -v "$command" >/dev/null || { echo "Missing base VPS prerequisite command: $command" >&2; exit 1; }
@@ -306,12 +306,12 @@ if len(private_key) != 32 or base64.b64encode(private_key).decode("ascii") != to
 PY
 }
 
-DEST="/opt/gateway-vpn-vps/releases/v$VERSION"
+DEST="/opt/gateway-vpn-vps/releases/v$RELEASE_VERSION"
 EXISTING=0
 PRESERVED_WG_CONFIG=0
 if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
-  [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
-  "$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$VERSION" --profile "$PROFILE"
+  [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
+  "$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$RELEASE_VERSION" --profile "$PROFILE"
   validate_preserved_wg_config /etc/wireguard/wg-mgmt.conf
   EXISTING=1
 elif [[ -e /etc/wireguard/wg-mgmt.conf || -L /etc/wireguard/wg-mgmt.conf ]]; then
@@ -357,7 +357,7 @@ if ((EXISTING)); then
   unset VPS_PRIVATE_KEY
 fi
 
-echo "Validated VPS profile $PROFILE release $VERSION"
+echo "Validated VPS profile $PROFILE release $RELEASE_VERSION"
 echo "Public endpoint: $PUBLIC_ENDPOINT"
 echo "WireGuard: wg-mgmt / 10.80.0.1/24 / UDP 51821"
 echo "Gateway peer: 10.80.0.2/32; admin peer: 10.80.0.10/32"
@@ -384,7 +384,7 @@ END { exit !(rows == 2 && gateway_ok == 1 && admin_ok == 1) }
   ip -4 route get 10.80.0.2 | grep -Eq 'dev wg-mgmt'
   ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
   nft list table inet gateway_vpn_vps >/dev/null
-  echo "Gateway VPN VPS $VERSION is already installed with the requested immutable release and peers."
+  echo "Gateway VPN VPS $RELEASE_VERSION is already installed with the requested immutable release and peers."
   exit 0
 fi
 if ((APPLY == 0)); then
@@ -413,7 +413,7 @@ install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-install-reco
 systemctl daemon-reload
 systemctl enable gateway-vpn-vps-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-vps/install-transactions/.active.tmp
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_forwarding=%s\nold_ipv6_default_forwarding=%s\npreserve_wg_config=%s\n' "$VERSION" "$OLD_FORWARD" "$OLD_IPV6_ALL" "$OLD_IPV6_DEFAULT" "$PRESERVED_WG_CONFIG" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_forwarding=%s\nold_ipv6_default_forwarding=%s\npreserve_wg_config=%s\n' "$RELEASE_VERSION" "$OLD_FORWARD" "$OLD_IPV6_ALL" "$OLD_IPV6_DEFAULT" "$PRESERVED_WG_CONFIG" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-vps/install-transactions/active
@@ -428,7 +428,7 @@ while IFS= read -r -d '' source; do
   install -D -m "$mode" "$source" "$DEST/$relative"
 done < <(find "$RELEASE_DIR" -type f -print0 | sort -z)
 install -D -m 0644 "$TRUSTED_UPDATE_KEY" /etc/gateway-vpn-vps/update-signing.pub
-"$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$VERSION" --profile "$PROFILE"
+"$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$RELEASE_VERSION" --profile "$PROFILE"
 
 install -d -m 0700 /etc/wireguard
 if ((PRESERVED_WG_CONFIG)); then
@@ -457,7 +457,7 @@ nft --check --file /etc/gateway-vpn-vps/firewall.nft
 sysctl -q -p /etc/sysctl.d/90-gateway-vpn-vps.conf
 
 install -d -m 0755 /opt/gateway-vpn-vps
-ln -sfn "releases/v$VERSION" /opt/gateway-vpn-vps/.current.new
+ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn-vps/.current.new
 mv -Tf /opt/gateway-vpn-vps/.current.new /opt/gateway-vpn-vps/current
 sync
 systemctl daemon-reload
@@ -473,7 +473,7 @@ ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
 nft list table inet gateway_vpn_vps >/dev/null
 
 install -d -m 0700 /var/lib/gateway-vpn-vps
-printf '{\n  "version": "%s",\n  "profile": "%s",\n  "public_endpoint": "%s",\n  "interface": "wg-mgmt",\n  "vps_address": "10.80.0.1/24",\n  "gateway_address": "10.80.0.2/32",\n  "admin_address": "10.80.0.10/32",\n  "vps_public_key": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$VERSION" "$PROFILE" "$PUBLIC_ENDPOINT" "$VPS_PUBLIC_KEY" >/var/lib/gateway-vpn-vps/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "%s",\n  "public_endpoint": "%s",\n  "interface": "wg-mgmt",\n  "vps_address": "10.80.0.1/24",\n  "gateway_address": "10.80.0.2/32",\n  "admin_address": "10.80.0.10/32",\n  "vps_public_key": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$PROFILE" "$PUBLIC_ENDPOINT" "$VPS_PUBLIC_KEY" >/var/lib/gateway-vpn-vps/install-report.json
 chmod 0600 /var/lib/gateway-vpn-vps/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)
@@ -493,6 +493,6 @@ trap - ERR INT TERM
 rm -f /run/gateway-vpn-vps-install-authorized || echo "Warning: VPS installation completed but the ephemeral service-start authorization could not be removed" >&2
 cleanup_temp_files
 trap - EXIT
-echo "Gateway VPN VPS $VERSION installed as INSTALLED_NOT_READY."
+echo "Gateway VPN VPS $RELEASE_VERSION installed as INSTALLED_NOT_READY."
 echo "VPS WireGuard public key: $VPS_PUBLIC_KEY"
 echo "Readiness requires Gateway/admin peer configuration and a verified handshake through the public endpoint."

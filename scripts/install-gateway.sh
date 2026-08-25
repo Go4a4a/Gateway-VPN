@@ -11,7 +11,7 @@ DEPENDENCY_PREFLIGHT_ONLY=0
 ENABLE_DHCP=0
 RELEASE_DIR=""
 TRUSTED_UPDATE_KEY=""
-VERSION=""
+RELEASE_VERSION=""
 LAN_INTERFACE=""
 LAN_ADDRESS="192.168.200.1/24"
 
@@ -24,7 +24,7 @@ while (($#)); do
   case "$1" in
     --release-dir) RELEASE_DIR=${2:?}; shift 2 ;;
     --trusted-update-key) TRUSTED_UPDATE_KEY=${2:?}; shift 2 ;;
-    --version) VERSION=${2:?}; shift 2 ;;
+    --version) RELEASE_VERSION=${2:?}; shift 2 ;;
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
@@ -36,10 +36,10 @@ while (($#)); do
   esac
 done
 
-[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$VERSION" && -n "$LAN_INTERFACE" ]] || { usage >&2; exit 2; }
+[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" ]] || { usage >&2; exit 2; }
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
+[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
 [[ "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "Invalid LAN interface" >&2; exit 2; }
 [[ "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || { echo "Invalid LAN CIDR" >&2; exit 2; }
 LAN_IP=${LAN_ADDRESS%/*}
@@ -78,7 +78,7 @@ TRUSTED_UPDATE_KEY=$(realpath -- "$TRUSTED_UPDATE_KEY")
 (cd -- "$RELEASE_DIR" && sha256sum --check --strict manifest.sha256)
 "$RELEASE_DIR/bin/gateway-vpnctl" release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --current-version 0.0.0 --current-schema 1
 RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
-[[ "$RELEASE_VERSION_OUTPUT" == "gateway-vpn $VERSION "* ]] || { echo "Release binary version does not match --version" >&2; exit 1; }
+[[ "$RELEASE_VERSION_OUTPUT" == "gateway-vpn $RELEASE_VERSION "* ]] || { echo "Release binary version does not match --version" >&2; exit 1; }
 
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
@@ -224,10 +224,10 @@ if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewa
   exit 1
 fi
 
-DEST="/opt/gateway-vpn/releases/v$VERSION"
+DEST="/opt/gateway-vpn/releases/v$RELEASE_VERSION"
 EXISTING=0
 if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery || -e /etc/gateway-vpn || -e /var/lib/gateway-vpn/install-report.json ]]; then
-  [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$VERSION" && -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$VERSION" ]] || { echo "Partial or conflicting Gateway VPN installation exists" >&2; exit 1; }
+  [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" && -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] || { echo "Partial or conflicting Gateway VPN installation exists" >&2; exit 1; }
   for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/70-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ -f "$installed_asset" && ! -L "$installed_asset" ]] || { echo "Installed Gateway asset is missing or unsafe: $installed_asset" >&2; exit 1; }
   done
@@ -265,7 +265,7 @@ else
     exit 1
   fi
 fi
-echo "Validated Ubuntu 24.04 release $VERSION"
+echo "Validated Ubuntu 24.04 release $RELEASE_VERSION"
 echo "Release destination: $DEST"
 echo "LAN: $LAN_INTERFACE / $LAN_ADDRESS"
 echo "DHCP enable requested: $ENABLE_DHCP"
@@ -282,7 +282,7 @@ if ((EXISTING)); then
   fi
   nft list table inet gateway_vpn >/dev/null
   ss -H -ltn "sport = :8443" | awk '{print $4}' | grep -Fxq "$LAN_IP:8443"
-  echo "Gateway VPN $VERSION is already installed with the requested immutable release and LAN policy."
+  echo "Gateway VPN $RELEASE_VERSION is already installed with the requested immutable release and LAN policy."
   exit 0
 fi
 if ((APPLY == 0)); then
@@ -302,7 +302,7 @@ install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-install-recovery.ser
 systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\n' "$VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -379,9 +379,9 @@ for unit in gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewal
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   install -D -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "/etc/systemd/system/$unit"
 done
-ln -sfn "releases/v$VERSION" /opt/gateway-vpn/.current.new
+ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn/.current.new
 mv -Tf /opt/gateway-vpn/.current.new /opt/gateway-vpn/current
-ln -sfn "releases/v$VERSION" /opt/gateway-vpn/.recovery.new
+ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn/.recovery.new
 mv -Tf /opt/gateway-vpn/.recovery.new /opt/gateway-vpn/recovery
 (set -o noclobber; : >/run/gateway-vpn-install-authorized) || { echo "Cannot create ephemeral Gateway service-start authorization safely" >&2; exit 1; }
 chmod 0600 /run/gateway-vpn-install-authorized
@@ -430,7 +430,7 @@ fi
 EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/70-gateway-vpn-lan.network.in")
 [[ $(cat /etc/systemd/network/70-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }
 [[ -d /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || false
-printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "state": "INSTALLED_NOT_READY"\n}\n' "$VERSION" "$LAN_INTERFACE" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" >/var/lib/gateway-vpn/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" >/var/lib/gateway-vpn/install-report.json
 chmod 0600 /var/lib/gateway-vpn/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)
@@ -448,6 +448,6 @@ if ! systemctl disable gateway-vpn-install-recovery.service >/dev/null 2>&1; the
 fi
 trap - ERR INT TERM
 rm -f /run/gateway-vpn-install-authorized || echo "Warning: installation completed but the ephemeral service-start authorization could not be removed" >&2
-echo "Installed Gateway VPN $VERSION. Mihomo starts only after a validated active generation exists; DHCP remains opt-in."
+echo "Installed Gateway VPN $RELEASE_VERSION. Mihomo starts only after a validated active generation exists; DHCP remains opt-in."
 cleanup_temp_files
 trap - EXIT
