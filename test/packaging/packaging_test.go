@@ -420,12 +420,17 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft flush ruleset",
 		"firewall_schema_generation",
 		"active_tun_interfaces",
+		"useradd --system --no-create-home --shell /usr/sbin/nologin",
+		"gateway-vpn-mihomo",
 		"ip route get 1.1.1.1 mark 0x1101",
 		"ip route get 1.1.1.1 >/dev/null",
 	} {
 		if !strings.Contains(harness, required) {
 			t.Errorf("firewall netns harness missing %q", required)
 		}
+	}
+	if strings.Contains(harness, "| grep -q") {
+		t.Fatal("firewall netns harness uses grep -q under pipefail and can fail on upstream SIGPIPE")
 	}
 }
 

@@ -78,14 +78,14 @@ sed 's/lan_interface: enp2s0/lan_interface: lan0/' "$ROOT/config.example.yaml" >
 
 # Production routing invariant: marked service traffic has a modem table,
 # while an unmarked forwarded LAN packet has no global/default route.
-ip netns exec "$GW" ip route get 1.1.1.1 mark 0x1101 | grep -q 'dev wan0'
+ip netns exec "$GW" ip route get 1.1.1.1 mark 0x1101 | grep 'dev wan0' >/dev/null
 if ip netns exec "$GW" ip route get 1.1.1.1 >/dev/null 2>&1; then
   echo "Unmarked direct route exists before firewall test" >&2
   exit 1
 fi
 
 ip netns exec "$GW" "$BINARY" firewall-boot --config "$WORK/config.yaml" --apply
-ip netns exec "$GW" nft list table inet gateway_vpn | grep -q 'policy drop'
+ip netns exec "$GW" nft list table inet gateway_vpn | grep 'policy drop' >/dev/null
 
 ip netns exec "$GW" "$BINARY" firewall-guard --config "$WORK/config.yaml" --marker-path "$WORK/quarantine" --apply >"$WORK/guard.log" 2>&1 &
 GUARD_PID=$!
@@ -95,14 +95,16 @@ wait_recovery() {
   local attempt
   for attempt in $(seq 1 100); do
     if ip netns exec "$GW" nft list table inet gateway_vpn >/dev/null 2>&1 \
-      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -q '"elem":\[1\]' \
-      && ip -n "$GW" -json link show dev lan0 | grep -q '"UP"' \
+      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*1[[:space:]]*\]' >/dev/null \
+      && ip -n "$GW" -json link show dev lan0 | grep '"UP"' >/dev/null \
       && [[ $(grep -c 'recovered=true' "$WORK/guard.log" || true) -ge $expected_count ]]; then
       return 0
     fi
     sleep 0.05
   done
   echo "Firewall guard recovery timeout" >&2
+	ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation >&2 || true
+	ip -n "$GW" -json link show dev lan0 >&2 || true
   cat "$WORK/guard.log" >&2
   return 1
 }
@@ -112,7 +114,7 @@ ip netns exec "$GW" nft add element inet gateway_vpn active_tun_interfaces '{ "g
 ip netns exec "$GW" nft add element inet gateway_vpn active_path_generation '{ 77 }'
 ip netns exec "$GW" nft delete table inet gateway_vpn
 wait_recovery 1
-if ip netns exec "$GW" nft list set inet gateway_vpn active_tun_interfaces | grep -q 'elements'; then
+if ip netns exec "$GW" nft list set inet gateway_vpn active_tun_interfaces | grep 'elements' >/dev/null; then
   echo "Guard reopened the previous TUN generation without re-verification" >&2
   exit 1
 fi
@@ -121,7 +123,7 @@ fi
 # only Gateway VPN's table and again leave PATH_BLOCKED.
 ip netns exec "$GW" nft flush ruleset
 wait_recovery 2
-ip netns exec "$GW" nft list chain inet gateway_vpn forward | grep -q 'gateway-vpn PATH_BLOCKED'
+ip netns exec "$GW" nft list chain inet gateway_vpn forward | grep 'gateway-vpn PATH_BLOCKED' >/dev/null
 if ip netns exec "$GW" ip route get 1.1.1.1 >/dev/null 2>&1; then
   echo "Unmarked direct route appeared after firewall recovery" >&2
   exit 1
