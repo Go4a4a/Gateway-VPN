@@ -264,6 +264,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		"vps-release-verify", "manifest.sha256", "--apply", "nft --check",
 		"gateway_vpn_vps", "10.80.0.1/24", "AllowedIPs = 10.80.0.2/32", "AllowedIPs = 10.80.0.10/32",
 		"gateway-vpn-vps-install-recovery.service", "install-transactions/active", "Validated harmless pre-transaction VPS marker artifact", "Orphan VPS installation artifact requires operator recovery",
+		"trap 'rollback_install $?' ERR EXIT", "trap 'rollback_install 130' INT", "trap 'rollback_install 143' TERM",
 		"validate_preserved_wg_config", "PRESERVED_WG_CONFIG", "preserve_wg_config=%s", ".gateway-vpn-wg-mgmt.conf.tmp",
 		"/run/lock/gateway-vpn-vps-install.lock", "set -o noclobber", "0:0:600", "flock -n 9", "flock -u 9",
 		"ip -4 route get 10.80.0.2", "ip -4 route get 10.80.0.10", "INSTALLED_NOT_READY",
@@ -368,8 +369,18 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 				t.Errorf("%s does not retain a read-only mount for %s", name, protected)
 			}
 		}
-		if strings.Contains(unit, "/var/lib/gateway-vpn/state.db") {
-			t.Errorf("%s relies on a not-yet-existing SQLite file instead of a writable state root", name)
+		for _, line := range strings.Split(unit, "\n") {
+			if strings.HasPrefix(line, "ReadWritePaths=") && strings.Contains(line, "/var/lib/gateway-vpn/state.db") {
+				t.Errorf("%s relies on a not-yet-existing SQLite file instead of a writable state root", name)
+			}
+		}
+	}
+	for _, required := range []string{
+		"ExecStartPost=/usr/bin/chown -R --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/backups /var/lib/gateway-vpn/recovery",
+		"ExecStartPost=/usr/bin/chown --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/state.db",
+	} {
+		if !strings.Contains(recovery, required) {
+			t.Errorf("network recovery does not return managed database state to the control-plane identity: missing %q", required)
 		}
 	}
 	networkd := read(t, filepath.Join(root, "packaging", "systemd-networkd", "80-gateway-vpn-hilink.network"))
@@ -388,6 +399,12 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 
 func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{"trap 'rollback_install $?' ERR EXIT", "trap 'rollback_install 130' INT", "trap 'rollback_install 143' TERM"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer does not recover nonzero exit/signal: missing %q", required)
+		}
+	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
 	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
 		if !strings.Contains(recovery, required) {

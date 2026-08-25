@@ -309,9 +309,9 @@ mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
 sync
 
 rollback_install() {
-  local code=$?
-  ((code != 0)) || code=1
-  trap - ERR INT TERM
+  local code=${1:-1}
+  trap - ERR INT TERM EXIT
+  ((code != 0)) || exit 0
   flock -u 9 || true
   exec 9>&-
   if [[ -x /usr/libexec/gateway-vpn-install-recovery ]]; then
@@ -319,7 +319,9 @@ rollback_install() {
   fi
   exit "$code"
 }
-trap rollback_install ERR INT TERM
+trap 'rollback_install $?' ERR EXIT
+trap 'rollback_install 130' INT
+trap 'rollback_install 143' TERM
 
 SNAPSHOT="/var/lib/gateway-vpn-privileged/install-transactions/install-$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 0700 "$SNAPSHOT"

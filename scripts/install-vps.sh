@@ -393,9 +393,9 @@ if ((APPLY == 0)); then
 fi
 
 rollback_install() {
-  local code=$?
-  ((code != 0)) || code=1
-  trap - ERR INT TERM
+  local code=${1:-1}
+  trap - ERR INT TERM EXIT
+  ((code != 0)) || exit 0
   flock -u 9 || true
   exec 9>&-
   if [[ -x /usr/libexec/gateway-vpn-vps-install-recovery ]]; then
@@ -418,7 +418,9 @@ chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-vps/install-transactions/active
 sync
-trap rollback_install ERR INT TERM
+trap 'rollback_install $?' ERR EXIT
+trap 'rollback_install 130' INT
+trap 'rollback_install 143' TERM
 
 install -d -m 0755 "$DEST"
 while IFS= read -r -d '' source; do
