@@ -3,10 +3,66 @@ package db
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"testing/fstest"
 )
+
+func TestEnsureExactModeSkipsUnneededChmod(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose verifiable POSIX modes")
+	}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	refuseChmod := func(string, os.FileMode) error {
+		called = true
+		return errors.New("chmod must not run")
+	}
+	if err := ensureExactMode(directory, 0o700, true, refuseChmod); err != nil || called {
+		t.Fatalf("private directory mode convergence = %v, chmod called=%t", err, called)
+	}
+
+	file := filepath.Join(directory, "state.db")
+	if err := os.WriteFile(file, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called = false
+	if err := ensureExactMode(file, 0o600, false, refuseChmod); err != nil || called {
+		t.Fatalf("private file mode convergence = %v, chmod called=%t", err, called)
+	}
+}
+
+func TestEnsureExactModeCorrectsUnsafeModeAndRejectsUnsafeType(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose verifiable POSIX modes")
+	}
+	directory := t.TempDir()
+	file := filepath.Join(directory, "state.db")
+	if err := os.WriteFile(file, []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := ensureExactMode(file, 0o600, false, func(path string, mode os.FileMode) error {
+		called = true
+		return os.Chmod(path, mode)
+	}); err != nil || !called {
+		t.Fatalf("unsafe file mode convergence = %v, chmod called=%t", err, called)
+	}
+	if err := ensureExactMode(directory, 0o600, false, os.Chmod); err == nil {
+		t.Fatal("directory accepted as database file")
+	}
+}
 
 func TestOpenConfiguresSafetyPragmas(t *testing.T) {
 	ctx := context.Background()

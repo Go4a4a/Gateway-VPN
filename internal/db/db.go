@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	_ "modernc.org/sqlite"
 )
@@ -82,8 +83,15 @@ func Open(ctx context.Context, options OpenOptions) (*sql.DB, error) {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
-		if err := os.Chmod(directory, 0o700); err != nil {
+		if err := ensureExactMode(directory, 0o700, true, os.Chmod); err != nil {
 			return nil, fmt.Errorf("secure database directory: %w", err)
+		}
+		if info, err := os.Lstat(absolute); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return nil, errors.New("database must be a regular non-symlink file")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect database file: %w", err)
 		}
 		options.Path = absolute
 	}
@@ -104,12 +112,42 @@ func Open(ctx context.Context, options OpenOptions) (*sql.DB, error) {
 		return nil, err
 	}
 	if fileBacked {
-		if err := os.Chmod(options.Path, 0o600); err != nil {
+		if err := ensureExactMode(options.Path, 0o600, false, os.Chmod); err != nil {
 			database.Close()
 			return nil, fmt.Errorf("secure database file: %w", err)
 		}
 	}
 	return database, nil
+}
+
+func ensureExactMode(path string, expected os.FileMode, directory bool, chmod func(string, os.FileMode) error) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || directory && !info.IsDir() || !directory && !info.Mode().IsRegular() {
+		return errors.New("database path has an unsafe type")
+	}
+	if runtime.GOOS == "windows" {
+		if chmod == nil {
+			return errors.New("database path mode requires correction")
+		}
+		return chmod(path, expected)
+	}
+	if info.Mode().Perm() == expected.Perm() && info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == 0 {
+		return nil
+	}
+	if chmod == nil {
+		return errors.New("database path mode requires correction")
+	}
+	if err := chmod(path, expected); err != nil {
+		return err
+	}
+	verified, err := os.Lstat(path)
+	if err != nil || verified.Mode()&os.ModeSymlink != 0 || directory && !verified.IsDir() || !directory && !verified.Mode().IsRegular() || verified.Mode().Perm() != expected.Perm() || verified.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return errors.New("database path mode correction did not converge")
+	}
+	return nil
 }
 
 func configure(ctx context.Context, database *sql.DB) error {
