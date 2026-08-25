@@ -39,7 +39,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 
 	text := fmt.Sprintf(`table inet %s {
     set firewall_schema_generation {
-        type integer
+		type mark
         elements = { 1 }
     }
 
@@ -57,7 +57,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	}
 
 	set wireguard_endpoint_generation {
-		type integer
+		type mark
 	}
 
     set bootstrap_dns_v4 {
@@ -79,11 +79,11 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	}
 
 	set mihomo_endpoint_generation {
-		type integer
+		type mark
 	}
 
 	set service_context_generation {
-		type integer
+		type mark
 	}
 
 	set active_tun_interfaces {
@@ -91,7 +91,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
     }
 
     set active_path_generation {
-        type integer
+		type mark
     }
 
     counter user_upload {

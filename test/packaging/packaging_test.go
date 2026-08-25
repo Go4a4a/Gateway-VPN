@@ -20,12 +20,12 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "elements = { 1 }", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 1 }", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"flush ruleset", "policy accept", "oifname @hilink_interfaces accept"} {
+	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "oifname @hilink_interfaces accept"} {
 		if strings.Contains(boot, forbidden) {
 			t.Errorf("boot ruleset contains forbidden %q", forbidden)
 		}

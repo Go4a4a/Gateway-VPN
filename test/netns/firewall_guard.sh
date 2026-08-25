@@ -6,7 +6,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BINARY=${1:-$ROOT/dist/gateway-vpn-netns}
 [[ $EUID -eq 0 ]] || { echo "firewall_guard.sh requires root" >&2; exit 1; }
 [[ -x $BINARY ]] || { echo "Build a Linux gateway-vpn binary and pass its absolute path" >&2; exit 2; }
-for command in ip nft sed grep mktemp; do
+for command in ip nft sed grep mktemp getent useradd userdel; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 
@@ -16,6 +16,7 @@ CLIENT="gvpn-client-$SUFFIX"
 MODEM="gvpn-modem-$SUFFIX"
 WORK=$(mktemp -d)
 GUARD_PID=
+CREATED_USERS=()
 cleanup() {
   if [[ -n ${GUARD_PID:-} ]]; then
     kill "$GUARD_PID" 2>/dev/null || true
@@ -24,9 +25,23 @@ cleanup() {
   ip netns del "$CLIENT" 2>/dev/null || true
   ip netns del "$MODEM" 2>/dev/null || true
   ip netns del "$GW" 2>/dev/null || true
+	for user in "${CREATED_USERS[@]}"; do
+		userdel "$user" 2>/dev/null || true
+	done
   rm -rf -- "$WORK"
 }
 trap cleanup EXIT INT TERM
+
+# nft resolves symbolic skuid values while loading the ruleset. The real
+# installer creates these two fixed service accounts before firewall-boot;
+# the standalone netns gate reproduces that prerequisite and removes only
+# accounts it created itself.
+for user in gateway-vpn gateway-vpn-mihomo; do
+	if ! getent passwd "$user" >/dev/null; then
+		useradd --system --no-create-home --shell /usr/sbin/nologin "$user"
+		CREATED_USERS+=("$user")
+	fi
+done
 
 ip netns add "$GW"
 ip netns add "$CLIENT"

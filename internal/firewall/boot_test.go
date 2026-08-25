@@ -23,6 +23,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 	for _, expected := range []string{
 		"table inet gateway_vpn",
 		"set firewall_schema_generation",
+		"type mark",
 		"elements = { 1 }",
 		"set active_tun_interfaces",
 		"set active_path_generation",
@@ -50,7 +51,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 			t.Errorf("ruleset missing %q:\n%s", expected, ruleset.Text)
 		}
 	}
-	for _, forbidden := range []string{"flush ruleset", "policy accept", "enp2s0\" oifname @hilink_interfaces accept"} {
+	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "enp2s0\" oifname @hilink_interfaces accept"} {
 		if strings.Contains(ruleset.Text, forbidden) {
 			t.Errorf("ruleset contains forbidden %q", forbidden)
 		}

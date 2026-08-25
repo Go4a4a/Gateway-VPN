@@ -1,6 +1,6 @@
 table inet gateway_vpn {
     set firewall_schema_generation {
-        type integer
+        type mark
         elements = { 1 }
     }
 
@@ -18,7 +18,7 @@ table inet gateway_vpn {
     }
 
     set wireguard_endpoint_generation {
-        type integer
+        type mark
     }
 
     set bootstrap_dns_v4 {
@@ -40,11 +40,11 @@ table inet gateway_vpn {
     }
 
     set mihomo_endpoint_generation {
-        type integer
+        type mark
     }
 
     set service_context_generation {
-        type integer
+        type mark
     }
 
     set active_tun_interfaces {
@@ -52,7 +52,7 @@ table inet gateway_vpn {
     }
 
     set active_path_generation {
-        type integer
+        type mark
     }
 
     counter user_upload {
