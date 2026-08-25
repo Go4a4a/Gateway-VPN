@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** GitHub zero-to-ready distribution: публичный `Go4a4a/Gateway-VPN` и remote Ubuntu 24.04 race/netns CI работают; на clean head `434d58c` в pinned Ubuntu Docker builder дважды byte-for-byte воспроизведён полный disposable Ed25519-signed Gateway/VPS/bootstrap/deploy/channel bundle с официальными Go/Mihomo inputs; permanent signing identity, immutable GitHub release и реальные systemd/VPS/hardware gates впереди
+**Текущий этап:** Gateway zero-to-ready systemd acceptance завершён в Docker: с clean public head `9eca9bb` собран и повторно проверен disposable Ed25519-signed bundle `0.1.0-systemd.8`; clean Ubuntu 24.04 прошёл dry-run, apply, fail-closed readiness, точный повтор installer, restart control plane и fresh-rootfs boot с новым `/run`/PID 1 без ручного запуска units. Следующий незавершённый блок — VPS Ubuntu 20.04/22.04/24.04 systemd/install/recovery acceptance, затем двухмашинная WireGuard orchestration и реальные hardware/endurance gates
 
-**Оценка прогресса:** около `94%` программной реализации и около `72%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/immutable GitHub release, Ubuntu/systemd/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить disposable signing rehearsal, Docker/netns или cross-build.
+**Оценка прогресса:** около `95%` программной реализации и около `76%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -31,29 +31,29 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
-| Репозиторий | `REMOTE_MAIN_CI_PASS` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; clean code baseline `cf7fa75` опубликован, GitHub CI run `32877860357` завершён success |
+| Репозиторий | `REMOTE_MAIN` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; systemd fix head `9eca9bb` опубликован в `main`; актуальный CI проверяется отдельно и не подменяется локальными результатами |
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
-| Этап 1: bootstrap | `CODE_PASS / LINUX_NOT_RUN` | Config, SQLite/bootstrap lifecycle, HTTPS runtime, clean-host dependencies, private LAN/host-overlap preflight, fail-closed first-install recovery и persistent networkd policy готовы; Linux host validation ещё не выполнена |
+| Этап 1: bootstrap | `DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Signed Ubuntu 24.04 installer прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
-| Firewall / routing | `DOCKER_AND_GITHUB_NETNS_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и независимый nft monitor/poll guard с LAN quarantine прошли Ubuntu 24.04 privileged netns delete/flush/recovery/no-direct-route gate; реальный host/systemd/reboot apply ещё не запускался |
+| Firewall / routing | `DOCKER_SYSTEMD_AND_NETNS_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и nft guard прошли netns; signed install/fresh boot подтвердил boot `PATH_BLOCKED`, `lan0` runtime ruleset, guard и отсутствие direct DNS; реальный host packet capture ещё не выполнен |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
 | WireGuard management | `CODE_PASS / LINUX_NOT_RUN` | Protected WebUI config, parameter-free root sync, modem-priority handshake selector, exact nft endpoint tuple и hot-unplug/failback state machine покрыты tests; реальные wg/ip/nft/VPS не запускались |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
 | SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
-| API / Web UI | `CODE_PASS / LINUX_TLS_NOT_RUN` | 78 `/api/v1` routes покрыты contract-tested OpenAPI; обязательная смена bootstrap password, case-insensitive local admins, user/session lifecycle, Argon2id/session/CSRF, lifecycle tabs, logging/diagnostics/restore UI проходят Go/browser tests; реальный Ubuntu HTTPS/bind ещё не запускался |
-| Logging / audit | `CODE_PASS / JOURNALD_NOT_RUN` | Dynamic levels/TTL, auth floor, aggregation, double redaction, parameter-free retention sync и bounded namespaced journal reader/API/UI покрыты tests; реальный journald ещё не запускался |
+| API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 78 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
+| Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
-| Backup / restore | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | SQLite Online Backup snapshots, corruption recovery, Argon2id+AES-GCM `.gvpn`, strict staging, root-owned journal, pre-restore snapshot, migration/session revoke, all-path rollback и WebUI покрыты success/adversarial/power-loss simulation tests; реальный root/systemd restore на Ubuntu ещё не запускался |
+| Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `DOUBLE_SIGNED_REHEARSAL_PASS / RELEASE_NOT_RUN` | Pinned Docker/Go/Mihomo inputs, temporary Ed25519 identity и две independent exact-commit сборки дали byte-identical полный `dist/`; все Gateway/VPS/channel signatures и local artifact hashes проверены, generated command прошёл `bash -n`; permanent key/draft/release/SSH/install ещё не запускались |
+| Packaging | `SIGNED_GATEWAY_SYSTEMD_PASS / RELEASE_NOT_RUN` | Pinned Ubuntu/Go/Mihomo builder создал signed `.8` с 43 Gateway files; signature/manifest/channel повторно проверены, installer реально применён и пережил fresh systemd boot. Permanent key, production tag/assets и VPS/SSH apply ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_DOCKER_GITHUB_PASS` | Локальные `go test ./...`, `go vet ./...`, shell/JS syntax и четыре Linux/amd64 builds прошли; Docker Ubuntu 24.04 privileged netns — PASS; GitHub `go test -race` и root netns — PASS |
+| Автоматические тесты | `LOCAL_DOCKER_PASS / REMOTE_PREVIOUS_PASS` | На `9eca9bb` локальные `go test ./...`, Linux shell syntax, Ubuntu `systemd-analyze` и signed systemd acceptance прошли; GitHub race/root-netns успешно работали на предыдущих heads, результат нового journal commit проверяется отдельно |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: включить GitHub release immutability и подготовить отдельный backed-up long-lived Ed25519 signing key на trusted builder. После зелёного CI для journal head создаётся exact release tag, production bundle повторяется тем же double-build gate, полностью наполненный draft просматривается и вручную публикуется. Затем выполняется реальная двухмашинная dry-run/apply/resume/reboot matrix. GitHub asset redirects, OpenSSH orchestration, sudo, systemd, WireGuard handshake и WebUI bind фактически ещё не запускались.
+Следующий инкремент: выполнить signed VPS role acceptance отдельно на Ubuntu 20.04, 22.04 и 24.04: dry-run/apply/idempotency, nftables/WireGuard units, recovery marker, service restart и fresh-systemd boot. Затем тем же disposable channel проверить SSH orchestrator Gateway+VPS и реальный WireGuard handshake на двух Linux-машинах. GitHub release immutability уже включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -68,8 +68,8 @@
 3. Docker Desktop `4.87.0`, Engine `29.7.2`, Linux/amd64 context `desktop-linux` запущен; Ubuntu 24.04 privileged nftables/netns gate прошёл. Docker не заменяет реальный systemd host, reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Публичный remote и GitHub CI работают; Docker signed rehearsal на head `434d58c` прошёл. Release immutability по GitHub API остаётся `enabled=false`; отдельный backed-up long-lived key и реальный GitHub draft/release ещё не подготовлены, CI не получает release secrets.
-7. Gateway installer/recovery/dependency/networkd code не запускался на Ubuntu 24.04: реальное поведение APT, systemd conditions, nftables ordering, sysctl, HTTPS bind, recovery/reboot и uninstall остаётся `NOT_RUN`.
+6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Disposable signed rehearsal на head `9eca9bb` прошёл, но отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены; CI не получает release secrets.
+7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS прошёл privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs + пустой `/run` + новый PID 1. Это не заменяет реальный host reboot, APT dependency installation на произвольной машине, uninstall, USB hotplug или power cut.
 8. VPS installer/recovery/dependency code не запускался на Ubuntu/Debian: реальное поведение APT, systemd, nftables, WireGuard, reboot и provider firewall остаётся `NOT_RUN`.
 
 ## Реестр решений реализации
@@ -182,8 +182,57 @@
 | DEV-104 | 2026-08-25 | Netns assertions под `set -o pipefail` не используют early-exit `grep -q` на выводе `nft`/`ip`, а JSON-проверки допускают whitespace | SIGPIPE upstream-процесса и различия JSON formatting не должны превращать успешное fail-closed recovery в ложный CI failure |
 | DEV-105 | 2026-08-25 | Production bundle до draft обязан повторяться дважды из одного exact clean commit, одинаковых pinned inputs и одного signer; `dist/` сравнивается byte-for-byte | Успешная signature verification доказывает целостность конкретного artifact, но не воспроизводимость сборки либо отсутствие invocation-time state |
 | DEV-106 | 2026-08-25 | Первый rehearsal pin — официальный Mihomo `v1.19.30` `linux-amd64-v1`, archive SHA-256 `cbe553d0319a414bd3a372c5976a252155b2c4882b66bce88a4d6bba9571a553`, binary SHA-256 `20ba567571d9ca642bedecbb01f8092cab0f1679100087ef1a4a2efac0ed5494`; production promotion требует повторной official metadata и runtime/API проверки | Нельзя подменять exact release input mutable `latest`; version probe и archive hash сами по себе ещё не доказывают совместимость data plane |
+| DEV-107 | 2026-08-25 | Runtime destructive restore unit с `Conflicts=` не включается в boot target; отдельный бесконфликтный boot restore unit завершает pending transaction до network recovery/socket/control | Condition-false conflict unit в общей boot transaction может вытеснить management jobs ещё до вычисления condition; runtime stop/resume и boot ordering являются разными задачами |
+| DEV-108 | 2026-08-25 | Повтор signed Gateway installer допускает отсутствие direct DNS только при точном root-owned completed report и совпадающих immutable `current`/`recovery` pointers, после чего всё равно выполняет полный existing-install audit | Собственный fail-closed firewall обязан блокировать direct DNS, поэтому без строго ограниченного исключения корректная повторная команда не была идемпотентной |
 
 ## Журнал разработки
+
+### Сессия 036 — signed Gateway systemd install, idempotency и fresh boot — 2026-08-25
+
+**Цель:** реально выполнить Gateway installer/recovery boundaries в Ubuntu 24.04 systemd, не выдавая Docker за bare-metal/hardware acceptance.
+
+**Сделано и опубликовано:**
+
+- `552da76` добавил pinned reproducible Ubuntu 24.04 systemd rehearsal image; `5dd557a` устранил перезапись release version через `/etc/os-release`;
+- `0173533` разрешил SQLite recovery state в hardened units и включил реальную NTP-синхронизацию fixture; `ed3df70` добавил минимальный `CAP_FOWNER`;
+- `464c42f` обеспечил automatic rollback на любом nonzero `EXIT` Gateway/VPS installers и возврат managed DB ownership после root network recovery;
+- `583debb` заставил installer явно запускать broker socket, ждать socket+service+Unix path и генерировать runtime `lan_interface: lan0` вместо оставшегося example `enp2s0`;
+- `a6aeaa1` сделал повторную установку совместимой с собственным fail-closed DNS, не ослабляя fresh-install preflight;
+- fresh-systemd boot обнаружил конфликт runtime restore unit с boot transaction; `9eca9bb` разделил boot recovery и runtime destructive restore, перенёс broker socket в упорядоченный `multi-user.target`, расширил first-install ordering и убрал ложные WAL/SHM `chown` errors.
+
+**Финальный disposable signed artifact этого блока:**
+
+- source commit: `9eca9bbc45f98db42681aa77a282034581ccded7`;
+- version: `0.1.0-systemd.8`; Gateway signed tree: 43 files;
+- signer fingerprint: `7b98a51ea20bdffe3db8831ca9bfa550b45bc221d2ceb493758c75e6215887d3`;
+- Gateway archive SHA-256: `fb9525c12b2b9b699bc027f806be9597cc2a4e7519d998e668ceec6dd0a1cf5d`;
+- bootstrap SHA-256: `776e843aad49122a241cce0fd15d332e0296fa9223ddc8e479508a2300049346`;
+- VPS archive SHA-256: `deea0cd85806dceb0500f875c2f47028b62a5f2c78f08fedb7072233528dc31e`;
+- channel manifest SHA-256: `d837d4c3fec372c6da82271142fae095da03836f96f9008437b51eda3a80cad0`;
+- private key существовал только в container tmpfs и уничтожен; это не production identity.
+
+**Проверено:**
+
+- полный local `go test ./...`, Linux `bash -n` для scripts/netns/systemd и Ubuntu 24.04 `systemd-analyze verify` всего Gateway/VPS unit graph — PASS;
+- clean signed `.8` dry-run проверил NTP, release signature/manifest, 43 files, Ubuntu/kernel/TUN/LAN/packages и ничего не изменил;
+- apply создал users/state/secrets/TLS/config/networkd/sysctl/units, загрузил `PATH_BLOCKED`, поднял guard, broker socket/service и control plane и завершил durable marker;
+- `lan0` получил `192.168.200.1/24`; runtime config и nftables используют `lan0`, `enp2s0` отсутствует; IPv4 forwarding включён, IPv6 disabled/не forwardится;
+- HTTPS реально слушает `192.168.200.1:8443`, возвращает 200, CSP, Permissions-Policy и no-sniff; DB `gateway-vpn:gateway-vpn 0600`, config `root:gateway-vpn 0640`;
+- runtime restore unit disabled, boot restore/socket enabled; install recovery disabled после completed marker; Mihomo ожидаемо inactive без validated generation;
+- точный повтор того же signed installer под заблокированным direct DNS вернул already-installed без mutation; restart `gateway-vpn.service` повторно прошёл acceptance;
+- installed rootfs запущена в новом контейнере с новым пустым `/run`, новым PID 1 и `lan0` до systemd: firewall/guard/update/boot restore/network recovery/socket/broker/control поднялись автоматически без ручного `systemctl start`, полный acceptance — PASS;
+- network recovery с отсутствующими WAL/SHM завершился чисто без ложных `chown: cannot access`; сообщений `network broker is unavailable` нет.
+
+**Неуспешные промежуточные проверки и найденные причины:**
+
+- `.5` сначала оставляла broker socket inactive и runtime firewall на `enp2s0`; оба дефекта воспроизведены, исправлены и закрыты `.6`;
+- первый exact repeat `.6` завершился `Gateway DNS resolution failed`, потому что корректный `PATH_BLOCKED` блокировал direct DNS; исключение ограничено строгим completed-install hint и подтверждено `.7/.8`;
+- обычный `docker restart` сохранил Docker tmpfs `/run` и не переиграл newly enabled target dependencies, поэтому не засчитан как reboot; проверка заменена installed-rootfs snapshot + новый контейнер/PID 1/пустой `/run`;
+- более честный fresh boot `.7` выявил, что enabled runtime restore `Conflicts=` вытесняет socket/control из общей transaction. После разделения units candidate и signed `.8` boot прошли автоматически.
+
+**Не проверено:** реальный Ubuntu host reboot/power cut, package installation на произвольном clean host, uninstall, pending database restore success/failure/power-cut, signed update apply/rollback, Mihomo validated generation/TUN, USB HiLink/Keenetic и любой реальный mobile/VPS packet flow.
+
+**Следующий шаг:** signed VPS installer/systemd/recovery matrix на Ubuntu 20.04, 22.04 и 24.04, затем SSH orchestrator и двухмашинный WireGuard handshake.
 
 ### Сессия 035 — reproducible signed release rehearsal — 2026-08-25
 
