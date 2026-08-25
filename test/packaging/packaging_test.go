@@ -357,6 +357,9 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 	}
 	recovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-recovery.service"))
 	for name, unit := range map[string]string{"broker": broker, "recovery": recovery} {
+		if !strings.Contains(unit, "CAP_FOWNER") {
+			t.Errorf("%s cannot enforce modes on gateway-vpn-owned SQLite recovery directories", name)
+		}
 		if !strings.Contains(unit, "ReadWritePaths=") || !strings.Contains(unit, "/var/lib/gateway-vpn ") {
 			t.Errorf("%s cannot create SQLite WAL/recovery state under the managed state root", name)
 		}
