@@ -47,7 +47,7 @@ UNITS=(
   gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer
   gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service
-  gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service
+  gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service
   gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service
 )
 systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
@@ -89,7 +89,7 @@ rm -rf "/opt/gateway-vpn/releases/v$VERSION" || record_failure "remove failed re
 for unit_file in \
   gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
-  gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service gateway-vpn-database-restore.service \
+  gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service \
   gateway-vpn-database-restore-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service \
   gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   rm -f "/etc/systemd/system/$unit_file" || record_failure "remove owned unit $unit_file"

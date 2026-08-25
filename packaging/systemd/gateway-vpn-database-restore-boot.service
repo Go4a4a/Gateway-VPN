@@ -1,13 +1,15 @@
 [Unit]
-Description=Gateway VPN verified database and state restore
+Description=Recover a pending Gateway VPN restore during boot
 Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
-After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Conflicts=gateway-vpn.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
-Before=gateway-vpn.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
-OnSuccess=gateway-vpn-database-restore-resume.service
-OnFailure=gateway-vpn-database-restore-resume.service
+DefaultDependencies=no
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service
+Before=gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
 ConditionPathExists=/var/lib/gateway-vpn/recovery/pending-restore.json
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
 
 [Service]
 LogNamespace=gateway-vpn
@@ -39,3 +41,6 @@ SystemCallFilter=@system-service
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/gateway-vpn
 ReadWritePaths=/etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged/restore-transactions /run
+
+[Install]
+WantedBy=multi-user.target

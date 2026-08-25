@@ -2,8 +2,9 @@
 Description=Gateway VPN recover unfinished network apply
 Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
 DefaultDependencies=no
-After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-database-restore-boot.service
 Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Wants=gateway-vpn-database-restore-boot.service
 Before=gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service
 ConditionPathExists=/etc/gateway-vpn/config.yaml
 
@@ -13,7 +14,7 @@ Type=oneshot
 ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn network-recover --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/network-transactions --apply
 ExecStartPost=/usr/bin/chown -R --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/backups /var/lib/gateway-vpn/recovery
 ExecStartPost=/usr/bin/chown --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/state.db
-ExecStartPost=-/usr/bin/chown --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/state.db-wal /var/lib/gateway-vpn/state.db-shm
+ExecStartPost=/usr/bin/find /var/lib/gateway-vpn -maxdepth 1 -type f -name state.db-* -exec /usr/bin/chown --no-dereference gateway-vpn:gateway-vpn {} +
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict

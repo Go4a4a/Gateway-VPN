@@ -1,6 +1,14 @@
 [Unit]
 Description=Gateway VPN privileged network broker socket
+DefaultDependencies=no
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Wants=gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service
 Before=gateway-vpn.service
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
 
 [Socket]
 ListenStream=/run/gateway-vpn/network-broker.sock
@@ -11,4 +19,4 @@ DirectoryMode=0755
 RemoveOnStop=yes
 
 [Install]
-WantedBy=sockets.target
+WantedBy=multi-user.target

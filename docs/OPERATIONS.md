@@ -323,14 +323,18 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 6. удаляет stale `mihomo/active`, проверяет live config/SQLite и оставляет runtime `PATH_BLOCKED`;
 7. возвращает broker socket и control plane. Mihomo не запускается resume unit: обычный reconciler должен заново доказать текущий tuple `modem × subscription × node` до `PATH_ACTIVE`.
 
+Boot recovery отделён от runtime destructive apply. Только бесконфликтный `gateway-vpn-database-restore-boot.service` включён в `multi-user.target`; при наличии `pending-restore.json` он после update recovery и boot firewall завершает ту же root-транзакцию до network recovery, broker socket и control plane. Runtime `gateway-vpn-database-restore.service` не включается ни в один boot target и запускается исключительно fixed-командой root broker после подтверждения в WebUI. Такое разделение не допускает, чтобы его `Conflicts=` вытеснил management units из обычной systemd boot transaction, когда pending restore отсутствует.
+
 Браузерная сессия после успешного restore намеренно недействительна — требуется войти снова. Если процесс/питание прервались между rename-операциями, root-owned `/var/lib/gateway-vpn-privileged/restore-transactions/` позволяет на следующем запуске вернуть прежние destinations в обратном порядке. Pending marker очищается только после полной проверки committed состояния; interrupted transaction после успешного rollback требует явного повторного Apply.
 
 Диагностика:
 
 ```bash
 sudo systemctl status gateway-vpn-database-restore.service
+sudo systemctl status gateway-vpn-database-restore-boot.service
 sudo systemctl status gateway-vpn-database-restore-resume.service
 sudo journalctl --namespace=gateway-vpn -u gateway-vpn-database-restore.service
+sudo journalctl --namespace=gateway-vpn -u gateway-vpn-database-restore-boot.service
 sudo ls -la /var/lib/gateway-vpn/recovery/
 sudo ls -la /var/lib/gateway-vpn-privileged/restore-transactions/
 sudo nft list table inet gateway_vpn

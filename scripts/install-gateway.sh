@@ -268,6 +268,7 @@ else
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
+    /etc/systemd/system/gateway-vpn-database-restore-boot.service \
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict" >&2; exit 1; }
   done
@@ -397,7 +398,7 @@ grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { ec
 for unit in gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service \
-  gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
+  gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   install -D -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "/etc/systemd/system/$unit"
 done
@@ -410,7 +411,7 @@ chmod 0600 /run/gateway-vpn-install-authorized
 [[ -f /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-install-authorized) == "0:0:600" ]] || { echo "Ephemeral Gateway service-start authorization is unsafe" >&2; exit 1; }
 systemctl daemon-reload
 systemctl try-restart systemd-journald@gateway-vpn.service
-systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-update-finalize.timer gateway-vpn-network-recovery.service gateway-vpn-database-restore.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
+systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-update-finalize.timer gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
 systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service
 systemctl restart gateway-vpn-update-recovery.service

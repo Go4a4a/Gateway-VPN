@@ -30,7 +30,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 			t.Errorf("boot ruleset contains forbidden %q", forbidden)
 		}
 	}
-	for _, unitName := range []string{"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service", "gateway-vpn.service", "gateway-vpn-mihomo.service", "gateway-vpn-dnsmasq.service"} {
+	for _, unitName := range []string{"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-broker.socket", "gateway-vpn.service", "gateway-vpn-mihomo.service", "gateway-vpn-dnsmasq.service"} {
 		unit := read(t, filepath.Join(root, "packaging", "systemd", unitName))
 		for _, gate := range []string{"ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active", "ConditionPathExists=|/run/gateway-vpn-install-authorized", "ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active", "ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized"} {
 			if !strings.Contains(unit, gate) {
@@ -420,6 +420,7 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 	for _, required := range []string{
 		"ExecStartPost=/usr/bin/chown -R --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/backups /var/lib/gateway-vpn/recovery",
 		"ExecStartPost=/usr/bin/chown --no-dereference gateway-vpn:gateway-vpn /var/lib/gateway-vpn/state.db",
+		"ExecStartPost=/usr/bin/find /var/lib/gateway-vpn -maxdepth 1 -type f -name state.db-* -exec /usr/bin/chown --no-dereference gateway-vpn:gateway-vpn {} +",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("network recovery does not return managed database state to the control-plane identity: missing %q", required)
@@ -455,6 +456,12 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 	}
 	if strings.Contains(recovery, "flush ruleset") || strings.Index(recovery, "if ((FAILED))") > strings.Index(recovery, "mv -f \"$MARKER\"") {
 		t.Fatal("Gateway recovery can discard its marker before verified owned-state cleanup")
+	}
+	installRecovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-install-recovery.service"))
+	for _, required := range []string{"gateway-vpn-update-recovery.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-recovery.service", "gateway-vpn-network-broker.socket", "gateway-vpn-network-broker.service"} {
+		if !strings.Contains(installRecovery, required) {
+			t.Errorf("first-install boot recovery is not ordered before %q", required)
+		}
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
 	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", "70-gateway-vpn-lan.network", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
@@ -617,13 +624,37 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 			t.Errorf("database restore unit missing %q", required)
 		}
 	}
+	if strings.Contains(restore, "WantedBy=") || strings.Contains(restore, "gateway-vpn-database-restore-boot.service") {
+		t.Fatal("destructive runtime restore unit must never join a boot target transaction")
+	}
+	bootRestore := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-database-restore-boot.service"))
+	for _, required := range []string{
+		"DefaultDependencies=no",
+		"ConditionPathExists=/var/lib/gateway-vpn/recovery/pending-restore.json",
+		"Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service",
+		"Before=gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service",
+		"GATEWAY_VPN_DATABASE_RESTORE_UNIT=1",
+		"ExecStartPre=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply",
+		"database-restore --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/restore-transactions --apply",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(bootRestore, required) {
+			t.Errorf("database boot restore unit missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"Conflicts=", "OnSuccess=", "OnFailure="} {
+		if strings.Contains(bootRestore, forbidden) {
+			t.Errorf("database boot restore unit contains runtime-only directive %q", forbidden)
+		}
+	}
 	resume := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-database-restore-resume.service"))
 	if !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") || strings.Contains(resume, "gateway-vpn-mihomo.service") {
 		t.Fatal("restore resume must restart management while leaving Mihomo to verified reconciliation")
 	}
 	control := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn.service"))
 	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
-	if !strings.Contains(control, "After=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service") || !strings.Contains(control, "gateway-vpn-database-restore.service") || !strings.Contains(broker, "After=gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service") {
+	socket := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.socket"))
+	if !strings.Contains(control, "gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service") || strings.Contains(control, "gateway-vpn-database-restore.service") || !strings.Contains(broker, "gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service") || strings.Contains(broker, "gateway-vpn-database-restore.service") || !strings.Contains(socket, "DefaultDependencies=no") || !strings.Contains(socket, "WantedBy=multi-user.target") || strings.Contains(socket, "WantedBy=sockets.target") {
 		t.Fatal("control plane or broker can race a boot-time pending restore")
 	}
 	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
@@ -632,10 +663,13 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 	}
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, unit := range []string{"gateway-vpn-database-restore.service", "gateway-vpn-database-restore-resume.service"} {
+	for _, unit := range []string{"gateway-vpn-database-restore-boot.service", "gateway-vpn-database-restore.service", "gateway-vpn-database-restore-resume.service"} {
 		if !strings.Contains(installer, unit) || !strings.Contains(uninstaller, unit) {
 			t.Errorf("installer lifecycle is missing %s", unit)
 		}
+	}
+	if !strings.Contains(installer, "gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service") || strings.Contains(installer, "gateway-vpn-network-recovery.service gateway-vpn-database-restore.service gateway-vpn-network-broker.socket") {
+		t.Fatal("installer must enable only the non-conflicting database boot recovery unit")
 	}
 }
 
@@ -663,7 +697,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"GATEWAY_VPN_UPDATE_RECOVERY_UNIT=1",
 		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover",
 		"update-recover --config /etc/gateway-vpn/config.yaml --apply",
-		"Before=gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket",
+		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("update recovery unit missing %q", required)

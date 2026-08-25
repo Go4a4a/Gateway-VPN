@@ -2,8 +2,8 @@
 Description=Gateway VPN privileged network broker
 Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
 Requires=gateway-vpn-network-broker.socket gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-After=gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-database-restore.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Wants=gateway-vpn-database-restore.service
+After=gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Wants=gateway-vpn-database-restore-boot.service
 
 [Service]
 LogNamespace=gateway-vpn
