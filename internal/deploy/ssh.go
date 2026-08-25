@@ -15,11 +15,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
-	DefaultSSHExecutable = "/usr/bin/ssh"
-	DefaultOutputLimit   = 256 * 1024
+	DefaultSSHExecutable        = "/usr/bin/ssh"
+	DefaultOutputLimit          = 256 * 1024
+	defaultControlPersistSecond = 45 * 60
 )
 
 var sshUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
@@ -42,8 +44,9 @@ type RemoteExecutor interface {
 }
 
 type SSHExecutor struct {
-	Executable  string
-	OutputLimit int
+	Executable       string
+	OutputLimit      int
+	controlDirectory string
 }
 
 type RemoteCommandError struct {
@@ -73,40 +76,34 @@ func ValidateHost(host Host) error {
 	return nil
 }
 
-func (executor SSHExecutor) Run(ctx context.Context, host Host, remoteCommand string) (RemoteResult, error) {
-	if executor.Executable == "" {
-		executor.Executable = DefaultSSHExecutable
+// NewSSHExecutor creates a process-owned OpenSSH multiplexing directory. The
+// first command authenticates and pins the host normally; later phases reuse
+// that established TCP connection after fail-closed firewalls are applied.
+func NewSSHExecutor() (*SSHExecutor, error) {
+	directory, err := os.MkdirTemp("", "gateway-vpn-ssh-control-")
+	if err != nil {
+		return nil, errors.New("create private SSH control directory failed")
 	}
-	if executor.OutputLimit == 0 {
-		executor.OutputLimit = DefaultOutputLimit
+	if err := os.Chmod(directory, 0o700); err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, errors.New("secure SSH control directory failed")
 	}
-	if executor.Executable != DefaultSSHExecutable || executor.OutputLimit < 4096 || executor.OutputLimit > 4*1024*1024 {
-		return RemoteResult{}, errors.New("fixed SSH executor and bounded output are required")
+	executor := &SSHExecutor{
+		Executable: DefaultSSHExecutable, OutputLimit: DefaultOutputLimit,
+		controlDirectory: directory,
 	}
-	if err := ValidateHost(host); err != nil {
+	if err := executor.validate(); err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, err
+	}
+	return executor, nil
+}
+
+func (executor *SSHExecutor) Run(ctx context.Context, host Host, remoteCommand string) (RemoteResult, error) {
+	arguments, err := executor.commandArguments(host, remoteCommand)
+	if err != nil {
 		return RemoteResult{}, err
 	}
-	if remoteCommand == "" || len(remoteCommand) > 128*1024 || strings.ContainsAny(remoteCommand, "\x00\r\n") {
-		return RemoteResult{}, errors.New("bounded single-line remote command is required")
-	}
-	arguments := []string{
-		"-F", "/dev/null", "-T",
-		"-o", "BatchMode=yes",
-		"-o", "PasswordAuthentication=no",
-		"-o", "KbdInteractiveAuthentication=no",
-		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=" + host.KnownHosts,
-		"-o", "GlobalKnownHostsFile=/dev/null",
-		"-o", "RequestTTY=no",
-		"-o", "ConnectTimeout=15",
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=2",
-		"-p", strconv.Itoa(host.Port),
-	}
-	if host.Identity != "" {
-		arguments = append(arguments, "-o", "IdentitiesOnly=yes", "-i", host.Identity)
-	}
-	arguments = append(arguments, "--", host.Destination, remoteCommand)
 	command := exec.CommandContext(ctx, executor.Executable, arguments...)
 	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
 	var stdout, stderr boundedBuffer
@@ -133,6 +130,108 @@ func (executor SSHExecutor) Run(ctx context.Context, host Host, remoteCommand st
 		return RemoteResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: -1}, RemoteCommandError{ExitCode: -1, Cause: "bounded output limit exceeded"}
 	}
 	return RemoteResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: 0}, nil
+}
+
+func (executor *SSHExecutor) commandArguments(host Host, remoteCommand string) ([]string, error) {
+	if err := executor.validate(); err != nil {
+		return nil, err
+	}
+	if err := ValidateHost(host); err != nil {
+		return nil, err
+	}
+	if remoteCommand == "" || len(remoteCommand) > 128*1024 || strings.ContainsAny(remoteCommand, "\x00\r\n") {
+		return nil, errors.New("bounded single-line remote command is required")
+	}
+	arguments := []string{
+		"-F", "/dev/null", "-T",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPersist=" + strconv.Itoa(defaultControlPersistSecond),
+		"-o", "ControlPath=" + executor.controlPath(),
+		"-o", "BatchMode=yes",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=" + host.KnownHosts,
+		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "RequestTTY=no",
+		"-o", "ConnectTimeout=15",
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=2",
+		"-p", strconv.Itoa(host.Port),
+	}
+	if host.Identity != "" {
+		arguments = append(arguments, "-o", "IdentitiesOnly=yes", "-i", host.Identity)
+	}
+	arguments = append(arguments, "--", host.Destination, remoteCommand)
+	return arguments, nil
+}
+
+// Close terminates persistent masters and removes their private socket
+// directory. Individual -O exit failures are tolerated only if no control
+// sockets remain, covering hosts whose first connection never opened.
+func (executor *SSHExecutor) Close(ctx context.Context, hosts ...Host) error {
+	if executor == nil || executor.controlDirectory == "" {
+		return nil
+	}
+	directory := executor.controlDirectory
+	executor.controlDirectory = ""
+	defer os.RemoveAll(directory)
+	if err := validateControlDirectory(directory); err != nil {
+		return err
+	}
+	controlPath := filepath.Join(directory, "%C")
+	for _, host := range hosts {
+		if ValidateHost(host) != nil {
+			continue
+		}
+		arguments := []string{
+			"-F", "/dev/null", "-T",
+			"-o", "BatchMode=yes",
+			"-o", "ControlPath=" + controlPath,
+			"-O", "exit", "-p", strconv.Itoa(host.Port),
+			"--", host.Destination,
+		}
+		command := exec.CommandContext(ctx, executor.Executable, arguments...)
+		command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
+		_ = command.Run()
+	}
+	for {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			return errors.New("inspect SSH control directory during close failed")
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("persistent SSH control connections did not close")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (executor *SSHExecutor) validate() error {
+	if executor == nil || executor.Executable != DefaultSSHExecutable || executor.OutputLimit < 4096 || executor.OutputLimit > 4*1024*1024 {
+		return errors.New("fixed SSH executor and bounded output are required")
+	}
+	return validateControlDirectory(executor.controlDirectory)
+}
+
+func (executor *SSHExecutor) controlPath() string {
+	return filepath.Join(executor.controlDirectory, "%C")
+}
+
+func validateControlDirectory(directory string) error {
+	expandedPath := filepath.Join(directory, strings.Repeat("0", 40))
+	if !filepath.IsAbs(directory) || strings.ContainsRune(directory, '\x00') || len(expandedPath) > 100 {
+		return errors.New("private bounded SSH control directory is required")
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return errors.New("SSH control directory is unsafe or unavailable")
+	}
+	return nil
 }
 
 type boundedBuffer struct {

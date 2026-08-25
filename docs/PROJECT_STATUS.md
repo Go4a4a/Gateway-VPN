@@ -1,8 +1,8 @@
 # Gateway VPN — статус и журнал разработки
 
-**Последнее обновление:** 2026-08-25  
+**Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Gateway и VPS zero-to-ready systemd acceptance завершены в Docker. Disposable bundle `0.1.0-systemd.9` из commit `11ec459` подтвердил исправление remote `.bashrc`, но первый настоящий bootstrap обнаружил второй production boundary: builders включали отдельную tar-запись `./`, которую strict extractor намеренно отвергает. Gateway/VPS builders исправлены на архивирование только явных top-level entries, regression и полный Go suite прошли. Следующий шаг — commit, новый signed bundle и повтор чистой двухмашинной orchestration, затем WireGuard handshake
+**Текущий этап:** Signed bundle `0.1.0-systemd.10` подтвердил strict bootstrap archive fix на clean Gateway. Полный SSH deploy прошёл оба role preflight и применил Gateway, затем доказанно потерял новое SSH-соединение после fail-closed firewall до `GATEWAY_KEY_PREPARE`; VPS остался clean. Deploy теперь использует заранее аутентифицированные private OpenSSH ControlMaster sessions, не открывая TCP/22 в firewall; Windows и Linux tests прошли. Следующий шаг — commit, signed `.11` и полный clean orchestration rerun до WireGuard handshake
 
 **Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
@@ -31,7 +31,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
-| Репозиторий | `REMOTE_MAIN` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; systemd fix head `9eca9bb` опубликован в `main`; актуальный CI проверяется отдельно и не подменяется локальными результатами |
+| Репозиторий | `LOCAL_AHEAD / PUSH_PENDING` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; local `main` содержит проверяемые commits сверх `origin/main`. Push остаётся отдельным внешним действием и не выполняется без явного разрешения пользователя |
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
 | Этап 1: bootstrap | `DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Signed Ubuntu 24.04 installer прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_SYSTEMD_PASS / BOOTSTRAP_DEFECT_FIXED_NOT_REBUILT` | Pinned builder создал signed `.9`; exact bootstrap доказанно отверг standalone archive root entry до mutation. Оба role builders исправлены, но новый signed artifact ещё не собран. Permanent key, production tag/assets и SSH orchestrator apply ещё не выполнены |
+| Packaging | `SIGNED_STRICT_BOOTSTRAP_PASS / ORCHESTRATION_PARTIAL` | Pinned builder создал signed `.10`; оба archives не содержат root entry, Gateway exact bootstrap dry-run прошёл 43 signed files и host preflight. Gateway apply прошёл, но post-firewall SSH continuity fix ещё не собран в signed artifact. Permanent key и production tag/assets не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_GO_PASS / DOCKER_REPRODUCED_DEFECT` | После archive-builder fix локальные packaging tests и полный `go test ./...` прошли. Signed `.9` и clean Docker s009 воспроизвели bootstrap incompatibility; новый signed artifact и удалённый CI ещё не проверены |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...` прошёл; Linux container tests для deploy/packaging и private ControlMaster options прошли. Signed `.10` воспроизвёл post-firewall SSH defect; исправленный deploy ещё не прошёл signed orchestration и удалённый CI |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: commit archive fix, собрать новый disposable channel и на полностью чистом стенде повторить bootstrap + SSH orchestrator Gateway/VPS, затем доказать WireGuard handshake. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: commit ControlMaster continuity fix, собрать новый disposable channel и на полностью чистом стенде повторить bootstrap + SSH orchestrator Gateway/VPS, затем доказать WireGuard handshake. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -186,8 +186,40 @@
 | DEV-108 | 2026-08-25 | Повтор signed Gateway installer допускает отсутствие direct DNS только при точном root-owned completed report и совпадающих immutable `current`/`recovery` pointers, после чего всё равно выполняет полный existing-install audit | Собственный fail-closed firewall обязан блокировать direct DNS, поэтому без строго ограниченного исключения корректная повторная команда не была идемпотентной |
 | DEV-109 | 2026-08-25 | Все generated bootstrap/deploy shell commands запускают Bash как `bash --norc -ceu` | `sshd` remote command может заставить Bash читать стандартный Ubuntu `.bashrc`; при `nounset` обращение `/etc/bash.bashrc` к unset `PS1` останавливало signed preflight до mutation. Доверенный workflow не должен зависеть от dotfiles удалённого пользователя |
 | DEV-110 | 2026-08-25 | Gateway/VPS release archives перечисляют явные top-level entries и никогда не включают отдельную tar-запись `.`/`./` | Bootstrap и runtime update используют один strict extractor, который отвергает standalone archive root entry. Старый `tar ... .` создавал structurally invalid artifact, хотя проверка уже распакованного signed tree проходила |
+| DEV-111 | 2026-08-26 | Two-host deploy создаёт private `0700` OpenSSH ControlMaster directory и переиспользует заранее pinned established sessions через Gateway/VPS firewall apply; в конце masters закрываются через `-O exit`, sockets проверяются и directory удаляется | Каждый прежний `SSHExecutor.Run` открывал новый TCP connection. Gateway installer правильно закрыл TCP/22, поэтому следующий key-preparation phase был недостижим. Открывать SSH hole в fail-closed firewall нельзя; multiplexing сохраняет существующую authenticated connection без ослабления ruleset |
 
 ## Журнал разработки
+
+### Сессия 040 — post-firewall SSH continuity и private ControlMaster lifecycle — 2026-08-26
+
+**Strict bootstrap fix подтверждён:**
+
+- из commit `def1c7f97df88ee09a03f1f6e243c923ecd09662` собран disposable bundle `0.1.0-systemd.10`; signer — `a6def8a6616e72e5906d2a731aea144bbb175bb6746c51585879878f8ec618ec`, channel manifest SHA-256 — `7109d40c4d9418471b9ecac188ee6f312ac159b9316f5ec0252bd4e7b49e2f42`;
+- Gateway archive начинается с `bin/` и содержит 60 actual entries, VPS — с `bin/` и 30 entries; отдельные `.`/`./` отсутствуют, public output hashes совпали, disposable private signing key уничтожен;
+- полностью новый s010 Gateway/VPS/admin/HTTPS стенд подтвердил clean managed state, fixture CA/channel hash и прежние pinned ED25519 host keys;
+- exact Gateway bootstrap по pinned SSH прошёл strict extraction, verification всех 43 файлов, Ubuntu/LAN host preflight и вернул `DEPENDENCY_PLAN_VALIDATED` без mutation.
+
+**Следующий production defect воспроизведён и классифицирован:**
+
+- полный exact deploy прошёл Gateway/VPS external preflight, применил Gateway и остановился в `GATEWAY_KEY_PREPARE`; report: Gateway `APPLIED`, VPS `NOT_RUN`;
+- Gateway остался безопасно `INSTALLED_NOT_READY`, firewall/broker/control active, SSH daemon продолжал слушать TCP/22, pending WireGuard deploy key отсутствовал, VPS managed state отсутствовал;
+- owned nft input chain имел policy drop и только `ct state established,related` для существующих connections; новый pinned SSH connect с admin `172.30.8.4` получил timeout. Тем самым доказана transport continuity причина, а не installer/key defect.
+
+**Исправлено в source:**
+
+- `gateway-vpn-deploy` создаёт новый private bounded `0700` OpenSSH control directory; первый pinned command включает `ControlMaster=auto`, а последующие фазы используют тот же authenticated established TCP session после firewall apply;
+- ControlPersist ограничен общим 45-минутным deploy window. После orchestration launcher посылает обоим hosts `-O exit`, ждёт удаления sockets, удаляет directory и при cleanup failure возвращает отдельный redacted diagnostic вместо ложного успеха;
+- TCP/22 в Gateway/VPS firewall не открывается и пользовательские SSH options/ProxyCommand по-прежнему не принимаются;
+- добавлены tests обязательных ControlMaster/ControlPersist/ControlPath/host-key/identity options и отказа insecure control directory; OPERATIONS описывает lifecycle.
+
+**Проверки и стендовые ошибки:**
+
+- Windows: deploy package tests, полный `go test ./...`, `go vet ./...`, `git diff --check` — PASS;
+- первая Linux test-container попытка имела fixture `/tmp` с `noexec`, поэтому Go test binaries не запускались; повтор с executable tmpfs раскрыл слишком длинный test-only `t.TempDir` для консервативного Unix socket bound;
+- test fixture переведён на короткий private `os.MkdirTemp`; финальные Linux `go test ./internal/deploy ./cmd/gateway-vpn-deploy ./test/packaging` — PASS. Production socket path из `/tmp/gateway-vpn-ssh-control-*` оставался в bound.
+- реальный fixture OpenSSH создал master socket после первой команды к clean VPS, `-O check` подтвердил master PID, `-O exit` удалил socket, private directory стал пустым и был удалён — PASS.
+
+**Следующий шаг:** commit, signed `.11`, полностью clean orchestration rerun; затем WireGuard handshake/modem fixture и проверка удаления SSH control sockets.
 
 ### Сессия 039 — настоящий bootstrap обнаружил несовместимый root tar entry — 2026-08-25
 

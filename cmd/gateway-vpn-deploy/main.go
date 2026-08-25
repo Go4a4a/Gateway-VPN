@@ -112,7 +112,23 @@ func run(args []string) int {
 		AllowGatewaySSH: *allowGatewaySSH, InstallDependencies: *installDependencies,
 		ReadinessAttempts: *readinessAttempts, ReadinessInterval: *readinessInterval,
 	}
-	report, deployErr := (deploy.Orchestrator{Executor: deploy.SSHExecutor{Executable: deploy.DefaultSSHExecutable, OutputLimit: deploy.DefaultOutputLimit}}).Run(ctx, request)
+	executor, err := deploy.NewSSHExecutor()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create private persistent SSH session failed")
+		return 1
+	}
+	report, deployErr := (deploy.Orchestrator{Executor: executor}).Run(ctx, request)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupErr := executor.Close(cleanupCtx, request.Gateway, request.VPS)
+	cleanupCancel()
+	if cleanupErr != nil {
+		report.DiagnosticCodes = append(report.DiagnosticCodes, "SSH_CONTROL_CLEANUP_FAILED")
+		if deployErr == nil {
+			report.State = deploy.StateFailed
+			report.FailurePhase = "SSH_CONTROL_CLEANUP"
+			deployErr = cleanupErr
+		}
+	}
 	if localAdminIdentity == nil {
 		report.AdminConfigState = "EXTERNAL_PUBLIC_KEY"
 	} else if report.VPSPublicKey == "" {
