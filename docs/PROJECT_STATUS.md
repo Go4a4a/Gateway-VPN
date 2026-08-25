@@ -2,7 +2,7 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** GitHub zero-to-ready distribution: independent bootstrap, Gateway/VPS/deploy artifacts, signed channel, typed two-host SSH orchestration, local-only WireGuard key lifecycle и durable role recovery готовы на synthetic уровне; первый committed GitHub release и реальные Linux/VPS gates впереди
+**Текущий этап:** GitHub zero-to-ready distribution: clean local source baseline `dd60f31`, independent bootstrap, Gateway/VPS/deploy artifacts, signed channel, typed two-host SSH orchestration, local-only WireGuard key lifecycle и durable role recovery готовы; trusted Linux build, первый immutable GitHub release и реальные Linux/VPS gates впереди
 
 **Оценка прогресса:** около `93%` программной реализации и около `65%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные GitHub install, Ubuntu/systemd/nftables/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить unit-тестами или cross-build.
 
@@ -31,7 +31,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
-| Репозиторий | `IN_PROGRESS` | Проверяемый Go-каркас и domain repositories расширяются по этапам плана |
+| Репозиторий | `LOCAL_COMMIT_PASS / REMOTE_NOT_RUN` | Первый clean local commit `dd60f31` создан после полного pre-commit gate; remote GitHub repository/release ещё не проверялись |
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
 | Этап 1: bootstrap | `CODE_PASS / LINUX_NOT_RUN` | Config, SQLite/bootstrap lifecycle, HTTPS runtime, clean-host dependencies, private LAN/host-overlap preflight, fail-closed first-install recovery и persistent networkd policy готовы; Linux host validation ещё не выполнена |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -53,7 +53,7 @@
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: создать первый clean committed test release на Linux builder, опубликовать immutable GitHub assets и выполнить реальную двухмашинную dry-run/apply/resume/reboot matrix. Найденные integration defects исправляются до перехода к nft/netns, update/restore/recovery и hardware gates. Bootstrap/channel/deploy уже готовы только на synthetic уровне; GitHub redirects, OpenSSH, sudo, systemd, nftables, WireGuard handshake и WebUI bind фактически не запускались.
+Следующий инкремент: получить clean checkout exact commit `dd60f31` на trusted Linux builder, собрать и подписать test release, опубликовать immutable GitHub assets и выполнить реальную двухмашинную dry-run/apply/resume/reboot matrix. Найденные integration defects исправляются до перехода к nft/netns, update/restore/recovery и hardware gates. Bootstrap/channel/deploy уже готовы только на synthetic уровне; GitHub redirects, OpenSSH, sudo, systemd, nftables, WireGuard handshake и WebUI bind фактически не запускались.
 
 ## Критический путь до release
 
@@ -68,7 +68,7 @@
 3. Docker CLI установлен, однако Docker Engine не запущен; локальные образы недоступны.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Репозиторий пока не имеет первого commit и весь worktree untracked. Поэтому production builders намеренно не запускались: их clean committed source gate должен остаться обязательным, а synthetic channel smoke не заменяет реальный GitHub Release.
+6. Clean local source baseline `dd60f31` создан. Remote GitHub repository/release credentials и trusted Linux builder в текущей среде не предоставлены; synthetic channel smoke не заменяет реальный GitHub Release.
 7. Gateway installer/recovery/dependency/networkd code не запускался на Ubuntu 24.04: реальное поведение APT, systemd conditions, nftables ordering, sysctl, HTTPS bind, recovery/reboot и uninstall остаётся `NOT_RUN`.
 8. VPS installer/recovery/dependency code не запускался на Ubuntu/Debian: реальное поведение APT, systemd, nftables, WireGuard, reboot и provider firewall остаётся `NOT_RUN`.
 
@@ -172,8 +172,36 @@
 | DEV-094 | 2026-08-25 | Gateway/VPS/admin private keys создаются только на соответствующих hosts; resume читает только public identity, pending key удаляется после atomic config+fsync, raw public keys в report заменяются fingerprints | Interruption не должен заставлять менять уже записанный VPS peer, а one-command install не должен передавать private key через argv/SSH/stdout или молча ротировать existing config |
 | DEV-095 | 2026-08-25 | Deploy exit code `0` разрешён только при свежем expected WireGuard handshake и `PATH_ACTIVE`; безопасно установленные роли без модема/подписки возвращают code `3` и `INSTALLED_NOT_READY` | Active systemd units и наличие файлов не доказывают management/data readiness, но отсутствие пользовательской конфигурации после clean install не является rollback-worthy corruption |
 | DEV-096 | 2026-08-25 | Внешний orchestrated dependency dry-run использует отдельный `DEPENDENCY_GATE_PASSED_OR_REFRESH_REQUIRED`; APT refresh остаётся только apply-фазе с повторной simulation | Устаревший package index не должен блокировать clean-host one-command до разрешённой apply, но невозможность полного preflight при отсутствующих packages нельзя называть обычным `PASSED` |
+| DEV-097 | 2026-08-25 | Первый release разрешено строить только из exact clean commit; локальный baseline `dd60f31` фиксирует проверенную source identity, но сам по себе не считается trusted Linux/GitHub release | Untracked workspace нельзя воспроизводимо связать с build metadata, SBOM, provenance и immutable artifacts |
 
 ## Журнал разработки
+
+### Сессия 032 — первый clean commit и перевод на Linux release gate — 2026-08-25
+
+**Сделано:**
+
+- весь ранее untracked workspace проверен перед staging: реальные private keys/tokens/runtime databases не найдены; совпадения secret scan оказались намеренными фальшивыми значениями redaction-тестов;
+- локальные binaries/caches остаются вне source tree через `.gitignore`; добавлен `.gitattributes` с repository-wide LF, чтобы shell/systemd assets не получали CRLF при работе из Windows;
+- staged snapshot проверен на случайные крупные/secret artifacts и line-ending contract;
+- создан первый локальный root commit `dd60f31` (`feat: implement Gateway VPN foundation and deployment`), содержащий 349 source/documentation/packaging files;
+- commit identity задан только для одной команды как `Codex <codex@local.invalid>`; global Git config пользователя не изменялся.
+
+**Проверено перед commit:**
+
+- `go test ./... -count=1` — PASS;
+- `go vet ./...` — PASS;
+- Linux/amd64 `CGO_ENABLED=0` builds `gateway-vpn`, `gateway-vpnctl`, `gateway-vpn-bootstrap`, `gateway-vpn-deploy` — PASS;
+- `node --check internal/webapi/static/app.js` — PASS;
+- Git Bash `bash -n scripts/*.sh test/netns/*.sh` — PASS;
+- Git index содержит LF, реальные secrets и tracked build artifacts не обнаружены.
+
+**Не выполнено и не считается PASS:**
+
+- commit ещё не получен clean Linux checkout-ом и не собран trusted Linux builder-ом;
+- GitHub repository/release, signed immutable assets и реальные Gateway/VPS hosts в текущей среде недоступны;
+- локальный Windows cross-build не меняет общий runtime status `LINUX_NOT_RUN`.
+
+**Следующий шаг:** clean checkout exact commit `dd60f31` на trusted Linux builder, signed test release и реальная двухмашинная acceptance matrix.
 
 ### Сессия 031 — typed SSH deploy, local-only keys и redacted readiness — 2026-08-25
 
