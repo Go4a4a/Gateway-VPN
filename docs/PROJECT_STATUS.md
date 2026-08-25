@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** GitHub zero-to-ready distribution: clean source baseline `28ad0c7`, deterministic signed bundle, secret-free full-SHA GitHub CI, draft-only publisher, independent bootstrap, Gateway/VPS/deploy artifacts, typed two-host SSH orchestration и local-only WireGuard key lifecycle готовы; первый remote Linux CI, immutable GitHub release и реальные Linux/VPS gates впереди
+**Текущий этап:** GitHub zero-to-ready distribution: публичный `Go4a4a/Gateway-VPN` подключён, remote Ubuntu 24.04 race/build и root nftables/netns CI прошли на code baseline `cf7fa75`; deterministic signed bundle, draft-only publisher, independent bootstrap, Gateway/VPS/deploy artifacts, typed two-host SSH orchestration и local-only WireGuard key lifecycle готовы; immutable signed GitHub release и реальные systemd/VPS/hardware gates впереди
 
-**Оценка прогресса:** около `94%` программной реализации и около `66%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные GitHub install, Ubuntu/systemd/nftables/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить unit-тестами или cross-build.
+**Оценка прогресса:** около `94%` программной реализации и около `70%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные signed GitHub release, Ubuntu/systemd/Mihomo/WireGuard/VPS/hardware gates и обязательный 72-часовой endurance, которые нельзя заменить unit-тестами, Docker/netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -31,11 +31,11 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE` | Зафиксирован `PLAN_v1.1.md` |
-| Репозиторий | `LOCAL_COMMIT_PASS / REMOTE_NOT_RUN` | Clean release/CI baseline `28ad0c7` создан после полного gate; remote GitHub repository/Actions/release ещё не проверялись |
+| Репозиторий | `REMOTE_MAIN_CI_PASS` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; clean code baseline `cf7fa75` опубликован, GitHub CI run `32877860357` завершён success |
 | Этап 0: hardware spike | `NOT_RUN` | Нужен Linux Gateway, Keenetic и минимум два HiLink-модема |
 | Этап 1: bootstrap | `CODE_PASS / LINUX_NOT_RUN` | Config, SQLite/bootstrap lifecycle, HTTPS runtime, clean-host dependencies, private LAN/host-overlap preflight, fail-closed first-install recovery и persistent networkd policy готовы; Linux host validation ещё не выполнена |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
-| Firewall / routing | `CODE_PASS / LINUX_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и независимый nft monitor/poll guard с LAN quarantine подключены; реальный nft/ip/netns apply не запускался |
+| Firewall / routing | `DOCKER_AND_GITHUB_NETNS_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и независимый nft monitor/poll guard с LAN quarantine прошли Ubuntu 24.04 privileged netns delete/flush/recovery/no-direct-route gate; реальный host/systemd/reboot apply ещё не запускался |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
 | WireGuard management | `CODE_PASS / LINUX_NOT_RUN` | Protected WebUI config, parameter-free root sync, modem-priority handshake selector, exact nft endpoint tuple и hot-unplug/failback state machine покрыты tests; реальные wg/ip/nft/VPS не запускались |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | SQLite Online Backup snapshots, corruption recovery, Argon2id+AES-GCM `.gvpn`, strict staging, root-owned journal, pre-restore snapshot, migration/session revoke, all-path rollback и WebUI покрыты success/adversarial/power-loss simulation tests; реальный root/systemd restore на Ubuntu ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `GATEWAY_VPS_DEPLOY_CI_DRAFT_CODE_PASS / GITHUB_LINUX_NOT_RUN` | Canonical commit-time bundle, strict official Mihomo fetch, local artifact re-hash, executable scripts, full-SHA secret-free CI и draft-only publisher покрыты tests/syntax; реальный release/GitHub/SSH/install не запускался |
+| Packaging | `GATEWAY_VPS_DEPLOY_CI_PASS / RELEASE_NOT_RUN` | Canonical commit-time bundle, strict official Mihomo fetch, local artifact re-hash, executable scripts, full-SHA secret-free CI и draft-only publisher покрыты tests/syntax; GitHub race/netns CI прошёл, но signed draft/release/SSH/install ещё не запускались |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_PASS / GITHUB_CI_NOT_RUN` | `go test ./...`, `go vet ./...`, shell/JS syntax и `linux/amd64 CGO_ENABLED=0` builds четырёх entrypoints прошли; GitHub Ubuntu 24.04 race/netns workflow определён, но ещё не запускался |
+| Автоматические тесты | `LOCAL_DOCKER_GITHUB_PASS` | Локальные `go test ./...`, `go vet ./...`, shell/JS syntax и четыре Linux/amd64 builds прошли; Docker Ubuntu 24.04 privileged netns — PASS; GitHub `go test -race` и root netns — PASS |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: push exact commit `28ad0c7` в remote, получить PASS GitHub Ubuntu 24.04 race/netns CI, затем на trusted Linux builder собрать/подписать bundle, создать draft, вручную опубликовать его после включения release immutability и выполнить реальную двухмашинную dry-run/apply/resume/reboot matrix. Найденные integration defects исправляются до перехода к update/restore/recovery и hardware gates. GitHub redirects, OpenSSH, sudo, systemd, nftables, WireGuard handshake и WebUI bind фактически не запускались.
+Следующий инкремент: включить GitHub release immutability, подготовить отдельный long-lived Ed25519 signing key на trusted builder, дождаться зелёного CI для status-only head, создать exact release tag, собрать/подписать bundle, загрузить полностью наполненный draft и вручную опубликовать его. Затем выполняется реальная двухмашинная dry-run/apply/resume/reboot matrix. GitHub redirects/assets, OpenSSH orchestration, sudo, systemd, WireGuard handshake и WebUI bind фактически ещё не запускались.
 
 ## Критический путь до release
 
@@ -63,12 +63,12 @@
 
 ## Известные ограничения и блокеры
 
-1. Текущая среда — Windows, команды `nft`, `ip` и `sqlite3` отсутствуют.
+1. Текущая host-среда — Windows, команды `nft`, `ip` и `sqlite3` на host отсутствуют; Linux gates доступны внутри Docker Desktop.
 2. WSL установлен, но доступ к списку дистрибутивов завершился `E_ACCESSDENIED`.
-3. Docker CLI установлен, однако Docker Engine не запущен; локальные образы недоступны.
+3. Docker Desktop `4.87.0`, Engine `29.7.2`, Linux/amd64 context `desktop-linux` запущен; Ubuntu 24.04 privileged nftables/netns gate прошёл. Docker не заменяет реальный systemd host, reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Clean release/CI baseline `28ad0c7` создан. Remote GitHub repository, release credentials и trusted Linux builder в текущей среде не предоставлены; workflow и publisher ещё не запускались, а synthetic channel smoke не заменяет реальный GitHub Release.
+6. Публичный remote и GitHub CI работают; code baseline `cf7fa75` прошёл race/netns. Release immutability, отдельный trusted signing key/builder и реальный GitHub draft/release ещё не подготовлены; CI не получает release secrets.
 7. Gateway installer/recovery/dependency/networkd code не запускался на Ubuntu 24.04: реальное поведение APT, systemd conditions, nftables ordering, sysctl, HTTPS bind, recovery/reboot и uninstall остаётся `NOT_RUN`.
 8. VPS installer/recovery/dependency code не запускался на Ubuntu/Debian: реальное поведение APT, systemd, nftables, WireGuard, reboot и provider firewall остаётся `NOT_RUN`.
 
@@ -177,8 +177,38 @@
 | DEV-099 | 2026-08-25 | GitHub CI не получает release secrets, использует official Actions только по full commit SHA и отдельно запускает race suite и root netns fail-closed gate на Ubuntu 24.04 | PR/CI automation не должна иметь путь к long-lived signing key; Windows cross-build не заменяет реальный nft/netns run |
 | DEV-100 | 2026-08-25 | Long-lived Ed25519 key остаётся только на trusted builder; GitHub publisher создаёт exact draft и никогда не публикует его автоматически | GitHub Actions secret расширил бы signing trust boundary, а release immutability применяется только при публикации и требует прикрепить все assets к draft заранее |
 | DEV-101 | 2026-08-25 | Все shell entrypoints и netns harness фиксируются в Git как executable `100755` | Документированные `./scripts/...` и CI `./test/netns/...` иначе ломаются сразу после clean Linux checkout |
+| DEV-102 | 2026-08-25 | Root ownership/chown остаются обязательными production gates, а non-root unit fixtures используют только package-private injected ownership operations; Linux test отдельно доказывает отказ non-root transaction root | GitHub race suite обязан работать без запуска всего test job от root, но тестовая изоляция не должна ослаблять реальную privilege boundary |
+| DEV-103 | 2026-08-25 | Все scalar generation sets в runtime и install nftables templates используют поддерживаемый Ubuntu 24.04 datatype `mark`; standalone netns gate создаёт точные production service users до загрузки symbolic `skuid` | nftables 1.0.9 отвергает unqualified `type integer`, а symbolic UID разрешается во время parsing ruleset |
+| DEV-104 | 2026-08-25 | Netns assertions под `set -o pipefail` не используют early-exit `grep -q` на выводе `nft`/`ip`, а JSON-проверки допускают whitespace | SIGPIPE upstream-процесса и различия JSON formatting не должны превращать успешное fail-closed recovery в ложный CI failure |
 
 ## Журнал разработки
+
+### Сессия 034 — первый public GitHub CI и Ubuntu nftables/netns acceptance — 2026-08-25
+
+**Сделано:**
+
+- публичный репозиторий `https://github.com/Go4a4a/Gateway-VPN` проверен как пустой, добавлен как `origin`, ветка `main` опубликована без конфликта истории;
+- Docker Desktop проверен от Windows user context: `4.87.0`, Engine `29.7.2`, Linux/amd64 `desktop-linux` — READY;
+- первый remote GitHub race run выявил настоящую гонку в firewall guard test executor и неверное требование выполнять restore/update unit fixtures от root;
+- commit `fd1549e` синхронизировал test executor и ввёл package-private ownership operations только для fixtures; production root ownership/chown остались неизменными, добавлен Linux-specific отказ non-root transaction root;
+- первый root netns run выявил несовместимый с Ubuntu 24.04 nftables `type integer` и отсутствие service users при standalone boot ruleset load;
+- commit `3afc425` перевёл все generation sets runtime/install templates на `type mark`, добавил regression checks и воспроизвёл production `gateway-vpn`/`gateway-vpn-mihomo` account prerequisite в harness;
+- Docker trace выявил два ложных harness failure: upstream SIGPIPE от `grep -q` под `pipefail` и жёсткое ожидание JSON без пробелов;
+- commit `cf7fa75` сделал stream assertions pipefail-safe, JSON whitespace-tolerant и добавил timeout diagnostics/regression test.
+
+**Проверено:**
+
+- локально после каждого исправления: `go test ./... -count=1`, `go vet ./...`, четыре Linux/amd64 CGO-free build, JS/shell syntax и `git diff --check` — PASS;
+- одноразовый privileged Docker `ubuntu:24.04` выполнил полный `test/netns/firewall_guard.sh`: owned table delete, LAN quarantine, PATH_BLOCKED recovery, global `nft flush ruleset`, повторное recovery и отсутствие unmarked direct route — PASS;
+- GitHub Actions run `32877860357` на exact code baseline `cf7fa75`: `Go, packaging and syntax gates` — success; `Linux nftables fail-closed gate` — success;
+- GitHub Actions остаётся secret-free; long-lived signing key не передавался GitHub.
+
+**Что не считается проверенным:**
+
+- Docker/netns не проверяет systemd ordering, reboot/power-loss recovery, реальный USB HiLink, Keenetic packet capture, VPS firewall/WireGuard handshake или WebUI bind;
+- release immutability, trusted signing key, signed GitHub draft/release и one-command install с GitHub assets ещё не выполнялись.
+
+**Следующий шаг:** включить release immutability, подготовить trusted signing key/builder, получить зелёный CI для status-only head и перейти к exact tag → signed bundle → draft → manual publish, затем к двухмашинному Gateway/VPS acceptance.
 
 ### Сессия 033 — deterministic release bundle, secret-free Linux CI и immutable draft — 2026-08-25
 
