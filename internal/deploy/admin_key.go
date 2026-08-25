@@ -27,7 +27,7 @@ type AdminIdentity struct {
 // Only its public key is returned; the private key remains in a mode-0600 file
 // on the administrative host.
 func PrepareAdminIdentity(configPath string) (AdminIdentity, error) {
-	if err := validateAdminConfigPath(configPath); err != nil {
+	if err := prepareAdminConfigPath(configPath); err != nil {
 		return AdminIdentity{}, err
 	}
 	identity := AdminIdentity{config: configPath, pending: configPath + ".pending"}
@@ -158,13 +158,64 @@ func loadAdminConfig(filename string) (adminConfig, error) {
 	return adminConfig{privateKey: privateKey, vpsPublicKey: vpsPublicKey, endpoint: endpoint}, nil
 }
 
-func validateAdminConfigPath(filename string) error {
-	if !filepath.IsAbs(filename) || strings.ContainsAny(filename, "\x00\r\n") {
+func prepareAdminConfigPath(filename string) error {
+	if !filepath.IsAbs(filename) || strings.ContainsAny(filename, "\x00\r\n") || filepath.Clean(filename) != filename {
 		return errors.New("absolute administrator WireGuard config path is required")
 	}
 	directory := filepath.Dir(filename)
+	if directory == filepath.Clean(string(os.PathSeparator)) || directory == filename {
+		return errors.New("administrator config directory must be a protected real directory")
+	}
+	if runtime.GOOS == "windows" {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return errors.New("create administrator config directory failed")
+		}
+		return validateAdminDirectory(directory)
+	}
+
+	// Walk from the filesystem root so an existing symlink in any parent
+	// component cannot redirect local private-key creation. Missing components
+	// are created one at a time with no group/other access. Existing ancestors
+	// may be readable. The direct existing parent at the creation boundary must
+	// not be writable by another user.
+	current := string(os.PathSeparator)
+	var parentInfo os.FileInfo
+	creating := false
+	for _, component := range strings.Split(strings.TrimPrefix(directory, string(os.PathSeparator)), string(os.PathSeparator)) {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("administrator config directory must be a protected real directory")
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if !creating {
+				if parentInfo == nil || parentInfo.Mode().Perm()&0o022 != 0 {
+					return errors.New("administrator config directory has an unsafe writable ancestor")
+				}
+				creating = true
+			}
+			if err := os.Mkdir(current, 0o700); err != nil {
+				if !errors.Is(err, os.ErrExist) {
+					return errors.New("create administrator config directory failed")
+				}
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("administrator config directory must be a protected real directory")
+		}
+		if creating && info.Mode().Perm()&0o077 != 0 {
+			return errors.New("administrator config directory must be a protected real directory")
+		}
+		parentInfo = info
+	}
+	return validateAdminDirectory(directory)
+}
+
+func validateAdminDirectory(directory string) error {
 	info, err := os.Lstat(directory)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() ||
+		(runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
 		return errors.New("administrator config directory must be a protected real directory")
 	}
 	return nil

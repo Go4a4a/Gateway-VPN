@@ -2,7 +2,7 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Signed bundle `0.1.0-systemd.11` прошёл clean двухмашинный SSH deploy с Gateway/VPS `APPLIED`, WireGuard configuration и полным удалением OpenSSH ControlMaster state; ожидаемое состояние без модема/подписки — `INSTALLED_NOT_READY`. Synthetic production-broker gate обнаружил несовместимость observer с реальным iproute2 JSON (`protocol 186` отображается как `bgp`, а filtered route JSON не повторяет protocol), исправление прошло Windows/Linux tests и фактический Gateway↔VPS handshake. Следующий шаг — commit, signed `.12` и clean exact повтор без временной замены бинарника
+**Текущий этап:** Routing fix собран из exact commit `d591be0` в воспроизводимый signed bundle `0.1.0-systemd.12`. Clean s012 one-command deploy безопасно остановился до SSH/role mutation: локальный admin config parent отсутствовал, а launcher не создавал его, что нарушало zero-from-scratch contract. Исправление теперь создаёт недостающую защищённую directory chain без symlink traversal и отвергает shared-writable boundary; Windows и нативные Linux tests прошли. Следующий шаг — commit, signed `.13` и полностью clean exact повтор
 
 **Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_ORCHESTRATION_PASS_TO_READINESS / FIX_PENDING_RESIGN` | Signed `.11` применил обе роли и завершился ожидаемым code 3 `INSTALLED_NOT_READY`; private ControlMaster lifecycle полностью очищен. Найденный затем iproute2 decoder fix проверен временным бинарником, но ещё должен пройти новый clean signed `.12`. Permanent key и production tag/assets не выполнены |
+| Packaging | `SIGNED_ZERO_FROM_SCRATCH_FIX_PENDING_RESIGN` | Signed `.12` double-build совпал byte-for-byte, но clean admin выявил отсутствующее безопасное создание parent для локального WireGuard config; роли остались clean. Source fix прошёл tests и требует signed `.13`. Permanent key и production tag/assets не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...` и нативный Linux dataplane suite прошли после iproute2 fix. Signed `.11` подтвердил ControlMaster orchestration; новый signed `.12` и удалённый CI ещё не выполнены |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows `go test ./...`/`go vet ./...`, нативные Linux dataplane и deploy security suites прошли. Signed `.11` подтвердил ControlMaster orchestration; signed `.12` воспроизвёл новый clean-admin defect до role mutation. Удалённый CI ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: commit iproute2 observer fix, собрать signed `.12` из exact commit и на полностью чистом стенде повторить bootstrap + SSH orchestrator, затем повторить synthetic modem/broker handshake без временной замены installed binary. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: commit safe admin config directory creation, собрать signed `.13` из exact commit и на полностью чистом admin/Gateway/VPS стенде повторить one-command orchestration без предварительного `mkdir`; затем повторить synthetic modem/broker handshake на неизменённом signed installed binary. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -188,8 +188,41 @@
 | DEV-110 | 2026-08-25 | Gateway/VPS release archives перечисляют явные top-level entries и никогда не включают отдельную tar-запись `.`/`./` | Bootstrap и runtime update используют один strict extractor, который отвергает standalone archive root entry. Старый `tar ... .` создавал structurally invalid artifact, хотя проверка уже распакованного signed tree проходила |
 | DEV-111 | 2026-08-26 | Two-host deploy создаёт private `0700` OpenSSH ControlMaster directory и переиспользует заранее pinned established sessions через Gateway/VPS firewall apply; в конце masters закрываются через `-O exit`, sockets проверяются и directory удаляется | Каждый прежний `SSHExecutor.Run` открывал новый TCP connection. Gateway installer правильно закрыл TCP/22, поэтому следующий key-preparation phase был недостижим. Открывать SSH hole в fail-closed firewall нельзя; multiplexing сохраняет существующую authenticated connection без ослабления ruleset |
 | DEV-112 | 2026-08-26 | Policy-rule observer запускает `ip -N -json`, а decoder filtered owned routes допускает отсутствующее поле `protocol`, проверяя его строго при наличии | Ubuntu iproute2 выводит protocol 186 как symbolic `bgp`; при `route show ... protocol 186` kernel-side filter работает, но JSON вообще опускает поле protocol. Прежний decoder не видел только что применённые owned rule/routes и ошибочно завершал verification |
+| DEV-113 | 2026-08-26 | `gateway-vpn-deploy` сам создаёт отсутствующие компоненты parent directory для локального admin WireGuard config с mode `0700`; каждый существующий component проверяется через `Lstat`, symlink запрещён, а первая missing boundary не может находиться непосредственно под group/other-writable parent | Сгенерированная «одна команда» на clean admin host завершалась до SSH, если `~/.config/gateway-vpn` ещё не существовал. Ручной `mkdir` противоречит zero-from-scratch contract; обычный `MkdirAll` мог бы пройти через symlink/shared writable path |
 
 ## Журнал разработки
+
+### Сессия 042 — signed `.12` и clean-admin zero-to-ready boundary — 2026-08-26
+
+**Reproducible signed `.12`:**
+
+- source commit — `d591be08bd3edf522791b3ab5a9fa22df37e4e10`, version — `0.1.0-systemd.12`, Mihomo — прежний pinned `v1.19.30` из trusted local builder image;
+- builder работал с `GOPROXY=off`, read-only local module cache и двумя независимыми clone из verified Git bundle; один disposable Ed25519 key находился только в `noexec` tmpfs;
+- две полные Gateway/VPS/bootstrap/deploy/channel сборки совпали byte-for-byte; private key не экспортирован и уничтожен вместе с контейнером;
+- signer — `5097b0e8694d282e75d7129bc61dede1d03e2721805ee1a484fca53ad32e4a10`, channel manifest SHA-256 — `60d25b7569aa9aa591fca07427bcb4050b6ae6aa919b1d59802054527aeb7f1e`;
+- Gateway/VPS archive SHA-256 — `5eb663d61f68d978610792f0c18b902fa610afb1bd9309fb4a42aeeff75e8c26` / `022da96da38667d8de122e7d4fb9ff3623b7b7c46166f3c2e449cece5125a0d6`; bootstrap/deploy — `3670290d8635929b7b804a15549d60afaac0a69f328facfddf812f9cf33a452b` / `072659c4c40e764ac607ae17dc4ea9897cd7bf70d2560fbae3f0adb3eabefb61`.
+
+**Неуспешные builder попытки сохранены как evidence:**
+
+- первый offline run показал, что image не содержит module cache; второй mount указывал в `/go/pkg/mod`, тогда как фактический `GOMODCACHE` — `/root/go/pkg/mod`;
+- следующая попытка не смогла запустить helper из намеренно `noexec` key tmpfs; после переноса helper внутрь clone clean-worktree gate закономерно отверг untracked binary;
+- финальная схема оставила key tmpfs `noexec`, helper поместила в ephemeral `/tmp`, source clones сохранила clean и успешно завершила double-build. Ни один ранний отказ не создал public artifact или сохранившийся private key.
+
+**Clean s012 выявил следующий дефект:**
+
+- старый s011 удалён; созданы новые isolated admin/modem networks и clean Ubuntu 24.04 Gateway/VPS/admin containers. Обе роли подтвердили отсутствие всех managed paths до запуска;
+- HTTPS mirror вернул exact `.12` manifest hash, SSH ED25519 fingerprints совпали с pinned Gateway/VPS значениями, generated command прошёл `bash -n`;
+- exact one-command deploy завершился до SSH и до любой role mutation с `administrator config directory must be a protected real directory`: на действительно clean admin отсутствовал `/root/.config/gateway-vpn`;
+- это классифицировано как дефект one-command-from-zero, а не operator prerequisite; ручной `mkdir` не применялся, Gateway/VPS остались clean.
+
+**Исправлено и проверено:**
+
+- `PrepareAdminIdentity` теперь создаёт недостающую directory chain по одному component с mode `0700`, проверяет каждый существующий component через `Lstat`, не следует symlink и не начинает создание непосредственно под group/other-writable parent;
+- существующий final directory по-прежнему обязан быть real и без group/other permissions; existing config/pending identity остаются idempotent и никогда молча не заменяются;
+- добавлены tests nested clean creation, exact `0700`, world-writable boundary, non-private final directory и symlink component без mutation target;
+- полный Windows `go test ./...`, `go vet ./...` и нативный Linux `internal/deploy` suite — PASS.
+
+**Следующий шаг:** commit, signed `.13`, новый clean admin/Gateway/VPS run без подготовленного config directory; затем exact signed synthetic WireGuard handshake.
 
 ### Сессия 041 — signed `.11`, реальный iproute2 defect и synthetic WireGuard handshake — 2026-08-26
 
