@@ -30,8 +30,8 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN
 RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
-ReadOnlyPaths=/opt/gateway-vpn
-ReadWritePaths=/etc/gateway-vpn /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn/state.db -/var/lib/gateway-vpn/state.db-wal -/var/lib/gateway-vpn/state.db-shm /var/lib/gateway-vpn/dnsmasq /run
+ReadOnlyPaths=/opt/gateway-vpn /var/lib/gateway-vpn/secrets /var/lib/gateway-vpn/tls /var/lib/gateway-vpn/subscriptions /var/lib/gateway-vpn/mihomo /var/lib/gateway-vpn/transactions /var/lib/gateway-vpn/update-staging
+ReadWritePaths=/etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged/network-transactions /run
 
 [Install]
 WantedBy=multi-user.target

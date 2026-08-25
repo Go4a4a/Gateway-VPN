@@ -20,5 +20,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && systemctl enable systemd-networkd.service systemd-timesyncd.service
 
+# systemd-timesyncd intentionally skips generic containers. This privileged,
+# disposable rehearsal needs a real NTP peer so installer clock preflight is
+# exercised rather than inherited intermittently from the WSL2 host kernel.
+RUN install -d -m 0755 /etc/systemd/system/systemd-timesyncd.service.d \
+    && printf '[Unit]\nConditionVirtualization=\n' \
+        >/etc/systemd/system/systemd-timesyncd.service.d/gateway-vpn-rehearsal.conf
+
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

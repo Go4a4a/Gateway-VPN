@@ -325,7 +325,7 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 		}
 	}
 	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
-	for _, required := range []string{"network-broker", "User=" /* root is intentionally implicit */, "CAP_NET_ADMIN", "CAP_NET_RAW", "NoNewPrivileges=yes", "/var/lib/gateway-vpn-privileged/network-transactions", "/var/lib/gateway-vpn/secrets/wireguard.yaml"} {
+	for _, required := range []string{"network-broker", "User=" /* root is intentionally implicit */, "CAP_NET_ADMIN", "CAP_NET_RAW", "NoNewPrivileges=yes", "/var/lib/gateway-vpn-privileged/network-transactions"} {
 		if required == "User=" {
 			if strings.Contains(broker, required) {
 				t.Error("broker service must run as the default root user, not switch identities")
@@ -354,6 +354,20 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 	}
 	if !strings.Contains(broker, "/etc/systemd/journald@gateway-vpn.conf.d") {
 		t.Fatal("root broker cannot atomically synchronize the fixed journald namespace drop-in")
+	}
+	recovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-recovery.service"))
+	for name, unit := range map[string]string{"broker": broker, "recovery": recovery} {
+		if !strings.Contains(unit, "ReadWritePaths=") || !strings.Contains(unit, "/var/lib/gateway-vpn ") {
+			t.Errorf("%s cannot create SQLite WAL/recovery state under the managed state root", name)
+		}
+		for _, protected := range []string{"/var/lib/gateway-vpn/secrets", "/var/lib/gateway-vpn/tls", "/var/lib/gateway-vpn/subscriptions", "/var/lib/gateway-vpn/mihomo", "/var/lib/gateway-vpn/update-staging"} {
+			if !strings.Contains(unit, "ReadOnlyPaths=") || !strings.Contains(unit, protected) {
+				t.Errorf("%s does not retain a read-only mount for %s", name, protected)
+			}
+		}
+		if strings.Contains(unit, "/var/lib/gateway-vpn/state.db") {
+			t.Errorf("%s relies on a not-yet-existing SQLite file instead of a writable state root", name)
+		}
 	}
 	networkd := read(t, filepath.Join(root, "packaging", "systemd-networkd", "80-gateway-vpn-hilink.network"))
 	for _, required := range []string{"ID_VENDOR_ID=12d1", "DHCP=ipv4", "UseRoutes=no", "UseGateway=no", "IPv6AcceptRA=no"} {
@@ -461,6 +475,7 @@ func TestSystemdRehearsalImageIsPinnedAndTargetScoped(t *testing.T) {
 		"FROM ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
 		"systemd-networkd.service",
 		"systemd-timesyncd.service",
+		"ConditionVirtualization=",
 		"dbus",
 		"wireguard-tools",
 		"CMD [\"/sbin/init\"]",
