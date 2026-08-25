@@ -53,7 +53,14 @@ printf '{\n  "_type": "https://in-toto.io/Statement/v1",\n  "subject": [\n    {"
 )
 "$DEST/bin/gateway-vpnctl" release-sign --release-dir "$DEST" --private-key "$SIGNING_PRIVATE_KEY"
 ARCHIVE="$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$DEST" -czf "$ARCHIVE" .
+ARCHIVE_ENTRIES=()
+while IFS= read -r -d '' entry; do
+  ARCHIVE_ENTRIES+=("$entry")
+done < <(find "$DEST" -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+((${#ARCHIVE_ENTRIES[@]} > 0)) || { echo "Gateway release tree is empty" >&2; exit 1; }
+# Do not archive `.` itself: the production strict extractor intentionally
+# rejects a standalone root entry and accepts only actual relative contents.
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$DEST" -czf "$ARCHIVE" -- "${ARCHIVE_ENTRIES[@]}"
 ARCHIVE_SHA256=$(sha256sum --binary "$ARCHIVE" | awk '{print $1}')
 BOOTSTRAP_SHA256=$(sha256sum --binary "$BOOTSTRAP" | awk '{print $1}')
 echo "Release prepared at $DEST"

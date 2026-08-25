@@ -43,7 +43,14 @@ printf '{\n  "_type": "https://in-toto.io/Statement/v1",\n  "subject": [{"name":
   find . -type f ! -path './manifest.sha256' ! -path './manifest.json' ! -path './release.sig' -print0 | sort -z | xargs -0 sha256sum --binary >manifest.sha256
 )
 "$DEST/bin/gateway-vpnctl" vps-release-sign --release-dir "$DEST" --private-key "$SIGNING_PRIVATE_KEY"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$DEST" -czf "$ARCHIVE" .
+ARCHIVE_ENTRIES=()
+while IFS= read -r -d '' entry; do
+  ARCHIVE_ENTRIES+=("$entry")
+done < <(find "$DEST" -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+((${#ARCHIVE_ENTRIES[@]} > 0)) || { echo "VPS release tree is empty" >&2; exit 1; }
+# Keep the archive compatible with the same strict extractor used by the
+# bootstrap and runtime updater: actual top-level entries only, never `.`.
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$DEST" -czf "$ARCHIVE" -- "${ARCHIVE_ENTRIES[@]}"
 ARCHIVE_SHA256=$(sha256sum --binary "$ARCHIVE" | awk '{print $1}')
 echo "VPS release prepared at $DEST"
 echo "Signed VPS archive prepared at $ARCHIVE"

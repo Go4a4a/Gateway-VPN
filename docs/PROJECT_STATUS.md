@@ -2,7 +2,7 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Gateway и VPS zero-to-ready systemd acceptance завершены в Docker на disposable Ed25519-signed bundle `0.1.0-systemd.8`. Первый exact SSH orchestrator run безопасно остановился до mutation из-за Ubuntu remote `.bashrc` + `nounset`; generated Gateway/VPS/deploy commands исправлены на `bash --norc -ceu`, regression и полный Go suite прошли. Следующий шаг — собрать новый signed disposable bundle и повторить двухмашинную orchestration с нуля, затем доказать WireGuard handshake
+**Текущий этап:** Gateway и VPS zero-to-ready systemd acceptance завершены в Docker. Disposable bundle `0.1.0-systemd.9` из commit `11ec459` подтвердил исправление remote `.bashrc`, но первый настоящий bootstrap обнаружил второй production boundary: builders включали отдельную tar-запись `./`, которую strict extractor намеренно отвергает. Gateway/VPS builders исправлены на архивирование только явных top-level entries, regression и полный Go suite прошли. Следующий шаг — commit, новый signed bundle и повтор чистой двухмашинной orchestration, затем WireGuard handshake
 
 **Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_GATEWAY_AND_VPS_SYSTEMD_PASS / RELEASE_NOT_RUN` | Pinned Ubuntu/Go/Mihomo builder создал signed `.8`; Gateway Ubuntu 24.04 и VPS Ubuntu 22.04/24.04/26.04 installers реально применены и пережили fresh systemd boot. Permanent key, production tag/assets и SSH orchestrator apply ещё не выполнены |
+| Packaging | `SIGNED_SYSTEMD_PASS / BOOTSTRAP_DEFECT_FIXED_NOT_REBUILT` | Pinned builder создал signed `.9`; exact bootstrap доказанно отверг standalone archive root entry до mutation. Оба role builders исправлены, но новый signed artifact ещё не собран. Permanent key, production tag/assets и SSH orchestrator apply ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_DOCKER_PASS / REMOTE_PREVIOUS_PASS` | На `9eca9bb` локальные `go test ./...`, Linux shell syntax, Ubuntu `systemd-analyze` и signed systemd acceptance прошли; GitHub race/root-netns успешно работали на предыдущих heads, результат нового journal commit проверяется отдельно |
+| Автоматические тесты | `LOCAL_GO_PASS / DOCKER_REPRODUCED_DEFECT` | После archive-builder fix локальные packaging tests и полный `go test ./...` прошли. Signed `.9` и clean Docker s009 воспроизвели bootstrap incompatibility; новый signed artifact и удалённый CI ещё не проверены |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: тем же disposable channel проверить SSH orchestrator Gateway+VPS и реальный WireGuard handshake на двух изолированных Linux-машинах. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: commit archive fix, собрать новый disposable channel и на полностью чистом стенде повторить bootstrap + SSH orchestrator Gateway/VPS, затем доказать WireGuard handshake. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -185,8 +185,34 @@
 | DEV-107 | 2026-08-25 | Runtime destructive restore unit с `Conflicts=` не включается в boot target; отдельный бесконфликтный boot restore unit завершает pending transaction до network recovery/socket/control | Condition-false conflict unit в общей boot transaction может вытеснить management jobs ещё до вычисления condition; runtime stop/resume и boot ordering являются разными задачами |
 | DEV-108 | 2026-08-25 | Повтор signed Gateway installer допускает отсутствие direct DNS только при точном root-owned completed report и совпадающих immutable `current`/`recovery` pointers, после чего всё равно выполняет полный existing-install audit | Собственный fail-closed firewall обязан блокировать direct DNS, поэтому без строго ограниченного исключения корректная повторная команда не была идемпотентной |
 | DEV-109 | 2026-08-25 | Все generated bootstrap/deploy shell commands запускают Bash как `bash --norc -ceu` | `sshd` remote command может заставить Bash читать стандартный Ubuntu `.bashrc`; при `nounset` обращение `/etc/bash.bashrc` к unset `PS1` останавливало signed preflight до mutation. Доверенный workflow не должен зависеть от dotfiles удалённого пользователя |
+| DEV-110 | 2026-08-25 | Gateway/VPS release archives перечисляют явные top-level entries и никогда не включают отдельную tar-запись `.`/`./` | Bootstrap и runtime update используют один strict extractor, который отвергает standalone archive root entry. Старый `tar ... .` создавал structurally invalid artifact, хотя проверка уже распакованного signed tree проходила |
 
 ## Журнал разработки
+
+### Сессия 039 — настоящий bootstrap обнаружил несовместимый root tar entry — 2026-08-25
+
+**Новый disposable artifact и чистый стенд:**
+
+- Docker Desktop подтверждён как Linux/x86_64 Engine `29.7.2`; локальная sandbox boundary потребовала отдельного разрешения на Docker API, но не изменения production code;
+- из clean commit `11ec459fd6af5d96eac6cbf17d3f39cfea099fc3` собран и повторно verified bundle `0.1.0-systemd.9`; итоговый disposable signer — `62a88df4fd086c5da2568e44f842f86e4fb673b486cf6179d9ebb69129d678c3`, channel manifest SHA-256 — `963caac852004eddffd24eeb68e427d7e64dd4a0a3049f00e87732c5504b7f7c`;
+- первый build успешно завершился, но публичный output находился в `/work` tmpfs и после остановки container закономерно исчез до `docker cp`; private key при этом был уничтожен. Повторный build экспортировал только public artifacts через отдельный bind mount, после чего builder удалён; все 10 top-level SHA-256 совпали, private-key-like output отсутствует;
+- старые containers/networks удалены, созданы clean Gateway/VPS/admin/HTTPS containers и новые bridge networks; fixture CA, HTTPS manifest hash и заранее известные ED25519 SSH host fingerprints подтверждены на всех трёх машинах, managed state до запуска отсутствовал.
+
+**Результат exact orchestration:**
+
+- новый outer launcher реально начинается с `bash --norc -ceu`; прежняя `/etc/bash.bashrc: PS1: unbound variable` больше не воспроизводится;
+- orchestration безопасно остановилась в `GATEWAY_ROLE_PREFLIGHT` до managed mutation с `independent bootstrap verification failed`;
+- отдельный pinned SSH dry-run получил ту же ошибку. Все скачанные manifest/signature/public key/Gateway archive имели точные size и SHA-256; channel signature и обычная verification распакованного signed tree прошли;
+- read-only diagnostic на том же source установил точную границу: `ExtractReleaseArchive` вернул `release archive contains an unsafe path, link, or mode` до первого файла;
+- tar inspection показал причину: оба builders выполняли `tar ... .`, добавляя отдельную запись `./`. Strict extractor после нормализации намеренно отклоняет пустой root path; ранее systemd harness предварительно распаковывал archive и потому не проверял этот bootstrap boundary.
+
+**Исправлено в source:**
+
+- `build-release.sh` и `build-vps-release.sh` теперь собирают отсортированный массив реальных top-level entries и передают tar только его, без `.`/`./`;
+- packaging regression требует explicit top-level enumeration и запрещает старый root-archiving pattern;
+- `go test ./test/packaging`, полный `go test ./...` и `git diff --check` — PASS.
+
+**Следующий шаг:** commit, новый clean disposable signed bundle, clean orchestration rerun и только после успешного bootstrap — проверка post-firewall SSH continuity и Gateway↔VPS WireGuard handshake.
 
 ### Сессия 038 — первый exact SSH orchestrator run и remote bashrc regression — 2026-08-25
 

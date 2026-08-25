@@ -143,6 +143,25 @@ func TestReleaseBuilderPinsMihomoVersionHashAndAPIContract(t *testing.T) {
 	}
 }
 
+func TestRoleBuildersExcludeStrictArchiveRootEntry(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, name := range []string{"build-release.sh", "build-vps-release.sh"} {
+		builder := read(t, filepath.Join(root, "scripts", name))
+		for _, required := range []string{
+			`find "$DEST" -mindepth 1 -maxdepth 1 -printf '%f\0'`,
+			`ARCHIVE_ENTRIES+=("$entry")`,
+			`-- "${ARCHIVE_ENTRIES[@]}"`,
+		} {
+			if !strings.Contains(builder, required) {
+				t.Errorf("%s does not build from explicit safe top-level entries: missing %q", name, required)
+			}
+		}
+		if strings.Contains(builder, `-czf "$ARCHIVE" .`) {
+			t.Errorf("%s archives a standalone root entry rejected by the production strict extractor", name)
+		}
+	}
+}
+
 func TestChannelBuilderPinsBootstrapBeforeSudoAndProducesExactCommand(t *testing.T) {
 	root := repositoryRoot(t)
 	builder := read(t, filepath.Join(root, "scripts", "build-channel.sh"))
