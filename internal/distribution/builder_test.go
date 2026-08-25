@@ -88,6 +88,9 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	if !strings.Contains(command, "sudo -n") {
 		t.Fatal("non-interactive Gateway command can prompt for sudo")
 	}
+	if !strings.HasPrefix(command, "bash --norc -ceu ") || strings.HasPrefix(command, "bash -ceu ") {
+		t.Fatal("Gateway command is vulnerable to SSH remote bashrc/nounset failures")
+	}
 	if _, err := GatewayInstallCommand(manifest, GatewayInstallCommandOptions{
 		Repository: "../bad/repo", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
 		SignerKeySHA256: fingerprint, LANInterface: "enp2s0", LANAddress: "192.168.200.1/24",
@@ -122,6 +125,9 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	if !strings.Contains(vpsCommand, "sudo -n") {
 		t.Fatal("non-interactive VPS command can prompt for sudo")
 	}
+	if !strings.HasPrefix(vpsCommand, "bash --norc -ceu ") || strings.HasPrefix(vpsCommand, "bash -ceu ") {
+		t.Fatal("VPS command is vulnerable to SSH remote bashrc/nounset failures")
+	}
 	deployCommand, err := DeployCommand(manifest, DeployCommandOptions{
 		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
 		SignerKeySHA256: fingerprint, GatewaySSH: "operator@gateway.example", GatewayPort: 22,
@@ -141,6 +147,9 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	}
 	if strings.Contains(deployCommand, "private-key") || strings.Index(deployCommand, "test ") > strings.LastIndex(deployCommand, "\"$tmp/deploy\"") {
 		t.Fatal("generated deploy command leaks a private-key argument or executes before exact hash verification")
+	}
+	if !strings.HasPrefix(deployCommand, "bash --norc -ceu ") || strings.HasPrefix(deployCommand, "bash -ceu ") {
+		t.Fatal("deploy command is vulnerable to administrator bashrc/nounset failures")
 	}
 	if _, err := DeployCommand(manifest, DeployCommandOptions{
 		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,

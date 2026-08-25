@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-25  
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Gateway zero-to-ready systemd acceptance завершён в Docker: с clean public head `9eca9bb` собран и повторно проверен disposable Ed25519-signed bundle `0.1.0-systemd.8`; clean Ubuntu 24.04 прошёл dry-run, apply, fail-closed readiness, точный повтор installer, restart control plane и fresh-rootfs boot с новым `/run`/PID 1 без ручного запуска units. Следующий незавершённый блок — VPS Ubuntu 20.04/22.04/24.04 systemd/install/recovery acceptance, затем двухмашинная WireGuard orchestration и реальные hardware/endurance gates
+**Текущий этап:** Gateway и VPS zero-to-ready systemd acceptance завершены в Docker на disposable Ed25519-signed bundle `0.1.0-systemd.8`. Первый exact SSH orchestrator run безопасно остановился до mutation из-за Ubuntu remote `.bashrc` + `nounset`; generated Gateway/VPS/deploy commands исправлены на `bash --norc -ceu`, regression и полный Go suite прошли. Следующий шаг — собрать новый signed disposable bundle и повторить двухмашинную orchestration с нуля, затем доказать WireGuard handshake
 
-**Оценка прогресса:** около `95%` программной реализации и около `76%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `95%` программной реализации и около `80%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -37,7 +37,7 @@
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
 | Firewall / routing | `DOCKER_SYSTEMD_AND_NETNS_PASS / HOST_NOT_RUN` | Dynamic TUN gate, protocol-186 routes, modem-scoped endpoint sets и nft guard прошли netns; signed install/fresh boot подтвердил boot `PATH_BLOCKED`, `lan0` runtime ruleset, guard и отсутствие direct DNS; реальный host packet capture ещё не выполнен |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
-| WireGuard management | `CODE_PASS / LINUX_NOT_RUN` | Protected WebUI config, parameter-free root sync, modem-priority handshake selector, exact nft endpoint tuple и hot-unplug/failback state machine покрыты tests; реальные wg/ip/nft/VPS не запускались |
+| WireGuard management | `VPS_DOCKER_SYSTEMD_PASS / GATEWAY_HOST_NOT_RUN` | VPS `wg-mgmt`, два exact peer AllowedIPs, routes, firewall ordering, restart и fresh boot прошли на Ubuntu 22.04/24.04/26.04; Gateway↔VPS handshake и modem-priority selector на реальных hosts ещё не запускались |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
 | SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
@@ -47,13 +47,13 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
 | Signed update | `CODE_PASS / LINUX_SYSTEMD_NOT_RUN` | Ed25519 release/staging, strict archive/metadata contracts, offline candidate+DB migration, atomic `current`/independent `recovery`, paired DB rollback, root journal/lock, 24h finalize, OnFailure resume и sanitized WebUI status покрыты synthetic tests; реальный Ubuntu root/reboot/power-cut update не запускался |
-| Packaging | `SIGNED_GATEWAY_SYSTEMD_PASS / RELEASE_NOT_RUN` | Pinned Ubuntu/Go/Mihomo builder создал signed `.8` с 43 Gateway files; signature/manifest/channel повторно проверены, installer реально применён и пережил fresh systemd boot. Permanent key, production tag/assets и VPS/SSH apply ещё не выполнены |
+| Packaging | `SIGNED_GATEWAY_AND_VPS_SYSTEMD_PASS / RELEASE_NOT_RUN` | Pinned Ubuntu/Go/Mihomo builder создал signed `.8`; Gateway Ubuntu 24.04 и VPS Ubuntu 22.04/24.04/26.04 installers реально применены и пережили fresh systemd boot. Permanent key, production tag/assets и SSH orchestrator apply ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
 | Автоматические тесты | `LOCAL_DOCKER_PASS / REMOTE_PREVIOUS_PASS` | На `9eca9bb` локальные `go test ./...`, Linux shell syntax, Ubuntu `systemd-analyze` и signed systemd acceptance прошли; GitHub race/root-netns успешно работали на предыдущих heads, результат нового journal commit проверяется отдельно |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: выполнить signed VPS role acceptance отдельно на Ubuntu 20.04, 22.04 и 24.04: dry-run/apply/idempotency, nftables/WireGuard units, recovery marker, service restart и fresh-systemd boot. Затем тем же disposable channel проверить SSH orchestrator Gateway+VPS и реальный WireGuard handshake на двух Linux-машинах. GitHub release immutability уже включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: тем же disposable channel проверить SSH orchestrator Gateway+VPS и реальный WireGuard handshake на двух изолированных Linux-машинах. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. GitHub release immutability включена; до production tag/assets по-прежнему нужен отдельный backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -70,7 +70,7 @@
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
 6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Disposable signed rehearsal на head `9eca9bb` прошёл, но отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены; CI не получает release secrets.
 7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS прошёл privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs + пустой `/run` + новый PID 1. Это не заменяет реальный host reboot, APT dependency installation на произвольной машине, uninstall, USB hotplug или power cut.
-8. VPS installer/recovery/dependency code не запускался на Ubuntu/Debian: реальное поведение APT, systemd, nftables, WireGuard, reboot и provider firewall остаётся `NOT_RUN`.
+8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
 ## Реестр решений реализации
 
@@ -184,8 +184,59 @@
 | DEV-106 | 2026-08-25 | Первый rehearsal pin — официальный Mihomo `v1.19.30` `linux-amd64-v1`, archive SHA-256 `cbe553d0319a414bd3a372c5976a252155b2c4882b66bce88a4d6bba9571a553`, binary SHA-256 `20ba567571d9ca642bedecbb01f8092cab0f1679100087ef1a4a2efac0ed5494`; production promotion требует повторной official metadata и runtime/API проверки | Нельзя подменять exact release input mutable `latest`; version probe и archive hash сами по себе ещё не доказывают совместимость data plane |
 | DEV-107 | 2026-08-25 | Runtime destructive restore unit с `Conflicts=` не включается в boot target; отдельный бесконфликтный boot restore unit завершает pending transaction до network recovery/socket/control | Condition-false conflict unit в общей boot transaction может вытеснить management jobs ещё до вычисления condition; runtime stop/resume и boot ordering являются разными задачами |
 | DEV-108 | 2026-08-25 | Повтор signed Gateway installer допускает отсутствие direct DNS только при точном root-owned completed report и совпадающих immutable `current`/`recovery` pointers, после чего всё равно выполняет полный existing-install audit | Собственный fail-closed firewall обязан блокировать direct DNS, поэтому без строго ограниченного исключения корректная повторная команда не была идемпотентной |
+| DEV-109 | 2026-08-25 | Все generated bootstrap/deploy shell commands запускают Bash как `bash --norc -ceu` | `sshd` remote command может заставить Bash читать стандартный Ubuntu `.bashrc`; при `nounset` обращение `/etc/bash.bashrc` к unset `PS1` останавливало signed preflight до mutation. Доверенный workflow не должен зависеть от dotfiles удалённого пользователя |
 
 ## Журнал разработки
+
+### Сессия 038 — первый exact SSH orchestrator run и remote bashrc regression — 2026-08-25
+
+**Стенд:** отдельные admin/Gateway/VPS Linux containers, strict key-only SSH с заранее сверенными ED25519 host fingerprints, краткоживущее локальное TLS-зеркало exact signed `.8` assets и отдельная изолированная сеть будущего WireGuard endpoint. Private SSH/TLS fixture keys находятся только в ignored `.tools`; GitHub Release не создавался.
+
+**Результат первого запуска:**
+
+- signed channel сгенерировал одну exact deploy command; admin проверил deploy SHA-256, channel signature/signer и HTTPS trust;
+- SSH prerequisite phase прошла на двух разных pinned destinations;
+- первая Gateway role preflight остановилась до создания `/etc/gateway-vpn`, `/opt/gateway-vpn`, state, nft table или interface;
+- ручной повтор той же signed preflight раскрыл точную ошибку: `/etc/bash.bashrc: line 7: PS1: unbound variable`;
+- причина — Bash, запущенный через `sshd` remote command, может читать `.bashrc` даже для non-interactive command; generated `bash -ceu` включает `nounset` до чтения Ubuntu bashrc.
+
+**Исправлено:**
+
+- Gateway, VPS и outer deploy commands теперь начинаются с `bash --norc -ceu` и не зависят от пользовательских/system-wide remote dotfiles;
+- добавлены assertions для всех трёх generated command classes;
+- package tests `internal/distribution`, `internal/deploy` и полный `go test ./...` — PASS.
+
+**Следующий шаг:** commit/push, новый clean disposable signed bundle и полный повтор orchestration с clean Gateway/VPS; после него проверить post-firewall SSH continuity и реальный WireGuard handshake.
+
+### Сессия 037 — signed VPS Ubuntu matrix, idempotency и fresh boot — 2026-08-25
+
+**Цель:** реально проверить подписанный VPS role на поддерживаемых Ubuntu systemd profiles, сохранив отдельными Docker и real-host acceptance boundaries.
+
+**Проверено на Ubuntu 22.04, 24.04 и 26.04:**
+
+- official Ubuntu base images закреплены по digest; systemd/NTP, nftables, WireGuard tools и clean rootfs запускались в отдельных privileged containers;
+- signed VPS archive `0.1.0-systemd.8` из commit `9eca9bb` прошёл legacy SHA-256 и strict Ed25519 exact-tree verification;
+- dry-run проверил OS/profile, NTP, DNS, RAM/disk, packages, public endpoint, WireGuard kernel/tools, nft syntax, UDP/51821, sysctl и path conflicts без mutation;
+- apply локально создал VPS private key, immutable release pointer, `root:root 0600` `wg-mgmt.conf`, два exact peers `10.80.0.2/32` и `10.80.0.10/32`, owned nft table и `INSTALLED_NOT_READY` report;
+- `net.ipv4.ip_forward=1`, IPv6 forwarding выключен, connected routes обоих peers идут через `wg-mgmt`, firewall и WireGuard units active/enabled, first-install recovery disabled после completed marker;
+- точный повтор исходной apply-команды вернул already-installed с теми же peer contract/key identity; restart firewall/WireGuard сохранил key, routes и ruleset;
+- installed rootfs каждой версии запущена новым контейнером с новым PID 1 и пустым `/run`: firewall и `wg-mgmt` поднялись автоматически без ручного запуска, marker/ephemeral authorization отсутствовали;
+- единственный failed unit после fresh boot — стандартный `systemd-networkd-wait-online.service`, поскольку Docker `eth0` не управляется networkd; application units полностью active и acceptance PASS, поэтому этот Docker-only degraded state не приравнен к VPS host defect.
+
+**Ubuntu 20.04:**
+
+- vanilla official image с актуальным Pro client прошёл signed release/NTP/host prerequisites, затем ожидаемо остановился сообщением `Ubuntu 20.04 is not attached to Ubuntu Pro`;
+- после отказа отсутствовали `/var/lib/gateway-vpn-vps`, managed config, `wg-mgmt` и owned nft table — mutation не началась;
+- положительный 20.04 gate требует предоставленного Pro-attached, non-expired VPS с enabled `esm-infra`/`esm-apps` и без pending updates; Docker не подменяет это внешнее право/состояние.
+
+**Неуспешные стендовые попытки:**
+
+- прямой `docker cp` signed directory с Windows NTFS выставил всем файлам executable bit; strict exact-tree verifier правильно отказал, поэтому acceptance использовал production `.tar.gz`, сохраняющий Unix executable contract;
+- первые 24.04/26.04 fixtures положили archive/public key внутрь release root; verifier правильно отклонил два лишних файла до mutation. После размещения bootstrap inputs вне signed tree оба dry-run прошли без изменения production code.
+
+**Не проверено:** реальный cloud VPS/provider firewall/reboot, внешний UDP/51821, Gateway↔VPS handshake, Debian 12 и положительный Ubuntu 20.04 Pro gate.
+
+**Следующий шаг:** SSH orchestrator на двух Linux-машинах и реальный WireGuard handshake через изолированную Docker network; затем journal/commit/push и возврат с `xhigh` на `High`, если acceptance не выявит критических дефектов.
 
 ### Сессия 036 — signed Gateway systemd install, idempotency и fresh boot — 2026-08-25
 

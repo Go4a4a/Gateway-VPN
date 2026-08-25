@@ -124,7 +124,11 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	if options.Apply {
 		parts[len(parts)-1] += " --apply"
 	}
-	return "bash -ceu " + shellQuote(strings.Join(parts, "; ")), nil
+	// SSH remote-command Bash may read ~/.bashrc even though the requested
+	// command is non-interactive. Ubuntu's stock bashrc reads PS1 without an
+	// unset guard, so nounset would abort the verified bootstrap before it can
+	// run. --norc makes the generated command independent of remote dotfiles.
+	return "bash --norc -ceu " + shellQuote(strings.Join(parts, "; ")), nil
 }
 
 // VPSInstallCommand provides the same bootstrap trust chain for the VPS role.
@@ -180,7 +184,7 @@ func VPSInstallCommand(manifest Manifest, options VPSInstallCommandOptions) (str
 	if options.Apply {
 		parts[len(parts)-1] += " --apply"
 	}
-	return "bash -ceu " + shellQuote(strings.Join(parts, "; ")), nil
+	return "bash --norc -ceu " + shellQuote(strings.Join(parts, "; ")), nil
 }
 
 // DeployCommand returns a single administrative Linux command that downloads
@@ -279,7 +283,7 @@ func DeployCommand(manifest Manifest, options DeployCommandOptions) (string, err
 		"chmod 0700 \"$tmp/deploy\"",
 		"\"$tmp/deploy\" " + strings.Join(quotedArguments, " "),
 	}
-	return "bash -ceu " + shellQuote(strings.Join(parts, "; ")), nil
+	return "bash --norc -ceu " + shellQuote(strings.Join(parts, "; ")), nil
 }
 
 func bootstrapCommandPrefix(downloadURL, expectedSHA256 string, nonInteractiveRoot bool) []string {
