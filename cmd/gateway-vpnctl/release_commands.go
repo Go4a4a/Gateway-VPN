@@ -62,8 +62,11 @@ func runReleaseVerify(args []string) int {
 	publicKeyPath := flags.String("public-key", "", "trusted PKIX Ed25519 public key path")
 	currentVersion := flags.String("current-version", "", "currently installed Gateway version")
 	currentSchema := flags.Int64("current-schema", 0, "current SQLite schema")
+	initialInstall := flags.Bool("initial-install", false, "verify as a first installation without an existing version or schema")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *releaseDir == "" || *publicKeyPath == "" || *currentVersion == "" || *currentSchema < 1 {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *releaseDir == "" || *publicKeyPath == "" ||
+		!*initialInstall && (*currentVersion == "" || *currentSchema < 1) ||
+		*initialInstall && (*currentVersion != "" || *currentSchema != 0) {
 		return 2
 	}
 	publicKey, err := updatepkg.LoadPublicKey(*publicKeyPath)
@@ -80,6 +83,7 @@ func runReleaseVerify(args []string) int {
 	verified, err := updatepkg.VerifyRelease(*releaseDir, updatepkg.VerificationPolicy{
 		PublicKey: publicKey, ExpectedOS: expectedOS, ExpectedArch: expectedArch,
 		CurrentGatewayVersion: *currentVersion, CurrentSchemaVersion: *currentSchema,
+		InitialInstall:   *initialInstall,
 		ConfigGeneration: config.CurrentVersion, GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
 	})
 	if err != nil {

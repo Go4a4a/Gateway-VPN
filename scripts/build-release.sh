@@ -20,9 +20,11 @@ BOOTSTRAP="$ROOT/dist/gateway-vpn-bootstrap-$VERSION-linux-amd64"
 COMMIT=$(git -C "$ROOT" rev-parse --verify HEAD) || { echo "Release build requires a committed Git revision" >&2; exit 1; }
 [[ "$COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "Git commit identity is invalid" >&2; exit 1; }
 [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=normal) ]] || { echo "Release build requires a clean committed worktree" >&2; exit 1; }
+SOURCE_DATE_EPOCH=$(git -C "$ROOT" show -s --format=%ct "$COMMIT")
+[[ "$SOURCE_DATE_EPOCH" =~ ^[1-9][0-9]*$ ]] || { echo "Git commit timestamp is invalid" >&2; exit 1; }
+BUILD_DATE=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+[[ "$BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "Canonical build date is invalid" >&2; exit 1; }
 mkdir -p "$DEST/bin" "$DEST/libexec" "$DEST/scripts" "$DEST/share/doc" "$DEST/share/supply-chain"
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(date -u +%s)}
 DATABASE_SCHEMA=$(find "$ROOT/migrations" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9][0-9][0-9]_*.sql' -printf '%f\n' | sort | tail -n1 | cut -d_ -f1 | sed 's/^0*//')
 [[ "$DATABASE_SCHEMA" =~ ^[1-9][0-9]*$ ]] || { echo "Cannot determine embedded database schema" >&2; exit 1; }
 LDFLAGS="-s -w -X gateway-vpn/internal/buildinfo.Version=$VERSION -X gateway-vpn/internal/buildinfo.Commit=$COMMIT -X gateway-vpn/internal/buildinfo.Date=$BUILD_DATE -X gateway-vpn/internal/buildinfo.MihomoVersion=$MIHOMO_VERSION"

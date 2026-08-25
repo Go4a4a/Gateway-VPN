@@ -107,6 +107,8 @@ func runChannelVerify(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpnctl channel-verify", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	manifestPath, signaturePath, publicKeyPath, channel, version, commit, maximumAge, jsonOutput := channelVerificationFlags(flags)
+	var artifacts artifactSpecs
+	flags.Var(&artifacts, "artifact", "local role artifact as ROLE=FILE; when present every signed artifact is re-hashed")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" {
 		return 2
 	}
@@ -115,13 +117,42 @@ func runChannelVerify(args []string) int {
 		fmt.Fprintf(os.Stderr, "verify signed channel: %v\n", err)
 		return 1
 	}
+	if len(artifacts) > 0 {
+		if err := verifyLocalChannelArtifacts(manifest, artifacts); err != nil {
+			fmt.Fprintf(os.Stderr, "verify local channel artifacts: %v\n", err)
+			return 1
+		}
+	}
 	digest, _ := distribution.ManifestSHA256(content)
 	if *jsonOutput {
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"channel": manifest.Channel, "release_version": manifest.ReleaseVersion, "source_commit": manifest.SourceCommit, "signer_key_sha256": fingerprint, "manifest_sha256": digest, "artifacts": manifest.Artifacts})
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"channel": manifest.Channel, "release_version": manifest.ReleaseVersion, "source_commit": manifest.SourceCommit, "signer_key_sha256": fingerprint, "manifest_sha256": digest, "artifacts": manifest.Artifacts, "local_artifacts_verified": len(artifacts) > 0})
 	} else {
-		fmt.Printf("Signed channel %s release %s verified; signer=%s manifest=%s artifacts=%d\n", manifest.Channel, manifest.ReleaseVersion, fingerprint, digest, len(manifest.Artifacts))
+		fmt.Printf("Signed channel %s release %s verified; signer=%s manifest=%s artifacts=%d local=%t\n", manifest.Channel, manifest.ReleaseVersion, fingerprint, digest, len(manifest.Artifacts), len(artifacts) > 0)
 	}
 	return 0
+}
+
+func verifyLocalChannelArtifacts(manifest distribution.Manifest, specifications []string) error {
+	if len(specifications) != len(manifest.Artifacts) {
+		return errors.New("every signed channel artifact must be provided exactly once")
+	}
+	seen := make(map[string]bool, len(specifications))
+	for _, specification := range specifications {
+		role, filename, ok := strings.Cut(specification, "=")
+		if !ok || role == "" || filename == "" || seen[role] {
+			return errors.New("each local channel artifact must use one unique ROLE=FILE")
+		}
+		seen[role] = true
+		actual, err := distribution.ArtifactFromFile(role, "linux", "amd64", filename, manifest.ReleaseVersion)
+		if err != nil {
+			return fmt.Errorf("inspect %s artifact: %w", role, err)
+		}
+		expected, err := distribution.SelectArtifact(manifest, role, "linux", "amd64")
+		if err != nil || actual != expected {
+			return fmt.Errorf("%s artifact does not match signed filename, size, and SHA-256", role)
+		}
+	}
+	return nil
 }
 
 func runChannelInstallCommand(args []string) int {

@@ -18,8 +18,10 @@ COMMIT=$(git -C "$ROOT" rev-parse --verify HEAD) || { echo "VPS release build re
 [[ -z $(git -C "$ROOT" status --porcelain --untracked-files=normal) ]] || { echo "VPS release build requires a clean committed worktree" >&2; exit 1; }
 
 mkdir -p "$DEST/bin" "$DEST/scripts" "$DEST/share/doc" "$DEST/share/supply-chain"
-BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" show -s --format=%ct "$COMMIT")}
+SOURCE_DATE_EPOCH=$(git -C "$ROOT" show -s --format=%ct "$COMMIT")
+[[ "$SOURCE_DATE_EPOCH" =~ ^[1-9][0-9]*$ ]] || { echo "Git commit timestamp is invalid" >&2; exit 1; }
+BUILD_DATE=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+[[ "$BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "Canonical build date is invalid" >&2; exit 1; }
 LDFLAGS="-s -w -X gateway-vpn/internal/buildinfo.Version=$VERSION -X gateway-vpn/internal/buildinfo.Commit=$COMMIT -X gateway-vpn/internal/buildinfo.Date=$BUILD_DATE"
 (
   cd -- "$ROOT"

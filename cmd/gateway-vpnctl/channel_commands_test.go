@@ -50,6 +50,8 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 	if code := runChannelVerify([]string{
 		"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
 		"--channel", "stable", "--release-version", version, "--source-commit", commit,
+		"--artifact", "bootstrap=" + bootstrapPath, "--artifact", "deploy=" + deployPath,
+		"--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
 	}); code != 0 {
 		t.Fatalf("runChannelVerify() code = %d", code)
 	}
@@ -103,6 +105,17 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 	}
 	if strings.Index(deployCommand, "test ") < 0 || strings.Index(deployCommand, "test ") > strings.LastIndex(deployCommand, "\"$tmp/deploy\"") {
 		t.Fatal("generated deploy command executes its launcher before exact SHA-256 verification")
+	}
+	if err := os.WriteFile(deployPath, []byte("modified deploy artifact"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := runChannelVerify([]string{
+		"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
+		"--channel", "stable", "--release-version", version, "--source-commit", commit,
+		"--artifact", "bootstrap=" + bootstrapPath, "--artifact", "deploy=" + deployPath,
+		"--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
+	}); code != 1 {
+		t.Fatalf("modified local artifact verify code = %d, want 1", code)
 	}
 }
 

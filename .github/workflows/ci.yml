@@ -1,0 +1,86 @@
+name: Gateway VPN CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-vpn-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Go, packaging and syntax gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install exact Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Verify formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l cmd internal migrations test)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted" >&2
+            exit 1
+          fi
+      - name: Run race-enabled suite
+        run: go test -race ./... -count=1
+      - name: Run vet
+        run: go vet ./...
+      - name: Build all Linux release entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gateway-vpn-ci"
+          for name in gateway-vpn gateway-vpnctl gateway-vpn-bootstrap gateway-vpn-deploy; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/gateway-vpn-ci/$name" "./cmd/$name"
+          done
+      - name: Check JavaScript and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check internal/webapi/static/app.js
+          bash -n scripts/*.sh test/netns/*.sh
+
+  netns:
+    name: Linux nftables fail-closed gate
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install exact Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Refresh Ubuntu package indexes
+        run: sudo apt-get update
+      - name: Install netns test dependencies
+        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps
+      - name: Build native Linux netns binary
+        run: go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
+      - name: Prove owned firewall recovery and no direct route
+        run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns

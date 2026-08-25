@@ -4,6 +4,8 @@ Fail-closed IPv4-шлюз для одного или нескольких HiLink
 
 Архитектурный источник истины: [`docs/PLAN_v1.1.md`](docs/PLAN_v1.1.md). Текущий ход разработки, проверки, проблемы и принятые решения: [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md).
 
+Linux CI определён в `.github/workflows/ci.yml` и не имеет release secrets. Полный подписанный Gateway/VPS/bootstrap/deploy bundle собирается на отдельном trusted Linux builder через `scripts/build-release-bundle.sh`; `scripts/create-github-release-draft.sh` создаёт только проверяемый GitHub draft для последующей ручной immutable-публикации.
+
 ## Текущее состояние
 
 Реализованы и покрыты unit/integration-level тестами strict config, SQLite migrations/repositories, multi-modem path matrix, subscription sanitizer/LKG, Mihomo generator/API transaction, qualification scheduler, runtime reconciler, защищённый Web API, verified backup/restore и Ed25519 signed update с согласованным rollback binary+SQLite. Gateway clean-host installer валидирует private transit LAN и пересечения host routes, безопасно устанавливает только отсутствующие зависимости, загружает `PATH_BLOCKED` до IPv4 forwarding/LAN, сохраняет persistent systemd-networkd policy и имеет durable first-install recovery. Отдельный подписанный VPS role имеет exact profiles Ubuntu Server 20.04/22.04/24.04/26.04 LTS и Debian 12, локальную генерацию WireGuard key, owned firewall/recovery и тот же opt-in принцип dependency provisioning; Ubuntu 20.04 принимается только с актуальным Pro/ESM. Typed `gateway-vpn-deploy` проверяет две SSH-машины до apply, устанавливает exact signed roles, обменивает только WireGuard public keys, локально создаёт optional admin `wg-quick` config и выдаёт redacted `READY`/`INSTALLED_NOT_READY` report.

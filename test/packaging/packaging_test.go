@@ -3,9 +3,12 @@ package packaging_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) {
@@ -110,6 +113,102 @@ func TestChannelBuilderPinsBootstrapBeforeSudoAndProducesExactCommand(t *testing
 		if !strings.Contains(builder, required) {
 			t.Errorf("channel builder missing %q", required)
 		}
+	}
+}
+
+func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, path := range []string{
+		filepath.Join(root, "scripts", "build-release.sh"),
+		filepath.Join(root, "scripts", "build-vps-release.sh"),
+		filepath.Join(root, "scripts", "build-deploy.sh"),
+		filepath.Join(root, "scripts", "build-channel.sh"),
+	} {
+		builder := read(t, path)
+		for _, required := range []string{"git -C \"$ROOT\" show -s --format=%ct", "date -u -d \"@"} {
+			if !strings.Contains(builder, required) {
+				t.Errorf("%s does not derive canonical metadata from commit time: missing %q", path, required)
+			}
+		}
+		if strings.Contains(builder, "date -u +%s") {
+			t.Errorf("%s still uses invocation time for signed release identity", path)
+		}
+	}
+
+	bundle := read(t, filepath.Join(root, "scripts", "build-release-bundle.sh"))
+	for _, required := range []string{
+		"build-release.sh", "build-vps-release.sh", "build-deploy.sh", "build-channel.sh",
+		"release-verify", "--initial-install", "vps-release-verify", "channel-verify",
+		"--artifact \"bootstrap=", "--artifact \"deploy=", "--artifact \"gateway=", "--artifact \"vps=",
+		"bootstrap=$ROOT/dist/", "deploy=$ROOT/dist/", "gateway=$ROOT/dist/", "vps=$ROOT/dist/",
+		"regular non-symlink files", "PRIVATE_MODE", "absent dist directory", "clean committed worktree",
+	} {
+		if !strings.Contains(bundle, required) {
+			t.Errorf("release bundle builder missing %q", required)
+		}
+	}
+
+	fetcher := read(t, filepath.Join(root, "scripts", "fetch-mihomo-release.sh"))
+	for _, required := range []string{
+		"https://github.com/MetaCubeX/mihomo/releases/download/", "mihomo-linux-amd64-v1-",
+		"--proto '=https'", "--max-filesize 67108864", "sha256sum --binary", "ulimit -f 262144",
+		"BINARY_SIZE <= 134217728", "timeout 10s", "does not report the requested version",
+	} {
+		if !strings.Contains(fetcher, required) {
+			t.Errorf("Mihomo release fetcher missing %q", required)
+		}
+	}
+
+	publisher := read(t, filepath.Join(root, "scripts", "create-github-release-draft.sh"))
+	for _, required := range []string{
+		"GH_TOKEN", "REMOTE_COMMIT", "--verify-tag --draft", "go run ./cmd/gateway-vpnctl", "--artifact \"bootstrap=",
+		"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz",
+		"gateway-vpn-vps-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64",
+		"gateway-vpn-deploy-$VERSION-linux-amd64", "channel-$CHANNEL.json", "update-signing.pub",
+		"Draft created only", "enable GitHub release immutability",
+	} {
+		if !strings.Contains(publisher, required) {
+			t.Errorf("GitHub draft publisher missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"--draft=false", "release edit", "release delete", "private-key"} {
+		if strings.Contains(publisher, forbidden) {
+			t.Errorf("GitHub draft publisher contains forbidden %q", forbidden)
+		}
+	}
+}
+
+func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
+	root := repositoryRoot(t)
+	workflow := read(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(workflow), &parsed); err != nil {
+		t.Fatalf("parse GitHub CI workflow: %v", err)
+	}
+	for _, required := range []string{
+		"permissions:\n  contents: read", "runs-on: ubuntu-24.04", "go test -race ./... -count=1",
+		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh",
+		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
+		"persist-credentials: false",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("GitHub CI workflow missing %q", required)
+		}
+	}
+	if strings.Contains(workflow, "pull_request_target") || strings.Contains(strings.ToLower(workflow), "release_signing") || strings.Contains(workflow, "secrets.") {
+		t.Fatal("GitHub CI can expose release secrets or runs privileged fork code with base context")
+	}
+	usesPattern := regexp.MustCompile(`(?m)^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$`)
+	matches := usesPattern.FindAllStringSubmatch(workflow, -1)
+	if len(matches) != 4 {
+		t.Fatalf("expected four full-SHA official Action references, got %d", len(matches))
+	}
+	if strings.Count(workflow, "uses:") != len(matches) {
+		t.Fatal("GitHub CI contains an unpinned Action reference")
+	}
+	dependabot := read(t, filepath.Join(root, ".github", "dependabot.yml"))
+	if !strings.Contains(dependabot, "package-ecosystem: github-actions") || !strings.Contains(dependabot, "interval: weekly") {
+		t.Fatal("GitHub Action pins do not have a reviewable update feed")
 	}
 }
 

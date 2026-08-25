@@ -31,6 +31,22 @@ Builder требует clean committed Git tree и создаёт:
 - `dist/gateway-vpn-deploy-<version>-linux-amd64` и его SBOM/provenance — административный SSH launcher;
 - SHA-256 role archives, bootstrap и deploy launcher в stdout trusted build.
 
+Все четыре роли и signed channel можно собрать и повторно проверить одной командой на trusted Ubuntu builder. `dist/` перед запуском обязан отсутствовать, private key должен быть regular non-symlink file без group/other permissions, а tag — точно `vVERSION`:
+
+```bash
+./scripts/fetch-mihomo-release.sh \
+  vX.Y.Z <SHA-256-официального-linux-amd64-v1-gz> \
+  /secure/build-input/mihomo
+
+./scripts/build-release-bundle.sh \
+  0.1.0 test vX.Y.Z /secure/build-input/mihomo \
+  /secure/release-signing.pem /secure/update-signing.pub \
+  OWNER/REPOSITORY v0.1.0 \
+  enp2s0 192.168.200.1/24 --enable-dhcp
+```
+
+Fetcher принимает только официальный compatible `mihomo-linux-amd64-v1-vX.Y.Z.gz` с GitHub MetaCubeX, ограничивает download/decompression, сначала проверяет опубликованный archive SHA-256 и только затем запускает bounded version probe. Bundle builder вычисляет и закрепляет SHA-256 распакованного binary, а build/channel timestamp канонически берётся из commit time. Поэтому повторная сборка exact commit с теми же Go/Mihomo inputs не зависит от времени запуска.
+
 Подписанный Gateway tree включает binaries, закреплённый Mihomo, `scripts/install-gateway.sh`, `scripts/uninstall.sh`, `config.example.yaml`, весь regular-file `packaging/`, документацию, SBOM/provenance, `release.json`, полный manifest и detached signature. Установленная `/opt/gateway-vpn/releases/v<version>` является точной копией этого дерева и снова проходит `release-verify`; выборочная копия файлов недопустима.
 
 ### Signed channel и точная команда GitHub
@@ -50,6 +66,19 @@ Builder требует clean committed Git tree и создаёт:
 ```
 
 Builder тем же trusted key создаёт и тут же перепроверяет `channel-stable.json` и `channel-stable.sig`, копирует публичный `update-signing.pub` и пишет `install-gateway-0.1.0.command.txt`. В GitHub Release с точным tag `v0.1.0` загружаются role artifacts, bootstrap, оба channel-файла и public key без переименования. `latest`, branch archive и mutable URL не используются.
+
+### GitHub CI и immutable draft
+
+`.github/workflows/ci.yml` не получает release secrets. На закреплённых full-SHA official Actions и Ubuntu 24.04 он выполняет race suite, vet, четыре CGO-free builds, JS/shell checks, а отдельный root netns job реально проверяет восстановление owned nftables table после delete/`nft flush ruleset` и отсутствие direct route. Dependabot может предложить обновление Action SHA отдельным PR; такое изменение проходит обычный review и не применяется автоматически.
+
+Долгоживущий Ed25519 private key не помещается в GitHub Actions secrets: production signing остаётся на изолированном trusted Linux builder. После успешного bundle gate builder с локально настроенным `GH_TOKEN` создаёт только GitHub draft:
+
+```bash
+./scripts/create-github-release-draft.sh \
+  0.1.0 test OWNER/REPOSITORY v0.1.0
+```
+
+Publisher сверяет clean HEAD, local/remote exact tag, отсутствие существующего release и полный фиксированный список assets, затем вызывает только `gh release create --draft --verify-tag`. Он никогда не публикует draft автоматически. До ручной публикации в GitHub repository settings обязательно включается **Enable release immutability**: настройка действует только для будущих публикаций. Сначала к draft прикрепляются все assets, затем draft просматривается и публикуется вручную; после публикации tag и assets должны отображаться как immutable.
 
 Содержимое `install-gateway-0.1.0.command.txt` является одной точной командой для выбранных при build LAN interface/CIDR. Она скачивает bootstrap только по HTTPS (`curl`, fallback на GNU `wget`), сверяет закреплённый SHA-256, затем запускает его напрямую из root-shell либо через `sudo`. Bootstrap отдельно закрепляет channel/version/commit/raw-manifest hash/signer fingerprint, допускает GitHub signed query string только на проверенном asset redirect и до installer проверяет archive hash/size, Ed25519 release signature и точный полный tree. Если нужен другой LAN interface, команда генерируется заново из того же уже проверенного channel manifest:
 
