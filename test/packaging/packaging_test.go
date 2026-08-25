@@ -74,6 +74,27 @@ func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
 	}
 }
 
+func TestGatewayInstallerAllowsOnlyStrictCompletedInstallToBypassDirectDNS(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{
+		"if ! getent ahostsv4 github.com >/dev/null; then",
+		"COMPLETED_INSTALL_HINT=0",
+		`$(stat -c '%u:%g:%a' /var/lib/gateway-vpn/install-report.json) == "0:0:600"`,
+		`$(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION"`,
+		`$(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION"`,
+		`grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json`,
+		"((COMPLETED_INSTALL_HINT == 1)) || { echo \"Gateway DNS resolution failed\"",
+		"continuing with strict existing-install verification",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer completed-install DNS exception missing %q", required)
+		}
+	}
+}
+
 func TestGatewayServicesUseBoundedJournaldNamespace(t *testing.T) {
 	root := repositoryRoot(t)
 	entries, err := os.ReadDir(filepath.Join(root, "packaging", "systemd"))

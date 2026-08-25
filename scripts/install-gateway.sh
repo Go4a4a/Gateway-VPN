@@ -87,7 +87,21 @@ for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
 [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) == yes ]] || { echo "Gateway clock is not reported as NTP-synchronized" >&2; exit 1; }
-getent ahostsv4 github.com >/dev/null || { echo "Gateway DNS resolution failed" >&2; exit 1; }
+if ! getent ahostsv4 github.com >/dev/null; then
+  COMPLETED_INSTALL_HINT=0
+  if [[ -f /var/lib/gateway-vpn/install-report.json && ! -L /var/lib/gateway-vpn/install-report.json &&
+        $(stat -c '%u:%g:%a' /var/lib/gateway-vpn/install-report.json) == "0:0:600" &&
+        -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" &&
+        -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] &&
+     grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json; then
+    COMPLETED_INSTALL_HINT=1
+  fi
+  ((COMPLETED_INSTALL_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
+  echo "Gateway DNS is blocked by the installed fail-closed policy; continuing with strict existing-install verification"
+fi
 AVAILABLE_KIB=$(df --output=avail / | awk 'NR==2 {print $1}')
 MEMORY_KIB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ && "$AVAILABLE_KIB" -ge 524288 ]] || { echo "Gateway requires at least 512 MiB free disk" >&2; exit 1; }
