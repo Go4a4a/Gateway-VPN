@@ -299,6 +299,30 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 
 Архив не содержит private/API keys, session/CSRF tokens, subscription URL/payload/secret refs, proxy credentials/config, target expected body, modem identity/serial/MAC или реальный WireGuard endpoint host. В него входят только redacted config/state/inventory, owned protocol-186 routes/rules, owned `inet gateway_vpn` table, masked WireGuard counters, versions, bounded events/journal и SQLite integrity result. Перед отправкой все host/log/event values проходят дополнительную sanitization. Даже для поддержки не следует прикладывать архив публично без проверки локальной политикой организации.
 
+## Endurance-наблюдение
+
+Authenticated read-only `GET /api/v1/system/runtime-metrics` возвращает только bounded process counters: uptime, число goroutines, Go heap/stack/system bytes, allocations/frees/live objects и GC totals. На Linux дополнительно возвращаются RSS и число открытых file descriptors из `/proc/self`. Endpoint не возвращает argv, environment, filesystem paths, network endpoints, IDs, config или secrets; обычная session authentication обязательна. Отдельный per-session limit — 20 запросов в минуту (`429` + `Retry-After` при превышении).
+
+После входа API-клиент может сохранять samples с интервалом 60 секунд, используя root-only cookie jar и установленный Gateway TLS certificate:
+
+```bash
+umask 077
+curl --fail --silent --show-error \
+  --cacert /var/lib/gateway-vpn/tls/server.crt \
+  --cookie /root/gateway-vpn-endurance.cookies \
+  https://192.168.200.1:8443/api/v1/system/runtime-metrics
+```
+
+Cookie jar создаётся штатным login API-клиентом и имеет mode `0600`; bearer token нельзя помещать в командную строку, журнал или итоговый CSV. Сессия живёт 12 часов, поэтому 24/72-часовой harness должен повторно аутентифицироваться до expiry, удерживая введённый пароль только в памяти процесса либо используя отдельный защищённый credential provider. Увеличивать lifetime production-сессии ради теста нельзя.
+
+Developer gate длится 24 часа, release gate — 72 часа. Warm-up первые 30 минут не участвует в оценке. Harness сохраняет минутные samples и 30-минутные медианы. Gate считается неуспешным, если после warm-up:
+
+- goroutines или FD растут в шести последовательных окнах и не возвращаются к первой медиане + 5;
+- RSS, heap allocation или live objects имеют положительный устойчивый slope, а медиана последнего часа превышает медиану первого часа более чем на 10% и минимум на 32 MiB для byte metrics;
+- процесс, broker/firewall guard либо WebUI недоступны, появляется direct leak или SQLite/retention check не проходит.
+
+`mallocs_total`, `frees_total`, `gc_cycles_total` и `gc_pause_total_nanoseconds` являются накопительными и сами по себе не означают leak. Перед warm-up и после последнего sample создаются diagnostic bundles; оба должны иметь complete SQLite integrity section. Отдельно сохраняются размер DB/WAL и counts таблиц с retention. Docker developer endurance не заменяет 72-часовой release endurance на реальном Gateway с модемами, Keenetic и VPS.
+
 ## Резервное копирование и восстановление
 
 Во вкладке **Система и безопасность → Резервные снимки и восстановление** доступны два разных вида копий:

@@ -42,13 +42,14 @@
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
 | SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
-| API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 78 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
+| API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 79 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
 | Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` доказали systemd update/recovery, `.27` — destructive restore/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
+| Endurance | `TELEMETRY_READY / RUN_NOT_STARTED` | Authenticated secret-free runtime endpoint отдаёт uptime/goroutines/heap/stack/alloc/GC и Linux RSS/FD, ограничен 20 запросами/минуту на session; OpenAPI и 24/72h evaluation policy задокументированы. Ни 24h developer, ни 72h release run ещё не выполнялись; до запуска нужен DB retention worker |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
 | Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore и Gateway uninstall; byte-identical current VPS uninstaller прошёл preserve/reinstall/purge. Удалённый CI для local-ahead commits ещё не выполнен |
 
@@ -197,8 +198,32 @@
 | DEV-118 | 2026-08-26 | Portable restore после upload остаётся только `STAGED`; WebUI Apply атомарно создаёт `APPLY_REQUESTED` с одноразовым 256-bit nonce, который не возвращается API | `pending-restore.json` раньше не отличал проверенный upload от подтверждённого destructive action, поэтому обычный reboot мог применить backup без согласия пользователя |
 | DEV-119 | 2026-08-26 | Успешный restore rollback сначала фиксирует root journal `ROLLED_BACK`, затем отзывает nonce и возвращает operation в `STAGED`; повторный rollback идемпотентен, а новый Apply получает другой nonce | Power cut после rollback, но до marker update мог повторно удалить уже возвращённые original destinations либо автоматически повторить destructive apply |
 | DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
+| DEV-121 | 2026-08-26 | Endurance использует authenticated `/api/v1/system/runtime-metrics`: только bounded Go/process counters, Linux RSS/FD и отдельный per-session rate limit 20/min | RSS/FD доступны через `/proc`, но число goroutines иначе нельзя достоверно измерять снаружи; endpoint не должен раскрывать argv/environment/config/IDs/secrets или позволять hammering `runtime.ReadMemStats` |
 
 ## Журнал разработки
+
+### Сессия 048 — измеримая endurance telemetry и completion-аудит retention — 2026-08-26
+
+**Реализация:**
+
+- добавлен authenticated read-only `GET /api/v1/system/runtime-metrics` со schema generation `1`, timestamp/uptime, goroutines, Go heap/stack/system, mallocs/frees/live objects и GC totals;
+- Linux implementation безопасно читает только `/proc/self/statm` и `/proc/self/fd`, возвращая RSS и steady-state FD count; на других development OS Linux-only поля отсутствуют;
+- response строится из фиксированного allowlist и не содержит argv, environment, filesystem paths, network endpoints, config, identities или secrets;
+- отдельный session limiter разрешает 20 samples в минуту и возвращает стабильный `RUNTIME_METRICS_RATE_LIMITED`/`Retry-After`, поэтому частые `runtime.ReadMemStats` нельзя использовать как простой authenticated DoS;
+- OpenAPI содержит exact response schema, а Operations — минутный sampling, 30-минутный warm-up/medians, 24h developer и 72h release gates, leak thresholds, 12h session reauthentication без увеличения production lifetime и обязательные start/end SQLite diagnostics.
+
+**Проверки:**
+
+- полный Windows `go test ./...` и `go vet ./...` — PASS;
+- полный offline Linux/amd64 `go test ./...` и `go vet ./...` — PASS; Linux handler test фактически получил положительные RSS/FD из `/proc`;
+- auth test подтверждает `401` без session, фиксированный набор полей, положительные counters, RFC3339Nano timestamp и `429` на 21-м запросе одного окна;
+- OpenAPI route/reference/security contract и packaging tests — PASS.
+
+**Обнаруженный незакрытый критерий:**
+
+- completion-аудит разделов 12.3/19/20 показал, что schema содержит `health_samples`, `events`, `traffic_daily_totals` и immutable subscription versions, но production worker удаления по срокам/количеству ещё отсутствует;
+- поэтому 24h endurance пока не запускается: отсутствие монотонного роста RSS/FD/goroutines не докажет критерий «размер БД соответствует retention policy»;
+- следующий локальный шаг — bounded small-transaction retention с cleanup защищённых payload directories, затем unit/runtime tests. Hardware/release gates остаются внешними и не считаются выполненными.
 
 ### Сессия 047 — Gateway/VPS uninstall, preserve, reinstall и purge — 2026-08-26
 

@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	runtimepkg "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -185,8 +186,10 @@ type ManualPathActivator interface {
 type Server struct {
 	dependencies          Dependencies
 	handler               http.Handler
+	startedAt             time.Time
 	matcherPreviewSecret  []byte
 	journalLimiter        *journalRateLimiter
+	metricsLimiter        *journalRateLimiter
 	diagnosticLimiter     *diagnosticRateLimiter
 	snapshotLimiter       *diagnosticRateLimiter
 	portableBackupLimiter *diagnosticRateLimiter
@@ -205,7 +208,11 @@ func New(dependencies Dependencies) (*Server, error) {
 	if _, err := rand.Read(previewSecret); err != nil {
 		return nil, errors.New("initialize matcher preview protection failed")
 	}
-	server := &Server{dependencies: dependencies, matcherPreviewSecret: previewSecret, journalLimiter: newJournalRateLimiter(), diagnosticLimiter: newDiagnosticRateLimiter(), snapshotLimiter: newDiagnosticRateLimiter(), portableBackupLimiter: newDiagnosticRateLimiter(), updateLimiter: newDiagnosticRateLimiter()}
+	startedAt := time.Now().UTC()
+	if dependencies.Now != nil {
+		startedAt = dependencies.Now().UTC()
+	}
+	server := &Server{dependencies: dependencies, startedAt: startedAt, matcherPreviewSecret: previewSecret, journalLimiter: newJournalRateLimiter(), metricsLimiter: newJournalRateLimiter(), diagnosticLimiter: newDiagnosticRateLimiter(), snapshotLimiter: newDiagnosticRateLimiter(), portableBackupLimiter: newDiagnosticRateLimiter(), updateLimiter: newDiagnosticRateLimiter()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", server.login)
 	mux.Handle("POST /api/v1/auth/logout", server.protected(http.HandlerFunc(server.logout)))
@@ -220,6 +227,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("DELETE /api/v1/auth/sessions/{id}", server.protected(http.HandlerFunc(server.revokeSession)))
 	mux.Handle("GET /api/v1/gateway/status", server.protected(http.HandlerFunc(server.gatewayStatus)))
 	mux.Handle("GET /api/v1/gateway/diagnostics", server.protected(http.HandlerFunc(server.diagnosticDescription)))
+	mux.Handle("GET /api/v1/system/runtime-metrics", server.protected(http.HandlerFunc(server.runtimeMetrics)))
 	mux.Handle("GET /api/v1/wireguard/status", server.protected(http.HandlerFunc(server.wireGuardStatus)))
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
@@ -533,6 +541,53 @@ func (server *Server) gatewayStatus(writer http.ResponseWriter, request *http.Re
 		"policy_transition_deadline":   snapshot.PolicyTransitionDeadline,
 		"updated_at":                   snapshot.UpdatedAt,
 	})
+}
+
+func (server *Server) runtimeMetrics(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := request.Context().Value(principalKey).(auth.Principal)
+	if !ok || principal.SessionHash == "" {
+		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
+		return
+	}
+	if allowed, retry := server.metricsLimiter.allow(principal.SessionHash, server.now()); !allowed {
+		seconds := int64((retry + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		writeError(writer, http.StatusTooManyRequests, "RUNTIME_METRICS_RATE_LIMITED", "Слишком много запросов runtime metrics")
+		return
+	}
+	var memory runtimepkg.MemStats
+	runtimepkg.ReadMemStats(&memory)
+	now := server.now()
+	uptime := now.Sub(server.startedAt)
+	if uptime < 0 {
+		uptime = 0
+	}
+	response := map[string]any{
+		"schema_version":             1,
+		"collected_at":               now.Format(time.RFC3339Nano),
+		"uptime_seconds":             int64(uptime / time.Second),
+		"goroutines":                 runtimepkg.NumGoroutine(),
+		"heap_alloc_bytes":           memory.HeapAlloc,
+		"heap_inuse_bytes":           memory.HeapInuse,
+		"stack_inuse_bytes":          memory.StackInuse,
+		"go_runtime_sys_bytes":       memory.Sys,
+		"mallocs_total":              memory.Mallocs,
+		"frees_total":                memory.Frees,
+		"live_heap_objects":          memory.Mallocs - memory.Frees,
+		"gc_cycles_total":            memory.NumGC,
+		"gc_pause_total_nanoseconds": memory.PauseTotalNs,
+	}
+	process := readProcessMetrics()
+	if process.RSSBytes != nil {
+		response["process_rss_bytes"] = *process.RSSBytes
+	}
+	if process.OpenFileDescriptors != nil {
+		response["open_file_descriptors"] = *process.OpenFileDescriptors
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (server *Server) wireGuardStatus(writer http.ResponseWriter, request *http.Request) {

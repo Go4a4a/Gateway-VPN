@@ -88,6 +88,85 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricsRequiresSessionAndExposesOnlyBoundedProcessCounters(t *testing.T) {
+	server, _ := testServer(t)
+	server.startedAt = time.Now().UTC().Add(-2 * time.Minute)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/runtime-metrics", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated runtime metrics = %d %s", response.Code, response.Body.String())
+	}
+
+	cookie, _ := login(t, server)
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/system/runtime-metrics", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("runtime metrics = %d %s", response.Code, response.Body.String())
+	}
+	var metrics map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &metrics); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{
+		"schema_version": true, "collected_at": true, "uptime_seconds": true,
+		"goroutines": true, "heap_alloc_bytes": true, "heap_inuse_bytes": true,
+		"stack_inuse_bytes": true, "go_runtime_sys_bytes": true,
+		"mallocs_total": true, "frees_total": true, "live_heap_objects": true,
+		"gc_cycles_total": true, "gc_pause_total_nanoseconds": true,
+		"process_rss_bytes": true, "open_file_descriptors": true,
+	}
+	for key := range metrics {
+		if !allowed[key] {
+			t.Errorf("unexpected runtime metric %q", key)
+		}
+	}
+	for _, required := range []string{
+		"schema_version", "collected_at", "uptime_seconds", "goroutines",
+		"heap_alloc_bytes", "heap_inuse_bytes", "stack_inuse_bytes",
+		"go_runtime_sys_bytes", "mallocs_total", "frees_total",
+		"live_heap_objects", "gc_cycles_total", "gc_pause_total_nanoseconds",
+	} {
+		if _, exists := metrics[required]; !exists {
+			t.Errorf("runtime metrics missing %q: %s", required, response.Body.String())
+		}
+	}
+	if metrics["schema_version"] != float64(1) || metrics["uptime_seconds"].(float64) < 100 || metrics["goroutines"].(float64) < 1 || metrics["heap_alloc_bytes"].(float64) < 1 {
+		t.Fatalf("invalid runtime metric values: %s", response.Body.String())
+	}
+	if _, err := time.Parse(time.RFC3339Nano, metrics["collected_at"].(string)); err != nil {
+		t.Fatalf("runtime collected_at = %v", metrics["collected_at"])
+	}
+	if runtimepkg.GOOS == "linux" {
+		rss, hasRSS := metrics["process_rss_bytes"].(float64)
+		fds, hasFDs := metrics["open_file_descriptors"].(float64)
+		if !hasRSS || !hasFDs || rss < 1 || fds < 1 {
+			t.Fatalf("Linux process metrics missing: %s", response.Body.String())
+		}
+	} else if metrics["process_rss_bytes"] != nil || metrics["open_file_descriptors"] != nil {
+		t.Fatalf("unsupported host exposed Linux process metrics: %s", response.Body.String())
+	}
+	for index := 1; index < journalQueryLimit; index++ {
+		request = httptest.NewRequest(http.MethodGet, "/api/v1/system/runtime-metrics", nil)
+		request.AddCookie(cookie)
+		response = httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("runtime metrics request %d = %d %s", index+1, response.Code, response.Body.String())
+		}
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/system/runtime-metrics", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") == "" || !strings.Contains(response.Body.String(), "RUNTIME_METRICS_RATE_LIMITED") {
+		t.Fatalf("runtime metrics rate limit = %d retry=%q %s", response.Code, response.Header().Get("Retry-After"), response.Body.String())
+	}
+}
+
 func TestBootstrapPasswordMustBeChangedBeforeAnyOtherAPI(t *testing.T) {
 	server, ctx := testServer(t)
 	if _, err := server.dependencies.Database.ExecContext(ctx, "UPDATE users SET must_change_password=1 WHERE id='admin'"); err != nil {

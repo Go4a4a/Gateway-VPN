@@ -147,6 +147,12 @@ paths:
       operationId: describeDiagnostics
       summary: Описать возможности диагностического архива
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/runtime-metrics:
+    get:
+      tags: [System]
+      operationId: getRuntimeMetrics
+      summary: Получить secret-free process metrics для endurance-наблюдения
+      responses: {'200': {$ref: '#/components/responses/RuntimeMetrics'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/gateway/reconcile:
     post:
       tags: [Gateway]
@@ -871,6 +877,11 @@ components:
             required: [items]
             properties:
               items: {type: array, items: {$ref: '#/components/schemas/SessionInfo'}}
+    RuntimeMetrics:
+      description: Ограниченный secret-free снимок Go runtime и Linux process counters.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/RuntimeMetrics'}
     NoContent: {description: Операция выполнена, response body отсутствует.}
     Error:
       description: Machine-readable error envelope без внутренних ошибок и секретов.
@@ -933,6 +944,39 @@ components:
         expires_at: {type: string, format: date-time}
         last_seen_at: {type: string, format: date-time}
         current: {type: boolean}
+    RuntimeMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - collected_at
+        - uptime_seconds
+        - goroutines
+        - heap_alloc_bytes
+        - heap_inuse_bytes
+        - stack_inuse_bytes
+        - go_runtime_sys_bytes
+        - mallocs_total
+        - frees_total
+        - live_heap_objects
+        - gc_cycles_total
+        - gc_pause_total_nanoseconds
+      properties:
+        schema_version: {const: 1}
+        collected_at: {type: string, format: date-time}
+        uptime_seconds: {type: integer, minimum: 0}
+        goroutines: {type: integer, minimum: 1}
+        heap_alloc_bytes: {type: integer, minimum: 0}
+        heap_inuse_bytes: {type: integer, minimum: 0}
+        stack_inuse_bytes: {type: integer, minimum: 0}
+        go_runtime_sys_bytes: {type: integer, minimum: 0}
+        mallocs_total: {type: integer, minimum: 0}
+        frees_total: {type: integer, minimum: 0}
+        live_heap_objects: {type: integer, minimum: 0}
+        gc_cycles_total: {type: integer, minimum: 0}
+        gc_pause_total_nanoseconds: {type: integer, minimum: 0}
+        process_rss_bytes: {type: integer, minimum: 0}
+        open_file_descriptors: {type: integer, minimum: 0}
     Error:
       type: object
       additionalProperties: false
