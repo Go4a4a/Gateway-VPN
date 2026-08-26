@@ -27,6 +27,7 @@ import (
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
+	watchdogpkg "gateway-vpn/internal/watchdog"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -49,6 +50,10 @@ type JournalProvider interface {
 	QueryLogs(context.Context, loggingpkg.JournalQuery) (loggingpkg.JournalPage, error)
 }
 
+type WatchdogStatusProvider interface {
+	Read() (watchdogpkg.Status, error)
+}
+
 type Builder struct {
 	Database              *sql.DB
 	Configuration         config.Config
@@ -58,6 +63,7 @@ type Builder struct {
 	ExpectedMihomoVersion string
 	TLSFingerprint        string
 	MihomoRoot            string
+	WatchdogStatus        WatchdogStatusProvider
 	Now                   func() time.Time
 }
 
@@ -120,7 +126,7 @@ func (builder Builder) Describe(ctx context.Context) (Description, error) {
 		DownloadEndpoint: "/api/v1/system/diagnostics", SecretsIncluded: false,
 		MaximumArchiveBytes: MaximumBundleBytes, MaximumUncompressedBytes: MaximumBundleUncompressedBytes,
 		ConfiguredJournalExcerptBytes: settings.DiagnosticExcerptBytes,
-		Sections:                      []string{"versions", "sanitized_config", "host_network", "owned_nftables", "modems_subscriptions_paths", "mihomo", "wireguard", "events", "journal", "sqlite_integrity", "database_retention"},
+		Sections:                      []string{"versions", "sanitized_config", "host_network", "owned_nftables", "modems_subscriptions_paths", "mihomo", "wireguard", "watchdog", "events", "journal", "sqlite_integrity", "database_retention"},
 	}, nil
 }
 
@@ -193,6 +199,28 @@ func (builder Builder) Build(ctx context.Context) (Bundle, error) {
 		if err := addStatus("runtime/gateway-state.json", "GATEWAY_STATE_UNAVAILABLE"); err != nil {
 			return Bundle{}, err
 		}
+	}
+	watchdogPolicy, watchdogPolicyErr := (watchdogpkg.Repository{Database: builder.Database}).Get(ctx)
+	if watchdogPolicyErr != nil {
+		addError("watchdog_policy", "WATCHDOG_POLICY_UNAVAILABLE")
+		if err := addStatus("runtime/watchdog-policy.json", "WATCHDOG_POLICY_UNAVAILABLE"); err != nil {
+			return Bundle{}, err
+		}
+	} else if err := addJSON("runtime/watchdog-policy.json", watchdogPolicy); err != nil {
+		return Bundle{}, err
+	}
+	if builder.WatchdogStatus == nil {
+		addWarning("watchdog_status", "WATCHDOG_STATUS_NOT_CONFIGURED")
+		if err := addStatus("runtime/watchdog-status.json", "WATCHDOG_STATUS_NOT_CONFIGURED"); err != nil {
+			return Bundle{}, err
+		}
+	} else if watchdogStatus, statusErr := builder.WatchdogStatus.Read(); statusErr != nil || watchdogStatus.ValidateFresh(now, watchdogpkg.MaximumStatusAge(watchdogPolicy)) != nil {
+		addWarning("watchdog_status", "WATCHDOG_STATUS_UNAVAILABLE")
+		if err := addStatus("runtime/watchdog-status.json", "WATCHDOG_STATUS_UNAVAILABLE"); err != nil {
+			return Bundle{}, err
+		}
+	} else if err := addJSON("runtime/watchdog-status.json", watchdogStatus); err != nil {
+		return Bundle{}, err
 	}
 
 	modems := modem.NewRepository(builder.Database, builder.Configuration.Modems.RoutingTableStart, builder.Configuration.Modems.FwmarkStart)

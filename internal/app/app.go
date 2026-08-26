@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	"gateway-vpn/internal/auth"
@@ -35,6 +36,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/tlsbootstrap"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
@@ -64,10 +66,18 @@ type Runtime struct {
 	wireGuardLogger       *slog.Logger
 	retentionInterval     time.Duration
 	retentionBacklogDelay time.Duration
+	reconcileNow          chan struct{}
+	processStartedAt      time.Time
+	lastReconcileUnixNano atomic.Int64
 }
 
 type brokerHostDiagnostics struct {
 	client *networkapply.BrokerClient
+}
+
+type runtimeWorkerExit struct {
+	name string
+	err  error
 }
 
 func (provider brokerHostDiagnostics) Collect(ctx context.Context) (diagnostics.HostSnapshot, error) {
@@ -168,6 +178,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		Database: database, Configuration: configuration, Host: brokerHostDiagnostics{client: networkBroker}, Journal: networkBroker,
 		GatewayVersion: buildinfo.String("gateway-vpn"), ExpectedMihomoVersion: buildinfo.MihomoVersion,
 		TLSFingerprint: tlsResult.Fingerprint, MihomoRoot: filepath.Join(configuration.System.StateDir, "mihomo"),
+		WatchdogStatus: watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
 	}
 	portableBackups, err := backup.NewPortableManager(managedDatabase.Backups, configuration.System.StateDir, configurationPath, buildinfo.String("gateway-vpn"))
 	if err != nil {
@@ -234,6 +245,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		RestoreApply:         networkBroker,
 		Updates:              updates,
 		UpdateApply:          networkBroker,
+		Watchdog:             &watchdog.Repository{Database: database},
+		WatchdogStatus:       watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
 		NetworkCandidate:     networkCandidateBuilder(configuration, database),
 		NetworkInterface:     configuration.Network.LANInterface,
 		NetworkLANAddress:    configuration.Network.LANAddress,
@@ -241,7 +254,19 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+}
+
+// RequestReconcile coalesces fixed SIGHUP requests from the privileged
+// watchdog. It does not accept a component, unit, command or desired state.
+func (application *Runtime) RequestReconcile() {
+	if application == nil || application.reconcileNow == nil {
+		return
+	}
+	select {
+	case application.reconcileNow <- struct{}{}:
+	default:
+	}
 }
 
 func (application *Runtime) Serve(ctx context.Context) error {
@@ -256,45 +281,76 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	application.logger.Info("management TLS ready", "certificate_sha256", application.TLS.Fingerprint)
 	workerContext, stopWorker := context.WithCancel(ctx)
-	workerDone := make(chan error, 8)
+	defer stopWorker()
+	workerDone := make(chan runtimeWorkerExit, 10)
 	workers := 0
-	if application.RefreshWorker != nil {
+	startWorker := func(name string, run func(context.Context) error) {
 		workers++
-		go func() { workerDone <- application.RefreshWorker.Run(workerContext) }()
+		go func() { workerDone <- runtimeWorkerExit{name: name, err: run(workerContext)} }()
+	}
+	if application.RefreshWorker != nil {
+		startWorker("subscription-refresh", application.RefreshWorker.Run)
 	}
 	if application.Reconciler != nil {
-		workers++
-		go func() { workerDone <- application.runReconcileLoop(workerContext) }()
+		startWorker("data-plane-reconcile", application.runReconcileLoop)
 	}
 	if application.ModemRunner != nil {
-		workers++
-		go func() { workerDone <- application.ModemRunner.Run(workerContext) }()
+		startWorker("modem-reconcile", application.ModemRunner.Run)
 	}
 	if application.HealthRunner != nil {
-		workers++
-		go func() { workerDone <- application.HealthRunner.Run(workerContext) }()
+		startWorker("path-health", application.HealthRunner.Run)
 	}
 	if application.Logging != nil {
-		workers++
-		go func() { workerDone <- application.Logging.Run(workerContext) }()
+		startWorker("logging", application.Logging.Run)
 	}
 	if application.LoggingSync != nil {
-		workers++
-		go func() { workerDone <- application.runLoggingSyncLoop(workerContext) }()
+		startWorker("logging-sync", application.runLoggingSyncLoop)
 	}
 	if application.Backups != nil && application.States != nil {
-		workers++
-		go func() { workerDone <- application.runBackupLoop(workerContext) }()
+		startWorker("database-backup", application.runBackupLoop)
 	}
 	if application.Retention != nil {
-		workers++
-		go func() { workerDone <- application.runRetentionLoop(workerContext) }()
+		startWorker("retention", application.runRetentionLoop)
 	}
-	serveErr := ServeHTTPS(ctx, application.Config.API.Listen, application.Config.API.TLSCert, application.Config.API.TLSKey, application.API, application.logger)
+	startWorker("control-heartbeat", application.runWatchdogHeartbeatLoop)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveHTTPS(workerContext, application.Config.API.Listen, application.Config.API.TLSCert, application.Config.API.TLSKey, application.API, application.logger, func() {
+			_ = watchdog.NotifySystemd("READY=1")
+		})
+	}()
+	backgroundErrors := []error{}
+	serveCollected := false
+	remainingWorkers := workers
+	select {
+	case <-ctx.Done():
+	case serveErr := <-serveDone:
+		serveCollected = true
+		if serveErr != nil {
+			backgroundErrors = append(backgroundErrors, serveErr)
+		}
+	case exit := <-workerDone:
+		remainingWorkers--
+		if ctx.Err() == nil {
+			if exit.err == nil {
+				exit.err = errors.New("worker exited without cancellation")
+			}
+			backgroundErrors = append(backgroundErrors, fmt.Errorf("critical runtime worker %s stopped: %w", exit.name, exit.err))
+		}
+	}
 	stopWorker()
-	backgroundErrors := []error{serveErr}
-	for index := 0; index < workers; index++ {
-		backgroundErrors = append(backgroundErrors, <-workerDone)
+	_ = watchdog.NotifySystemd("STOPPING=1")
+	if !serveCollected {
+		if serveErr := <-serveDone; serveErr != nil {
+			backgroundErrors = append(backgroundErrors, serveErr)
+		}
+	}
+	for remainingWorkers > 0 {
+		exit := <-workerDone
+		remainingWorkers--
+		if exit.err != nil && !errors.Is(exit.err, context.Canceled) {
+			backgroundErrors = append(backgroundErrors, fmt.Errorf("runtime worker %s shutdown: %w", exit.name, exit.err))
+		}
 	}
 	return errors.Join(backgroundErrors...)
 }
@@ -351,6 +407,38 @@ func (application *Runtime) runReconcileLoop(ctx context.Context) error {
 		}
 		if _, err := application.Reconciler.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			application.logger.Warn("data-plane reconciliation failed", "error", err)
+		}
+		application.lastReconcileUnixNano.Store(time.Now().UTC().UnixNano())
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		case <-application.reconcileNow:
+		}
+	}
+}
+
+func (application *Runtime) runWatchdogHeartbeatLoop(ctx context.Context) error {
+	file := watchdog.HeartbeatFile{Path: "/run/gateway-vpn-watchdog/control.json"}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		now := time.Now().UTC()
+		pingContext, cancel := context.WithTimeout(ctx, 3*time.Second)
+		databaseOK := application.Database.PingContext(pingContext) == nil
+		cancel()
+		lastReconcileNano := application.lastReconcileUnixNano.Load()
+		workersOK := lastReconcileNano > 0 && now.Sub(time.Unix(0, lastReconcileNano)) <= 90*time.Second
+		if databaseOK && workersOK {
+			heartbeat := watchdog.ControlHeartbeat{
+				SchemaVersion: 1, PID: os.Getpid(), ProcessStartedAt: application.processStartedAt.Format(time.RFC3339Nano),
+				WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true,
+				ReconcileLastAt: time.Unix(0, lastReconcileNano).UTC().Format(time.RFC3339Nano),
+			}
+			if err := file.Write(heartbeat); err != nil && ctx.Err() == nil {
+				application.logger.Warn("publish control watchdog heartbeat failed", "error", err)
+			}
+			_ = watchdog.NotifySystemd("WATCHDOG=1")
 		}
 		select {
 		case <-ctx.Done():

@@ -30,12 +30,62 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 			t.Errorf("boot ruleset contains forbidden %q", forbidden)
 		}
 	}
-	for _, unitName := range []string{"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-broker.socket", "gateway-vpn.service", "gateway-vpn-mihomo.service", "gateway-vpn-dnsmasq.service"} {
+	for _, unitName := range []string{"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service", "gateway-vpn-watchdog.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-broker.socket", "gateway-vpn.service", "gateway-vpn-mihomo.service", "gateway-vpn-dnsmasq.service"} {
 		unit := read(t, filepath.Join(root, "packaging", "systemd", unitName))
 		for _, gate := range []string{"ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active", "ConditionPathExists=|/run/gateway-vpn-install-authorized", "ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active", "ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized"} {
 			if !strings.Contains(unit, gate) {
 				t.Errorf("%s can start during an incomplete install: missing %q", unitName, gate)
 			}
+		}
+	}
+}
+
+func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T) {
+	root := repositoryRoot(t)
+	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-watchdog.service"))
+	for _, required := range []string{
+		"Type=notify", "NotifyAccess=main", "WatchdogSec=10min", "Group=gateway-vpn",
+		"RuntimeDirectory=gateway-vpn-watchdog", "RuntimeDirectoryMode=0770",
+		"gateway-vpn watchdog --config /etc/gateway-vpn/config.yaml --history-root /var/lib/gateway-vpn-privileged/watchdog --status-path /run/gateway-vpn-watchdog/status.json --apply",
+		"Restart=always", "NoNewPrivileges=yes", "ProtectSystem=strict",
+		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_BOOT CAP_DAC_READ_SEARCH",
+		"ReadOnlyPaths=/etc/gateway-vpn /opt/gateway-vpn /var/lib/gateway-vpn",
+		"ReadWritePaths=/var/lib/gateway-vpn-privileged/watchdog /run/gateway-vpn-watchdog",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Errorf("watchdog unit missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/bin/sh", "bash -c", "%i", "EnvironmentFile=", "User=gateway-vpn\n"} {
+		if strings.Contains(unit, forbidden) {
+			t.Errorf("watchdog unit contains unsafe dynamic surface %q", forbidden)
+		}
+	}
+	control := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn.service"))
+	for _, required := range []string{"Type=notify", "WatchdogSec=120s", "Wants=network-online.target gateway-vpn-network-broker.socket gateway-vpn-watchdog.service", "ReadWritePaths=/var/lib/gateway-vpn /run/gateway-vpn-watchdog"} {
+		if !strings.Contains(control, required) {
+			t.Errorf("control hang-detection contract missing %q", required)
+		}
+	}
+	for filename, required := range map[string]string{
+		"gateway-vpn-install-recovery.service":      "Before=network-pre.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service",
+		"gateway-vpn-update-recovery.service":       "gateway-vpn-network-recovery.service gateway-vpn-watchdog.service",
+		"gateway-vpn-database-restore-boot.service": "Before=gateway-vpn-network-recovery.service gateway-vpn-watchdog.service",
+		"gateway-vpn-network-recovery.service":      "Before=gateway-vpn-watchdog.service",
+	} {
+		content := read(t, filepath.Join(root, "packaging", "systemd", filename))
+		if !strings.Contains(content, required) {
+			t.Errorf("%s does not order recovery before watchdog: missing %q", filename, required)
+		}
+	}
+	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
+	if !strings.Contains(tmpfiles, "d /var/lib/gateway-vpn-privileged/watchdog 0700 root root") {
+		t.Fatal("tmpfiles does not create the root-only durable watchdog history root")
+	}
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{"systemctl restart gateway-vpn-watchdog.service", "systemctl is-active --quiet gateway-vpn-watchdog.service", "watchdog_runtime_ready", "/run/gateway-vpn-watchdog/status.json", "/run/gateway-vpn-watchdog/control.json", `"database_ok":true`, `"workers_ok":true`, "status_age <= 660", "control_age <= 30"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("installer watchdog acceptance missing %q", required)
 		}
 	}
 }
@@ -741,7 +791,7 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 		"DefaultDependencies=no",
 		"ConditionPathExists=/var/lib/gateway-vpn/recovery/pending-restore.json",
 		"Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service",
-		"Before=gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service",
+		"Before=gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service",
 		"GATEWAY_VPN_DATABASE_RESTORE_UNIT=1",
 		"RemainAfterExit=yes",
 		"ExecStartPre=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply",
@@ -808,7 +858,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover",
 		"ExecStartPost=/usr/bin/systemctl start --no-block gateway-vpn-network-broker.socket gateway-vpn.service",
 		"update-recover --config /etc/gateway-vpn/config.yaml --apply",
-		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket",
+		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("update recovery unit missing %q", required)

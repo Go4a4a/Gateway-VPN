@@ -37,6 +37,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "network-broker" {
 		return runNetworkBroker(args[1:])
 	}
+	if len(args) > 0 && args[0] == "watchdog" {
+		return runWatchdog(args[1:])
+	}
 	if len(args) > 0 && args[0] == "network-rollback" {
 		return runNetworkRollback(args[1:])
 	}
@@ -93,7 +96,7 @@ func run(args []string) int {
 		}
 		return 1
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|network-rollback|network-recover|database-restore|update-offline-check|update-apply|update-recover|update-finalize|serve]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|watchdog|network-rollback|network-recover|database-restore|update-offline-check|update-apply|update-recover|update-finalize|serve]")
 		fmt.Fprintln(os.Stderr, "no network changes were made")
 		return 2
 	}
@@ -231,6 +234,19 @@ func runServe(args []string) int {
 		return 1
 	}
 	defer runtime.Close()
+	reconcileSignal := make(chan os.Signal, 1)
+	signal.Notify(reconcileSignal, syscall.SIGHUP)
+	defer signal.Stop(reconcileSignal)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reconcileSignal:
+				runtime.RequestReconcile()
+			}
+		}
+	}()
 	if err := runtime.Serve(ctx); err != nil {
 		systemLogger.Error("Gateway VPN runtime stopped", "error", err)
 		return 1

@@ -10,14 +10,19 @@ import (
 	"time"
 
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/watchdog"
 )
 
 const (
-	controlUnit = "gateway-vpn.service"
-	brokerUnit  = "gateway-vpn-network-broker.socket"
-	mihomoUnit  = "gateway-vpn-mihomo.service"
-	dnsmasqUnit = "gateway-vpn-dnsmasq.service"
-	guardUnit   = "gateway-vpn-firewall-guard.service"
+	controlUnit  = "gateway-vpn.service"
+	brokerUnit   = "gateway-vpn-network-broker.socket"
+	mihomoUnit   = "gateway-vpn-mihomo.service"
+	dnsmasqUnit  = "gateway-vpn-dnsmasq.service"
+	guardUnit    = "gateway-vpn-firewall-guard.service"
+	watchdogUnit = "gateway-vpn-watchdog.service"
+
+	watchdogStatusPath   = "/run/gateway-vpn-watchdog/status.json"
+	controlHeartbeatPath = "/run/gateway-vpn-watchdog/control.json"
 )
 
 type SystemRuntime struct {
@@ -96,6 +101,9 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 	if runtime.RecoveryOnly {
 		return runtime.checkVersionAndState(ctx, expectedVersion, databasePath)
 	}
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: []string{"restart", watchdogUnit}, MaxOutputBytes: 64 << 10}); err != nil {
+		return fmt.Errorf("restart switched Gateway VPN watchdog: %w", err)
+	}
 	units := []string{brokerUnit, controlUnit}
 	if previous.MihomoActive {
 		units = append(units, mihomoUnit)
@@ -106,7 +114,7 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: append([]string{"start"}, units...), MaxOutputBytes: 64 << 10}); err != nil {
 		return fmt.Errorf("start switched Gateway VPN services: %w", err)
 	}
-	required := []string{guardUnit, brokerUnit, controlUnit}
+	required := []string{guardUnit, watchdogUnit, brokerUnit, controlUnit}
 	if previous.MihomoActive {
 		required = append(required, mihomoUnit)
 	}
@@ -131,7 +139,9 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 			}
 		}
 		if allActive {
-			if err := runtime.checkVersionAndState(ctx, expectedVersion, databasePath); err == nil {
+			versionErr := runtime.checkVersionAndState(ctx, expectedVersion, databasePath)
+			watchdogErr := checkWatchdogRuntimeFiles(watchdogStatusPath, controlHeartbeatPath, time.Now().UTC())
+			if versionErr == nil && watchdogErr == nil {
 				consecutive++
 				if consecutive == 3 {
 					return nil
@@ -153,6 +163,17 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 		case <-timer.C:
 		}
 	}
+}
+
+func checkWatchdogRuntimeFiles(statusPath, heartbeatPath string, now time.Time) error {
+	status, err := (watchdog.StatusFile{Path: statusPath}).Read()
+	if err != nil || status.ValidateFresh(now, 2*time.Minute) != nil {
+		return errors.New("switched Gateway watchdog status is unavailable or stale")
+	}
+	if _, err := (watchdog.HeartbeatFile{Path: heartbeatPath}).Read(now, 30*time.Second); err != nil {
+		return errors.New("switched Gateway control heartbeat is unavailable or stale")
+	}
+	return nil
 }
 
 func (runtime SystemRuntime) checkVersionAndState(ctx context.Context, expectedVersion, databasePath string) error {

@@ -20,6 +20,26 @@ usage() {
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
+watchdog_runtime_ready() {
+  local now status_mtime control_mtime status_age control_age
+  [[ -f /run/gateway-vpn-watchdog/status.json && ! -L /run/gateway-vpn-watchdog/status.json ]] || return 1
+  [[ -f /run/gateway-vpn-watchdog/control.json && ! -L /run/gateway-vpn-watchdog/control.json ]] || return 1
+  [[ $(stat -c '%U:%G:%a' /run/gateway-vpn-watchdog/status.json) == "root:gateway-vpn:640" ]] || return 1
+  [[ $(stat -c '%U:%G:%a' /run/gateway-vpn-watchdog/control.json) == "gateway-vpn:gateway-vpn:640" ]] || return 1
+  now=$(date +%s)
+  status_mtime=$(stat -c '%Y' /run/gateway-vpn-watchdog/status.json)
+  control_mtime=$(stat -c '%Y' /run/gateway-vpn-watchdog/control.json)
+  [[ "$now" =~ ^[0-9]+$ && "$status_mtime" =~ ^[0-9]+$ && "$control_mtime" =~ ^[0-9]+$ ]] || return 1
+  status_age=$((now - status_mtime))
+  control_age=$((now - control_mtime))
+  ((status_age >= -5 && status_age <= 660 && control_age >= -5 && control_age <= 30)) || return 1
+  grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/status.json || return 1
+  grep -Fq '"policy_source":' /run/gateway-vpn-watchdog/status.json || return 1
+  grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/control.json || return 1
+  grep -Fq '"database_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
+  grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
+}
+
 while (($#)); do
   case "$1" in
     --release-dir) RELEASE_DIR=${2:?}; shift 2 ;;
@@ -293,7 +313,7 @@ else
     /opt/gateway-vpn/current /opt/gateway-vpn/recovery /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf \
     /etc/systemd/network/70-gateway-vpn-lan.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /var/lib/gateway-vpn-dnsmasq \
-    /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-firewall.service \
+    /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
     /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service \
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
@@ -319,12 +339,14 @@ if ((EXISTING)); then
   fi
   systemctl is-active --quiet gateway-vpn-firewall.service
   systemctl is-active --quiet gateway-vpn-firewall-guard.service
+  systemctl is-active --quiet gateway-vpn-watchdog.service
   systemctl is-active --quiet gateway-vpn-network-broker.socket
   systemctl is-active --quiet gateway-vpn-network-broker.service
   systemctl is-active --quiet gateway-vpn.service
   systemctl is-enabled --quiet gateway-vpn-update-finalize.timer
   systemctl is-active --quiet gateway-vpn-update-finalize.timer
   [[ -S /run/gateway-vpn/network-broker.sock ]]
+  watchdog_runtime_ready
   if ((ENABLE_DHCP)); then
     systemctl is-active --quiet gateway-vpn-dnsmasq.service
   fi
@@ -424,7 +446,7 @@ fi
 grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { echo "Generated Gateway runtime LAN interface verification failed" >&2; exit 1; }
 "$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml
 
-for unit in gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
+for unit in gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service \
   gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
@@ -440,13 +462,14 @@ chmod 0600 /run/gateway-vpn-install-authorized
 [[ -f /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-install-authorized) == "0:0:600" ]] || { echo "Ephemeral Gateway service-start authorization is unsafe" >&2; exit 1; }
 systemctl daemon-reload
 systemctl try-restart systemd-journald@gateway-vpn.service
-systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
+systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
 systemctl enable --now gateway-vpn-update-finalize.timer
 systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service
 systemctl restart gateway-vpn-update-recovery.service
 systemctl restart gateway-vpn-network-recovery.service
 systemctl restart gateway-vpn-network-broker.socket
+systemctl restart gateway-vpn-watchdog.service
 systemctl restart gateway-vpn.service
 
 if ((ENABLE_DHCP)); then
@@ -467,11 +490,13 @@ GATEWAY_RUNTIME_READY=0
 for _ in {1..20}; do
   if systemctl is-active --quiet gateway-vpn-firewall.service &&
      systemctl is-active --quiet gateway-vpn-firewall-guard.service &&
+     systemctl is-active --quiet gateway-vpn-watchdog.service &&
      systemctl is-active --quiet gateway-vpn-network-broker.socket &&
      systemctl is-active --quiet gateway-vpn-network-broker.service &&
      systemctl is-active --quiet gateway-vpn.service &&
      systemctl is-active --quiet gateway-vpn-update-finalize.timer &&
      [[ -S /run/gateway-vpn/network-broker.sock ]] &&
+     watchdog_runtime_ready &&
      nft list table inet gateway_vpn >/dev/null 2>&1 &&
      [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] &&
      ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}' | grep -Fxq "$LAN_ADDRESS" &&

@@ -134,6 +134,19 @@ func TestOrchestratorReachesReadyWithoutTransportingPrivateKeys(t *testing.T) {
 	}
 }
 
+func TestGatewayBaseReadinessIncludesBoundedWatchdog(t *testing.T) {
+	command := gatewayBaseReadinessCommand("192.168.200.1/24")
+	for _, required := range []string{
+		"systemctl is-active --quiet gateway-vpn-watchdog.service",
+		"/run/gateway-vpn-watchdog/status.json",
+		"/run/gateway-vpn-watchdog/control.json",
+	} {
+		if !strings.Contains(command, required) {
+			t.Errorf("Gateway readiness command missing %q", required)
+		}
+	}
+}
+
 func TestOrchestratorRunsBothRolePreflightsBeforeReturningFailure(t *testing.T) {
 	executor := &fakeRemoteExecutor{now: time.Now(), failContains: "install-gateway"}
 	report, err := (Orchestrator{Executor: executor, Sleep: func(context.Context, time.Duration) error { return nil }}).Run(context.Background(), validDeployRequest(t))

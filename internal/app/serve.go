@@ -19,6 +19,10 @@ type listenerExit struct {
 }
 
 func ServeHTTPS(ctx context.Context, addresses []string, certPath, keyPath string, handler http.Handler, logger *slog.Logger) error {
+	return serveHTTPS(ctx, addresses, certPath, keyPath, handler, logger, nil)
+}
+
+func serveHTTPS(ctx context.Context, addresses []string, certPath, keyPath string, handler http.Handler, logger *slog.Logger, ready func()) error {
 	if len(addresses) == 0 || handler == nil {
 		return errors.New("HTTPS addresses and handler are required")
 	}
@@ -60,6 +64,9 @@ func ServeHTTPS(ctx context.Context, addresses []string, certPath, keyPath strin
 	}
 	if err := start(addresses[0], true); err != nil {
 		return fmt.Errorf("bind required LAN management address %s: %w", addresses[0], err)
+	}
+	if ready != nil {
+		ready()
 	}
 	for _, address := range addresses[1:] {
 		if err := start(address, false); err != nil {

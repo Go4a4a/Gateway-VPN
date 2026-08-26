@@ -4,7 +4,7 @@ Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
 DefaultDependencies=no
 After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
 Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn.service
+Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn.service
 
 [Service]
 LogNamespace=gateway-vpn

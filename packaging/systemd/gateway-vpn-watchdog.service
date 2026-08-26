@@ -1,0 +1,54 @@
+[Unit]
+Description=Gateway VPN bounded self-health supervisor
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service
+Wants=gateway-vpn-firewall-guard.service gateway-vpn-database-restore-boot.service
+Requires=gateway-vpn-firewall.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service
+Before=gateway-vpn.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+ConditionPathExists=/etc/gateway-vpn/config.yaml
+ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-privileged/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
+
+[Service]
+LogNamespace=gateway-vpn
+Type=notify
+NotifyAccess=main
+Group=gateway-vpn
+UMask=0027
+RuntimeDirectory=gateway-vpn-watchdog
+RuntimeDirectoryMode=0770
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn watchdog --config /etc/gateway-vpn/config.yaml --history-root /var/lib/gateway-vpn-privileged/watchdog --status-path /run/gateway-vpn-watchdog/status.json --apply
+Restart=always
+RestartSec=5s
+WatchdogSec=10min
+TimeoutStartSec=60s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_BOOT CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_BOOT CAP_DAC_READ_SEARCH
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/gateway-vpn /opt/gateway-vpn /var/lib/gateway-vpn
+ReadWritePaths=/var/lib/gateway-vpn-privileged/watchdog /run/gateway-vpn-watchdog
+
+[Install]
+WantedBy=multi-user.target

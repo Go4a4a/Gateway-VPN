@@ -54,7 +54,7 @@ func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testi
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 11 {
+	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 12 {
 		t.Fatalf("recovery result = %+v", result)
 	}
 	preserved, err := os.ReadFile(filepath.Join(stateDirectory, "recovery", "quarantine", result.QuarantineID, "state.db"))
@@ -156,7 +156,7 @@ func TestOpenManagedCreatesFreshSchemaWithoutPretendingItWasRecovery(t *testing.
 		t.Fatalf("fresh managed recovery = %+v", managed.Recovery)
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 11 {
+	if err != nil || version != 12 {
 		t.Fatalf("managed schema = %d, %v", version, err)
 	}
 	if err := databasepkg.IntegrityCheck(ctx, managed.Database); err != nil {
@@ -181,12 +181,12 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		database.Close()
 		t.Fatal(err)
 	}
-	if _, err := transaction.ExecContext(ctx, "DROP INDEX users_username_nocase"); err != nil {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM settings WHERE key='watchdog'"); err != nil {
 		transaction.Rollback()
 		database.Close()
 		t.Fatal(err)
 	}
-	if _, err := transaction.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=11"); err != nil {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=12"); err != nil {
 		transaction.Rollback()
 		database.Close()
 		t.Fatal(err)
@@ -206,11 +206,11 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal("pre-migration snapshot id is empty")
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 11 {
+	if err != nil || version != 12 {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	items, err := managed.Backups.List(ctx, true)
-	if err != nil || len(items) != 1 || items[0].Manifest.Kind != KindPreMigration || items[0].Manifest.SchemaVersion != 10 {
+	if err != nil || len(items) != 1 || items[0].Manifest.Kind != KindPreMigration || items[0].Manifest.SchemaVersion != 11 {
 		t.Fatalf("pre-migration snapshots = %+v, %v", items, err)
 	}
 	var audit int

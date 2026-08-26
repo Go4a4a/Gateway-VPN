@@ -153,6 +153,12 @@ paths:
       operationId: getRuntimeMetrics
       summary: Получить secret-free process metrics для endurance-наблюдения
       responses: {'200': {$ref: '#/components/responses/RuntimeMetrics'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/watchdog:
+    get:
+      tags: [System]
+      operationId: getWatchdogStatus
+      summary: Получить secret-free component health, recovery history и suppression state
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/gateway/reconcile:
     post:
       tags: [Gateway]
@@ -526,6 +532,19 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/watchdog:
+    get:
+      tags: [System]
+      operationId: getWatchdogSettings
+      summary: Получить bounded policy самоконтроля и её неизменяемые safety invariants
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [System]
+      operationId: updateWatchdogSettings
+      summary: Изменить audited bounded recovery policy без сброса durable budgets
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/WatchdogPolicyUpdate'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/logs:
     get:
       tags: [Logging]
@@ -841,6 +860,12 @@ components:
             required: [release]
             properties:
               release: {type: string, format: binary}
+    WatchdogPolicyUpdate:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WatchdogPolicyUpdate'
   responses:
     JSON:
       description: Успешный JSON response соответствующего read model.
@@ -977,6 +1002,37 @@ components:
         gc_pause_total_nanoseconds: {type: integer, minimum: 0}
         process_rss_bytes: {type: integer, minimum: 0}
         open_file_descriptors: {type: integer, minimum: 0}
+    WatchdogPolicyUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - check_interval_seconds
+        - failure_threshold
+        - success_threshold
+        - reconcile_enabled
+        - component_restart_enabled
+        - restart_cooldown_seconds
+        - max_restarts_per_component
+        - restart_window_seconds
+        - host_reboot_enabled
+        - reboot_after_critical_seconds
+        - max_reboots_per_24h
+        - reboot_grace_seconds
+      properties:
+        enabled: {type: boolean}
+        check_interval_seconds: {type: integer, minimum: 5, maximum: 300}
+        failure_threshold: {type: integer, minimum: 1, maximum: 10}
+        success_threshold: {type: integer, minimum: 1, maximum: 10}
+        reconcile_enabled: {type: boolean}
+        component_restart_enabled: {type: boolean}
+        restart_cooldown_seconds: {type: integer, minimum: 5, maximum: 3600}
+        max_restarts_per_component: {type: integer, minimum: 1, maximum: 20}
+        restart_window_seconds: {type: integer, minimum: 60, maximum: 86400}
+        host_reboot_enabled: {type: boolean, default: false}
+        reboot_after_critical_seconds: {type: integer, minimum: 300, maximum: 86400}
+        max_reboots_per_24h: {type: integer, minimum: 1, maximum: 3}
+        reboot_grace_seconds: {type: integer, minimum: 10, maximum: 600}
     Error:
       type: object
       additionalProperties: false

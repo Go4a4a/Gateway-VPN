@@ -44,7 +44,7 @@ record_failure() {
 }
 
 UNITS=(
-  gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
+  gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer
   gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service
   gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service
@@ -87,7 +87,7 @@ rm -rf /etc/gateway-vpn || record_failure "remove owned Gateway config"
 rm -f /opt/gateway-vpn/current /opt/gateway-vpn/recovery /opt/gateway-vpn/.current.new /opt/gateway-vpn/.recovery.new || record_failure "remove release pointers"
 rm -rf "/opt/gateway-vpn/releases/v$VERSION" || record_failure "remove failed release"
 for unit_file in \
-  gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
+  gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service \
   gateway-vpn-database-restore-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service \

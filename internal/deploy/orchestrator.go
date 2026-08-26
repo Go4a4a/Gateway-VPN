@@ -458,7 +458,7 @@ func gatewayFinalizeKeyCommand(endpoint, peerPublicKey string) string {
 func gatewayBaseReadinessCommand(lanAddress string) string {
 	prefix, _ := netip.ParsePrefix(lanAddress)
 	url := "https://" + prefix.Addr().String() + ":8443/"
-	return "sudo -n -- /usr/bin/test -f /var/lib/gateway-vpn/secrets/wireguard.yaml && sudo -n -- /usr/bin/systemctl is-active --quiet gateway-vpn.service && sudo -n -- /usr/bin/systemctl is-active --quiet gateway-vpn-firewall.service && sudo -n -- /usr/sbin/nft list table inet gateway_vpn >/dev/null && if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --insecure --max-time 5 " + url + " >/dev/null; else wget --quiet --no-check-certificate --timeout=5 --spider " + url + "; fi"
+	return "sudo -n -- /usr/bin/test -f /var/lib/gateway-vpn/secrets/wireguard.yaml && sudo -n -- /usr/bin/systemctl is-active --quiet gateway-vpn.service && sudo -n -- /usr/bin/systemctl is-active --quiet gateway-vpn-watchdog.service && sudo -n -- /usr/bin/test -f /run/gateway-vpn-watchdog/status.json && sudo -n -- /usr/bin/test -f /run/gateway-vpn-watchdog/control.json && sudo -n -- /usr/bin/systemctl is-active --quiet gateway-vpn-firewall.service && sudo -n -- /usr/sbin/nft list table inet gateway_vpn >/dev/null && if command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --insecure --max-time 5 " + url + " >/dev/null; else wget --quiet --no-check-certificate --timeout=5 --spider " + url + "; fi"
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

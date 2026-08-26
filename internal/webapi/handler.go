@@ -46,6 +46,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/watchdog"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -94,7 +95,13 @@ type Dependencies struct {
 	RestoreApply            RestoreApplyTrigger
 	Updates                 UpdateStager
 	UpdateApply             UpdateApplyTrigger
+	Watchdog                *watchdog.Repository
+	WatchdogStatus          WatchdogStatusReader
 	Now                     func() time.Time
+}
+
+type WatchdogStatusReader interface {
+	Read() (watchdog.Status, error)
 }
 
 type ProbeBudgetReader interface {
@@ -276,6 +283,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/health/periodic", server.protected(http.HandlerFunc(server.periodicHealth)))
 	mux.Handle("GET /api/v1/settings/logging", server.protected(http.HandlerFunc(server.loggingSettings)))
 	mux.Handle("PUT /api/v1/settings/logging", server.protected(http.HandlerFunc(server.updateLoggingSettings)))
+	mux.Handle("GET /api/v1/settings/watchdog", server.protected(http.HandlerFunc(server.watchdogSettings)))
+	mux.Handle("PUT /api/v1/settings/watchdog", server.protected(http.HandlerFunc(server.updateWatchdogSettings)))
+	mux.Handle("GET /api/v1/system/watchdog", server.protected(http.HandlerFunc(server.watchdogStatus)))
 	mux.Handle("GET /api/v1/logs", server.protected(http.HandlerFunc(server.logs)))
 	mux.Handle("POST /api/v1/system/diagnostics", server.protected(http.HandlerFunc(server.downloadDiagnostics)))
 	mux.Handle("GET /api/v1/system/backups", server.protected(http.HandlerFunc(server.backupInventory)))
@@ -1967,6 +1977,75 @@ func (server *Server) loggingSettings(writer http.ResponseWriter, request *http.
 	server.writeLoggingSettings(writer, request.Context(), server.dependencies.Logging.Snapshot(), "NOT_REQUESTED")
 }
 
+func (server *Server) watchdogSettings(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Watchdog == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Настройки самоконтроля не подключены")
+		return
+	}
+	policy, err := server.dependencies.Watchdog.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"policy": policy,
+		"limits": map[string]int{
+			"check_interval_seconds_min":        watchdog.MinimumCheckIntervalSeconds,
+			"check_interval_seconds_max":        watchdog.MaximumCheckIntervalSeconds,
+			"failure_threshold_min":             watchdog.MinimumFailureThreshold,
+			"failure_threshold_max":             watchdog.MaximumFailureThreshold,
+			"success_threshold_min":             watchdog.MinimumSuccessThreshold,
+			"success_threshold_max":             watchdog.MaximumSuccessThreshold,
+			"restart_cooldown_seconds_min":      watchdog.MinimumRestartCooldown,
+			"restart_cooldown_seconds_max":      watchdog.MaximumRestartCooldown,
+			"max_restarts_per_component_min":    watchdog.MinimumRestartBudget,
+			"max_restarts_per_component_max":    watchdog.MaximumRestartBudget,
+			"restart_window_seconds_min":        watchdog.MinimumRestartWindow,
+			"restart_window_seconds_max":        watchdog.MaximumRestartWindow,
+			"reboot_after_critical_seconds_min": watchdog.MinimumRebootCritical,
+			"reboot_after_critical_seconds_max": watchdog.MaximumRebootCritical,
+			"max_reboots_per_24h_min":           watchdog.MinimumRebootBudget,
+			"max_reboots_per_24h_max":           watchdog.MaximumRebootBudget,
+			"reboot_grace_seconds_min":          watchdog.MinimumRebootGrace,
+			"reboot_grace_seconds_max":          watchdog.MaximumRebootGrace,
+		},
+		"invariants": map[string]any{
+			"host_reboot_default":             false,
+			"external_outage_can_reboot":      false,
+			"arbitrary_units_or_commands":     false,
+			"firewall_guard_disableable":      false,
+			"durable_budgets_reset_on_update": false,
+		},
+	})
+}
+
+func (server *Server) watchdogStatus(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Watchdog == nil || server.dependencies.WatchdogStatus == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Самоконтроль не подключён")
+		return
+	}
+	policy, err := server.dependencies.Watchdog.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	status, err := server.dependencies.WatchdogStatus.Read()
+	if err == nil {
+		err = status.ValidateFresh(server.now(), watchdog.MaximumStatusAge(policy))
+	}
+	if err != nil {
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"runtime_state": "UNAVAILABLE", "error_code": "WATCHDOG_STATUS_UNAVAILABLE",
+			"effective_policy": policy, "components": []watchdog.ComponentStatus{},
+		})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"runtime_state": "AVAILABLE", "effective_policy": policy,
+		"status": status, "components": status.Components,
+	})
+}
+
 func (server *Server) diagnosticDescription(writer http.ResponseWriter, request *http.Request) {
 	if server.dependencies.Diagnostics == nil {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Диагностический архив не подключён")
@@ -2630,6 +2709,46 @@ func (server *Server) updateLoggingSettings(writer http.ResponseWriter, request 
 		}
 	}
 	server.writeLoggingSettings(writer, request.Context(), settings, syncState)
+}
+
+func (server *Server) updateWatchdogSettings(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Watchdog == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Настройки самоконтроля не подключены")
+		return
+	}
+	var input struct {
+		Enabled                    bool `json:"enabled"`
+		CheckIntervalSeconds       int  `json:"check_interval_seconds"`
+		FailureThreshold           int  `json:"failure_threshold"`
+		SuccessThreshold           int  `json:"success_threshold"`
+		ReconcileEnabled           bool `json:"reconcile_enabled"`
+		ComponentRestartEnabled    bool `json:"component_restart_enabled"`
+		RestartCooldownSeconds     int  `json:"restart_cooldown_seconds"`
+		MaxRestartsPerComponent    int  `json:"max_restarts_per_component"`
+		RestartWindowSeconds       int  `json:"restart_window_seconds"`
+		HostRebootEnabled          bool `json:"host_reboot_enabled"`
+		RebootAfterCriticalSeconds int  `json:"reboot_after_critical_seconds"`
+		MaxRebootsPer24h           int  `json:"max_reboots_per_24h"`
+		RebootGraceSeconds         int  `json:"reboot_grace_seconds"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	policy, err := server.dependencies.Watchdog.Update(request.Context(), watchdog.UpdateInput{
+		Enabled: input.Enabled, CheckIntervalSeconds: input.CheckIntervalSeconds,
+		FailureThreshold: input.FailureThreshold, SuccessThreshold: input.SuccessThreshold,
+		ReconcileEnabled: input.ReconcileEnabled, ComponentRestartEnabled: input.ComponentRestartEnabled,
+		RestartCooldownSeconds:  input.RestartCooldownSeconds,
+		MaxRestartsPerComponent: input.MaxRestartsPerComponent, RestartWindowSeconds: input.RestartWindowSeconds,
+		HostRebootEnabled: input.HostRebootEnabled, RebootAfterCriticalSeconds: input.RebootAfterCriticalSeconds,
+		MaxRebootsPer24h: input.MaxRebootsPer24h, RebootGraceSeconds: input.RebootGraceSeconds,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"policy": policy, "durable_budgets_reset": false})
 }
 
 func (server *Server) writeLoggingSettings(writer http.ResponseWriter, ctx context.Context, settings loggingpkg.Settings, syncRequestState string) {

@@ -2,7 +2,7 @@
 Description=Recover interrupted Gateway VPN first installation
 DefaultDependencies=no
 After=local-fs.target
-Before=network-pre.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
+Before=network-pre.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
 
 [Service]
 Type=oneshot

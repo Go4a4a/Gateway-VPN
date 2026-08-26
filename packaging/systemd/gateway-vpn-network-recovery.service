@@ -5,7 +5,7 @@ DefaultDependencies=no
 After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-database-restore-boot.service
 Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
 Wants=gateway-vpn-database-restore-boot.service
-Before=gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service
+Before=gateway-vpn-watchdog.service gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service
 ConditionPathExists=/etc/gateway-vpn/config.yaml
 
 [Service]

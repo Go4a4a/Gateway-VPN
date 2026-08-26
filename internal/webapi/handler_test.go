@@ -39,6 +39,7 @@ import (
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/watchdog"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -494,6 +495,86 @@ func TestLoggingSettingsAPIAppliesDynamicLevelsTTLAndAudit(t *testing.T) {
 	server.ServeHTTP(invalidResponse, invalidRequest)
 	if invalidResponse.Code != http.StatusBadRequest || !strings.Contains(invalidResponse.Body.String(), "temporary") && !strings.Contains(invalidResponse.Body.String(), "global logging level") {
 		t.Fatalf("permanent debug response = %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
+type fakeWatchdogStatusReader struct {
+	status watchdog.Status
+	err    error
+}
+
+func (reader fakeWatchdogStatusReader) Read() (watchdog.Status, error) {
+	return reader.status, reader.err
+}
+
+func TestWatchdogAPIUsesBoundedAuditedPolicyAndSecretFreeStatus(t *testing.T) {
+	server, ctx := testServer(t)
+	clock := time.Date(2026, 8, 26, 20, 0, 0, 0, time.UTC)
+	server.dependencies.Now = func() time.Time { return clock }
+	server.dependencies.Watchdog = &watchdog.Repository{Database: server.dependencies.Database, Now: func() time.Time { return clock }}
+	server.dependencies.WatchdogStatus = fakeWatchdogStatusReader{status: watchdog.Status{
+		SchemaVersion: 1, SupervisorStartedAt: clock.Add(-time.Hour).Format(time.RFC3339Nano),
+		ObservedAt: clock.Format(time.RFC3339Nano), OverallState: watchdog.OverallHealthy,
+		ConnectivityState: "UNAVAILABLE", ConnectivityClass: watchdog.ClassificationExternal,
+		PolicySource: "SQLITE", Components: []watchdog.ComponentStatus{{ID: watchdog.ComponentControl, Label: "Control plane", State: watchdog.ComponentHealthy, Applicable: true}},
+	}}
+	cookie, csrf := login(t, server)
+
+	get := httptest.NewRequest(http.MethodGet, "/api/v1/settings/watchdog", nil)
+	get.AddCookie(cookie)
+	getResponse := httptest.NewRecorder()
+	server.ServeHTTP(getResponse, get)
+	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"host_reboot_enabled":false`) || !strings.Contains(getResponse.Body.String(), `"external_outage_can_reboot":false`) || !strings.Contains(getResponse.Body.String(), `"arbitrary_units_or_commands":false`) {
+		t.Fatalf("get watchdog settings = %d %s", getResponse.Code, getResponse.Body.String())
+	}
+
+	payload := `{"enabled":true,"check_interval_seconds":20,"failure_threshold":4,"success_threshold":2,"reconcile_enabled":true,"component_restart_enabled":true,"restart_cooldown_seconds":45,"max_restarts_per_component":4,"restart_window_seconds":1200,"host_reboot_enabled":true,"reboot_after_critical_seconds":1200,"max_reboots_per_24h":1,"reboot_grace_seconds":90}`
+	withoutCSRF := httptest.NewRequest(http.MethodPut, "/api/v1/settings/watchdog", strings.NewReader(payload))
+	withoutCSRF.AddCookie(cookie)
+	withoutCSRFResponse := httptest.NewRecorder()
+	server.ServeHTTP(withoutCSRFResponse, withoutCSRF)
+	if withoutCSRFResponse.Code != http.StatusForbidden {
+		t.Fatalf("watchdog PUT without CSRF = %d", withoutCSRFResponse.Code)
+	}
+	update := httptest.NewRequest(http.MethodPut, "/api/v1/settings/watchdog", strings.NewReader(payload))
+	update.AddCookie(cookie)
+	update.Header.Set("X-CSRF-Token", csrf)
+	updateResponse := httptest.NewRecorder()
+	server.ServeHTTP(updateResponse, update)
+	if updateResponse.Code != http.StatusOK || !strings.Contains(updateResponse.Body.String(), `"host_reboot_enabled":true`) || !strings.Contains(updateResponse.Body.String(), `"durable_budgets_reset":false`) {
+		t.Fatalf("update watchdog settings = %d %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	var auditCount int
+	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='WATCHDOG_SETTINGS_CHANGED' AND severity='INFO'").Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("watchdog settings audit = %d, %v", auditCount, err)
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/watchdog", nil)
+	statusRequest.AddCookie(cookie)
+	statusResponse := httptest.NewRecorder()
+	server.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"runtime_state":"AVAILABLE"`) || !strings.Contains(statusResponse.Body.String(), `"connectivity_class":"EXTERNAL_CONNECTIVITY_FAILURE"`) {
+		t.Fatalf("watchdog status = %d %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	server.dependencies.WatchdogStatus = fakeWatchdogStatusReader{status: watchdog.Status{
+		SchemaVersion: 1, SupervisorStartedAt: clock.Add(-2 * time.Hour).Format(time.RFC3339Nano),
+		ObservedAt: clock.Add(-time.Hour).Format(time.RFC3339Nano), OverallState: watchdog.OverallHealthy,
+	}}
+	staleRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/watchdog", nil)
+	staleRequest.AddCookie(cookie)
+	staleResponse := httptest.NewRecorder()
+	server.ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code != http.StatusOK || !strings.Contains(staleResponse.Body.String(), `"runtime_state":"UNAVAILABLE"`) || !strings.Contains(staleResponse.Body.String(), `"error_code":"WATCHDOG_STATUS_UNAVAILABLE"`) {
+		t.Fatalf("stale watchdog status = %d %s", staleResponse.Code, staleResponse.Body.String())
+	}
+
+	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/watchdog", strings.NewReader(strings.TrimSuffix(payload, "}")+`,"unit":"ssh.service"}`))
+	invalid.AddCookie(cookie)
+	invalid.Header.Set("X-CSRF-Token", csrf)
+	invalidResponse := httptest.NewRecorder()
+	server.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("watchdog arbitrary unit field accepted = %d %s", invalidResponse.Code, invalidResponse.Body.String())
 	}
 }
 

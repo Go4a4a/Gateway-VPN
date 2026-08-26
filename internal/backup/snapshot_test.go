@@ -24,7 +24,7 @@ func TestOnlineSnapshotIsStandaloneVerifiedAndDailyIsIdempotent(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("EnsureDaily() = %+v, %v, %v", snapshot, created, err)
 	}
-	if snapshot.Manifest.Kind != KindDaily || snapshot.Manifest.SchemaVersion != 11 || snapshot.Manifest.Database.Bytes <= 0 || snapshot.Manifest.Database.SHA256 == "" {
+	if snapshot.Manifest.Kind != KindDaily || snapshot.Manifest.SchemaVersion != 12 || snapshot.Manifest.Database.Bytes <= 0 || snapshot.Manifest.Database.SHA256 == "" {
 		t.Fatalf("snapshot manifest = %+v", snapshot.Manifest)
 	}
 	if _, err := os.Stat(filepath.Join(snapshot.Path, "state.db-wal")); !errors.Is(err, os.ErrNotExist) {
