@@ -27,6 +27,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "release-sign" {
 		return runReleaseSign(args[1:])
 	}
+	if len(args) > 0 && args[0] == "release-host-contract" {
+		return runReleaseHostContract(args[1:])
+	}
 	if len(args) > 0 && args[0] == "release-verify" {
 		return runReleaseVerify(args[1:])
 	}
@@ -74,7 +77,7 @@ func run(args []string) int {
 		return 0
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|release-keygen|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
+	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|release-keygen|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
 	return 2
 }
 

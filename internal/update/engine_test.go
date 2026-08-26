@@ -44,6 +44,9 @@ func TestUpdateEngineAppliesSignedCandidateAndFinalizesAfterWindow(t *testing.T)
 	if _, err := os.Stat(filepath.Join(fixture.releaseRoot, "releases", "v1.1.0", ReleaseFilename)); err != nil {
 		t.Fatalf("previous release was not retained: %v", err)
 	}
+	if target := readReleaseTarget(t, fixture.releaseRoot, "recovery"); target != "releases/v1.2.0" {
+		t.Fatalf("recovery target after finalization = %q", target)
+	}
 }
 
 func TestUpdateEngineHealthFailureRestoresOldBinaryAndSnapshot(t *testing.T) {
@@ -201,6 +204,26 @@ func TestUpdateFinalizeChecksHealthBeforeStabilityDeadline(t *testing.T) {
 	}
 }
 
+func TestUpdateFinalizeIsSuccessfulNoopWithoutPendingTransaction(t *testing.T) {
+	fixture := newEngineFixture(t)
+	journal, err := fixture.engine.Finalize(context.Background())
+	if !errors.Is(err, ErrNoFinalizationPending) || journal.UpdateID != "" {
+		t.Fatalf("Finalize() without transaction = %+v,%v", journal, err)
+	}
+}
+
+func TestUpdateFinalizeIsSuccessfulNoopAfterRollback(t *testing.T) {
+	fixture := newEngineFixture(t)
+	fixture.runtime.failVersion = "1.2.0"
+	if _, err := fixture.engine.Apply(context.Background(), fixture.operation.UpdateID); err == nil {
+		t.Fatal("candidate health failure unexpectedly succeeded")
+	}
+	journal, err := fixture.engine.Finalize(context.Background())
+	if !errors.Is(err, ErrNoFinalizationPending) || journal.State != StateRolledBack {
+		t.Fatalf("Finalize() after rollback = %+v,%v", journal, err)
+	}
+}
+
 func TestUpdateJournalUsesRedundantCopyAndRejectsChecksumWhenBothAreCorrupt(t *testing.T) {
 	root := t.TempDir()
 	store := JournalStore{Root: root}
@@ -324,6 +347,11 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	keyPath := writePublicKeyFixture(t, stateDir, publicKey)
 	policy := fixturePolicy(publicKey)
 	policy.CurrentSchemaVersion = 13
+	newReleaseMetadata, err := ReadReleaseMetadata(newRelease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.CurrentHostContractSHA256 = newReleaseMetadata.HostContractSHA256
 	stager, err := NewStager(stateDir, keyPath, policy)
 	if err != nil {
 		t.Fatal(err)
@@ -342,6 +370,15 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	}
 	if err := copyExclusiveFile(filepath.Join(oldFixture, ReleaseFilename), filepath.Join(oldRoot, ReleaseFilename), 0o644, MaximumReleaseBytes); err != nil {
 		t.Fatal(err)
+	}
+	for _, relative := range requiredHostContractFiles {
+		destination := filepath.Join(oldRoot, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyExclusiveFile(filepath.Join(oldFixture, filepath.FromSlash(relative)), destination, 0o644, MaximumReleaseBytes); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := createCurrentLink(filepath.Join(releaseRoot, "current"), filepath.FromSlash("releases/v1.1.0")); err != nil {
 		t.Fatalf("create current release symlink: %v", err)

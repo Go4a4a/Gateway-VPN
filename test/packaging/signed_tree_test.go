@@ -37,10 +37,15 @@ func TestActualGatewayAndVPSSourceTreesFitStrictSignedReleaseContracts(t *testin
 		writeSignedTreeFile(t, root, "share/supply-chain/sbom.spdx.json", "{}\n", 0o644)
 		writeSignedTreeFile(t, root, "share/supply-chain/provenance.intoto.json", "{}\n", 0o644)
 		digest := sha256.Sum256(mihomo)
+		hostContract, err := updatepkg.ComputeHostContractSHA256(root)
+		if err != nil {
+			t.Fatal(err)
+		}
 		writeSignedTreeJSON(t, filepath.Join(root, "release.json"), updatepkg.Release{
 			FormatVersion: updatepkg.ReleaseFormatVersion, GatewayVersion: "1.2.0", MihomoVersion: "v1.19.10",
 			OS: "linux", Arch: "amd64", MihomoSHA256: hex.EncodeToString(digest[:]),
 			DatabaseSchemaMinimum: 1, DatabaseSchemaMaximum: 11, ConfigSchemaGeneration: 1,
+			HostContractSHA256: hostContract,
 			GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
 			BuildCommit: strings.Repeat("a", 40), BuildDate: "2026-08-25T00:00:00Z",
 		})

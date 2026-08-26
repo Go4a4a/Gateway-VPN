@@ -28,7 +28,7 @@ func TestStagerAcceptsVerifiedArchiveAndDiscardIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operation.GatewayVersion != "1.2.0" || operation.FileCount != 7 || operation.UncompressedBytes <= 0 || !updateIDPattern.MatchString(operation.UpdateID) {
+	if operation.GatewayVersion != "1.2.0" || operation.FileCount != 7+len(requiredHostContractFiles) || operation.UncompressedBytes <= 0 || !updateIDPattern.MatchString(operation.UpdateID) {
 		t.Fatalf("staged operation = %+v", operation)
 	}
 	status, exists, err := stager.Status()

@@ -10,6 +10,7 @@ Type=oneshot
 ExecStart=/usr/bin/systemctl restart gateway-vpn-update-recovery.service
 ExecStart=/usr/bin/systemctl start gateway-vpn-network-broker.socket
 ExecStart=/usr/bin/systemctl start gateway-vpn.service
+ExecStart=/usr/bin/systemctl reset-failed gateway-vpn-update.service gateway-vpn-update-finalize.service
 TimeoutStartSec=25min
 UMask=0077
 NoNewPrivileges=yes

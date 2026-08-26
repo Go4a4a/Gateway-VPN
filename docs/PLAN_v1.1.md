@@ -1845,6 +1845,8 @@ Systemd запускает `/opt/gateway-vpn/current/bin/gateway-vpn`. Новы�
 10. при неуспехе остановить новый binary, вернуть старый symlink и исходную DB как согласованную пару;
 11. удалить rollback copy только после завершения заданного stability window.
 
+Pointer-only update дополнительно принимает candidate только при точном совпадении подписанного `host_contract_sha256`, вычисленного по полному набору packaged systemd unit/socket/timer files, с контрактом текущего release. Изменение root-owned lifecycle assets нельзя молча проигнорировать при переключении binaries: такой artifact отклоняется до host mutation и требует отдельной подписанной installer-upgrade transaction. После успешного stability window и повторной health-проверки `recovery` symlink атомарно переводится на новый проверенный release; до этого момента он остаётся на старом release для rollback. Поэтому следующую update-транзакцию всегда выполняет последний finalized trusted updater, а не произвольно давний binary.
+
 Down-migration новой БД старым binary не используется: rollback всегда восстанавливает snapshot до migration.
 
 ### 17.4 GitHub zero-to-ready deployment

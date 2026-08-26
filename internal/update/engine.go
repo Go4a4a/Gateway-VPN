@@ -19,6 +19,7 @@ const DefaultStabilityWindow = 24 * time.Hour
 var (
 	ErrUpdateStabilizing     = errors.New("the current release is still inside its stability window")
 	ErrStabilityWindowActive = errors.New("the release stability window has not elapsed")
+	ErrNoFinalizationPending = errors.New("no update transaction awaits finalization")
 	ErrUpdateInProgress      = errors.New("another update transaction process is active")
 	errInjectedInterruption  = errors.New("injected update interruption")
 )
@@ -291,11 +292,14 @@ func (engine *Engine) Finalize(ctx context.Context) (Journal, error) {
 	}
 	defer unlock()
 	journal, exists, err := engine.Store.LoadActive()
-	if err != nil || !exists {
-		return Journal{}, errors.New("no update transaction is available to finalize")
+	if err != nil {
+		return Journal{}, err
 	}
-	if journal.State == StateFinalized {
-		return journal, nil
+	if !exists {
+		return Journal{}, ErrNoFinalizationPending
+	}
+	if journal.State == StateFinalized || journal.State == StateRolledBack {
+		return journal, ErrNoFinalizationPending
 	}
 	if journal.State != StateStabilizing {
 		return Journal{}, errors.New("only a stabilizing update may be finalized")
@@ -322,6 +326,13 @@ func (engine *Engine) Finalize(ctx context.Context) (Journal, error) {
 	deadline, _ := time.Parse(time.RFC3339Nano, journal.StabilityDeadline)
 	if engine.now().Before(deadline) {
 		return Journal{}, ErrStabilityWindowActive
+	}
+	// Only after the complete stability window and a fresh health check may the
+	// trusted updater/recovery entry point advance to the new release. This
+	// guarantees that the next update is never executed by an older binary that
+	// may not understand the current database or signed-release contract.
+	if err := engine.switchReleasePointer("recovery", journal.NewCurrentTarget, journal.UpdateID+"-finalize-recovery"); err != nil {
+		return Journal{}, errors.New("advance finalized recovery release failed")
 	}
 	journal.ErrorCode = ""
 	if err := engine.saveState(&journal, StateFinalized); err != nil {
@@ -461,12 +472,8 @@ func (engine *Engine) currentRelease() (string, Release, error) {
 	if !strings.HasPrefix(target, "releases/v") || strings.Contains(strings.TrimPrefix(target, "releases/v"), "/") {
 		return "", Release{}, errors.New("Gateway VPN current symlink escapes the release layout")
 	}
-	content, err := readBoundedRegular(filepath.Join(engine.ReleaseRoot, filepath.FromSlash(target), ReleaseFilename), MaximumReleaseBytes)
-	if err != nil {
-		return "", Release{}, errors.New("current release metadata is unavailable")
-	}
-	var release Release
-	if err := decodeStrict(content, &release); err != nil || validateRelease(release) != nil || target != "releases/v"+release.GatewayVersion {
+	release, err := ReadReleaseMetadata(filepath.Join(engine.ReleaseRoot, filepath.FromSlash(target)))
+	if err != nil || target != "releases/v"+release.GatewayVersion {
 		return "", Release{}, errors.New("current release metadata does not match its target")
 	}
 	return target, release, nil

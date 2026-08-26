@@ -189,7 +189,7 @@ func TestGatewayServicesUseBoundedJournaldNamespace(t *testing.T) {
 func TestReleaseBuilderPinsMihomoVersionHashAndAPIContract(t *testing.T) {
 	root := repositoryRoot(t)
 	builder := read(t, filepath.Join(root, "scripts", "build-release.sh"))
-	for _, required := range []string{"MIHOMO_VERSION", "SIGNING_PRIVATE_KEY", "buildinfo.MihomoVersion", "mihomo_sha256", "gateway_api_contract", "mihomo_api_contract", "database_schema_maximum", "manifest.json", "release.sig", "release-sign", "sbom.spdx.json", "provenance.intoto.json", "release.json", "sha256sum --binary"} {
+	for _, required := range []string{"MIHOMO_VERSION", "SIGNING_PRIVATE_KEY", "buildinfo.MihomoVersion", "mihomo_sha256", "gateway_api_contract", "mihomo_api_contract", "database_schema_maximum", "host_contract_sha256", "release-host-contract", "manifest.json", "release.sig", "release-sign", "sbom.spdx.json", "provenance.intoto.json", "release.json", "sha256sum --binary"} {
 		if !strings.Contains(builder, required) {
 			t.Errorf("release builder missing %q", required)
 		}
@@ -894,7 +894,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		t.Fatal("stability-window finalization contract is incomplete")
 	}
 	resume := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-resume.service"))
-	if !strings.Contains(resume, "systemctl restart gateway-vpn-update-recovery.service") || !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") {
+	if !strings.Contains(resume, "systemctl restart gateway-vpn-update-recovery.service") || !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") || !strings.Contains(resume, "systemctl reset-failed gateway-vpn-update.service gateway-vpn-update-finalize.service") {
 		t.Fatal("failed update does not recover before resuming management")
 	}
 	if !strings.Contains(resume, "Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service") || strings.Contains(resume, "Requires=gateway-vpn-firewall.service") {

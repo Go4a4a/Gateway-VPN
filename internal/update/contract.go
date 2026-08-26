@@ -28,7 +28,7 @@ import (
 
 const (
 	ManifestFormatVersion = 1
-	ReleaseFormatVersion  = 1
+	ReleaseFormatVersion  = 2
 	GatewayAPIContract    = "gateway-vpn-api-v1"
 	MihomoAPIContract     = "mihomo-local-v1"
 	ManifestFilename      = "manifest.json"
@@ -68,6 +68,7 @@ type Release struct {
 	DatabaseSchemaMinimum  int64  `json:"database_schema_minimum"`
 	DatabaseSchemaMaximum  int64  `json:"database_schema_maximum"`
 	ConfigSchemaGeneration int    `json:"config_schema_generation"`
+	HostContractSHA256     string `json:"host_contract_sha256"`
 	GatewayAPIContract     string `json:"gateway_api_contract"`
 	MihomoAPIContract      string `json:"mihomo_api_contract"`
 	BuildCommit            string `json:"build_commit"`
@@ -89,16 +90,17 @@ type Manifest struct {
 }
 
 type VerificationPolicy struct {
-	PublicKey             ed25519.PublicKey
-	ExpectedOS            string
-	ExpectedArch          string
-	CurrentGatewayVersion string
-	CurrentSchemaVersion  int64
-	InitialInstall        bool
-	ConfigGeneration      int
-	GatewayAPIContract    string
-	MihomoAPIContract     string
-	AllowSameVersion      bool
+	PublicKey                 ed25519.PublicKey
+	ExpectedOS                string
+	ExpectedArch              string
+	CurrentGatewayVersion     string
+	CurrentSchemaVersion      int64
+	InitialInstall            bool
+	ConfigGeneration          int
+	CurrentHostContractSHA256 string
+	GatewayAPIContract        string
+	MihomoAPIContract         string
+	AllowSameVersion          bool
 }
 
 type VerifiedRelease struct {
@@ -203,6 +205,10 @@ func SignRelease(root string, privateKey ed25519.PrivateKey) (Manifest, error) {
 	if err := decodeStrict(releaseContent, &release); err != nil || validateRelease(release) != nil {
 		return Manifest{}, errors.New("release metadata contract is invalid")
 	}
+	hostContract, err := ComputeHostContractSHA256(root)
+	if err != nil || hostContract != release.HostContractSHA256 {
+		return Manifest{}, errors.New("release host lifecycle contract is invalid")
+	}
 	files, err := collectFiles(root)
 	if err != nil {
 		return Manifest{}, err
@@ -274,6 +280,10 @@ func VerifyRelease(root string, policy VerificationPolicy) (VerifiedRelease, err
 	if err := decodeStrict(releaseContent, &release); err != nil {
 		return VerifiedRelease{}, errors.New("decode release metadata failed")
 	}
+	hostContract, err := ComputeHostContractSHA256(root)
+	if err != nil || hostContract != release.HostContractSHA256 {
+		return VerifiedRelease{}, errors.New("signed release host lifecycle contract is invalid")
+	}
 	if err := validateCompatibility(release, policy); err != nil {
 		return VerifiedRelease{}, err
 	}
@@ -303,7 +313,95 @@ func ReadReleaseMetadata(root string) (Release, error) {
 	if err := decodeStrict(content, &release); err != nil || validateRelease(release) != nil {
 		return Release{}, errors.New("release metadata contract is invalid")
 	}
+	hostContract, err := ComputeHostContractSHA256(root)
+	if err != nil || hostContract != release.HostContractSHA256 {
+		return Release{}, errors.New("release host lifecycle contract is invalid")
+	}
 	return release, nil
+}
+
+var requiredHostContractFiles = []string{
+	"packaging/systemd/gateway-vpn.service",
+	"packaging/systemd/gateway-vpn-watchdog.service",
+	"packaging/systemd/gateway-vpn-firewall.service",
+	"packaging/systemd/gateway-vpn-firewall-guard.service",
+	"packaging/systemd/gateway-vpn-network-broker.socket",
+	"packaging/systemd/gateway-vpn-update.service",
+	"packaging/systemd/gateway-vpn-update-recovery.service",
+	"packaging/systemd/gateway-vpn-update-resume.service",
+	"packaging/systemd/gateway-vpn-update-finalize.service",
+	"packaging/systemd/gateway-vpn-update-finalize.timer",
+}
+
+type hostContractFile struct {
+	path   string
+	bytes  int64
+	digest string
+}
+
+// ComputeHostContractSHA256 binds pointer-only updates to the exact signed
+// systemd lifecycle already installed on the host. Updating these root-owned
+// assets requires a separate installer transaction; silently ignoring changed
+// units while switching binaries would create an untested hybrid release.
+func ComputeHostContractSHA256(root string) (string, error) {
+	root, err := safeRoot(root)
+	if err != nil {
+		return "", err
+	}
+	contractRoot := filepath.Join(root, "packaging", "systemd")
+	info, err := os.Lstat(contractRoot)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("release systemd contract directory is invalid")
+	}
+	files := make([]hostContractFile, 0, 32)
+	err = filepath.WalkDir(contractRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == contractRoot {
+			return nil
+		}
+		if entry.IsDir() {
+			return errors.New("release systemd contract must be a flat directory")
+		}
+		entryInfo, err := entry.Info()
+		if err != nil || entryInfo.Mode()&os.ModeSymlink != 0 || !entryInfo.Mode().IsRegular() || entryInfo.Size() <= 0 || entryInfo.Size() > MaximumReleaseBytes {
+			return errors.New("release systemd contract contains an invalid file")
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return errors.New("resolve release systemd contract path failed")
+		}
+		relative = filepath.ToSlash(relative)
+		if !safeRelativePath(relative) || !strings.HasPrefix(relative, "packaging/systemd/") {
+			return errors.New("release systemd contract path is invalid")
+		}
+		digest, bytesRead, err := hashFile(path, MaximumReleaseBytes)
+		if err != nil || bytesRead != entryInfo.Size() {
+			return errors.New("hash release systemd contract file failed")
+		}
+		files = append(files, hostContractFile{path: relative, bytes: bytesRead, digest: digest})
+		if len(files) > 64 {
+			return errors.New("release systemd contract contains too many files")
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
+	present := make(map[string]bool, len(files))
+	digest := sha256.New()
+	for _, file := range files {
+		present[file.path] = true
+		_, _ = fmt.Fprintf(digest, "%s\x00%d\x00%s\x00", file.path, file.bytes, file.digest)
+	}
+	for _, required := range requiredHostContractFiles {
+		if !present[required] {
+			return "", fmt.Errorf("required host lifecycle file is missing: %s", required)
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func validateCompatibility(release Release, policy VerificationPolicy) error {
@@ -330,6 +428,9 @@ func validateCompatibility(release Release, policy VerificationPolicy) error {
 	}
 	if policy.ConfigGeneration > 0 && release.ConfigSchemaGeneration != policy.ConfigGeneration {
 		return errors.New("candidate config schema generation is incompatible")
+	}
+	if policy.CurrentHostContractSHA256 != "" && release.HostContractSHA256 != policy.CurrentHostContractSHA256 {
+		return errors.New("candidate host lifecycle contract requires a signed installer upgrade")
 	}
 	if policy.GatewayAPIContract != "" && release.GatewayAPIContract != policy.GatewayAPIContract {
 		return errors.New("candidate Gateway API contract is incompatible")
@@ -361,7 +462,7 @@ func ValidateGatewayVersion(value string) error {
 
 func validateRelease(release Release) error {
 	buildDate, dateErr := time.Parse(time.RFC3339, release.BuildDate)
-	if release.FormatVersion != ReleaseFormatVersion || !versionPattern.MatchString(release.GatewayVersion) || !mihomoVersionPattern.MatchString(release.MihomoVersion) || release.OS != "linux" || release.Arch != "amd64" || !digestPattern.MatchString(release.MihomoSHA256) || release.DatabaseSchemaMinimum < 1 || release.DatabaseSchemaMaximum < release.DatabaseSchemaMinimum || release.ConfigSchemaGeneration < 1 || release.GatewayAPIContract != GatewayAPIContract || release.MihomoAPIContract != MihomoAPIContract || !buildCommitPattern.MatchString(release.BuildCommit) || dateErr != nil || buildDate.IsZero() {
+	if release.FormatVersion != ReleaseFormatVersion || !versionPattern.MatchString(release.GatewayVersion) || !mihomoVersionPattern.MatchString(release.MihomoVersion) || release.OS != "linux" || release.Arch != "amd64" || !digestPattern.MatchString(release.MihomoSHA256) || release.DatabaseSchemaMinimum < 1 || release.DatabaseSchemaMaximum < release.DatabaseSchemaMinimum || release.ConfigSchemaGeneration < 1 || !digestPattern.MatchString(release.HostContractSHA256) || release.GatewayAPIContract != GatewayAPIContract || release.MihomoAPIContract != MihomoAPIContract || !buildCommitPattern.MatchString(release.BuildCommit) || dateErr != nil || buildDate.IsZero() {
 		return errors.New("release metadata contract is invalid")
 	}
 	return nil

@@ -467,11 +467,24 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 	writeFixtureFile(t, releaseRoot, "manifest.sha256", []byte(strings.Repeat("0", 64)+"  placeholder\n"))
 	writeFixtureFile(t, releaseRoot, "share/supply-chain/sbom.spdx.json", []byte("{}\n"))
 	writeFixtureFile(t, releaseRoot, "share/supply-chain/provenance.intoto.json", []byte("{}\n"))
+	for _, name := range []string{
+		"gateway-vpn.service", "gateway-vpn-watchdog.service", "gateway-vpn-firewall.service",
+		"gateway-vpn-firewall-guard.service", "gateway-vpn-network-broker.socket",
+		"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service",
+		"gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer",
+	} {
+		writeFixtureFile(t, releaseRoot, "packaging/systemd/"+name, []byte("[Unit]\nDescription=synthetic lifecycle unit\n"))
+	}
 	mihomoDigest := sha256.Sum256(mihomo)
+	hostContract, err := updatepkg.ComputeHostContractSHA256(releaseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	release := updatepkg.Release{
 		FormatVersion: updatepkg.ReleaseFormatVersion, GatewayVersion: fixture.version, MihomoVersion: "v1.19.10",
 		OS: "linux", Arch: "amd64", MihomoSHA256: hex.EncodeToString(mihomoDigest[:]),
 		DatabaseSchemaMinimum: 1, DatabaseSchemaMaximum: 11, ConfigSchemaGeneration: 1,
+		HostContractSHA256: hostContract,
 		GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
 		BuildCommit: fixture.commit, BuildDate: "2026-08-25T00:00:00Z",
 	}

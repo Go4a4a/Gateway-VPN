@@ -72,6 +72,7 @@ func TestReleaseCompatibilityRejectsDowngradeSchemaPlatformAndContracts(t *testi
 		{"wrong os", func(policy *VerificationPolicy) { policy.ExpectedOS = "freebsd" }},
 		{"wrong arch", func(policy *VerificationPolicy) { policy.ExpectedArch = "arm64" }},
 		{"wrong config", func(policy *VerificationPolicy) { policy.ConfigGeneration = 2 }},
+		{"wrong host lifecycle", func(policy *VerificationPolicy) { policy.CurrentHostContractSHA256 = strings.Repeat("f", 64) }},
 		{"wrong Gateway API", func(policy *VerificationPolicy) { policy.GatewayAPIContract = "gateway-vpn-api-v2" }},
 		{"wrong Mihomo API", func(policy *VerificationPolicy) { policy.MihomoAPIContract = "mihomo-local-v2" }},
 	}
@@ -107,6 +108,17 @@ func TestSignerRejectsSymlinksAndStrictMetadata(t *testing.T) {
 	}
 	if _, err := SignRelease(root, privateKey); err == nil {
 		t.Fatal("release metadata with unknown fields was signed")
+	}
+}
+
+func TestSignerRejectsChangedHostLifecycleWithoutMetadataUpdate(t *testing.T) {
+	root, _, privateKey := unsignedReleaseFixture(t, "1.2.0", 11, 12)
+	unit := filepath.Join(root, filepath.FromSlash(requiredHostContractFiles[0]))
+	if err := os.WriteFile(unit, []byte("[Unit]\nDescription=changed lifecycle unit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SignRelease(root, privateKey); err == nil {
+		t.Fatal("release with stale host lifecycle metadata was signed")
 	}
 }
 
@@ -188,7 +200,20 @@ func unsignedReleaseFixture(t *testing.T, version string, schemaMin, schemaMax i
 			t.Fatal(err)
 		}
 	}
+	for _, name := range requiredHostContractFiles {
+		filename := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, []byte("[Unit]\nDescription=test host lifecycle unit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mihomoDigest, _, err := hashFile(filepath.Join(root, "libexec", "mihomo"), MaximumFileBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostContract, err := ComputeHostContractSHA256(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +221,8 @@ func unsignedReleaseFixture(t *testing.T, version string, schemaMin, schemaMax i
 		FormatVersion: ReleaseFormatVersion, GatewayVersion: version, MihomoVersion: "v1.19.10",
 		OS: "linux", Arch: "amd64", MihomoSHA256: mihomoDigest,
 		DatabaseSchemaMinimum: schemaMin, DatabaseSchemaMaximum: schemaMax,
-		ConfigSchemaGeneration: 1, GatewayAPIContract: GatewayAPIContract, MihomoAPIContract: MihomoAPIContract,
+		ConfigSchemaGeneration: 1, HostContractSHA256: hostContract,
+		GatewayAPIContract: GatewayAPIContract, MihomoAPIContract: MihomoAPIContract,
 		BuildCommit: strings.Repeat("a", 40), BuildDate: "2026-08-24T20:00:00Z",
 	}
 	content, err := json.MarshalIndent(release, "", "  ")

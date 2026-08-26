@@ -171,6 +171,14 @@ func runUpdateFinalize(args []string) int {
 		return 1
 	}
 	journal, err := engine.Finalize(ctx)
+	if errors.Is(err, updatepkg.ErrNoFinalizationPending) {
+		if journal.UpdateID == "" {
+			fmt.Println("No Gateway VPN update awaits finalization")
+		} else {
+			fmt.Printf("Gateway VPN update %s is already %s\n", journal.UpdateID, journal.State)
+		}
+		return 0
+	}
 	if errors.Is(err, updatepkg.ErrStabilityWindowActive) {
 		fmt.Fprintln(os.Stderr, "release stability window is still active")
 		return 0
@@ -210,10 +218,16 @@ func productionUpdateEngine(ctx context.Context, configPath string, withStager b
 	if schemaErr != nil || closeErr != nil || schema < 1 {
 		return nil, errors.New("read current schema for update compatibility failed")
 	}
+	currentReleaseRoot := filepath.Join(defaultReleaseRoot, "releases", "v"+buildinfo.Version)
+	currentRelease, err := updatepkg.ReadReleaseMetadata(currentReleaseRoot)
+	if err != nil || currentRelease.GatewayVersion != buildinfo.Version {
+		return nil, errors.New("read current release host lifecycle contract failed")
+	}
 	stager, err := updatepkg.NewStager(configuration.System.StateDir, defaultTrustedUpdateKey, updatepkg.VerificationPolicy{
 		ExpectedOS: "linux", ExpectedArch: "amd64", CurrentGatewayVersion: buildinfo.Version,
 		CurrentSchemaVersion: schema, ConfigGeneration: config.CurrentVersion,
-		GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
+		CurrentHostContractSHA256: currentRelease.HostContractSHA256,
+		GatewayAPIContract:        updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
 	})
 	if err != nil {
 		return nil, err

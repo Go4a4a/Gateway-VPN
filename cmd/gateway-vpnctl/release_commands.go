@@ -55,6 +55,22 @@ func runReleaseSign(args []string) int {
 	return 0
 }
 
+func runReleaseHostContract(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpnctl release-host-contract", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	releaseDir := flags.String("release-dir", "", "prepared release directory containing packaging/systemd")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *releaseDir == "" {
+		return 2
+	}
+	digest, err := updatepkg.ComputeHostContractSHA256(*releaseDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "compute host lifecycle contract: %v\n", err)
+		return 1
+	}
+	fmt.Println(digest)
+	return 0
+}
+
 func runReleaseVerify(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpnctl release-verify", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -94,6 +110,7 @@ func runReleaseVerify(args []string) int {
 		"gateway_version": verified.Release.GatewayVersion, "mihomo_version": verified.Release.MihomoVersion,
 		"signer_key_sha256": verified.Fingerprint, "file_count": len(verified.Manifest.Files),
 		"database_schema_minimum": verified.Release.DatabaseSchemaMinimum, "database_schema_maximum": verified.Release.DatabaseSchemaMaximum,
+		"host_contract_sha256": verified.Release.HostContractSHA256,
 	}
 	if *jsonOutput {
 		_ = json.NewEncoder(os.Stdout).Encode(result)
