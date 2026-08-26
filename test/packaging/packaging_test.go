@@ -715,6 +715,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"RemainAfterExit=yes",
 		"GATEWAY_VPN_UPDATE_RECOVERY_UNIT=1",
 		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover",
+		"ExecStartPost=/usr/bin/systemctl start --no-block gateway-vpn-network-broker.socket gateway-vpn.service",
 		"update-recover --config /etc/gateway-vpn/config.yaml --apply",
 		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket",
 	} {
