@@ -43,7 +43,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
-	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "preserve_state_root=%s", "90-gateway-vpn-ipv4-forwarding.conf", "70-gateway-vpn-lan.network", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
+	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "preserve_state_root=%s", "90-gateway-vpn-ipv4-forwarding.conf", "70-gateway-vpn-lan.network", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer missing %q", required)
 		}
@@ -642,12 +642,24 @@ func TestIsolatedDataPlaneUsersCanTraverseOnlyTheirStateDirectories(t *testing.T
 		t.Fatal("shared service group must not be able to list or write the state root")
 	}
 	sysusers := read(t, filepath.Join(root, "packaging", "sysusers.d", "gateway-vpn.conf"))
-	for _, required := range []string{
-		"m gateway-vpn-mihomo gateway-vpn",
-		"m gateway-vpn-dns gateway-vpn",
-	} {
-		if !strings.Contains(sysusers, required) {
-			t.Errorf("isolated service user is missing traversal-only group membership %q", required)
+	if !strings.Contains(sysusers, "m gateway-vpn-mihomo gateway-vpn") {
+		t.Fatal("Mihomo service user is missing traversal-only group membership")
+	}
+	dnsmasqService := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-dnsmasq.service"))
+	for _, required := range []string{"User=gateway-vpn-dns", "Group=gateway-vpn", "UMask=0077"} {
+		if !strings.Contains(dnsmasqService, required) {
+			t.Errorf("dnsmasq service identity policy missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"CAP_SETUID", "CAP_SETGID"} {
+		if strings.Contains(dnsmasqService, forbidden) {
+			t.Errorf("dnsmasq service retains unnecessary privilege %q", forbidden)
+		}
+	}
+	dnsmasqConfig := read(t, filepath.Join(root, "packaging", "dnsmasq", "dnsmasq.conf.in"))
+	for _, forbidden := range []string{"user=", "group="} {
+		if strings.Contains(dnsmasqConfig, forbidden) {
+			t.Errorf("dnsmasq duplicates systemd privilege drop with %q", forbidden)
 		}
 	}
 }

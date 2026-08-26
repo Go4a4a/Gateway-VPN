@@ -14,7 +14,7 @@ done
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -qq --yes --no-install-recommends \
-  systemd nftables dnsmasq wireguard-tools >/dev/null
+  systemd nftables dnsmasq-base wireguard-tools >/dev/null
 command -v systemd-analyze >/dev/null || { echo "systemd-analyze is unavailable after installing systemd" >&2; exit 1; }
 
 mkdir -p \

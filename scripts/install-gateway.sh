@@ -139,7 +139,7 @@ if ((APPLY && ORPHAN_MARKER_TEMP)); then
   echo "Removed harmless pre-transaction Gateway marker artifact"
 fi
 
-REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq)
+REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq-base)
 MISSING_PACKAGES=()
 for package in "${REQUIRED_PACKAGES[@]}"; do
   status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
@@ -213,6 +213,17 @@ fi
 for command in ip nft wg sysctl dnsmasq modprobe ss; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
+if ((ENABLE_DHCP)); then
+  mapfile -t DNS_LISTEN_ADDRESSES < <(ss -H -lntu "sport = :53" | awk '{print $4}')
+  for listen_address in "${DNS_LISTEN_ADDRESSES[@]}"; do
+    case "$listen_address" in
+      "0.0.0.0:53"|"*:53"|"[::]:53"|"$LAN_IP:53")
+        echo "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener" >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
 [[ -d /sys/module/wireguard ]] || modprobe -n wireguard >/dev/null 2>&1 || { echo "Kernel WireGuard support is unavailable" >&2; exit 1; }
 systemctl is-active --quiet systemd-networkd.service || { echo "Gateway VPN requires active systemd-networkd" >&2; exit 1; }
 [[ -c /dev/net/tun ]] || { echo "/dev/net/tun is unavailable" >&2; exit 1; }
