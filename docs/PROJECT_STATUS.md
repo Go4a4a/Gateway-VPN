@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Exact signed `0.1.0-systemd.27` из commit `ddcc407` прошёл на двух clean Ubuntu 24.04/systemd rootfs полную destructive restore matrix: signature/dry-run/install, portable backup, corrupt rejection, `STAGED` reboot без применения, explicit success/reboot, host-side exit `137` в `APPLYING` после трёх replacements, boot rollback/no-auto-retry/cleanup, новое explicit Apply и success/reboot. Restore/recovery Docker gate закрыт; следующий шаг — bare-metal Gateway + реальный VPS/HiLink/Keenetic, production signing/release и 72-часовой endurance
+**Текущий этап:** Exact signed `0.1.0-systemd.27` из commit `ddcc407` прошёл полную destructive restore/recovery matrix на clean Ubuntu 24.04/systemd. Дополнительно Gateway exact `.27` и byte-identical current VPS uninstaller прошли preserve/reboot/reinstall/explicit-purge acceptance: owned network/systemd state удаляется, данные и WireGuard key сохраняются по умолчанию, purge требует отдельного флага. Restore и uninstall Docker gates закрыты; следующий шаг — bare-metal Gateway + реальный VPS/HiLink/Keenetic, production signing/release и 72-часовой endurance
 
-**Оценка прогресса:** около `97%` программной реализации и около `89%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `97%` программной реализации и около `90%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -48,8 +48,9 @@
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
 | Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` доказали systemd update/recovery, `.27` — destructive restore/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
+| Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore success/power-cut/no-auto-retry/retry/reboot. Удалённый CI для local-ahead commits ещё не выполнен |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore и Gateway uninstall; byte-identical current VPS uninstaller прошёл preserve/reinstall/purge. Удалённый CI для local-ahead commits ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
@@ -69,8 +70,8 @@
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
 6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact disposable signed `.13` прошёл clean orchestration/handshake, а `.21/.22` — systemd update/recovery; отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены, CI не получает release secrets.
-7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS, exact signed update и exact signed restore `.27` прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, success/reboot и host-side container exit 137 в durable update/restore состояниях. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине, uninstall или USB hotplug.
-8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
+7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS, exact signed update/restore `.27` и uninstall прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, success/reboot и host-side container exit 137 в durable update/restore состояниях. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине или USB hotplug.
+8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; current uninstaller дополнительно прошёл preserve/reinstall/purge на Ubuntu 24.04. Vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
 ## Реестр решений реализации
 
@@ -198,6 +199,29 @@
 | DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
 
 ## Журнал разработки
+
+### Сессия 047 — Gateway/VPS uninstall, preserve, reinstall и purge — 2026-08-26
+
+**Gateway exact signed `.27`:**
+
+- использован завершивший restore/reboot disposable Ubuntu 24.04 container с exact signed `0.1.0-systemd.27`; dry-run явно сообщил, что runtime data сохраняются без `--purge-data`;
+- обычный uninstall остановил/удалил все owned units, nft table, `wg-mgmt`, persistent LAN config, program/config tree и install report, восстановил прежние forwarding/IPv6 sysctl, удалил добавленный `192.168.200.1/24` и сохранил исходный up-state `lan0`;
+- `/var/lib/gateway-vpn/state.db`, subscriptions и marker сохранились; новый boot не восстановил ни один owned artifact, а embedded `gateway-vpnctl status` открыл сохранённую БД read-only и вернул `PATH_BLOCKED`;
+- raw SHA main SQLite-файла, ошибочно снятый до graceful service stop, ожидаемо изменился после WAL checkpoint и дал false negative; acceptance исправлен на logical/read-only open и последующий application startup integrity gate;
+- signed installer dry-run/apply поверх сохранённого state прошёл, management вернулся, marker сохранился, startup integrity завершился успешно и path остался `BLOCKED`;
+- повторный uninstall с `--purge-data` удалил оба state roots, но сначала создал `/root/gateway-vpn-state-<UTC>.db` как `root:root 0600`; backup открылся embedded CLI до и после reboot, owned state не восстановился.
+
+**VPS current uninstaller:**
+
+- установленный signed VPS `0.1.0-systemd.8` имеет `scripts/uninstall-vps.sh` SHA-256 `da091a9bb1f9adf86a87e143cc3aa8e84d2bcfbd775455baac1defb60ad14991`, byte-for-byte совпадающий с current source;
+- обычный uninstall сохранил byte-identical `root:root 0600` `/etc/wireguard/wg-mgmt.conf` и `/var/lib/gateway-vpn-vps`, удалил owned nft/interface/units/program/config и восстановил прежние IPv4/IPv6 forwarding values; reboot не запустил recovery;
+- signed dry-run/apply строго распознал preserved private key и requested peers, переустановил VPS без смены config, поднял owned firewall и `wg-mgmt` с ожидаемыми `/32` AllowedIPs;
+- только явный `--purge-keys` удалил WireGuard config и state root; reboot подтвердил отсутствие key, interface, nft table, units и recovery.
+
+**Итог и границы доказательства:**
+
+- runtime uninstall requirement закрыт для privileged Docker/systemd, включая безопасные defaults и destructive confirmations;
+- bare-metal cleanup, произвольный package set и current full VPS release rebuild не подменяются этим тестом; последний допустим как current-uninstaller acceptance именно из-за доказанного byte identity.
 
 ### Сессия 046 — exact signed `.27` destructive restore/recovery acceptance — 2026-08-26
 
