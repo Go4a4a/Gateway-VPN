@@ -625,14 +625,13 @@ func TestMihomoServiceConditionAndPermissionsAreFailClosed(t *testing.T) {
 	}
 }
 
-func TestIsolatedDataPlaneUsersCanTraverseOnlyTheirStateDirectories(t *testing.T) {
+func TestIsolatedDataPlaneUsersHaveSeparatedStateDirectories(t *testing.T) {
 	root := repositoryRoot(t)
 	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
 	for _, required := range []string{
 		"d /var/lib/gateway-vpn 0710 gateway-vpn gateway-vpn",
 		"d /var/lib/gateway-vpn/secrets 0700 gateway-vpn gateway-vpn",
 		"d /var/lib/gateway-vpn/mihomo 0750 gateway-vpn gateway-vpn",
-		"d /var/lib/gateway-vpn/dnsmasq 0750 gateway-vpn-dns gateway-vpn",
 	} {
 		if !strings.Contains(tmpfiles, required) {
 			t.Errorf("service state traversal policy missing %q", required)
@@ -645,8 +644,14 @@ func TestIsolatedDataPlaneUsersCanTraverseOnlyTheirStateDirectories(t *testing.T
 	if !strings.Contains(sysusers, "m gateway-vpn-mihomo gateway-vpn") {
 		t.Fatal("Mihomo service user is missing traversal-only group membership")
 	}
+	if !strings.Contains(sysusers, `u gateway-vpn-dns - "Gateway VPN dnsmasq" /var/lib/gateway-vpn-dnsmasq /usr/sbin/nologin`) {
+		t.Fatal("dnsmasq service user does not have the isolated state root as its home")
+	}
+	if strings.Contains(tmpfiles, "/var/lib/gateway-vpn/dnsmasq") {
+		t.Fatal("dnsmasq state must not be created inside the application state tree")
+	}
 	dnsmasqService := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-dnsmasq.service"))
-	for _, required := range []string{"User=gateway-vpn-dns", "Group=gateway-vpn", "UMask=0077"} {
+	for _, required := range []string{"User=gateway-vpn-dns", "Group=gateway-vpn", "UMask=0077", "StateDirectory=gateway-vpn-dnsmasq", "StateDirectoryMode=0700", "ReadWritePaths=/var/lib/gateway-vpn-dnsmasq"} {
 		if !strings.Contains(dnsmasqService, required) {
 			t.Errorf("dnsmasq service identity policy missing %q", required)
 		}
@@ -657,9 +662,28 @@ func TestIsolatedDataPlaneUsersCanTraverseOnlyTheirStateDirectories(t *testing.T
 		}
 	}
 	dnsmasqConfig := read(t, filepath.Join(root, "packaging", "dnsmasq", "dnsmasq.conf.in"))
+	if !strings.Contains(dnsmasqConfig, "dhcp-leasefile=/var/lib/gateway-vpn-dnsmasq/dnsmasq.leases") || strings.Contains(dnsmasqConfig, "/var/lib/gateway-vpn/dnsmasq") {
+		t.Fatal("dnsmasq lease path is not isolated from the application state tree")
+	}
 	for _, forbidden := range []string{"user=", "group="} {
 		if strings.Contains(dnsmasqConfig, forbidden) {
 			t.Errorf("dnsmasq duplicates systemd privilege drop with %q", forbidden)
+		}
+	}
+	backend := read(t, filepath.Join(root, "internal", "networkapply", "ubuntu_backend.go"))
+	if !strings.Contains(backend, "dhcp-leasefile=/var/lib/gateway-vpn-dnsmasq/dnsmasq.leases") || strings.Contains(backend, "/var/lib/gateway-vpn/dnsmasq") {
+		t.Fatal("safe-apply renderer does not preserve the isolated dnsmasq lease path")
+	}
+	rollback := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-rollback@.service"))
+	if !strings.Contains(rollback, "/var/lib/gateway-vpn-dnsmasq") || strings.Contains(rollback, "/var/lib/gateway-vpn/dnsmasq") {
+		t.Fatal("network rollback unit does not use the isolated dnsmasq state root")
+	}
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
+	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
+	for name, content := range map[string]string{"installer": installer, "recovery": recovery, "uninstaller": uninstaller} {
+		if !strings.Contains(content, "/var/lib/gateway-vpn-dnsmasq") {
+			t.Errorf("%s does not manage the isolated dnsmasq state root", name)
 		}
 	}
 }

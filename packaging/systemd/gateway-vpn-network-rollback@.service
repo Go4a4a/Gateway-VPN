@@ -29,4 +29,4 @@ RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/gateway-vpn
-ReadWritePaths=/etc/gateway-vpn /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn/dnsmasq /run
+ReadWritePaths=/etc/gateway-vpn /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn-dnsmasq /run

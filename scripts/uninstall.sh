@@ -106,6 +106,7 @@ if ((HAVE_COMPLETED_TRANSACTION)); then
 fi
 rm -rf /etc/gateway-vpn /opt/gateway-vpn
 rm -f /var/lib/gateway-vpn/install-report.json
+rm -rf /var/lib/gateway-vpn-dnsmasq
 rm -f /run/gateway-vpn-install-authorized
 rm -f /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery
 if ((PURGE_DATA)); then

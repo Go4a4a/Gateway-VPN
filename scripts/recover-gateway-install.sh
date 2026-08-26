@@ -96,6 +96,7 @@ for unit_file in \
 done
 rm -f /var/lib/gateway-vpn/install-report.json || record_failure "remove incomplete install report"
 rm -f /run/gateway-vpn-install-authorized || record_failure "remove ephemeral service-start authorization"
+rm -rf /var/lib/gateway-vpn-dnsmasq || record_failure "remove newly created dnsmasq state root"
 if ((PRESERVE_STATE_ROOT == 0)); then
   rm -rf /var/lib/gateway-vpn || record_failure "remove newly created Gateway state root"
 fi

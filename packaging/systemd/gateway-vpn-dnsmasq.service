@@ -14,6 +14,8 @@ Type=simple
 User=gateway-vpn-dns
 Group=gateway-vpn
 UMask=0077
+StateDirectory=gateway-vpn-dnsmasq
+StateDirectoryMode=0700
 ExecStartPre=/usr/sbin/dnsmasq --test --conf-file=/etc/gateway-vpn/dnsmasq.conf
 ExecStart=/usr/sbin/dnsmasq --no-daemon --conf-file=/etc/gateway-vpn/dnsmasq.conf
 Restart=on-failure
@@ -34,7 +36,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
 RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
-ReadWritePaths=/var/lib/gateway-vpn/dnsmasq
+ReadWritePaths=/var/lib/gateway-vpn-dnsmasq
 ReadOnlyPaths=/etc/gateway-vpn
 
 [Install]

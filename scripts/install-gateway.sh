@@ -276,12 +276,19 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN interface differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  if ((ENABLE_DHCP)); then
+    [[ -f /etc/gateway-vpn/dnsmasq.conf && ! -L /etc/gateway-vpn/dnsmasq.conf ]] || { echo "Installed Gateway dnsmasq config is missing or unsafe" >&2; exit 1; }
+    [[ -d /var/lib/gateway-vpn-dnsmasq && ! -L /var/lib/gateway-vpn-dnsmasq && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq) == "gateway-vpn-dns:gateway-vpn:700" ]] || { echo "Installed Gateway dnsmasq state root ownership or mode is invalid" >&2; exit 1; }
+    if [[ -e /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases || -L /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases ]]; then
+      [[ -f /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && ! -L /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases) == "gateway-vpn-dns:gateway-vpn:600" ]] || { echo "Installed Gateway dnsmasq lease file ownership or mode is invalid" >&2; exit 1; }
+    fi
+  fi
   EXISTING=1
 else
   for conflict in \
     /opt/gateway-vpn/current /opt/gateway-vpn/recovery /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf \
     /etc/systemd/network/70-gateway-vpn-lan.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
-    /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf \
+    /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /var/lib/gateway-vpn-dnsmasq \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
     /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service \
@@ -473,6 +480,7 @@ done
 ((GATEWAY_RUNTIME_READY == 1)) || { echo "Installed Gateway services did not reach blocked management-ready state" >&2; exit 1; }
 if ((ENABLE_DHCP)); then
   systemctl is-active --quiet gateway-vpn-dnsmasq.service || { echo "Installed Gateway DHCP service is not active" >&2; exit 1; }
+  [[ -d /var/lib/gateway-vpn-dnsmasq && ! -L /var/lib/gateway-vpn-dnsmasq && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq) == "gateway-vpn-dns:gateway-vpn:700" ]] || { echo "Installed Gateway dnsmasq state root ownership or mode is invalid" >&2; exit 1; }
 fi
 EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/70-gateway-vpn-lan.network.in")
 [[ $(cat /etc/systemd/network/70-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }

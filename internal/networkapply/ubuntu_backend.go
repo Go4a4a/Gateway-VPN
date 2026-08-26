@@ -497,7 +497,7 @@ no-resolv
 server=127.0.0.1#1053
 cache-size=0
 log-facility=-
-dhcp-leasefile=/var/lib/gateway-vpn/dnsmasq/dnsmasq.leases
+dhcp-leasefile=/var/lib/gateway-vpn-dnsmasq/dnsmasq.leases
 pid-file=/run/gateway-vpn-dnsmasq.pid
 `, interfaceName, prefix.Addr(), netip.AddrFrom4(start), netip.AddrFrom4(end), prefix.Addr(), prefix.Addr()), nil
 }
