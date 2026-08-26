@@ -668,7 +668,7 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 		"Before=gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service",
 		"GATEWAY_VPN_DATABASE_RESTORE_UNIT=1",
 		"ExecStartPre=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply",
-		"database-restore --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/restore-transactions --apply",
+		"database-restore --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/restore-transactions --apply --boot-recovery",
 		"WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(bootRestore, required) {

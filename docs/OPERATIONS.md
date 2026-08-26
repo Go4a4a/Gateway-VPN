@@ -313,7 +313,7 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 1. выбрать `.gvpn` и ввести passphrase; control plane потоково принимает файл, проверяет AEAD/final record, ZIP paths/types/count/size, manifest SHA-256, SQLite integrity/schema/FK и fixed config paths; upload, passphrase и plaintext ZIP удаляются, live-состояние не меняется;
 2. проверить displayed restore/snapshot/schema/size/SHA-256, ввести `ВОССТАНОВИТЬ` и отдельно подтвердить destructive apply. Неверный staging можно удалить кнопкой **Удалить staging** без изменения live-файлов.
 
-После Apply Web/API сначала закрывает data path и сохраняет blocked runtime. Root broker принимает только пустой fixed request и ставит в очередь `gateway-vpn-database-restore-dispatch.service`. Fixed dispatcher ждёт одну секунду, чтобы ответ `202 Accepted` гарантированно ушёл через broker socket, и только затем запускает конфликтующий с management plane `gateway-vpn-database-restore.service`. Restore unit:
+После загрузки операция имеет состояние `STAGED` и не является разрешением на замену live-файлов. После Apply Web/API сначала закрывает data path, сохраняет blocked runtime и audit, затем отдельной power-loss-safe записью переводит именно выбранную операцию в `APPLY_REQUESTED`. Только после этого root broker принимает пустой fixed request и ставит в очередь `gateway-vpn-database-restore-dispatch.service`. Fixed dispatcher ждёт одну секунду, чтобы ответ `202 Accepted` гарантированно ушёл через broker socket, и только затем запускает конфликтующий с management plane `gateway-vpn-database-restore.service`. Restore unit:
 
 1. останавливает control plane, broker/socket, Mihomo и dnsmasq;
 2. повторно загружает boot `PATH_BLOCKED` ruleset;
@@ -323,9 +323,9 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 6. удаляет stale `mihomo/active`, проверяет live config/SQLite и оставляет runtime `PATH_BLOCKED`;
 7. возвращает broker socket и control plane. Mihomo не запускается resume unit: обычный reconciler должен заново доказать текущий tuple `modem × subscription × node` до `PATH_ACTIVE`.
 
-Boot recovery отделён от runtime destructive apply. Только бесконфликтный `gateway-vpn-database-restore-boot.service` включён в `multi-user.target`; при наличии `pending-restore.json` он после update recovery и boot firewall завершает ту же root-транзакцию до network recovery, broker socket и control plane. Runtime `gateway-vpn-database-restore.service` не включается ни в один boot target и запускается исключительно fixed-командой root broker после подтверждения в WebUI. Такое разделение не допускает, чтобы его `Conflicts=` вытеснил management units из обычной systemd boot transaction, когда pending restore отсутствует.
+Boot recovery отделён от runtime destructive apply. Только бесконфликтный `gateway-vpn-database-restore-boot.service` включён в `multi-user.target`; при наличии `pending-restore.json` он после update recovery и boot firewall проверяет durable state до network recovery, broker socket и control plane. Обычный `STAGED` является успешным no-op и никогда не применяется из-за перезагрузки. Только `APPLY_REQUESTED` разрешает начать подтверждённую транзакцию либо восстановить её root-journal. После rollback состояние сначала возвращается в `STAGED`, и только затем удаляется journal, поэтому повторный запуск unit не может автоматически повторить destructive apply. Runtime `gateway-vpn-database-restore.service` не включается ни в один boot target и запускается исключительно fixed-командой root broker после подтверждения в WebUI.
 
-Браузерная сессия после успешного restore намеренно недействительна — требуется войти снова. Если процесс/питание прервались между rename-операциями, root-owned `/var/lib/gateway-vpn-privileged/restore-transactions/` позволяет на следующем запуске вернуть прежние destinations в обратном порядке. Pending marker очищается только после полной проверки committed состояния; interrupted transaction после успешного rollback требует явного повторного Apply.
+Браузерная сессия после успешного restore намеренно недействительна — требуется войти снова. Если процесс/питание прервались между rename-операциями, root-owned `/var/lib/gateway-vpn-privileged/restore-transactions/` позволяет на следующем запуске вернуть прежние destinations в обратном порядке. Pending marker очищается только после полной проверки committed состояния; любой failed/interrupted transaction после успешного rollback остаётся `STAGED` с `apply_error_code` и требует нового явного Apply.
 
 Диагностика:
 
@@ -341,7 +341,7 @@ sudo ls -la /var/lib/gateway-vpn-privileged/restore-transactions/
 sudo nft list table inet gateway_vpn
 ```
 
-`gateway-vpn database-restore` не запускается вручную: binary требует fixed systemd-unit environment, а unit обеспечивает остановку процессов и повторную загрузку fail-closed firewall. Если restore unit завершился ошибкой, не удаляйте `pending-restore.json`, operation tree, root transaction journal или rollback paths вручную; сохраните diagnostic bundle, проверьте `last-restore.json`/`operation.apply_error_code` в WebUI и повторяйте Apply только после выяснения причины. До фактического Ubuntu root/systemd теста этот runbook является реализованным contract, но не hardware/Linux acceptance evidence.
+`gateway-vpn database-restore` не запускается вручную: binary требует fixed systemd-unit environment, а unit обеспечивает остановку процессов и повторную загрузку fail-closed firewall. Если restore unit завершился ошибкой, не удаляйте `pending-restore.json`, operation tree, root transaction journal или rollback paths вручную; сохраните diagnostic bundle, проверьте `last-restore.json`/`operation.apply_error_code` в WebUI и повторяйте Apply только после выяснения причины. Простая перезагрузка не считается повторным Apply. Этот contract проверяется unit/integration tests; реальный bare-metal power-cut остаётся отдельным hardware gate.
 
 ## Подписанное обновление и atomic rollback
 

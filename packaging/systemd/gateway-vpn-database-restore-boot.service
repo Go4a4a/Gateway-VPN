@@ -16,7 +16,7 @@ LogNamespace=gateway-vpn
 Type=oneshot
 Environment=GATEWAY_VPN_DATABASE_RESTORE_UNIT=1
 ExecStartPre=/opt/gateway-vpn/current/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply
-ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn database-restore --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/restore-transactions --apply
+ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn database-restore --config /etc/gateway-vpn/config.yaml --transaction-root /var/lib/gateway-vpn-privileged/restore-transactions --apply --boot-recovery
 TimeoutStartSec=30min
 UMask=0077
 NoNewPrivileges=yes

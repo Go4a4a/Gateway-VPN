@@ -128,6 +128,7 @@ type PortableBackupManager interface {
 type RestoreStager interface {
 	Stage(context.Context, io.Reader, string) (backup.RestoreOperation, error)
 	Status() (backup.RestoreOperation, bool, error)
+	AuthorizeApply(string) (backup.RestoreOperation, error)
 	Discard(context.Context, string) error
 }
 
@@ -2239,6 +2240,11 @@ func (server *Server) applyRestore(writer http.ResponseWriter, request *http.Req
 		writeInternalError(writer, err)
 		return
 	}
+	operation, err = server.dependencies.Restores.AuthorizeApply(operation.RestoreID)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "RESTORE_APPLY_AUTHORIZATION_FAILED", "Data path закрыт, но подтверждение restore не удалось сохранить")
+		return
+	}
 	if err := server.dependencies.RestoreApply.ApplyPendingRestore(request.Context()); err != nil {
 		writeError(writer, http.StatusBadGateway, "RESTORE_APPLY_START_FAILED", "Data path закрыт, но systemd restore helper не запустился")
 		return
@@ -2263,7 +2269,7 @@ func (server *Server) discardRestore(writer http.ResponseWriter, request *http.R
 		return
 	}
 	operation, pending, err := server.dependencies.Restores.Status()
-	if err != nil || !pending || operation.State != "STAGED" || input.RestoreID != operation.RestoreID {
+	if err != nil || !pending || operation.State != backup.RestoreStateStaged || input.RestoreID != operation.RestoreID {
 		writeError(writer, http.StatusConflict, "RESTORE_NOT_PENDING", "Проверенная staged операция восстановления не найдена или изменилась")
 		return
 	}

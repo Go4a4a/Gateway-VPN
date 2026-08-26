@@ -68,7 +68,7 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operation.State != "STAGED" || !restoreIDPattern.MatchString(operation.RestoreID) || operation.SnapshotID != artifact.SnapshotID || operation.PortableSHA256 != artifact.SHA256 || operation.Files < 3 {
+	if operation.State != RestoreStateStaged || !restoreIDPattern.MatchString(operation.RestoreID) || operation.SnapshotID != artifact.SnapshotID || operation.PortableSHA256 != artifact.SHA256 || operation.Files < 3 {
 		t.Fatalf("restore operation = %+v", operation)
 	}
 	status, exists, err := restorer.Status()
@@ -111,6 +111,31 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 	if !errors.Is(secondErr, ErrRestorePending) {
 		t.Fatalf("second Stage() error = %v", secondErr)
 	}
+	if _, err := restorer.VerifyPending(ctx); !errors.Is(err, ErrRestoreNotAuthorized) {
+		t.Fatalf("VerifyPending before explicit authorization error = %v", err)
+	}
+	// Simulate power loss after the pointer-like marker was updated but before
+	// operation.json became the authorization commit point. The restore must
+	// remain staged and non-destructive.
+	tornAuthorization := operation
+	tornAuthorization.State = RestoreStateApplyRequested
+	if err := writeJSONFile(restorer.pendingPath(), tornAuthorization, true); err != nil {
+		t.Fatal(err)
+	}
+	status, exists, err = restorer.Status()
+	if err != nil || !exists || status.State != RestoreStateStaged {
+		t.Fatalf("torn authorization status = %+v, %t, %v", status, exists, err)
+	}
+	if _, err := restorer.AuthorizeApply("restore-00000000000000000000000000000000"); !errors.Is(err, ErrRestoreNotPending) {
+		t.Fatalf("AuthorizeApply(other) error = %v", err)
+	}
+	authorized, err := restorer.AuthorizeApply(operation.RestoreID)
+	if err != nil || authorized.State != RestoreStateApplyRequested || authorized.ApplyErrorCode != "" {
+		t.Fatalf("AuthorizeApply() = %+v, %v", authorized, err)
+	}
+	if _, err := restorer.VerifyPending(ctx); err != nil {
+		t.Fatalf("VerifyPending after authorization = %v", err)
+	}
 	if err := restorer.markApplyFailure(operation.RestoreID, "INJECTED_RETRYABLE_FAILURE"); err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +148,18 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 	if err != nil || !exists || tornStatus.ApplyErrorCode != "INJECTED_RETRYABLE_FAILURE" {
 		t.Fatalf("torn pending marker recovery = %+v, %t, %v", tornStatus, exists, err)
 	}
-	if _, err := restorer.VerifyPending(ctx); err != nil {
-		t.Fatalf("VerifyPending after torn mutable marker = %v", err)
+	if tornStatus.State != RestoreStateStaged {
+		t.Fatalf("failed restore did not revoke apply authorization: %+v", tornStatus)
+	}
+	if _, err := restorer.VerifyPending(ctx); !errors.Is(err, ErrRestoreNotAuthorized) {
+		t.Fatalf("VerifyPending after failed apply error = %v", err)
+	}
+	reauthorized, err := restorer.AuthorizeApply(operation.RestoreID)
+	if err != nil || reauthorized.State != RestoreStateApplyRequested || reauthorized.ApplyErrorCode != "" {
+		t.Fatalf("retry AuthorizeApply() = %+v, %v", reauthorized, err)
+	}
+	if err := restorer.markApplyFailure(operation.RestoreID, "RETRY_CANCELLED_FOR_DISCARD"); err != nil {
+		t.Fatal(err)
 	}
 	if err := restorer.Discard(ctx, "restore-00000000000000000000000000000000"); !errors.Is(err, ErrRestoreNotPending) {
 		t.Fatalf("Discard(other) error = %v", err)

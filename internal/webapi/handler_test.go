@@ -782,6 +782,13 @@ func TestRestoreStatusAndApplyAreFailClosedBeforePrivilegedTrigger(t *testing.T)
 	runtime := &fakeModemRuntime{}
 	sequence := []string{}
 	runtime.onBlock = func() { sequence = append(sequence, "firewall-block") }
+	stager.onAuthorize = func() {
+		var audit int
+		if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='RESTORE_APPLY_REQUESTED'").Scan(&audit); err != nil || audit != 1 {
+			t.Errorf("restore apply audit was not committed before authorization: count=%d error=%v", audit, err)
+		}
+		sequence = append(sequence, "apply-authorized")
+	}
 	trigger := &fakeRestoreApplyTrigger{onApply: func() error {
 		current, err := server.dependencies.State.Get(ctx)
 		if err != nil {
@@ -789,6 +796,9 @@ func TestRestoreStatusAndApplyAreFailClosedBeforePrivilegedTrigger(t *testing.T)
 		}
 		if current.GatewayState != state.GatewayBlocked || current.PathState != state.PathBlocked {
 			return errors.New("runtime was not durably blocked before restore trigger")
+		}
+		if stager.operation.State != backup.RestoreStateApplyRequested {
+			return errors.New("restore apply was not durably authorized before trigger")
 		}
 		var audit int
 		if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='RESTORE_APPLY_REQUESTED'").Scan(&audit); err != nil || audit != 1 {
@@ -816,8 +826,8 @@ func TestRestoreStatusAndApplyAreFailClosedBeforePrivilegedTrigger(t *testing.T)
 	withoutConfirmation.AddCookie(cookie)
 	withoutConfirmationResponse := httptest.NewRecorder()
 	server.ServeHTTP(withoutConfirmationResponse, withoutConfirmation)
-	if withoutConfirmationResponse.Code != http.StatusConflict || runtime.blocks != 0 || trigger.calls != 0 {
-		t.Fatalf("restore apply without confirmation = %d blocks=%d triggers=%d", withoutConfirmationResponse.Code, runtime.blocks, trigger.calls)
+	if withoutConfirmationResponse.Code != http.StatusConflict || runtime.blocks != 0 || stager.authorizations != 0 || trigger.calls != 0 {
+		t.Fatalf("restore apply without confirmation = %d blocks=%d authorizations=%d triggers=%d", withoutConfirmationResponse.Code, runtime.blocks, stager.authorizations, trigger.calls)
 	}
 
 	applyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/system/restore/apply", strings.NewReader(`{"restore_id":"`+operation.RestoreID+`"}`))
@@ -827,8 +837,8 @@ func TestRestoreStatusAndApplyAreFailClosedBeforePrivilegedTrigger(t *testing.T)
 	applyRequest.AddCookie(cookie)
 	applyResponse := httptest.NewRecorder()
 	server.ServeHTTP(applyResponse, applyRequest)
-	if applyResponse.Code != http.StatusAccepted || runtime.blocks != 1 || trigger.calls != 1 || strings.Join(sequence, ",") != "firewall-block,privileged-trigger" || !strings.Contains(applyResponse.Body.String(), `"management_reconnect_required":true`) {
-		t.Fatalf("restore apply = %d blocks=%d triggers=%d sequence=%v %s", applyResponse.Code, runtime.blocks, trigger.calls, sequence, applyResponse.Body.String())
+	if applyResponse.Code != http.StatusAccepted || runtime.blocks != 1 || stager.authorizations != 1 || trigger.calls != 1 || strings.Join(sequence, ",") != "firewall-block,apply-authorized,privileged-trigger" || !strings.Contains(applyResponse.Body.String(), `"management_reconnect_required":true`) {
+		t.Fatalf("restore apply = %d blocks=%d authorizations=%d triggers=%d sequence=%v %s", applyResponse.Code, runtime.blocks, stager.authorizations, trigger.calls, sequence, applyResponse.Body.String())
 	}
 }
 
@@ -883,8 +893,31 @@ func TestRestoreApplyTriggerFailureLeavesRuntimeDurablyBlocked(t *testing.T) {
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	current, err := server.dependencies.State.Get(ctx)
-	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "systemd failure") || runtime.blocks != 1 || trigger.calls != 1 || err != nil || current.GatewayState != state.GatewayBlocked || current.PathState != state.PathBlocked {
-		t.Fatalf("failed restore trigger = %d blocks=%d triggers=%d state=%+v error=%v %s", response.Code, runtime.blocks, trigger.calls, current, err, response.Body.String())
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "systemd failure") || runtime.blocks != 1 || stager.authorizations != 1 || stager.operation.State != backup.RestoreStateApplyRequested || trigger.calls != 1 || err != nil || current.GatewayState != state.GatewayBlocked || current.PathState != state.PathBlocked {
+		t.Fatalf("failed restore trigger = %d blocks=%d authorizations=%d restore_state=%s triggers=%d state=%+v error=%v %s", response.Code, runtime.blocks, stager.authorizations, stager.operation.State, trigger.calls, current, err, response.Body.String())
+	}
+}
+
+func TestRestoreAuthorizationFailureNeverStartsPrivilegedApply(t *testing.T) {
+	server, ctx := testServer(t)
+	operation := backup.RestoreOperation{FormatVersion: 1, RestoreID: "restore-55555555555555555555555555555555", State: backup.RestoreStateStaged, SnapshotID: "snapshot-d", PortableSHA256: strings.Repeat("f", 64)}
+	stager := &fakeRestoreStager{operation: operation, pending: true, authorizeErr: errors.New("injected durable write failure")}
+	runtime := &fakeModemRuntime{}
+	trigger := &fakeRestoreApplyTrigger{}
+	server.dependencies.Restores = stager
+	server.dependencies.ModemRuntime = runtime
+	server.dependencies.RestoreApply = trigger
+	cookie, csrf := login(t, server)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/restore/apply", strings.NewReader(`{"restore_id":"`+operation.RestoreID+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("X-Confirm-Destructive", "apply-verified-restore")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	current, err := server.dependencies.State.Get(ctx)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "RESTORE_APPLY_AUTHORIZATION_FAILED") || strings.Contains(response.Body.String(), "durable write") || runtime.blocks != 1 || stager.authorizations != 1 || trigger.calls != 0 || err != nil || current.PathState != state.PathBlocked {
+		t.Fatalf("failed restore authorization = %d blocks=%d authorizations=%d triggers=%d state=%+v error=%v %s", response.Code, runtime.blocks, stager.authorizations, trigger.calls, current, err, response.Body.String())
 	}
 }
 
@@ -1788,15 +1821,18 @@ type fakePortableBackups struct {
 }
 
 type fakeRestoreStager struct {
-	operation  backup.RestoreOperation
-	content    []byte
-	passphrase string
-	stageErr   error
-	statusErr  error
-	discardErr error
-	stages     int
-	discards   int
-	pending    bool
+	operation      backup.RestoreOperation
+	content        []byte
+	passphrase     string
+	stageErr       error
+	statusErr      error
+	discardErr     error
+	authorizeErr   error
+	stages         int
+	discards       int
+	authorizations int
+	pending        bool
+	onAuthorize    func()
 }
 
 type fakeRestoreApplyTrigger struct {
@@ -1874,12 +1910,28 @@ func (stager *fakeRestoreStager) Status() (backup.RestoreOperation, bool, error)
 	return stager.operation, stager.pending, stager.statusErr
 }
 
+func (stager *fakeRestoreStager) AuthorizeApply(restoreID string) (backup.RestoreOperation, error) {
+	stager.authorizations++
+	if stager.authorizeErr != nil {
+		return backup.RestoreOperation{}, stager.authorizeErr
+	}
+	if !stager.pending || restoreID != stager.operation.RestoreID || (stager.operation.State != backup.RestoreStateStaged && stager.operation.State != backup.RestoreStateApplyRequested) {
+		return backup.RestoreOperation{}, backup.ErrRestoreNotPending
+	}
+	stager.operation.State = backup.RestoreStateApplyRequested
+	stager.operation.ApplyErrorCode = ""
+	if stager.onAuthorize != nil {
+		stager.onAuthorize()
+	}
+	return stager.operation, nil
+}
+
 func (stager *fakeRestoreStager) Discard(_ context.Context, restoreID string) error {
 	stager.discards++
 	if stager.discardErr != nil {
 		return stager.discardErr
 	}
-	if !stager.pending || restoreID != stager.operation.RestoreID {
+	if !stager.pending || restoreID != stager.operation.RestoreID || stager.operation.State != backup.RestoreStateStaged {
 		return backup.ErrRestoreNotPending
 	}
 	stager.pending = false

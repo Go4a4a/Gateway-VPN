@@ -113,7 +113,7 @@ func TestRestoreApplyFailureRollsBackEveryLivePathAndAllowsExplicitRetry(t *test
 		t.Fatalf("failed restore Apply() error = %v", err)
 	}
 	operation, pending, err := fixture.restorer.Status()
-	if err != nil || !pending || operation.ApplyErrorCode != "RESTORE_APPLY_FAILED_ROLLED_BACK" {
+	if err != nil || !pending || operation.State != RestoreStateStaged || operation.ApplyErrorCode != "RESTORE_APPLY_FAILED_ROLLED_BACK" {
 		t.Fatalf("rolled-back restore status = %+v, %t, %v", operation, pending, err)
 	}
 	assertOldRestoreFixtureLive(t, fixture)
@@ -121,6 +121,12 @@ func TestRestoreApplyFailureRollsBackEveryLivePathAndAllowsExplicitRetry(t *test
 		t.Fatalf("rolled-back journal remains: %v", err)
 	}
 	fixture.applier.AfterActivate = nil
+	if _, err := fixture.applier.Apply(fixture.ctx); !errors.Is(err, ErrRestoreNotAuthorized) {
+		t.Fatalf("restore retry without renewed authorization error = %v", err)
+	}
+	if _, err := fixture.restorer.AuthorizeApply(operation.RestoreID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.applier.Apply(fixture.ctx); err != nil {
 		t.Fatalf("explicit restore retry failed: %v", err)
 	}
@@ -159,10 +165,16 @@ func TestRestoreApplyRecoversPowerLossJournalBeforeRequiringRetry(t *testing.T) 
 		t.Fatalf("power-loss recovery Apply() error = %v", err)
 	}
 	operation, pending, err := fixture.restorer.Status()
-	if err != nil || !pending || operation.ApplyErrorCode != "RESTORE_INTERRUPTED_ROLLED_BACK" {
+	if err != nil || !pending || operation.State != RestoreStateStaged || operation.ApplyErrorCode != "RESTORE_INTERRUPTED_ROLLED_BACK" {
 		t.Fatalf("power-loss recovered status = %+v, %t, %v", operation, pending, err)
 	}
 	assertOldRestoreFixtureLive(t, fixture)
+	if _, err := fixture.applier.Apply(fixture.ctx); !errors.Is(err, ErrRestoreNotAuthorized) {
+		t.Fatalf("power-loss retry without renewed authorization error = %v", err)
+	}
+	if _, err := fixture.restorer.AuthorizeApply(operation.RestoreID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.applier.Apply(fixture.ctx); err != nil {
 		t.Fatalf("restore after recovered power loss failed: %v", err)
 	}
@@ -272,6 +284,10 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	reader.Close()
 	if stageErr != nil {
 		t.Fatal(stageErr)
+	}
+	operation, err = restorer.AuthorizeApply(operation.RestoreID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	applier, err := NewRestoreApplier(restorer, filepath.Join(stateDirectory, "restore-transactions"), -1, -1)
 	if err != nil {

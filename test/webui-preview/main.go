@@ -84,7 +84,7 @@ func (restore *previewRestore) Stage(_ context.Context, reader io.Reader, passph
 	}
 	now := time.Now().UTC()
 	restore.operation = backup.RestoreOperation{
-		FormatVersion: backup.PortableFormatVersion, RestoreID: "restore-0123456789abcdef0123456789abcdef", State: "STAGED",
+		FormatVersion: backup.PortableFormatVersion, RestoreID: "restore-0123456789abcdef0123456789abcdef", State: backup.RestoreStateStaged,
 		CreatedAt: now.Format(time.RFC3339Nano), SnapshotID: "preview-snapshot", SchemaVersion: 11, GatewayVersion: "gateway-vpn preview",
 		PortableBytes: int64(len(content)), PortableSHA256: strings.Repeat("a", 64), ArchiveBytes: int64(len(content)), PayloadBytes: int64(len(content)), Files: 3,
 	}
@@ -98,10 +98,21 @@ func (restore *previewRestore) Status() (backup.RestoreOperation, bool, error) {
 	return restore.operation, restore.pending, nil
 }
 
+func (restore *previewRestore) AuthorizeApply(restoreID string) (backup.RestoreOperation, error) {
+	restore.mutex.Lock()
+	defer restore.mutex.Unlock()
+	if !restore.pending || restore.operation.RestoreID != restoreID || (restore.operation.State != backup.RestoreStateStaged && restore.operation.State != backup.RestoreStateApplyRequested) {
+		return backup.RestoreOperation{}, backup.ErrRestoreNotPending
+	}
+	restore.operation.State = backup.RestoreStateApplyRequested
+	restore.operation.ApplyErrorCode = ""
+	return restore.operation, nil
+}
+
 func (restore *previewRestore) Discard(_ context.Context, restoreID string) error {
 	restore.mutex.Lock()
 	defer restore.mutex.Unlock()
-	if !restore.pending || restore.operation.RestoreID != restoreID {
+	if !restore.pending || restore.operation.RestoreID != restoreID || restore.operation.State != backup.RestoreStateStaged {
 		return backup.ErrRestoreNotPending
 	}
 	restore.pending = false
@@ -391,7 +402,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	if restorePending {
 		restores.pending = true
 		restores.operation = backup.RestoreOperation{
-			FormatVersion: backup.PortableFormatVersion, RestoreID: "restore-0123456789abcdef0123456789abcdef", State: "STAGED",
+			FormatVersion: backup.PortableFormatVersion, RestoreID: "restore-0123456789abcdef0123456789abcdef", State: backup.RestoreStateStaged,
 			CreatedAt: previewNow.Format(time.RFC3339Nano), SnapshotID: "preview-snapshot", SchemaVersion: 11, GatewayVersion: "gateway-vpn preview",
 			PortableBytes: 12 << 20, PortableSHA256: strings.Repeat("a", 64), ArchiveBytes: 20 << 20, PayloadBytes: 18 << 20, Files: 42,
 		}

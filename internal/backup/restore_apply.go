@@ -163,10 +163,15 @@ func (applier *RestoreApplier) resumeInterrupted(ctx context.Context, verified V
 		_ = applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_INTERRUPTED_ROLLBACK_FAILED")
 		return RestoreApplyResult{}, errors.Join(errors.New("interrupted restore transaction is unsafe"), err, rollbackErr)
 	}
+	// Revoke authorization before removing the recovery journal. A crash in
+	// either direction may leave a harmless stale journal, but it must never
+	// leave APPLY_REQUESTED without evidence that rollback is still required.
+	if markErr := applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_INTERRUPTED_ROLLED_BACK"); markErr != nil {
+		return RestoreApplyResult{}, errors.Join(errors.New("interrupted restore was rolled back but authorization could not be revoked"), markErr)
+	}
 	if removeErr := applier.removeJournal(journalPath); removeErr != nil {
 		return RestoreApplyResult{}, removeErr
 	}
-	_ = applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_INTERRUPTED_ROLLED_BACK")
 	return RestoreApplyResult{}, errors.New("interrupted restore transaction was rolled back; explicit retry is required")
 }
 
@@ -414,9 +419,12 @@ func (applier *RestoreApplier) rollbackFailure(restoreID string, items []restore
 		_ = applier.Manager.markApplyFailure(restoreID, "RESTORE_ROLLBACK_FAILED")
 		return RestoreApplyResult{}, errors.Join(cause, rollbackErr)
 	}
-	removeErr := applier.removeJournal(journalPath)
 	markErr := applier.Manager.markApplyFailure(restoreID, "RESTORE_APPLY_FAILED_ROLLED_BACK")
-	return RestoreApplyResult{}, errors.Join(cause, removeErr, markErr)
+	if markErr != nil {
+		return RestoreApplyResult{}, errors.Join(cause, markErr)
+	}
+	removeErr := applier.removeJournal(journalPath)
+	return RestoreApplyResult{}, errors.Join(cause, removeErr)
 }
 
 func (applier *RestoreApplier) rollbackItems(items []restoreSwapItem) error {

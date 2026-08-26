@@ -24,8 +24,15 @@ import (
 var (
 	ErrRestorePending        = errors.New("a restore operation is already pending")
 	ErrRestoreNotPending     = errors.New("the restore operation is not pending")
+	ErrRestoreNotAuthorized  = errors.New("restore apply was not explicitly authorized")
 	ErrRestoreUploadTooLarge = errors.New("the encrypted restore upload exceeds its bound")
 	restoreIDPattern         = regexp.MustCompile(`^restore-[a-f0-9]{32}$`)
+)
+
+const (
+	RestoreStateStaged         = "STAGED"
+	RestoreStateApplyRequested = "APPLY_REQUESTED"
+	RestoreStateApplied        = "APPLIED"
 )
 
 type RestoreOperation struct {
@@ -158,7 +165,7 @@ func (manager *RestoreManager) Stage(ctx context.Context, encrypted io.Reader, p
 		return RestoreOperation{}, errors.New("remove decrypted restore staging archive failed")
 	}
 	operation := RestoreOperation{
-		FormatVersion: PortableFormatVersion, RestoreID: restoreID, State: "STAGED", CreatedAt: manager.now().Format(time.RFC3339Nano),
+		FormatVersion: PortableFormatVersion, RestoreID: restoreID, State: RestoreStateStaged, CreatedAt: manager.now().Format(time.RFC3339Nano),
 		SnapshotID: manifest.SnapshotID, SchemaVersion: manifest.SchemaVersion, GatewayVersion: manifest.GatewayVersion,
 		PortableBytes: written, PortableSHA256: portableDigest, ArchiveBytes: plainBytes, PayloadBytes: manifest.PayloadBytes, Files: len(manifest.Files),
 	}
@@ -179,6 +186,42 @@ func (manager *RestoreManager) Stage(ctx context.Context, encrypted io.Reader, p
 	}
 	if err := writeJSONFile(manager.pendingPath(), operation, false); err != nil {
 		_ = removeRestoreDirectory(finalDirectory)
+		return RestoreOperation{}, err
+	}
+	return operation, nil
+}
+
+// AuthorizeApply records the destructive confirmation as a separate durable
+// state transition. The pointer-like pending marker is replaced first and the
+// authoritative operation record second: after a power loss, readPending
+// always returns the operation record, so a torn transition can remain STAGED
+// but can never manufacture an APPLY_REQUESTED authorization.
+func (manager *RestoreManager) AuthorizeApply(restoreID string) (RestoreOperation, error) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	if !restoreIDPattern.MatchString(restoreID) {
+		return RestoreOperation{}, ErrRestoreNotPending
+	}
+	if err := manager.prepareRoot(); err != nil {
+		return RestoreOperation{}, err
+	}
+	operation, pending, err := manager.readPending()
+	if err != nil {
+		return RestoreOperation{}, err
+	}
+	if !pending || operation.RestoreID != restoreID {
+		return RestoreOperation{}, ErrRestoreNotPending
+	}
+	if operation.State != RestoreStateStaged && operation.State != RestoreStateApplyRequested {
+		return RestoreOperation{}, ErrRestoreNotPending
+	}
+	operation.State = RestoreStateApplyRequested
+	operation.ApplyErrorCode = ""
+	operation.AppliedAt = ""
+	if err := writeJSONFile(manager.pendingPath(), operation, true); err != nil {
+		return RestoreOperation{}, err
+	}
+	if err := writeJSONFile(filepath.Join(manager.Root, restoreID, "operation.json"), operation, true); err != nil {
 		return RestoreOperation{}, err
 	}
 	return operation, nil
@@ -207,8 +250,11 @@ func (manager *RestoreManager) VerifyPending(ctx context.Context) (VerifiedResto
 	if err != nil {
 		return VerifiedRestore{}, err
 	}
-	if !pending || operation.State != "STAGED" {
+	if !pending {
 		return VerifiedRestore{}, ErrRestoreNotPending
+	}
+	if operation.State != RestoreStateApplyRequested {
+		return VerifiedRestore{}, ErrRestoreNotAuthorized
 	}
 	operationRoot := filepath.Join(manager.Root, operation.RestoreID)
 	stagedOperation, err := readRestoreOperation(filepath.Join(operationRoot, "operation.json"))
@@ -249,7 +295,7 @@ func (manager *RestoreManager) Discard(_ context.Context, restoreID string) erro
 	if err != nil {
 		return err
 	}
-	if !pending || operation.RestoreID != restoreID || operation.State != "STAGED" {
+	if !pending || operation.RestoreID != restoreID || operation.State != RestoreStateStaged {
 		return ErrRestoreNotPending
 	}
 	if err := os.Remove(manager.pendingPath()); err != nil {
@@ -274,7 +320,7 @@ func (manager *RestoreManager) markApplyFailure(restoreID, code string) error {
 	if !pending || operation.RestoreID != restoreID {
 		return ErrRestoreNotPending
 	}
-	operation.State = "STAGED"
+	operation.State = RestoreStateStaged
 	operation.ApplyErrorCode = code
 	if err := writeJSONFile(filepath.Join(manager.Root, restoreID, "operation.json"), operation, true); err != nil {
 		return err
@@ -295,7 +341,7 @@ func (manager *RestoreManager) complete(restoreID, appliedAt string) error {
 	if _, err := time.Parse(time.RFC3339Nano, appliedAt); err != nil {
 		return errors.New("valid restore completion timestamp is required")
 	}
-	operation.State = "APPLIED"
+	operation.State = RestoreStateApplied
 	operation.AppliedAt = appliedAt
 	operation.ApplyErrorCode = ""
 	if err := writeJSONFile(filepath.Join(manager.StateDirectory, "recovery", "last-restore.json"), operation, true); err != nil {
@@ -638,8 +684,23 @@ func validRestoreOperation(operation RestoreOperation) bool {
 	if operation.FormatVersion != PortableFormatVersion || !restoreIDPattern.MatchString(operation.RestoreID) || operation.State == "" || operation.SnapshotID == "" || operation.SchemaVersion < 1 || operation.PortableBytes <= 0 || operation.PortableBytes > MaximumPortableBackupBytes || !validDigest(operation.PortableSHA256) || operation.ArchiveBytes <= 0 || operation.ArchiveBytes > MaximumPortablePlainBytes || operation.PayloadBytes <= 0 || operation.PayloadBytes > MaximumPortablePlainBytes || operation.Files < 2 || operation.Files > MaximumPortableFiles {
 		return false
 	}
-	_, err := time.Parse(time.RFC3339Nano, operation.CreatedAt)
-	return err == nil
+	if _, err := time.Parse(time.RFC3339Nano, operation.CreatedAt); err != nil {
+		return false
+	}
+	switch operation.State {
+	case RestoreStateStaged:
+		return operation.AppliedAt == ""
+	case RestoreStateApplyRequested:
+		return operation.ApplyErrorCode == "" && operation.AppliedAt == ""
+	case RestoreStateApplied:
+		if operation.ApplyErrorCode != "" {
+			return false
+		}
+		_, err := time.Parse(time.RFC3339Nano, operation.AppliedAt)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 func sameRestoreIdentity(left, right RestoreOperation) bool {
