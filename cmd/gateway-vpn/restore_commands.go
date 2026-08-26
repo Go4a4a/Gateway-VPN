@@ -51,7 +51,21 @@ func runDatabaseRestore(args []string) int {
 	manager.ExpectedAPISecretPath = configuration.Mihomo.APISecretFile
 	manager.ExpectedTLSCertPath = configuration.API.TLSCert
 	manager.ExpectedTLSKeyPath = configuration.API.TLSKey
+	uid, gid, err := gatewayVPNIdentity()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "resolve Gateway VPN state ownership failed")
+		return 1
+	}
+	applier, err := backup.NewRestoreApplier(manager, *transactionRoot, int(uid), int(gid))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "initialize root restore transaction failed")
+		return 1
+	}
 	if *bootRecovery {
+		if err := applier.CleanupOrphanedTransactionTemps(); err != nil {
+			fmt.Fprintln(os.Stderr, "clean orphaned boot restore transaction records failed")
+			return 1
+		}
 		operation, pending, statusErr := manager.Status()
 		if statusErr != nil {
 			fmt.Fprintln(os.Stderr, "inspect boot restore state failed")
@@ -69,16 +83,6 @@ func runDatabaseRestore(args []string) int {
 			fmt.Fprintln(os.Stderr, "pending boot restore has an unsupported state")
 			return 1
 		}
-	}
-	uid, gid, err := gatewayVPNIdentity()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "resolve Gateway VPN state ownership failed")
-		return 1
-	}
-	applier, err := backup.NewRestoreApplier(manager, *transactionRoot, int(uid), int(gid))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "initialize root restore transaction failed")
-		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

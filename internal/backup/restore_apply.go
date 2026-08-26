@@ -567,7 +567,7 @@ func (applier *RestoreApplier) validate() error {
 	if applier == nil || applier.Manager == nil || !filepath.IsAbs(applier.TransactionRoot) || applier.setOwnership == nil || applier.validateOwner == nil {
 		return errors.New("restore applier is not initialized")
 	}
-	if err := secureRootTransactionDirectory(applier.TransactionRoot, applier.validateOwner); err != nil {
+	if err := applier.CleanupOrphanedTransactionTemps(); err != nil {
 		return err
 	}
 	for _, directory := range []string{filepath.Dir(applier.Manager.ConfigurationPath), applier.Manager.StateDirectory, filepath.Join(applier.Manager.StateDirectory, "mihomo")} {
@@ -576,6 +576,56 @@ func (applier *RestoreApplier) validate() error {
 		}
 	}
 	return nil
+}
+
+// CleanupOrphanedTransactionTemps removes only atomic JSON temporary files
+// left by a killed root restore process. It refuses unexpected type, mode, or
+// ownership rather than following or deleting an unsafe entry.
+func (applier *RestoreApplier) CleanupOrphanedTransactionTemps() error {
+	if applier == nil || !filepath.IsAbs(applier.TransactionRoot) || applier.validateOwner == nil {
+		return errors.New("restore applier transaction root is not initialized")
+	}
+	if err := secureRootTransactionDirectory(applier.TransactionRoot, applier.validateOwner); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(applier.TransactionRoot)
+	if err != nil {
+		return errors.New("read restore transaction root failed")
+	}
+	removed := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".recovery-record-") {
+			continue
+		}
+		if !validRecoveryRecordTempName(entry.Name()) {
+			return errors.New("orphaned restore transaction temporary filename is unsafe")
+		}
+		info, err := entry.Info()
+		if err != nil || entry.Type()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) || applier.validateOwner(info) != nil {
+			return errors.New("orphaned restore transaction temporary file is unsafe")
+		}
+		if err := os.Remove(filepath.Join(applier.TransactionRoot, entry.Name())); err != nil {
+			return errors.New("remove orphaned restore transaction temporary file failed")
+		}
+		removed = true
+	}
+	if removed {
+		return syncDirectory(applier.TransactionRoot)
+	}
+	return nil
+}
+
+func validRecoveryRecordTempName(name string) bool {
+	const prefix = ".recovery-record-"
+	if !strings.HasPrefix(name, prefix) || len(name) <= len(prefix) || len(name) > len(prefix)+20 {
+		return false
+	}
+	for _, character := range name[len(prefix):] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (applier *RestoreApplier) journalPath(restoreID string) string {

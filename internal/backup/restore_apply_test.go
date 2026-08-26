@@ -277,6 +277,45 @@ func TestRestoreRejectsActiveJournalFromDifferentAuthorizationWithoutMutation(t 
 	assertOldRestoreFixtureLive(t, fixture)
 }
 
+func TestRestoreTransactionTempCleanupIsStrictAndDurable(t *testing.T) {
+	t.Run("valid orphan is removed", func(t *testing.T) {
+		root := t.TempDir()
+		applier := &RestoreApplier{TransactionRoot: root, validateOwner: func(os.FileInfo) error { return nil }}
+		orphan := filepath.Join(root, ".recovery-record-123456789")
+		unrelated := filepath.Join(root, "keep.txt")
+		if err := os.WriteFile(orphan, []byte("partial atomic record"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := applier.CleanupOrphanedTransactionTemps(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("orphaned atomic record remains: %v", err)
+		}
+		if _, err := os.Lstat(unrelated); err != nil {
+			t.Fatalf("unrelated root-owned file was removed: %v", err)
+		}
+	})
+
+	t.Run("unexpected prefix match is refused", func(t *testing.T) {
+		root := t.TempDir()
+		applier := &RestoreApplier{TransactionRoot: root, validateOwner: func(os.FileInfo) error { return nil }}
+		unsafe := filepath.Join(root, ".recovery-record-not-random-digits")
+		if err := os.WriteFile(unsafe, []byte("do not remove"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := applier.CleanupOrphanedTransactionTemps(); err == nil || !strings.Contains(err.Error(), "filename is unsafe") {
+			t.Fatalf("unsafe orphan cleanup error = %v", err)
+		}
+		if _, err := os.Lstat(unsafe); err != nil {
+			t.Fatalf("unsafe prefix match was removed: %v", err)
+		}
+	})
+}
+
 func TestVerifyPendingRejectsTreeAndManifestTampering(t *testing.T) {
 	fixture := newRestoreApplyFixture(t)
 	secret := filepath.Join(fixture.restorer.Root, fixture.operation.RestoreID, "tree", "state", "secrets", "restored.secret")
