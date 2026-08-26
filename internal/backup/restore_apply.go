@@ -225,7 +225,10 @@ func (applier *RestoreApplier) prepareCandidates(ctx context.Context, verified V
 	if err != nil || applier.Manager.validateRestoredConfig(restoredConfiguration) != nil {
 		return errors.New("prepared restore configuration failed fixed-path validation")
 	}
-	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "database", "state.db"), items[1].Candidate, 0o600, applier.OwnerUID, applier.OwnerGID, applier.setOwnership); err != nil {
+	// Keep the mutable database candidate root-owned until migration and final
+	// verification are complete. The hardened restore unit intentionally lacks
+	// CAP_FOWNER; ownership is transferred only after the last chmod.
+	if err := copyPrivateFile(ctx, filepath.Join(verified.TreeRoot, "database", "state.db"), items[1].Candidate, 0o600, 0, 0, applier.setOwnership); err != nil {
 		return err
 	}
 	schemaVersion, sessionsRevoked, err := applier.prepareDatabase(ctx, items[1].Candidate, verified.Operation, result.PreRestoreSnapshot)
