@@ -59,7 +59,7 @@ func runDatabaseRestore(args []string) int {
 	defer stop()
 	result, err := applier.Apply(ctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "verified database restore failed and remains fail-closed")
+		fmt.Fprintf(os.Stderr, "verified database restore failed and remains fail-closed: %v\n", err)
 		return 1
 	}
 	fmt.Printf("Gateway VPN restore %s applied from snapshot %s; pre-restore snapshot %s; reconciliation required\n", result.RestoreID, result.SnapshotID, result.PreRestoreSnapshot)

@@ -413,6 +413,12 @@ func secureDirectory(directory string) error {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return errors.New("backup directory must be a real directory")
 	}
+	// The control-plane user owns these trees, while privileged restore and
+	// recovery helpers intentionally run without CAP_FOWNER. Avoid requiring
+	// that capability merely to reapply an already-correct mode.
+	if info.Mode().Perm() == 0o700 {
+		return nil
+	}
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return fmt.Errorf("secure backup directory: %w", err)
 	}
