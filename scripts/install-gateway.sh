@@ -214,7 +214,12 @@ for command in ip nft wg sysctl dnsmasq modprobe ss; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 if ((ENABLE_DHCP)); then
-  mapfile -t DNS_LISTEN_ADDRESSES < <(ss -H -lntu "sport = :53" | awk '{print $4}')
+  mapfile -t DNS_LISTEN_ADDRESSES < <(
+    {
+      ss -H -ltn "sport = :53"
+      ss -H -lun "sport = :53"
+    } | awk '{print $4}'
+  )
   for listen_address in "${DNS_LISTEN_ADDRESSES[@]}"; do
     case "$listen_address" in
       "0.0.0.0:53"|"*:53"|"[::]:53"|"$LAN_IP:53")
