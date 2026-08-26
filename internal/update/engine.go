@@ -483,11 +483,31 @@ func (engine *Engine) installRelease(verified VerifiedRelease) (string, error) {
 		if err != nil || !sameVerifiedArtifact(existing, verified) {
 			return "", errors.New("existing candidate release directory is not the same verified artifact")
 		}
+		if err := normalizeReleaseDirectoryModes(destination); err != nil {
+			return "", fmt.Errorf("normalize existing candidate release directories: %w", err)
+		}
+		if err := syncTree(destination); err != nil {
+			return "", err
+		}
+		existing, err = VerifyRelease(destination, engine.Stager.Policy)
+		if err != nil || !sameVerifiedArtifact(existing, verified) {
+			return "", errors.New("existing candidate release changed while normalizing directories")
+		}
 		return destination, nil
 	}
 	temporary := filepath.Join(releasesRoot, ".v"+verified.Release.GatewayVersion+"-"+verified.Manifest.ReleaseJSONSHA256[:12])
 	if pathExists(temporary) {
 		if existing, err := VerifyRelease(temporary, engine.Stager.Policy); err == nil && sameVerifiedArtifact(existing, verified) {
+			if err := normalizeReleaseDirectoryModes(temporary); err != nil {
+				return "", fmt.Errorf("normalize interrupted candidate release directories: %w", err)
+			}
+			if err := syncTree(temporary); err != nil {
+				return "", err
+			}
+			existing, err = VerifyRelease(temporary, engine.Stager.Policy)
+			if err != nil || !sameVerifiedArtifact(existing, verified) {
+				return "", errors.New("interrupted candidate release changed while normalizing directories")
+			}
 			if err := os.Rename(temporary, destination); err != nil {
 				return "", err
 			}
@@ -504,6 +524,12 @@ func (engine *Engine) installRelease(verified VerifiedRelease) (string, error) {
 		return "", err
 	}
 	defer func() { _ = removeReleaseTemporary(releasesRoot, temporary) }()
+	// gateway-vpn-update.service deliberately runs with UMask=0077. Chmod the
+	// root explicitly so the unprivileged runtime can traverse the release after
+	// the atomic rename; ownership remains that of the privileged updater.
+	if err := os.Chmod(temporary, 0o755); err != nil {
+		return "", err
+	}
 	records := append([]FileRecord(nil), verified.Manifest.Files...)
 	for _, name := range []string{ManifestFilename, SignatureFilename} {
 		info, err := os.Lstat(filepath.Join(verified.Root, name))
@@ -526,6 +552,12 @@ func (engine *Engine) installRelease(verified VerifiedRelease) (string, error) {
 			return "", err
 		}
 	}
+	// MkdirAll applies the process umask to every newly-created component. Make
+	// every real directory in the verified candidate tree exactly traversable;
+	// signed file modes are set separately by copyExclusiveFile.
+	if err := normalizeReleaseDirectoryModes(temporary); err != nil {
+		return "", fmt.Errorf("normalize candidate release directories: %w", err)
+	}
 	if err := syncTree(temporary); err != nil {
 		return "", err
 	}
@@ -539,6 +571,35 @@ func (engine *Engine) installRelease(verified VerifiedRelease) (string, error) {
 		return "", err
 	}
 	return destination, nil
+}
+
+func normalizeReleaseDirectoryModes(root string) error {
+	root, err := safeRoot(root)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("candidate release directory tree is unsafe")
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != root {
+			relative, err := filepath.Rel(root, path)
+			if err != nil || !safeRelativePath(filepath.ToSlash(relative)) {
+				return errors.New("candidate release directory path is unsafe")
+			}
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			return fmt.Errorf("chmod candidate release directory: %w", err)
+		}
+		return nil
+	})
 }
 
 func sameVerifiedArtifact(left, right VerifiedRelease) bool {
