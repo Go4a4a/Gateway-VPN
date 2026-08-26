@@ -224,6 +224,7 @@
 - полный Windows `go test ./... -count=1` и `go vet ./...` — PASS;
 - полный offline Linux/amd64 `go test ./... -count=1`, `go vet ./...` и `go build -trimpath -buildvcs=true ./test/endurance` — PASS;
 - отдельный Linux end-to-end CLI smoke реально выполнил TLS login, secure cookie+CSRF, 11 samples, два verified diagnostic downloads, logout и создал `SMOKE_PASS` report за 200 ms;
+- post-commit offline Linux build из clean `58b9cea46907eaa8f6e7e7f5955a5c005e3bdae6` подтверждён через `go version -m`: `GOOS=linux`, `GOARCH=amd64`, exact `vcs.revision`, `vcs.modified=false`;
 - `git diff --check` — PASS. Ни 24-часовой, ни 72-часовой run не выполнялся и не засчитывается.
 
 **Следующий шаг:** зафиксировать harness clean commit, затем на повышенном уровне провести exact signed/versioned Ubuntu systemd candidate build/install и запустить 24-часовой developer endurance. Hardware/release gates остаются `NOT_RUN`.
