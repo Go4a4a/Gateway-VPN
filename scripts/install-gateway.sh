@@ -295,6 +295,8 @@ if ((EXISTING)); then
   systemctl is-active --quiet gateway-vpn-network-broker.socket
   systemctl is-active --quiet gateway-vpn-network-broker.service
   systemctl is-active --quiet gateway-vpn.service
+  systemctl is-enabled --quiet gateway-vpn-update-finalize.timer
+  systemctl is-active --quiet gateway-vpn-update-finalize.timer
   [[ -S /run/gateway-vpn/network-broker.sock ]]
   if ((ENABLE_DHCP)); then
     systemctl is-active --quiet gateway-vpn-dnsmasq.service
@@ -411,7 +413,8 @@ chmod 0600 /run/gateway-vpn-install-authorized
 [[ -f /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-install-authorized) == "0:0:600" ]] || { echo "Ephemeral Gateway service-start authorization is unsafe" >&2; exit 1; }
 systemctl daemon-reload
 systemctl try-restart systemd-journald@gateway-vpn.service
-systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-update-finalize.timer gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
+systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
+systemctl enable --now gateway-vpn-update-finalize.timer
 systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service
 systemctl restart gateway-vpn-update-recovery.service
@@ -440,6 +443,7 @@ for _ in {1..20}; do
      systemctl is-active --quiet gateway-vpn-network-broker.socket &&
      systemctl is-active --quiet gateway-vpn-network-broker.service &&
      systemctl is-active --quiet gateway-vpn.service &&
+     systemctl is-active --quiet gateway-vpn-update-finalize.timer &&
      [[ -S /run/gateway-vpn/network-broker.sock ]] &&
      nft list table inet gateway_vpn >/dev/null 2>&1 &&
      [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] &&

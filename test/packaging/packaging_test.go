@@ -752,6 +752,13 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 			t.Errorf("installer lifecycle is missing %s", unit)
 		}
 	}
+	if !strings.Contains(installer, "systemctl enable --now gateway-vpn-update-finalize.timer") || !strings.Contains(installer, "systemctl is-active --quiet gateway-vpn-update-finalize.timer") {
+		t.Fatal("installer does not activate and verify the stability-window timer")
+	}
+	updateUnit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update.service"))
+	if !strings.Contains(updateUnit, "ExecStartPost=/usr/bin/systemctl start gateway-vpn-update-finalize.timer") {
+		t.Fatal("successful signed update does not ensure the stability-window timer is active")
+	}
 }
 
 func repositoryRoot(t *testing.T) string {

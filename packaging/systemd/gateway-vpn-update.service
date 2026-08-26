@@ -12,6 +12,7 @@ Type=oneshot
 Environment=GATEWAY_VPN_UPDATE_UNIT=1
 ExecStartPre=/opt/gateway-vpn/recovery/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply
 ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn update-apply --config /etc/gateway-vpn/config.yaml --apply
+ExecStartPost=/usr/bin/systemctl start gateway-vpn-update-finalize.timer
 TimeoutStartSec=30min
 UMask=0077
 NoNewPrivileges=yes
