@@ -686,6 +686,19 @@ func TestIsolatedDataPlaneUsersHaveSeparatedStateDirectories(t *testing.T) {
 			t.Errorf("%s does not manage the isolated dnsmasq state root", name)
 		}
 	}
+	for _, required := range []string{
+		`$(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases) == "gateway-vpn-dns:gateway-vpn:644"`,
+		`Installed Gateway dnsmasq config differs from the requested LAN policy`,
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("existing-install dnsmasq audit missing %q", required)
+		}
+	}
+	listenerGate := strings.Index(installer, `mapfile -t DNS_LISTEN_ADDRESSES`)
+	freshInstallBranch := strings.Index(installer, "  EXISTING=1\nelse\n")
+	if listenerGate < 0 || freshInstallBranch < 0 || listenerGate < freshInstallBranch {
+		t.Fatal("port-53 conflict gate must run only for a fresh install, after exact existing-install classification")
+	}
 }
 
 func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testing.T) {

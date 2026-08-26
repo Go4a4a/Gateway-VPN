@@ -213,22 +213,6 @@ fi
 for command in ip nft wg sysctl dnsmasq modprobe ss; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
-if ((ENABLE_DHCP)); then
-  mapfile -t DNS_LISTEN_ADDRESSES < <(
-    {
-      ss -H -ltn "sport = :53"
-      ss -H -lun "sport = :53"
-    } | awk '{print $4}'
-  )
-  for listen_address in "${DNS_LISTEN_ADDRESSES[@]}"; do
-    case "$listen_address" in
-      "0.0.0.0:53"|"*:53"|"[::]:53"|"$LAN_IP:53")
-        echo "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener" >&2
-        exit 1
-        ;;
-    esac
-  done
-fi
 [[ -d /sys/module/wireguard ]] || modprobe -n wireguard >/dev/null 2>&1 || { echo "Kernel WireGuard support is unavailable" >&2; exit 1; }
 systemctl is-active --quiet systemd-networkd.service || { echo "Gateway VPN requires active systemd-networkd" >&2; exit 1; }
 [[ -c /dev/net/tun ]] || { echo "/dev/net/tun is unavailable" >&2; exit 1; }
@@ -278,13 +262,33 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
   if ((ENABLE_DHCP)); then
     [[ -f /etc/gateway-vpn/dnsmasq.conf && ! -L /etc/gateway-vpn/dnsmasq.conf ]] || { echo "Installed Gateway dnsmasq config is missing or unsafe" >&2; exit 1; }
+    DHCP_START="$LAN_A.$LAN_B.$LAN_C.100"
+    DHCP_END="$LAN_A.$LAN_B.$LAN_C.200"
+    EXPECTED_DNSMASQ=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_IP__|$LAN_IP|g" -e "s|__DHCP_START__|$DHCP_START|g" -e "s|__DHCP_END__|$DHCP_END|g" -e "s|__NETMASK__|255.255.255.0|g" "$ROOT_DIR/packaging/dnsmasq/dnsmasq.conf.in")
+    [[ $(cat /etc/gateway-vpn/dnsmasq.conf) == "$EXPECTED_DNSMASQ" ]] || { echo "Installed Gateway dnsmasq config differs from the requested LAN policy" >&2; exit 1; }
     [[ -d /var/lib/gateway-vpn-dnsmasq && ! -L /var/lib/gateway-vpn-dnsmasq && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq) == "gateway-vpn-dns:gateway-vpn:700" ]] || { echo "Installed Gateway dnsmasq state root ownership or mode is invalid" >&2; exit 1; }
     if [[ -e /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases || -L /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases ]]; then
-      [[ -f /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && ! -L /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases) == "gateway-vpn-dns:gateway-vpn:600" ]] || { echo "Installed Gateway dnsmasq lease file ownership or mode is invalid" >&2; exit 1; }
+      [[ -f /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && ! -L /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases) == "gateway-vpn-dns:gateway-vpn:644" ]] || { echo "Installed Gateway dnsmasq lease file ownership or mode is invalid" >&2; exit 1; }
     fi
   fi
   EXISTING=1
 else
+  if ((ENABLE_DHCP)); then
+    mapfile -t DNS_LISTEN_ADDRESSES < <(
+      {
+        ss -H -ltn "sport = :53"
+        ss -H -lun "sport = :53"
+      } | awk '{print $4}'
+    )
+    for listen_address in "${DNS_LISTEN_ADDRESSES[@]}"; do
+      case "$listen_address" in
+        "0.0.0.0:53"|"*:53"|"[::]:53"|"$LAN_IP:53")
+          echo "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener" >&2
+          exit 1
+          ;;
+      esac
+    done
+  fi
   for conflict in \
     /opt/gateway-vpn/current /opt/gateway-vpn/recovery /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf \
     /etc/systemd/network/70-gateway-vpn-lan.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
