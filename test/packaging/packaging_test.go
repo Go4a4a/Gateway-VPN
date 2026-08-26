@@ -44,8 +44,8 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 	root := repositoryRoot(t)
 	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-watchdog.service"))
 	for _, required := range []string{
-		"Type=notify", "NotifyAccess=main", "WatchdogSec=10min", "Group=gateway-vpn",
-		"RuntimeDirectory=gateway-vpn-watchdog", "RuntimeDirectoryMode=0770",
+		"Type=notify", "NotifyAccess=all", "WatchdogSec=10min", "Group=gateway-vpn",
+		"RuntimeDirectory=gateway-vpn-watchdog", "RuntimeDirectoryMode=0770", "RuntimeDirectoryPreserve=restart",
 		"gateway-vpn watchdog --config /etc/gateway-vpn/config.yaml --history-root /var/lib/gateway-vpn-privileged/watchdog --status-path /run/gateway-vpn-watchdog/status.json --apply",
 		"Restart=always", "NoNewPrivileges=yes", "ProtectSystem=strict",
 		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_BOOT CAP_DAC_READ_SEARCH",
@@ -62,7 +62,7 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 		}
 	}
 	control := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn.service"))
-	for _, required := range []string{"Type=notify", "WatchdogSec=120s", "Wants=network-online.target gateway-vpn-network-broker.socket gateway-vpn-watchdog.service", "ReadWritePaths=/var/lib/gateway-vpn /run/gateway-vpn-watchdog"} {
+	for _, required := range []string{"Type=notify", "NotifyAccess=all", "WatchdogSec=120s", "Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service", "Wants=network-online.target gateway-vpn-network-broker.socket", "PartOf=gateway-vpn-watchdog.service", "ReadWritePaths=/var/lib/gateway-vpn /run/gateway-vpn-watchdog"} {
 		if !strings.Contains(control, required) {
 			t.Errorf("control hang-detection contract missing %q", required)
 		}
@@ -87,6 +87,20 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer watchdog acceptance missing %q", required)
 		}
+	}
+	last := -1
+	for _, command := range []string{
+		"systemctl restart gateway-vpn-update-recovery.service",
+		"systemctl restart gateway-vpn-network-recovery.service",
+		"systemctl restart gateway-vpn-network-broker.socket",
+		"systemctl restart gateway-vpn-watchdog.service",
+		"systemctl restart gateway-vpn.service",
+	} {
+		position := strings.Index(installer, command)
+		if position < 0 || position <= last {
+			t.Fatalf("installer recovery/watchdog startup order is unsafe at %q", command)
+		}
+		last = position
 	}
 }
 
@@ -856,13 +870,15 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"RemainAfterExit=yes",
 		"GATEWAY_VPN_UPDATE_RECOVERY_UNIT=1",
 		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover",
-		"ExecStartPost=/usr/bin/systemctl start --no-block gateway-vpn-network-broker.socket gateway-vpn.service",
 		"update-recover --config /etc/gateway-vpn/config.yaml --apply",
 		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("update recovery unit missing %q", required)
 		}
+	}
+	if strings.Contains(recovery, "ExecStartPost=") || strings.Contains(recovery, "systemctl start --no-block") {
+		t.Fatal("update recovery must finish before a separate owner resumes management")
 	}
 	finalize := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-finalize.service"))
 	timer := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-finalize.timer"))

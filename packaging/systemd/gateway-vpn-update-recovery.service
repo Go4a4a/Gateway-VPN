@@ -12,7 +12,6 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=GATEWAY_VPN_UPDATE_RECOVERY_UNIT=1
 ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover --config /etc/gateway-vpn/config.yaml --apply
-ExecStartPost=/usr/bin/systemctl start --no-block gateway-vpn-network-broker.socket gateway-vpn.service
 TimeoutStartSec=20min
 UMask=0077
 NoNewPrivileges=yes

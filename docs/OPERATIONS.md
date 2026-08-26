@@ -199,13 +199,14 @@ Boot order:
 
 1. если остался durable first-install marker, `gateway-vpn-install-recovery.service` восстанавливает прежнее host state; application units имеют отдельный marker gate;
 2. `gateway-vpn-firewall.service` загружает owned `PATH_BLOCKED` table;
-3. `gateway-vpn-network-recovery.service` до DHCP/API откатывает каждую незавершённую сетевую транзакцию либо завершает уже доказанный confirmation intent;
-4. `gateway-vpn.service` открывает SQLite, применяет migrations и проверяет integrity; systemd-networkd сохраняет transit LAN и выдаёт Huawei HiLink только DHCP lease без routes/DNS/NTP;
-5. при отсутствии users создаётся `admin` и одноразовый пароль в `/var/lib/gateway-vpn/secrets/bootstrap-admin-password` с mode `0600`;
-6. self-signed TLS certificate создаётся в `/var/lib/gateway-vpn/tls/`, fingerprint пишется в journald;
-7. HTTPS API начинает слушать LAN address; WireGuard bind подключается после появления адреса;
-8. root broker активируется только через `/run/gateway-vpn/network-broker.sock`, доступный owner `gateway-vpn` с mode `0600`;
-9. Mihomo и DHCP остаются выключены, пока их конфигурации не проверены.
+3. update recovery, условный restore recovery и `gateway-vpn-network-recovery.service` последовательно завершают или откатывают незавершённые root-транзакции до DHCP/API;
+4. `gateway-vpn-watchdog.service` создаёт общий runtime heartbeat-каталог и переходит в safe-default policy; во время install/recovery он только наблюдает и не выполняет recovery actions;
+5. `gateway-vpn.service` открывает SQLite, применяет migrations и проверяет integrity; systemd-networkd сохраняет transit LAN и выдаёт Huawei HiLink только DHCP lease без routes/DNS/NTP;
+6. при отсутствии users создаётся `admin` и одноразовый пароль в `/var/lib/gateway-vpn/secrets/bootstrap-admin-password` с mode `0600`;
+7. self-signed TLS certificate создаётся в `/var/lib/gateway-vpn/tls/`, fingerprint пишется в journald;
+8. HTTPS API начинает слушать LAN address; WireGuard bind подключается после появления адреса;
+9. root broker активируется только через `/run/gateway-vpn/network-broker.sock`, доступный owner `gateway-vpn` с mode `0600`;
+10. Mihomo остаётся condition-inactive до проверенной LKG; dnsmasq запускается только для установки с явно включённым DHCP.
 
 ```bash
 sudo cat /var/lib/gateway-vpn/secrets/bootstrap-admin-password
@@ -290,6 +291,28 @@ Retention policy имеет отдельный durable state `UNKNOWN/PENDING/AP
 Там же доступен **Технический журнал** только из namespace `gateway-vpn`: страницы до 25 записей, период не более 31 дня и фильтры по уровню, component, modem/subscription/path, correlation ID и тексту. API ограничен 20 запросами в минуту на session. Reader всегда запускает фиксированный `/usr/bin/journalctl` с фиксированными namespace/JSON/reverse flags, считывает не более 129 записей/2 MiB за вызов, ограничивает cursor/поля/сообщение и повторно применяет secret redaction. Control plane не добавляется в широкую группу чтения host journal; доступ выполняется через тот же UID-bound root broker. Недоступность журнала не скрывает logging settings и отображается отдельной ошибкой блока.
 
 Audit входов, policy/settings mutations, manual activation, update/restore и destructive actions не отключается и имеет жёсткий minimum `info`, даже если global level равен `warning` или `error`. Pre-logger handler удаляет subscription URL/token, passwords, private/API keys, proxy credentials, modem serial/identity hash, response body, полный subscription payload и несаницированный Mihomo config также из вложенных map/struct/error. Journal reader и diagnostic builder выполняют независимый второй redaction pass и не полагаются на текущий log level.
+
+## Самоконтроль 24/7
+
+Во вкладке **Система и безопасность → Самоконтроль 24/7** отдельно показываются локальное состояние процессов/SQLite/firewall, доступность глобального Интернета, active maintenance и durable restart/reboot budgets. Потеря модемов, операторов, подписок, targets, VPS или всего внешнего Интернета отображается как connectivity outage и сама по себе никогда не запускает restart либо reboot.
+
+Safe-default policy проверяет фиксированный allowlist компонентов каждые 15 секунд, требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает systemd crash restart, fail-closed firewall guard и audit.
+
+Host reboot по умолчанию выключен. Его включение требует отдельного подтверждения в WebUI; даже после включения нужны непрерывный локальный critical failure не менее 15 минут, исчерпанная безопасная локальная recovery ladder, повторный `PATH_BLOCKED`, 60-секундный grace и свободный durable budget (по умолчанию один reboot за 24 часа). История записывается и fsync-ится до privileged action, не очищается restart-ом supervisor или изменением settings и блокирует reboot loop. Disk/memory/FD pressure, maintenance transaction и внешний outage не являются reboot-eligible причинами.
+
+Control и supervisor используют systemd watchdog heartbeats. Runtime status считается доступным только при свежих root status и control heartbeat с правильными owner/mode; старый файл после смерти процесса не отображается как healthy. `gateway-vpn.service` следует lifecycle supervisor, а его heartbeat-каталог сохраняется при restart обоих units, поэтому control не продолжает работу в отдельном устаревшем mount namespace.
+
+Диагностика:
+
+```bash
+sudo systemctl status gateway-vpn-watchdog.service gateway-vpn.service
+sudo systemctl show gateway-vpn-watchdog.service gateway-vpn.service -p ActiveState -p SubState -p NRestarts -p WatchdogUSec
+sudo stat -c '%U:%G:%a %y %n' /run/gateway-vpn-watchdog/status.json /run/gateway-vpn-watchdog/control.json
+sudo journalctl --namespace=gateway-vpn -u gateway-vpn-watchdog.service -u gateway-vpn.service
+sudo nft list table inet gateway_vpn
+```
+
+Не удаляйте вручную `/var/lib/gateway-vpn-privileged/watchdog`: там находится root-only история budget. Перед плановым обслуживанием используйте штатные install/update/restore/network-apply units; supervisor распознаёт их как maintenance и не конкурирует с транзакцией.
 
 ## Диагностический архив
 

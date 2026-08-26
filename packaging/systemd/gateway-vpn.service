@@ -2,8 +2,9 @@
 Description=Gateway VPN management and control plane
 Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
 After=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service systemd-networkd.service network-online.target
-Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service systemd-networkd.service
-Wants=network-online.target gateway-vpn-network-broker.socket gateway-vpn-watchdog.service gateway-vpn-database-restore-boot.service
+Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service systemd-networkd.service
+Wants=network-online.target gateway-vpn-network-broker.socket gateway-vpn-database-restore-boot.service
+PartOf=gateway-vpn-watchdog.service
 ConditionPathExists=/etc/gateway-vpn/config.yaml
 ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-install-authorized
@@ -13,7 +14,7 @@ ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
 [Service]
 LogNamespace=gateway-vpn
 Type=notify
-NotifyAccess=main
+NotifyAccess=all
 User=gateway-vpn
 Group=gateway-vpn
 UMask=0077

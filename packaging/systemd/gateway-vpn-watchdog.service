@@ -16,11 +16,12 @@ ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
 [Service]
 LogNamespace=gateway-vpn
 Type=notify
-NotifyAccess=main
+NotifyAccess=all
 Group=gateway-vpn
 UMask=0027
 RuntimeDirectory=gateway-vpn-watchdog
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=restart
 ExecStart=/opt/gateway-vpn/current/bin/gateway-vpn watchdog --config /etc/gateway-vpn/config.yaml --history-root /var/lib/gateway-vpn-privileged/watchdog --status-path /run/gateway-vpn-watchdog/status.json --apply
 Restart=always
 RestartSec=5s
