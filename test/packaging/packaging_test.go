@@ -625,6 +625,33 @@ func TestMihomoServiceConditionAndPermissionsAreFailClosed(t *testing.T) {
 	}
 }
 
+func TestIsolatedDataPlaneUsersCanTraverseOnlyTheirStateDirectories(t *testing.T) {
+	root := repositoryRoot(t)
+	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
+	for _, required := range []string{
+		"d /var/lib/gateway-vpn 0710 gateway-vpn gateway-vpn",
+		"d /var/lib/gateway-vpn/secrets 0700 gateway-vpn gateway-vpn",
+		"d /var/lib/gateway-vpn/mihomo 0750 gateway-vpn gateway-vpn",
+		"d /var/lib/gateway-vpn/dnsmasq 0750 gateway-vpn-dns gateway-vpn",
+	} {
+		if !strings.Contains(tmpfiles, required) {
+			t.Errorf("service state traversal policy missing %q", required)
+		}
+	}
+	if strings.Contains(tmpfiles, "d /var/lib/gateway-vpn 0750") || strings.Contains(tmpfiles, "d /var/lib/gateway-vpn 0770") {
+		t.Fatal("shared service group must not be able to list or write the state root")
+	}
+	sysusers := read(t, filepath.Join(root, "packaging", "sysusers.d", "gateway-vpn.conf"))
+	for _, required := range []string{
+		"m gateway-vpn-mihomo gateway-vpn",
+		"m gateway-vpn-dns gateway-vpn",
+	} {
+		if !strings.Contains(sysusers, required) {
+			t.Errorf("isolated service user is missing traversal-only group membership %q", required)
+		}
+	}
+}
+
 func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testing.T) {
 	root := repositoryRoot(t)
 	restore := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-database-restore.service"))

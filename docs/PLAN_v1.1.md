@@ -6,6 +6,7 @@
 **Целевая платформа Gateway:** Ubuntu Server 24.04 LTS, x86_64  
 **Целевая платформа VPS:** Ubuntu Server LTS 20.04 и выше, x86_64; Debian 12+ как отдельный support profile  
 **Проверяемые Ubuntu VPS profiles:** 20.04, 22.04, 24.04 и 26.04 LTS; 20.04 допускается только с активным Ubuntu Pro/ESM и актуальными security updates
+**Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
 
 ---
 
@@ -72,6 +73,7 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - SQLite, структурированные события и учёт трафика;
 - idempotent install/update/uninstall scripts;
 - backup, restore и diagnostic bundle.
+- круглосуточный self-health supervisor с настраиваемой через Web UI безопасной лестницей восстановления и защитой от restart/reboot loop.
 
 Рабочая топология — `1..N` adopted HiLink-модемов. Один модем является полностью поддерживаемой штатной конфигурацией: список modem priority состоит из одного элемента, межмодемный failover не выполняется, а при disconnect единственного uplink Gateway остаётся `PATH_BLOCKED` до его стабильного reconnect либо добавления другого модема. При двух, пяти или большем числе модемов используется та же модель без специального «двухмодемного» режима; каждый модем имеет собственные identity, priority, management subnet, route table, fwmark, health и ячейки `modem × subscription`. Web UI не задаёт искусственный предел количества записей, но фактический hard limit определяется уникальностью подсетей, USB-питанием и hardware-profile limits для размера Mihomo config и probe matrix. Требование иметь минимум два модема относится только к стендовой проверке multi-modem failover и не является минимальным требованием для обычной установки.
 
@@ -99,6 +101,7 @@ Gateway VPN — домашний IPv4-шлюз, который:
 5. **Минимальные привилегии:** Web/API не работают от root; секреты не попадают в БД, API и логи.
 6. **Проверяемость:** каждый этап заканчивается автоматизируемыми критериями готовности.
 7. **Безопасное изменение сети:** рискованные настройки применяются с подтверждением или rollback.
+8. **Unattended recovery:** локальные программные сбои обнаруживаются и исправляются автоматически, но внешний outage не маскируется опасным циклом перезагрузок.
 
 ---
 
@@ -970,6 +973,50 @@ failover:
 
 Failback разрешён только после непрерывной стабильности всей preferred path cell. Вернувшийся modem сначала проходит `modem_reconnect_stable_seconds` и приоритетную requalification; одно его появление в USB не вызывает переключение.
 
+### 9.8 Круглосуточный самоконтроль и bounded recovery
+
+Эксплуатационная цель — `24/7 unattended operation` и максимально достижимая доступность. Формулировка «100% uptime» не является технической гарантией: программно невозможно устранить отключение питания, физический отказ Gateway/USB-хаба, одновременную недоступность всех операторов/VPS или повреждение оборудования. Любое заявленное uptime измеряется по журналу и monitoring interval, а не предполагается по наличию active systemd unit.
+
+Самоконтроль разделяет три класса состояния:
+
+- `LOCAL_COMPONENT_FAILURE`: процесс, event loop, SQLite, firewall generation, broker, Mihomo/TUN, dnsmasq, disk/memory/FD pressure или внутренняя reconciliation loop неисправны;
+- `EXTERNAL_CONNECTIVITY_FAILURE`: все модемы offline, mobile registration отсутствует, подписки/узлы/targets либо VPS недоступны при исправном локальном control plane;
+- `MAINTENANCE_TRANSACTION`: install/update/restore/safe network apply выполняется или восстанавливается.
+
+Лестница автоматического восстановления строго ограничена и журналируется:
+
+1. повторить локальную проверку с failure threshold и jitter;
+2. выполнить idempotent reconcile;
+3. перевести data plane в `PATH_BLOCKED` до опасной мутации;
+4. перезапустить только неисправный component в dependency order и проверить его readiness;
+5. для Mihomo/config/update использовать LKG/transaction rollback;
+6. если локальный критический дефект сохраняется, зафиксировать `CRITICAL_LOCAL` и оставить management plane доступным;
+7. optional host reboot разрешён только явной настройкой, после непрерывного локального critical interval, вне любой maintenance transaction и в пределах durable reboot budget;
+8. после исчерпания restart/reboot budget перейти в `RECOVERY_SUPPRESSED`, сохранить fail-closed и требовать operator action.
+
+Обычная потеря глобального Интернета, `ALL_MODEMS_OFFLINE`, отсутствие working subscription/target или недоступность VPS **никогда сами по себе не перезагружают Gateway**: reboot не исправляет внешний outage и может создать destructive loop. Firewall guard и базовый systemd liveness watchdog не отключаются из Web UI. Hardware watchdog (`/dev/watchdog`) является отдельной optional advanced функцией и включается только после hardware preflight.
+
+Изменяемая policy хранится в SQLite, валидируется server-side, имеет safe defaults, bounded ranges и audit history. Минимальный набор настроек:
+
+```yaml
+watchdog:
+  enabled: true
+  check_interval_seconds: 15
+  failure_threshold: 3
+  success_threshold: 2
+  reconcile_enabled: true
+  component_restart_enabled: true
+  restart_cooldown_seconds: 30
+  max_restarts_per_component: 5
+  restart_window_seconds: 900
+  host_reboot_enabled: false
+  reboot_after_critical_seconds: 900
+  max_reboots_per_24h: 1
+  reboot_grace_seconds: 60
+```
+
+Настройка не разрешает arbitrary unit/command. Список компонентов, порядок restart, fixed executable/systemd unit names и признаки critical failure зашиты в signed release. Изменение policy не сбрасывает durable restart/reboot history. Web UI показывает effective policy, состояние каждого компонента, last success/failure/recovery, число попыток и причину suppression. Все автоматические actions попадают в events/journald и diagnostic bundle без secrets.
+
 ---
 
 ## 10. WireGuard management plane
@@ -1491,6 +1538,8 @@ POST   /api/v1/bypass-targets/{id}/probe
 
 GET    /api/v1/health
 GET    /api/v1/health/history
+GET    /api/v1/health/supervisor
+POST   /api/v1/health/supervisor/recover
 GET    /api/v1/events
 
 GET    /api/v1/traffic/current
@@ -1500,6 +1549,8 @@ GET    /api/v1/traffic/export.csv
 
 GET    /api/v1/settings
 PATCH  /api/v1/settings
+GET    /api/v1/settings/watchdog
+PUT    /api/v1/settings/watchdog
 POST   /api/v1/settings/network/apply
 POST   /api/v1/settings/network/apply/{id}/confirm
 
@@ -1530,7 +1581,7 @@ Web UI разделяется по предметным областям; одн
 9. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
 10. **Удалённый доступ:** VPS peer, выбранный management-модем, handshake и admin peers.
 11. **Сеть:** transit LAN, DHCP/DNS, обнаруженные интерфейсы, routing tables/marks read-only и safe apply.
-12. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS и diagnostic bundle.
+12. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
 
 Вкладка **Модемы** использует такой же управляемый список, как **Подписки**: стабильный номер/имя, enabled и явный priority; priority не выводится из USB port или порядка обнаружения. Строка модема показывает configured/observed operator, interface, management subnet/gateway/DNS, routing table/fwmark, signal/registration, telemetry state, WireGuard endpoint reachability, `last_seen_at`, subnet conflict и компактные badges по всем subscriptions. Доступны Adopt, Disable/Enable, Probe, Recover, Replace identity и Forget; Forget разрешён только для offline-модема с подтверждением.
 
@@ -1965,6 +2016,12 @@ Linux network namespaces моделируют:
 | SQLite WAL оборван/имеет неверную checksum | отбросить неподтверждённый tail, quick check, затем verification | нет |
 | SQLite main DB page повреждена/частично записана | не открывать БД на запись; integrity event; restore backup либо PATH_BLOCKED | нет |
 | Mihomo SIGKILL/restart storm | ограниченный restart, LKG, затем PATH_BLOCKED | нет |
+| Control loop завис, но PID жив | systemd liveness watchdog завершает process; bounded restart; reconcile observed state | нет |
+| Broker/dnsmasq/firewall guard завершился | перезапуск только компонента, readiness check и audit event | нет |
+| Внешний Internet/modems/VPS недоступны длительно | failover либо PATH_BLOCKED; host reboot не выполняется | нет |
+| Локальный critical failure пережил restart budget | RECOVERY_SUPPRESSED; optional bounded reboot только по explicit policy | нет |
+| Reboot budget исчерпан | запрет следующих reboot до durable window expiry; operator alert | нет |
+| Update/restore/network transaction активна | watchdog не вмешивается; штатный transaction recovery имеет приоритет | нет |
 | Gateway VPN nftables table удалена | LAN quarantine, восстановление guard, повторная verification | нет |
 | Reboot | старт с blocked ruleset, затем verification | нет |
 | IPv6 router advertisement | ignored/dropped | нет |
@@ -2179,6 +2236,9 @@ Fixtures не содержат production credentials, настоящие subscr
 19. вернувшийся preferred modem активируется только после stable requalification, без flap;
 20. DHCP, DNS bootstrap, proxy sockets и WireGuard endpoint routes каждого модема изолированы его fwmark/routing table.
 21. versioned signed artifacts из GitHub устанавливают чистые поддерживаемые Gateway и VPS воспроизводимо; одна SSH-orchestrated команда либо подтверждает полный `READY`, либо выдаёт проверяемый `INSTALLED_NOT_READY`/failure и безопасный rollback без ложного заявления о готовности.
+22. PID-alive hang, component crash и restart storm автоматически обнаруживаются; восстановление bounded, dependency-aware, fail-closed и полностью отражено в UI/events/diagnostics.
+23. длительная внешняя потеря Internet/modems/VPS не вызывает host reboot; optional reboot локального critical failure имеет durable budget и не выполняется во время install/update/restore/network transaction.
+24. 24- и 72-часовые endurance результаты содержат supervisor/recovery counters и не имеют скрытого restart/reboot loop.
 
 ---
 
