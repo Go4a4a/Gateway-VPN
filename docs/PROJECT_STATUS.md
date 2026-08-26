@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Exact signed update `.21 → .22` из commit `e5b8934` прошёл clean Ubuntu 24.04/systemd install, Web API staging/apply, atomic binary+DB switch, 24-часовой finalize contract, forced health/finalize rollback, finalized reboot и настоящий host-side power cut в durable `HEALTH_CHECKING`. Boot recovery восстановил `.21`+SQLite snapshot, fail-closed boundary и автоматически возобновил broker/WebUI. Следующий шаг — реальный destructive restore/recovery acceptance, затем bare-metal Gateway/VPS/HiLink/Keenetic и 72-часовой endurance
+**Текущий этап:** Exact signed `.26` из commit `9235e42` прошёл clean Ubuntu 24.04/systemd install, portable backup, corrupt rejection, verified staging, destructive restore success и reboot. Host-side power cut в `APPLYING` выявил auto-retry defect; commits `0725413`, `dd56903` и `ddcc407` ввели отдельный `APPLY_REQUESTED`, одноразовый nonce, durable `ROLLED_BACK`, идемпотентный rollback и single-pass boot cleanup. Актуальный unsigned binary из `ddcc407` уже прошёл staging-only reboot, success и exit-137 rollback/no-auto-retry на Ubuntu/systemd. Следующий шаг — повторить ту же матрицу exact signed `.27`, затем bare-metal Gateway/VPS/HiLink/Keenetic и 72-часовой endurance
 
-**Оценка прогресса:** около `96%` программной реализации и около `85%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, destructive restore gate и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `97%` программной реализации и около `87%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные exact-signed restore retest, permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -45,19 +45,19 @@
 | API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 78 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
-| Backup / restore | `CODE_PASS / BOOT_GRAPH_PASS / APPLY_NOT_RUN` | Restore engine покрыт success/adversarial/power-loss simulation tests; Docker fresh boot подтвердил, что бесконфликтный boot recovery упорядочен до broker/control, а runtime destructive unit не включён в boot target; реальный pending restore success/failure/power-cut ещё не запускался |
+| Backup / restore | `DEV_SYSTEMD_POWER_CUT_PASS / EXACT_RETEST_PENDING / HOST_NOT_RUN` | Exact signed `.26` прошёл success/reboot, но exit-137 выявил auto-retry. Актуальный `ddcc407` на Ubuntu/systemd доказал: `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, не повторяет Apply, очищает root temp records и возвращает management. Нужен повтор этой матрицы на новом exact signed `.27` и bare-metal power cut |
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
 | Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` дополнительно доказали systemd update/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline native Linux `go test ./...`/`go vet ./...` прошли после каждого update/recovery fix. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — systemd update, rollback, reboot и power-cut recovery. Удалённый CI для local-ahead commits ещё не выполнен |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.26` — restore success, а latest dev binary — исправленный restore power-cut/no-auto-retry. Удалённый CI для local-ahead commits ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: выполнить реальный destructive SQLite restore success/failure/reboot/power-cut acceptance на exact signed Ubuntu 24.04 стенде без потери fail-closed boundary. Затем нужны bare-metal Gateway + реальный VPS, HiLink/Keenetic packet-capture matrix и 72-часовой endurance. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. До production tag/assets по-прежнему нужен отдельно backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: собрать exact signed `.27` строго из clean commit `ddcc407` и повторить clean Ubuntu 24.04 staging-only reboot, success, corrupt rejection, partial activation + host SIGKILL, boot rollback/no-auto-retry, explicit retry и reboot. Затем нужны bare-metal Gateway + реальный VPS, HiLink/Keenetic packet-capture matrix и 72-часовой endurance. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. До production tag/assets по-прежнему нужен отдельно backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
-При неизменном scope основной оставшийся путь — restore/release/hardware integration acceptance и найденные при ней исправления. Signed update/reboot/power-cut matrix уже пройден в privileged Docker/systemd; отдельно ещё требуются destructive restore matrix, production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой endurance.
+При неизменном scope основной оставшийся путь — exact-signed restore retest, release/hardware integration acceptance и найденные при ней исправления. Signed update/reboot/power-cut matrix и latest dev restore matrix уже пройдены в privileged Docker/systemd; отдельно ещё требуются exact signed restore `.27`, production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой endurance.
 
 Если целевые Linux Gateway, VPS и модемы доступны без пауз, оптимистичный календарный ориентир до проверенного release — `4–8 дней`: примерно `1–3` интенсивных дня на оставшийся код и интеграционные исправления, затем минимум `72 часа` endurance. Это не обещанная дата: отсутствие стенда, найденные routing/hardware defects либо расширение scope сдвигают срок. Без фактического доступа к Linux/VPS/оборудованию можно завершить код и synthetic tests, но нельзя честно поставить production status `DONE`.
 
@@ -69,7 +69,7 @@
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
 6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact disposable signed `.13` прошёл clean orchestration/handshake, а `.21/.22` — systemd update/recovery; отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены, CI не получает release secrets.
-7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS и exact signed update прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, finalized reboot и host-side container exit 137 в `HEALTH_CHECKING`. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине, uninstall или USB hotplug.
+7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS и exact signed update прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, finalized reboot и host-side container exit 137 в `HEALTH_CHECKING`. Exact signed restore `.26` прошёл success, а исправленный `ddcc407` — unsigned systemd power-cut matrix; exact signed `.27` ещё не собран. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине, uninstall или USB hotplug.
 8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
 ## Реестр решений реализации
@@ -193,8 +193,39 @@
 | DEV-115 | 2026-08-26 | Updater после создания и перед atomic rename нормализует каждый real candidate release directory в `root:root 0755`, а signed files — строго `0755/0644`; tree повторно signature-verify | `UMask=0077` создавал root-only `0700` directories, из-за чего unprivileged control service не мог исполнить новый binary, хотя file mode был правильным |
 | DEV-116 | 2026-08-26 | Installer активирует finalize timer через `enable --now`, readiness проверяет его active state, а successful update имеет fixed `ExecStartPost` для того же timer | Простое `enable` после уже активного `timers.target` оставляло 24h transaction в `STABILIZING` до следующего reboot |
 | DEV-117 | 2026-08-26 | Successful boot update recovery ставит fixed broker socket/control start jobs через `systemctl start --no-block`; failed recovery не выполняет post-step | Rollback quiesce отменял ожидавшие boot jobs управления; synchronous start создал бы dependency cycle с network recovery, а no-block сохраняет systemd ordering и fail-closed failure semantics |
+| DEV-118 | 2026-08-26 | Portable restore после upload остаётся только `STAGED`; WebUI Apply атомарно создаёт `APPLY_REQUESTED` с одноразовым 256-bit nonce, который не возвращается API | `pending-restore.json` раньше не отличал проверенный upload от подтверждённого destructive action, поэтому обычный reboot мог применить backup без согласия пользователя |
+| DEV-119 | 2026-08-26 | Успешный restore rollback сначала фиксирует root journal `ROLLED_BACK`, затем отзывает nonce и возвращает operation в `STAGED`; повторный rollback идемпотентен, а новый Apply получает другой nonce | Power cut после rollback, но до marker update мог повторно удалить уже возвращённые original destinations либо автоматически повторить destructive apply |
+| DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
 
 ## Журнал разработки
+
+### Сессия 045 — destructive restore, найденный auto-retry и boot-safe recovery — 2026-08-26
+
+**Exact signed baseline и обнаруженный дефект:**
+
+- exact signed `0.1.0-systemd.26` собран из `9235e42afcea6ba79bb46cdf25830e05e7d987b1`, signer fingerprint `6670666c1a1f61c3d0e1d441241e25c605d79b390ab9ce9633589d151d200ecf`, archive SHA-256 `ec41158bff049dbb39aef63028cfcc0cc821e616a23c951a678758bcb984569a`; private key существовал только в `noexec` tmpfs и уничтожен;
+- clean Ubuntu 24.04/systemd install, mandatory bootstrap password change, portable encrypted backup, corrupt/truncated rejection, verified staging without live mutation, API `202 APPLY_SCHEDULED`, root restore DB/config/secrets/subscriptions, session revocation, pre-restore snapshot, management resume, empty TUN gate и clean reboot — PASS;
+- host-side `docker kill --signal SIGKILL` после durable `APPLYING`, `applied_items=3`, exit `137`: первый boot правильно выполнил rollback, но второй dependency-start применил backup автоматически. Дополнительно доказано, что простой `STAGED` upload также мог примениться после reboot.
+
+**Исправления:**
+
+- `0725413` добавил `APPLY_REQUESTED`, power-loss-safe `AuthorizeApply`, WebUI authorization до broker trigger, `--boot-recovery`, запрет `VerifyPending` для обычного `STAGED` и обязательную новую авторизацию после failure;
+- `dd56903` связал operation/root journal одноразовым nonce, добавил durable `ROLLED_BACK`, отказ от чужого active journal, идемпотентный повтор rollback и безопасное продолжение только после нового explicit Apply;
+- `ddcc407` очищает строго распознанные root-owned atomic temp records после SIGKILL и оставляет boot helper active/exited через `RemainAfterExit=yes`, поэтому несколько `Wants=` не создают второй recovery pass;
+- Web API никогда не возвращает authorization nonce; failed rollback не переводится в `STAGED`, пока filesystem rollback реально не завершён.
+
+**Проверки актуального `ddcc407`:**
+
+- полный Windows и offline Linux/amd64 `go test ./...` + `go vet ./...` — PASS; весь unit graph — `systemd-analyze verify` PASS;
+- disposable Ubuntu/systemd, production Web API и current binary: обычный `STAGED` reboot сохранил одинаковые config/secret/last-restore SHA-256 и mutation marker, management вернулся, root journal не создан;
+- success path восстановил marker/config/secrets, удалил pending/journal, оставил Mihomo inactive и TUN gate пустым. Первая попытка в клонированном image получила ожидаемый Docker OverlayFS lower-layer `EXDEV`; после verified upper-layer copy-up тех же disposable каталогов production restore прошёл. Это artifact метода `docker commit`, а не production restore defect;
+- power-cut clone остановлен в `APPLYING` после трёх replacements и уничтожен host-side с exit `137`; boot вернул mutation DB/config/secrets, записал `STAGED / RESTORE_INTERRUPTED_ROLLED_BACK`, удалил nonce/journal/temp, сохранил прежний `last-restore`, поднял broker/WebUI и за пять секунд не выполнил auto-retry;
+- следующий staged reboot с latest cleanup binary дал ровно один новый `remains STAGED`, `Result=success`, `ActiveState=active`, пустой transaction root и работающее management.
+
+**Ограничение и следующий шаг:**
+
+- latest matrix пока `unsigned behavioral acceptance`: попытка exact-signed `.27` не стартовала, потому что среда автоматически отклонила Docker approval до запуска builder. Нужен явный пользовательский allow для offline builder с read-only source/module mounts и одноразовым ключом в tmpfs;
+- после exact signed `.27` retest можно завершить xhigh restore/recovery block и вернуться на High; hardware/VPS/endurance gates останутся отдельным production path.
 
 ### Сессия 044 — exact signed update, finalize, rollback и power-cut recovery — 2026-08-26
 
