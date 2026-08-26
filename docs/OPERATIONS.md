@@ -217,6 +217,163 @@ sudo /opt/gateway-vpn/current/bin/gateway-vpnctl status
 
 Пароль необходимо сменить при первом входе. Не передавайте его в issue, diagnostic bundle или журнал разработки.
 
+## Первый аппаратный acceptance
+
+Этот gate начинается только с versioned immutable GitHub Release, production/hardware-test signing identity и generated exact command. Локальный disposable acceptance artifact нельзя переносить на физический Gateway как production release. До начала зафиксируйте tag, source commit, signer fingerprint, SHA-256 Gateway/VPS/bootstrap/deploy и фактические модели Ubuntu, KeeneticOS и HiLink firmware.
+
+Проверка разделена на два уровня:
+
+- **H1 — первая установка:** физический Ubuntu 24.04 Gateway, отдельная LAN NIC в WAN Keenetic, один HiLink и реальный VPS. H1 доказывает clean install, один рабочий path, fail-closed, management WireGuard и unplug/replug единственного модема;
+- **H2 — полный hardware/production gate:** тот же стенд и минимум два HiLink с разными management subnets, желательно разных операторов. H2 дополнительно доказывает modem-first failover/failback, раздельные policy tables, reverse USB order и management-uplink switch. Поддержка `1..N` не означает, что для обычной работы обязательно иметь два модема, но Definition of Done multi-modem функции без H2 не закрывается.
+
+### 1. Топология и безопасное окно
+
+Физическая схема H1/H2:
+
+```text
+домашний test client → LAN Keenetic
+WAN Keenetic          → отдельная LAN NIC Gateway
+USB Gateway           → HiLink 1 [→ HiLink 2 для H2]
+Gateway               → WireGuard через выбранный HiLink → VPS
+```
+
+На первом прогоне не переводите основной домашний трафик на Gateway. Используйте отдельный test client/SSID/VLAN и окно обслуживания. HiLink interfaces нельзя добавлять в bridge с transit LAN. На WAN Keenetic отключаются global IPv6 prefix/default route; точные пункты меню и версия KeeneticOS записываются в локальное evidence.
+
+Создайте root-only каталог доказательств. Он может содержать MAC, USB serial, public IP, DNS names и packet payload, поэтому не прикладывается целиком к issue или `PROJECT_STATUS.md`:
+
+```bash
+sudo install -d -m 0700 /root/gateway-vpn-acceptance
+sudo sh -c 'umask 077; date -u +%FT%TZ > /root/gateway-vpn-acceptance/started-at.txt'
+```
+
+До установки локально сохраните `uname -a`, `/etc/os-release`, `timedatectl`, `ip -json link/address/route`, `networkctl list`, `lsusb`, выбранную LAN NIC и фактические HiLink subnets. USB serial и полные MAC не переносятся в публичный журнал; в `PROJECT_STATUS.md` используются salted identity/fingerprint и обезличенные interface labels.
+
+### 2. Clean install и exact identity
+
+Запустите только exact generated GitHub command. Его bootstrap SHA-256 должен совпадать с опубликованным channel manifest. Ожидаемый первый результат без настроенных subscriptions — `INSTALLED_NOT_READY`, а не ложный `READY`.
+
+Сразу после установки:
+
+```bash
+sudo systemctl is-system-running
+sudo systemctl --failed --no-legend --plain
+sudo readlink /opt/gateway-vpn/current
+sudo readlink /opt/gateway-vpn/recovery
+release=$(sudo readlink -f /opt/gateway-vpn/current)
+sudo "$release/bin/gateway-vpn" --version
+sudo "$release/bin/gateway-vpnctl" release-verify \
+  --release-dir "$release" \
+  --public-key /etc/gateway-vpn/update-signing.pub \
+  --current-version 0.0.0 --current-schema 1 --json
+sudo "$release/bin/gateway-vpnctl" status
+sudo nft list table inet gateway_vpn
+ip -json -4 rule show
+ip -json -4 route show table all
+```
+
+Verifier намеренно требует canonical real release directory; передавать ему symlink `/opt/gateway-vpn/current` нельзя. До qualification ожидаются `PATH_BLOCKED`, пустой TUN gate, отсутствие modem default routes в `main` и пустой `systemctl --failed`. WebUI должен открываться с test client за Keenetic по transit address, но не через HiLink management address.
+
+После первого входа смените bootstrap password, создайте diagnostic bundle и сохраните его SHA-256 локально. Не копируйте password, session cookie, subscription URL, WireGuard private key или raw diagnostic ZIP в журнал разработки.
+
+### 3. Модемы, подписки и path matrix
+
+Для каждого физического модема отдельно:
+
+1. принять найденный modem в WebUI, задать номер, имя, enabled и priority;
+2. сверить interface/driver/DHCP lease/management subnet и убедиться, что другой modem не использует ту же subnet;
+3. добавить subscriptions, targets и matchers; полные URL/tokens остаются только в secrets storage;
+4. подтвердить candidate-pool правило: при наличии `обход`/`lte`/whitelist marker проверяются только matched nodes, без markers — все enabled nodes подписки;
+5. выполнить qualification точного `modem × subscription × node` по всем required targets;
+6. сравнить одну и ту же cell во вкладках **Модемы**, **Подписки** и **Матрица путей**;
+7. активировать только свежий `BYPASS_QUALIFIED` tuple и записать route/policy generations, node fingerprint и время.
+
+H1 выполняется с одной cell и проверяет disconnect/reconnect без direct fallback. H2 заполняет полную матрицу минимум `2 modems × 1 subscription`, включая случай без name-marker fallback, и подтверждает independent status через каждого оператора.
+
+### 4. Packet capture и leak gate
+
+`tcpdump` является отдельным инструментом стенда и намеренно не устанавливается Gateway installer-ом. Если он нужен, установку пакета выполняет администратор до gate. PCAP хранится только в `/root/gateway-vpn-acceptance` и считается чувствительным.
+
+В трёх терминалах запустите bounded capture на фактических интерфейсах:
+
+```bash
+read -r -p 'LAN interface: ' LAN_IF
+read -r -p 'HiLink interface: ' HILINK_IF
+ip link show dev "$LAN_IF"
+ip link show dev "$HILINK_IF"
+sudo timeout --signal=INT 180 tcpdump -ni "$LAN_IF" -s 0 \
+  -w /root/gateway-vpn-acceptance/lan.pcap
+sudo timeout --signal=INT 180 tcpdump -ni "$HILINK_IF" -s 0 \
+  -w /root/gateway-vpn-acceptance/hilink-1.pcap
+sudo timeout --signal=INT 180 tcpdump -ni gateway-vpn-tun -s 0 \
+  -w /root/gateway-vpn-acceptance/tun.pcap
+```
+
+Для H2 одновременно пишется отдельный capture второго HiLink. С test client выполните TCP/HTTPS, UDP/QUIC, обычный DNS lookup, known-size download и `curl -6 --max-time 5 https://example.com`. Capture и nft counters должны доказать:
+
+- пользовательский IPv4 появляется LAN↔TUN и не идёт LAN→HiLink напрямую;
+- выбранный proxy socket выходит только через HiLink конкретной cell/mark;
+- client DNS не уходит прямым UDP/TCP 53 в обход DNS hijack;
+- IPv6 global route/connection отсутствует;
+- `user_*` изменяются known-size transfer, `service_*` считаются отдельно;
+- отсутствие direct traffic сохраняется после reload, guard recovery и reboot.
+
+Любой подтверждённый direct IPv4/DNS/IPv6 packet является немедленным `FAIL`: оставьте `PATH_BLOCKED`, сохраните diagnostics/pcap и не подключайте основной домашний трафик.
+
+### 5. Failure matrix H1/H2
+
+Для каждой операции фиксируйте UTC start/detection/recovery timestamps, active tuple до/после, reason code, `systemctl --failed`, nft generation и relevant packet-capture interval.
+
+Обязательные H1 проверки:
+
+- `SIGKILL` Mihomo: новый пользовательский трафик прекращается, direct fallback отсутствует;
+- unplug единственного HiLink: modem остаётся в UI offline, `PATH_BLOCKED`; после replug возвращается тот же identity/number/priority и выполняется новая qualification;
+- reboot Gateway: boot начинает с `PATH_BLOCKED`, SQLite integrity проходит, рабочий path возвращается только после fresh evidence;
+- остановленный Mihomo/нерабочая subscription не лишают доступа к WebUI через `wg-mgmt`;
+- `curl -6` и DNS sentinel не дают leak;
+- corrupt import/config/update отклоняются без потери LKG.
+
+Дополнительные H2 проверки:
+
+- unplug active modem переключает `node → subscription на текущем modem → следующий modem` не позднее 45 секунд после подтверждённого failure;
+- WireGuard endpoint route и fresh handshake переходят на резервный modem;
+- preferred modem после возврата не активируется до stable requalification/cooldown;
+- десять reboot и replug в обратном USB-порядке сохраняют оба identities/priorities и раздельные route tables;
+- общий outage required target не создаёт node/subscription/modem switching loop;
+- subnet conflict одного модема помещает только его в quarantine и не повреждает routes другого.
+
+`nft flush ruleset` выполняется только в изолированном окне H2. Guard обязан опустить transit link, восстановить owned table строго в `PATH_BLOCKED`, проверить schema/counters и только затем вернуть link; чужие nft tables он не восстанавливает.
+
+### 6. VPS/WireGuard, traffic и длительные gates
+
+На реальном VPS provider firewall разрешает UDP/51821. Для каждого ready modem получите свежий handshake, затем при остановленном Mihomo откройте `https://10.80.0.2:8443` с admin peer. Сохраните локально:
+
+```bash
+sudo wg show wg-mgmt latest-handshakes transfer endpoints
+ip route get 10.80.0.2
+sudo nft list table inet gateway_vpn_vps
+```
+
+На Gateway сверяются modem-specific endpoint route/mark и WebUI statuses `REACHABLE/STALE/BLOCKED`. Private keys и raw public keys в `PROJECT_STATUS.md` не записываются; допустим только SHA-256 fingerprint public identity.
+
+Traffic spike выполняется known-size transfer до/после Mihomo reload и reboot. Запишите checkpoint interval, user/service delta, Mihomo cross-check delta и процент расхождения; per-subscription attribution не добавляется. После функционального H1/H2 запускаются несокращаемые 24h developer и 72h hardware release profiles из раздела **Endurance-наблюдение**.
+
+### 7. Фиксация результата
+
+Для каждой попытки в `PROJECT_STATUS.md` добавляется отдельная сессия с таблицей:
+
+| Gate | Результат | Обезличенное доказательство | Ограничение/следующий шаг |
+|---|---|---|---|
+| Release identity/install | `PASS/FAIL/NOT_RUN` | version, commit, signer/hash fingerprints |  |
+| H1 one-modem path/fail-closed | `PASS/FAIL/NOT_RUN` | modem label, timestamps, event/reason IDs |  |
+| H2 multi-modem failover | `PASS/FAIL/NOT_RUN` | modem labels, failover/failback seconds |  |
+| IPv4/DNS/IPv6 leak | `PASS/FAIL/NOT_RUN` | local PCAP SHA-256 и анализ без публикации PCAP |  |
+| VPS/WireGuard | `PASS/FAIL/NOT_RUN` | endpoint label, handshake age, public-key fingerprints |  |
+| Traffic accounting | `PASS/FAIL/NOT_RUN` | known bytes, four deltas, mismatch percent |  |
+| Reboot/replug/update/restore | `PASS/FAIL/NOT_RUN` | counts, terminal states, failed-unit count |  |
+| 24h/72h endurance | `PASS/FAIL/NOT_RUN` | report SHA-256, sample count, restart/gap totals |  |
+
+`PASS` ставится только после просмотра исходного локального evidence. Отсутствие ошибки в UI, unit test, Docker или устное наблюдение не заменяет packet capture, handshake, reboot/replug и endurance доказательства соответствующего масштаба.
+
 ## Локальные пользователи и сессии
 
 До замены одноразового bootstrap-пароля API разрешает только просмотр текущей сессии, смену собственного пароля и logout. Web UI скрывает остальные вкладки и показывает обязательную форму. Успешная смена сохраняет текущую сессию, отзывает все остальные сессии этого пользователя и очищает флаг `must_change_password`.
@@ -499,7 +656,7 @@ sudo ls -la /var/lib/gateway-vpn-privileged/update-transactions/
 sudo nft list table inet gateway_vpn
 ```
 
-Не удаляйте staging, root journal, snapshot, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering. До реального Ubuntu root/systemd/power-cut теста механизм имеет статус `CODE_PASS / LINUX_NOT_RUN`, а не production acceptance.
+Не удаляйте staging, root journal, snapshot, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering. Exact privileged Ubuntu 24.04 Docker/systemd install/update/rollback/finalize/reboot gate пройден; bare-metal reboot/power-cut и 24/72h hardware endurance остаются обязательными до production acceptance.
 
 ## Удалённый доступ WireGuard
 

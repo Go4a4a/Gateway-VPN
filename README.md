@@ -12,7 +12,7 @@ Linux CI определён в `.github/workflows/ci.yml` и не имеет rel
 
 Контракт management API хранится в [`docs/openapi.yaml`](docs/openapi.yaml). Он автоматически сверяется со всеми зарегистрированными `/api/v1` маршрутами. Локальные пользователи MVP имеют одинаковые административные права; обязательная смена bootstrap-пароля, управление пользователями и отзыв активных сессий доступны во вкладке **Система и безопасность**.
 
-Linux/netns и аппаратный gate с двумя HiLink-модемами пока не пройдены, поэтому проект ещё нельзя считать готовым к домашнему трафику. Signed update пока доказан synthetic tests/cross-build, но не реальным root/systemd update на Ubuntu. Точный статус и ограничения находятся в `docs/PROJECT_STATUS.md`.
+Автоматизированные Linux/netns и privileged Ubuntu 24.04 Docker/systemd gates пройдены, включая exact install/reboot и signed update/rollback/finalize. Физический Gateway, HiLink/Keenetic, реальный VPS/provider UDP и 24/72-часовой endurance ещё не пройдены, поэтому проект нельзя считать production-ready для домашнего трафика. Точный статус и ограничения находятся в `docs/PROJECT_STATUS.md`; порядок первой проверки на железе — в разделе **Первый аппаратный acceptance** документа `docs/OPERATIONS.md`.
 
 ## Команды разработчика
 
@@ -31,4 +31,4 @@ make build
 
 Production distribution использует отдельно распространяемые `gateway-vpn-bootstrap` и `gateway-vpn-deploy`. Generated one-command сверяет заранее опубликованный SHA-256 launcher до исполнения; launcher затем повторно проверяет собственный hash/size/build identity по подписанному channel manifest. SSH работает без password/TTY, только с pinned `known_hosts`, `StrictHostKeyChecking=yes` и non-interactive `sudo -n`. Gateway/VPS private keys создаются только соответствующими hosts, а optional admin private key — только в защищённом локальном файле административной машины. Полный порядок публикации и one-command запуска описан в `docs/OPERATIONS.md`.
 
-Hardware/Linux-проверки этапа 0 выполняются только на отдельном Gateway-стенде и описываются в `docs/PROJECT_STATUS.md`.
+Hardware-проверки этапа 0 выполняются только на отдельном Gateway-стенде по `docs/OPERATIONS.md`; обезличенный результат каждой попытки записывается в `docs/PROJECT_STATUS.md`.
