@@ -2,7 +2,7 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Bounded production DB retention подключён к runtime: временные данные и immutable subscription versions сходятся к политике малыми транзакциями, payload cleanup восстанавливается после interruption, `VACUUM` не запускается. Полные Windows и offline Linux/amd64 test/vet проходят. Telemetry+retention prerequisites для 24-часового developer endurance закрыты; реальный bare-metal Gateway, VPS/HiLink/Keenetic, production signing/release и 72-часовой release endurance остаются впереди
+**Текущий этап:** Reference endurance harness реализован поверх authenticated TLS API: короткий Linux end-to-end smoke прошёл login/session renewal, runtime sampling, start/end diagnostic ZIP, SQLite integrity/retention evaluation и durable artifacts с итогом только `SMOKE_PASS`. 24/72-часовые профили нельзя сократить, они требуют clean VCS-stamped harness и versioned Gateway. Следующий шаг — собрать/установить exact committed Gateway candidate и запустить 24-часовой developer endurance; реальный bare-metal Gateway, VPS/HiLink/Keenetic, production signing/release и 72-часовой release endurance остаются впереди
 
 **Оценка прогресса:** около `98%` программной реализации и около `90%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
@@ -44,18 +44,18 @@
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
 | API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 79 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
-| Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
+| Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, host snapshot, audit/rate limit и WebUI download покрыты tests; fixed `database/retention.json` дополнительно даёт path-free policy, table ranges/counts, version excess и DB/WAL/page/freelist sizes. Реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
 | Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` доказали systemd update/recovery, `.27` — destructive restore/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
-| Endurance | `TELEMETRY_AND_RETENTION_READY / RUN_NOT_STARTED` | Authenticated secret-free runtime endpoint отдаёт uptime/goroutines/heap/stack/alloc/GC и Linux RSS/FD; bounded DB/payload retention подключён к production lifecycle. OpenAPI и 24/72h evaluation policy задокументированы, но ни 24h developer, ни 72h release run ещё не выполнялись |
+| Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
 | Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для текущего retention-инкремента; systemd graph ранее прошёл `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore и Gateway uninstall; byte-identical current VPS uninstaller прошёл preserve/reinstall/purge. Удалённый CI для local-ahead commits ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий локальный инкремент: подготовить воспроизводимый harness и выполнить 24-часовой developer endurance на exact committed Linux build с минутными samples, DB/retention diagnostics и автоматической оценкой. Параллельный внешний путь — bare-metal Ubuntu 24.04 Gateway и VPS: exact public-GitHub install dry-run/apply, reboot, внешний WireGuard handshake и HiLink/Keenetic packet-capture matrix минимум с одним модемом. Multi-modem gate требует отдельно минимум два модема с разными management-подсетями. Положительный Ubuntu 20.04 acceptance остаётся внешним gate на Pro-attached VPS; до production tag/assets нужен backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий локальный инкремент: после clean commit собрать exact versioned Gateway candidate и VCS-stamped harness, установить candidate в production-like Ubuntu 24.04/systemd и выполнить harness smoke, затем запустить несокращаемый 24-часовой developer run с минутными samples и start/end SQLite diagnostics. Параллельный внешний путь — bare-metal Ubuntu 24.04 Gateway и VPS: exact public-GitHub install dry-run/apply, reboot, внешний WireGuard handshake и HiLink/Keenetic packet-capture matrix минимум с одним модемом. Multi-modem gate требует отдельно минимум два модема с разными management-подсетями. Положительный Ubuntu 20.04 acceptance остаётся внешним gate на Pro-attached VPS; до production tag/assets нужен backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
@@ -200,8 +200,33 @@
 | DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
 | DEV-121 | 2026-08-26 | Endurance использует authenticated `/api/v1/system/runtime-metrics`: только bounded Go/process counters, Linux RSS/FD и отдельный per-session rate limit 20/min | RSS/FD доступны через `/proc`, но число goroutines иначе нельзя достоверно измерять снаружи; endpoint не должен раскрывать argv/environment/config/IDs/secrets или позволять hammering `runtime.ReadMemStats` |
 | DEV-122 | 2026-08-26 | DB retention запускается немедленно и каждые 10 минут, удаляет максимум 500 time-series rows и 20 versions за транзакционный pass, а известный backlog повторяет через 250 ms; DB row удаляется до payload directory, orphan scan идемпотентен, `.payload-*` не трогается, автоматический `VACUUM` запрещён | Размер SQLite должен сходиться к PLAN §12.3 без длинной write lock; power loss между DB commit и filesystem delete не должен навсегда сохранять proxy payload либо затронуть текущий refresh |
+| DEV-123 | 2026-08-26 | Каждый diagnostic bundle содержит fixed `database/retention.json`: policy, table counts/time ranges, aggregate version states/excess и DB/WAL/page/freelist bytes без DB path или IDs | Endurance обязан доказать SQLite integrity и соответствие retention, а одной process-memory telemetry для этого недостаточно |
+| DEV-124 | 2026-08-26 | Reference endurance CLI имеет только `smoke`, fixed 24h developer и fixed 72h release profiles; developer/release требуют clean VCS-stamped harness и versioned Gateway, release — отдельные hardware environment+typed confirmation | Короткий тест, modified binary или Docker нельзя случайно представить как production endurance; credentials/session material не должны попадать в argv, environment или artifacts |
 
 ## Журнал разработки
+
+### Сессия 050 — воспроизводимый endurance harness и DB evidence — 2026-08-26
+
+**Реализация:**
+
+- diagnostic bundle получил fixed `database/retention.json` со schema generation 1: точная active policy 7/30 дней, 24 месяца, version limits, rows/oldest/latest для health/events/traffic, aggregate LKG/CANDIDATE/RETAINED/FAILED/other, active non-LKG и over-retention counts;
+- storage evidence содержит только DB/WAL bytes, page size/count, freelist и live-page bytes; реальный database path не сериализуется, недоступный/несогласованный storage делает diagnostic section incomplete;
+- `internal/endurance` реализует TLS 1.3 API client без proxy/redirect, in-memory secure cookie/CSRF, automatic pre-expiry logout/login, bounded strict runtime JSON и diagnostic ZIP verification по Content-Length/header SHA-256/manifest file SHA-256/path/mode/size;
+- evaluator фиксирует minute sampling, 30-minute warm-up/windows, restart и sample gaps, шесть растущих окон goroutines/FD, устойчивый RSS/heap/live-object slope, 10%+32 MiB byte threshold, SQLite cutoffs/version excess и live-page growth;
+- runner пишет новый `0700` run directory, minute-fsynced `0600` NDJSON, start/end ZIP, progress state и final report; backend error text, credentials, cookie/CSRF и endpoint в artifacts не записываются;
+- `test/endurance` читает пароль только из absolute current-user single-link `0600` file, очищает caller buffer после client construction и не принимает password через argv/environment; exact developer/release profiles нельзя изменить flags;
+- `smoke` всегда возвращает только `SMOKE_PASS`/`endurance_gate=false`; release требует `hardware-gateway` и exact typed confirmation, но документация отдельно запрещает считать эту attestation автоматическим доказательством hardware;
+- CI дополнительно собирает Linux/amd64 VCS-stamped harness, а Operations/Security получили точные команды, artifacts и threat-boundary.
+
+**Проверки:**
+
+- adversarial/unit tests покрывают strict metrics JSON, inconsistent counters, ZIP/path/mode/hash/unknown fields, retention cutoffs, restart/gap и все resource-growth classifiers, fixed profile validation, durable success/failure state и отсутствие backend secret text;
+- полный Windows `go test ./... -count=1` и `go vet ./...` — PASS;
+- полный offline Linux/amd64 `go test ./... -count=1`, `go vet ./...` и `go build -trimpath -buildvcs=true ./test/endurance` — PASS;
+- отдельный Linux end-to-end CLI smoke реально выполнил TLS login, secure cookie+CSRF, 11 samples, два verified diagnostic downloads, logout и создал `SMOKE_PASS` report за 200 ms;
+- `git diff --check` — PASS. Ни 24-часовой, ни 72-часовой run не выполнялся и не засчитывается.
+
+**Следующий шаг:** зафиксировать harness clean commit, затем на повышенном уровне провести exact signed/versioned Ubuntu systemd candidate build/install и запустить 24-часовой developer endurance. Hardware/release gates остаются `NOT_RUN`.
 
 ### Сессия 049 — bounded DB retention и production lifecycle — 2026-08-26
 

@@ -120,7 +120,7 @@ func (builder Builder) Describe(ctx context.Context) (Description, error) {
 		DownloadEndpoint: "/api/v1/system/diagnostics", SecretsIncluded: false,
 		MaximumArchiveBytes: MaximumBundleBytes, MaximumUncompressedBytes: MaximumBundleUncompressedBytes,
 		ConfiguredJournalExcerptBytes: settings.DiagnosticExcerptBytes,
-		Sections:                      []string{"versions", "sanitized_config", "host_network", "owned_nftables", "modems_subscriptions_paths", "mihomo", "wireguard", "events", "journal", "sqlite_integrity"},
+		Sections:                      []string{"versions", "sanitized_config", "host_network", "owned_nftables", "modems_subscriptions_paths", "mihomo", "wireguard", "events", "journal", "sqlite_integrity", "database_retention"},
 	}, nil
 }
 
@@ -341,6 +341,15 @@ func (builder Builder) Build(ctx context.Context) (Bundle, error) {
 		addError("sqlite_integrity", "SQLITE_INTEGRITY_FAILED")
 	}
 	if err := addJSON("database/integrity.json", integrity); err != nil {
+		return Bundle{}, err
+	}
+	retention, retentionErr := buildDatabaseRetentionReport(ctx, builder.Database, now)
+	if retentionErr != nil {
+		addError("database_retention", "DATABASE_RETENTION_UNAVAILABLE")
+		if err := addStatus("database/retention.json", "DATABASE_RETENTION_UNAVAILABLE"); err != nil {
+			return Bundle{}, err
+		}
+	} else if err := addJSON("database/retention.json", retention); err != nil {
 		return Bundle{}, err
 	}
 

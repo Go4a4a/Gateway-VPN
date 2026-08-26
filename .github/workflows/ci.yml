@@ -52,6 +52,7 @@ jobs:
           for name in gateway-vpn gateway-vpnctl gateway-vpn-bootstrap gateway-vpn-deploy; do
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/gateway-vpn-ci/$name" "./cmd/$name"
           done
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -o "$RUNNER_TEMP/gateway-vpn-ci/gateway-vpn-endurance" ./test/endurance
       - name: Check JavaScript and shell syntax
         shell: bash
         run: |

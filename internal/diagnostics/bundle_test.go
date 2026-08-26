@@ -131,7 +131,7 @@ func TestDiagnosticBundleContainsManifestRequiredSectionsAndNoSecrets(t *testing
 		"manifest.json", "meta.json", "config/sanitized.json", "runtime/gateway-state.json",
 		"runtime/modems.json", "runtime/subscriptions.json", "runtime/path-matrix.json", "runtime/nodes.json",
 		"runtime/probe-targets.json", "runtime/mihomo-sanitized.json", "runtime/wireguard.json",
-		"host/snapshot.json", "events/events.jsonl", "logs/journal.jsonl", "database/integrity.json",
+		"host/snapshot.json", "events/events.jsonl", "logs/journal.jsonl", "database/integrity.json", "database/retention.json",
 	} {
 		if _, exists := archiveFiles[name]; !exists {
 			t.Fatalf("archive is missing %s", name)
@@ -175,7 +175,7 @@ func TestDiagnosticBundleContainsManifestRequiredSectionsAndNoSecrets(t *testing
 			t.Fatalf("diagnostic bundle leaked %q", forbidden)
 		}
 	}
-	for _, expected := range []string{"***1234", "Whitelist subscription", "visible", "https://event.example/", "https://journal.example/", `"integrity_check": "PASS"`, `"schema_version": 11`} {
+	for _, expected := range []string{"***1234", "Whitelist subscription", "visible", "https://event.example/", "https://journal.example/", `"integrity_check": "PASS"`, `"schema_version": 11`, `"health_days": 7`, `"traffic_months": 24`} {
 		if !strings.Contains(combined, expected) {
 			t.Fatalf("diagnostic bundle missing %q", expected)
 		}

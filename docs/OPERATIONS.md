@@ -297,7 +297,7 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 
 Архив создаётся только в памяти и не сохраняется на диске Gateway. `manifest.json` показывает schema, `complete`, section errors/warnings, размер и SHA-256 каждого payload-файла. Ошибка host/journal/отдельного read model не отменяет download: архив становится частичным, а manifest содержит стабильный error code без внутренних command/path details. Максимум — 24 MiB несжатых данных и 32 MiB ZIP; journal excerpt отдельно задаётся в Logging в диапазоне 64 KiB–16 MiB.
 
-Архив не содержит private/API keys, session/CSRF tokens, subscription URL/payload/secret refs, proxy credentials/config, target expected body, modem identity/serial/MAC или реальный WireGuard endpoint host. В него входят только redacted config/state/inventory, owned protocol-186 routes/rules, owned `inet gateway_vpn` table, masked WireGuard counters, versions, bounded events/journal и SQLite integrity result. Перед отправкой все host/log/event values проходят дополнительную sanitization. Даже для поддержки не следует прикладывать архив публично без проверки локальной политикой организации.
+Архив не содержит private/API keys, session/CSRF tokens, subscription URL/payload/secret refs, proxy credentials/config, target expected body, modem identity/serial/MAC или реальный WireGuard endpoint host. В него входят только redacted config/state/inventory, owned protocol-186 routes/rules, owned `inet gateway_vpn` table, masked WireGuard counters, versions, bounded events/journal, SQLite integrity и fixed `database/retention.json`. Последний содержит только policy, counts/ranges таблиц, DB/WAL bytes и SQLite page/freelist totals — путь к БД не выдаётся. Перед отправкой все host/log/event values проходят дополнительную sanitization. Даже для поддержки не следует прикладывать архив публично без проверки локальной политикой организации.
 
 ## Endurance-наблюдение
 
@@ -315,13 +315,58 @@ curl --fail --silent --show-error \
 
 Cookie jar создаётся штатным login API-клиентом и имеет mode `0600`; bearer token нельзя помещать в командную строку, журнал или итоговый CSV. Сессия живёт 12 часов, поэтому 24/72-часовой harness должен повторно аутентифицироваться до expiry, удерживая введённый пароль только в памяти процесса либо используя отдельный защищённый credential provider. Увеличивать lifetime production-сессии ради теста нельзя.
 
+Reference harness находится в `test/endurance` и запускается с отдельного Linux admin host либо из изолированного Linux container. Он требует TLS 1.3 и явно указанный CA certificate, запрещает redirect/proxy, хранит cookie/CSRF только в памяти, обновляет сессию до expiry и отзывает её при завершении. Пароль читается только из absolute single-link файла текущего пользователя с mode `0600`; содержимое password нельзя передавать через argv/environment. Артефакты создаются в новом `0700` directory, а `samples.ndjson`, start/end ZIP, `run-state.json` и `report.json` имеют mode `0600` и fsync. `run-state.json` обновляет число samples после каждой минуты, поэтому interrupted run не выглядит завершённым.
+
+Harness необходимо собирать из clean exact revision без `-buildvcs=false`; 24/72-часовой профиль откажется стартовать, если binary не содержит VCS revision либо был собран из modified worktree. Точно так же итоговый PASS запрещён для Gateway diagnostic identity `0.0.0-dev`/`commit=unknown` или если Gateway version/schema изменились во время run:
+
+```bash
+git status --porcelain
+CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+  -o ./gateway-vpn-endurance ./test/endurance
+sudo install -m 0755 ./gateway-vpn-endurance /root/gateway-vpn-endurance
+rm -f ./gateway-vpn-endurance
+sudo install -d -m 0700 /root/gateway-vpn-endurance-results
+sudo install -m 0600 /dev/null /root/gateway-vpn-endurance.password
+sudoedit /root/gateway-vpn-endurance.password
+```
+
+Сначала выполняется короткая проверка самого harness. Она может вернуть только `SMOKE_PASS` и никогда не засчитывается как endurance:
+
+```bash
+sudo /root/gateway-vpn-endurance \
+  --profile smoke \
+  --environment developer-linux \
+  --smoke-duration 2m \
+  --smoke-interval 10s \
+  --endpoint https://192.168.200.1:8443 \
+  --ca-cert /var/lib/gateway-vpn/tls/cert.pem \
+  --username admin \
+  --password-file /root/gateway-vpn-endurance.password \
+  --output-parent /root/gateway-vpn-endurance-results
+```
+
+После успешного smoke запускается несокращаемый developer profile; duration/interval/warm-up/window в нём фиксированы как 24h/1m/30m/30m:
+
+```bash
+sudo /root/gateway-vpn-endurance \
+  --profile developer \
+  --environment developer-linux \
+  --endpoint https://192.168.200.1:8443 \
+  --ca-cert /var/lib/gateway-vpn/tls/cert.pem \
+  --username admin \
+  --password-file /root/gateway-vpn-endurance.password \
+  --output-parent /root/gateway-vpn-endurance-results
+```
+
+Release profile фиксирован на 72 часа и дополнительно требует `--environment hardware-gateway --release-hardware-confirmation REAL_GATEWAY_MODEMS_KEENETIC_VPS`. Это явная operator attestation, а не автоматическое доказательство оборудования: release gate всё равно засчитывается только вместе с журналом реального Gateway, минимум одного HiLink, Keenetic, VPS handshake/packet capture и отсутствия direct/IPv6/DNS leak. Docker run с release flags не заменяет hardware gate.
+
 Developer gate длится 24 часа, release gate — 72 часа. Warm-up первые 30 минут не участвует в оценке. Harness сохраняет минутные samples и 30-минутные медианы. Gate считается неуспешным, если после warm-up:
 
 - goroutines или FD растут в шести последовательных окнах и не возвращаются к первой медиане + 5;
 - RSS, heap allocation или live objects имеют положительный устойчивый slope, а медиана последнего часа превышает медиану первого часа более чем на 10% и минимум на 32 MiB для byte metrics;
 - процесс, broker/firewall guard либо WebUI недоступны, появляется direct leak или SQLite/retention check не проходит.
 
-`mallocs_total`, `frees_total`, `gc_cycles_total` и `gc_pause_total_nanoseconds` являются накопительными и сами по себе не означают leak. Перед warm-up и после последнего sample создаются diagnostic bundles; оба должны иметь complete SQLite integrity section. Отдельно сохраняются размер DB/WAL и counts таблиц с retention. Docker developer endurance не заменяет 72-часовой release endurance на реальном Gateway с модемами, Keenetic и VPS.
+`mallocs_total`, `frees_total`, `gc_cycles_total` и `gc_pause_total_nanoseconds` являются накопительными и сами по себе не означают leak. Перед warm-up и после последнего sample создаются diagnostic bundles; harness проверяет ZIP paths/modes/bounds, SHA-256 каждого manifest entry, `complete=true`, неизменность Gateway build/schema и оба SQLite integrity result. Финальный retention snapshot обязан не иметь строк старше 7/30 дней и 24 месяцев (для worker допускается 15-минутное окно), лишних `RETAINED/FAILED`, неизвестных states либо active non-LKG. Рост live SQLite pages более 10% и 32 MiB также завершает gate ошибкой. Docker developer endurance не заменяет 72-часовой release endurance на реальном Gateway с модемами, Keenetic и VPS.
 
 ## Резервное копирование и восстановление
 
