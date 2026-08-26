@@ -4,7 +4,7 @@
 **Общее состояние:** `LOCAL_INSTALL_READY / HARDWARE_VALIDATION_PENDING`
 **Текущий этап:** docs-complete validation successor `0.1.0-validation.47297a7` из clean commit `47297a72488b0cbe6e0c8416e4cd511a6d7f0628` завершил локальный reproducible build и fresh Ubuntu 24.04 install/idempotency/new-PID-1 gate. Он содержит тот же проверенный code candidate `3c13b09`, format-2 update/rollback/finalize evidence и исправленный H1/H2 runbook. Две независимые disposable-signed сборки побайтно совпали; установленный immutable tree, schema `13`, firewall generation `2`, четыре traffic counters, `PATH_BLOCKED` и пустой `systemctl --failed` повторно подтверждены. Публичный hardware release должен получить ещё одну новую immutable version и production/hardware-test signer: ни `0.1.0-traffic.3c13b09`, ни `0.1.0-validation.47297a7` другим artifact не заменяются.
 
-**Оценка прогресса:** `100%` локальной программно-релизной готовности к первой установке на железо и около `89%` полной production-готовности. Оставшиеся проценты относятся не к недописанному локальному коду, а к внешним и несокращаемым gates: production signing/publish, реальный Ubuntu Gateway и VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance. Docker/systemd, netns и test-only ускорение stability deadline эти проверки не заменяют.
+**Оценка прогресса:** `100%` локальной программно-релизной готовности к первой установке на железо и около `90%` полной production-готовности. Push и exact remote CI завершены. Оставшиеся проценты относятся не к недописанному локальному коду, а к внешним и несокращаемым gates: production signing/publish, реальный Ubuntu Gateway и VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance. Docker/systemd, netns и test-only ускорение stability deadline эти проверки не заменяют.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED` | Зафиксирован `PLAN_v1.1.md`; явная пользовательская поправка 2026-08-26 добавила §9.8 про круглосуточный самоконтроль, не переписывая остальные решения |
-| Репозиторий | `LOCAL_AHEAD / PUSH_PENDING` | Публичный `https://github.com/Go4a4a/Gateway-VPN` настроен как `origin`; local `main` содержит проверяемые commits сверх `origin/main`. Push остаётся отдельным внешним действием и не выполняется без явного разрешения пользователя |
+| Репозиторий | `PUBLIC_MAIN_SYNCED / REMOTE_CI_PASS` | Пользователь явно разрешил push; public `Go4a4a/Gateway-VPN` получил полный local history до `5d86e14`. Exact GitHub Actions run `33024593573` завершился `success`; tag/release/signing key не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -55,7 +55,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `47297A7_REPRO_INSTALL_PASS / REMOTE_CI_PENDING` | Code commit `3c13b09` прошёл полный Windows и offline native Linux `go test ./... -count=1`/`go vet ./...`; docs-complete `47297a7` дополнительно прошёл double-build equality, signed-tree verification, fresh install/idempotency и новый PID 1. Remote CI ждёт будущий push |
+| Автоматические тесты | `REMOTE_CI_5D86E14_PASS` | Exact GitHub Actions run `33024593573`: race-enabled suite, vet, Linux release entrypoints, JS/shell syntax, native nft/netns fail-closed и Gateway/VPS systemd verification на Ubuntu 24.04 — PASS |
 
 ## Матрица доказательств Definition of Done
 
@@ -83,20 +83,20 @@
 | 18 | `PARTIAL_EXTERNAL` | Ranking `node → subscription → modem` и отсутствие main-table direct route доказаны model/netns tests; physical active-modem loss/capture не проверены |
 | 19 | `PARTIAL_EXTERNAL` | Restart-safe stable interval/cooldown/failback hysteresis покрыты durable tests; реальный recovered preferred modem не проверен |
 | 20 | `PARTIAL_EXTERNAL` | Per-modem fwmark/table, DHCP, DNS, proxy и WireGuard route isolation проходят render/kernel/netns gates; реальные operator subnets/interfaces не зафиксированы |
-| 21 | `PARTIAL_EXTERNAL` | Reproducible signed Gateway/VPS/bootstrap/deploy artifacts и SSH orchestrator rehearsals прошли локально; GitHub version/tag/assets, remote CI и real two-host `READY` отсутствуют |
+| 21 | `PARTIAL_EXTERNAL` | Reproducible signed Gateway/VPS/bootstrap/deploy artifacts, SSH orchestrator rehearsals и exact remote CI прошли; production GitHub version/tag/assets и real two-host `READY` отсутствуют |
 | 22 | `PASS_LOCAL` | Exact signed systemd watchdog обнаруживает hang/crash/restart storm, имеет bounded dependency-aware recovery и публикует UI/events/diagnostics evidence |
 | 23 | `PASS_LOCAL` | External outage отделён от local failure; default host reboot выключен, optional action имеет durable budget и transaction suppression |
 | 24 | `NOT_RUN_EXTERNAL` | Exact endurance harness и smoke готовы, но обязательные непрерывные 24- и 72-часовые runs не запускались |
 
-**Итог аудита:** `12 PASS_LOCAL`, `10 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут и не может быть объявлен без publish/remote CI, H1/H2/VPS и 24/72h evidence.
+**Итог аудита:** `12 PASS_LOCAL`, `10 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут и не может быть объявлен без production publish, H1/H2/VPS и 24/72h evidence.
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент — внешний release/hardware gate. После явного разрешения пользователя: push локальных commits, remote CI, создание отдельной production/hardware-test signing identity и новой immutable publish version из актуального clean commit. Затем — установка одной командой на физический Ubuntu 24.04 Gateway и реальный VPS, фиксация фактического LAN interface, HiLink/Keenetic/WireGuard packet captures и исправление только реально найденных отклонений. Versions `0.1.0-traffic.3c13b09` и `0.1.0-validation.47297a7` другими signed artifacts не заменяются; push/tag/release и работа с долгоживущим key без отдельного разрешения не выполняются.
+Следующий инкремент — production/hardware-test signing identity и новая immutable publish version из актуального clean commit. Это отдельное security-решение: место резервного хранения private key и полномочие на key generation/tag/draft Release должны быть явно подтверждены. Затем — установка одной командой на физический Ubuntu 24.04 Gateway и реальный VPS, фиксация фактического LAN interface, HiLink/Keenetic/WireGuard packet captures и исправление только реально найденных отклонений. Versions `0.1.0-traffic.3c13b09` и `0.1.0-validation.47297a7` другими signed artifacts не заменяются.
 
 ## Критический путь до release
 
-Локальный кандидат для первой установки на железо готов; дополнительного времени на недописанную локальную программную часть сейчас не требуется. До реально запускаемой GitHub-команды остаётся внешний publish-блок: production signing identity, push/tag/release и remote CI. Его длительность зависит от разрешения и выбранного способа безопасного хранения ключа; при отсутствии нового CI-дефекта это обычно часы, а не дни.
+Локальный кандидат для первой установки на железо готов; дополнительного времени на недописанную локальную программную часть сейчас не требуется. До реально запускаемой GitHub-команды остаётся внешний publish-блок: production signing identity, новая version/tag и draft Release. Push и exact remote CI уже прошли. Длительность следующего блока зависит от выбранного способа безопасного хранения ключа; при отсутствии нового release-дефекта это обычно часы, а не дни.
 
 После установки отдельный путь до production release включает реальные Gateway/VPS/HiLink/Keenetic проверки, найденные исправления, 24-часовой developer и несокращаемый 72-часовой release endurance. Если целевые Linux Gateway, VPS и модемы доступны без пауз, ориентир до проверенного production release остаётся `4–8 дней`. Без фактического доступа к Linux/VPS/оборудованию можно передать install-ready candidate, но нельзя честно поставить production status `DONE`.
 
@@ -107,7 +107,7 @@
 3. Docker Desktop `4.87.0`, Engine `29.7.2`, Linux/amd64 context `desktop-linux` запущен; Ubuntu 24.04 privileged nftables/netns gate прошёл. Docker не заменяет реальный systemd host, reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact disposable-signed `0.1.0-traffic.3c13b09` и docs-complete successor `0.1.0-validation.47297a7` прошли соответствующие local gates, но отдельный backed-up production key и реальный tag/release ещё не подготовлены; CI не получает release secrets, а локальные commits не отправлены без разрешения пользователя.
+6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact remote run `33024593573` для `5d86e14` прошёл; CI не получает release secrets. Disposable-signed `0.1.0-traffic.3c13b09` и docs-complete successor `0.1.0-validation.47297a7` прошли local gates, но отдельный backed-up production key и реальный tag/release ещё не подготовлены.
 7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS, exact signed update/rollback/finalize `3c13b09`, docs-complete fresh install/reboot `47297a7`, restore и uninstall прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новые PID 1 и durable recovery. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине или USB hotplug.
 8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; current uninstaller дополнительно прошёл preserve/reinstall/purge на Ubuntu 24.04. Vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
@@ -257,8 +257,21 @@
 | DEV-140 | 2026-08-27 | Разделить первый hardware gate на H1 с одним модемом и полный H2 минимум с двумя модемами; только H2 закрывает multi-modem часть этапа 0 и Definition of Done | Рабочая установка обязана поддерживать `1..N` и не требовать резервного modem, но failover/reverse-order/раздельные operator routes невозможно доказать на одном устройстве |
 | DEV-141 | 2026-08-27 | `0.1.0-validation.47297a7` считать локальным docs-complete successor для hardware handoff; будущая публичная сборка получает новую version и не переиспользует обе локальные validation identities | Signed OPERATIONS входит в immutable release tree, поэтому исправленный H1/H2 runbook нужно доказать внутри exact artifact, но disposable acceptance key и локальная version не должны превращаться в production identity задним числом |
 | DEV-142 | 2026-08-27 | Вести явную 24-пунктную DoD evidence matrix в `PROJECT_STATUS.md`, не отмечая архитектурные чекбоксы `PLAN_v1.1.md` задним числом | Локальный test PASS, обязательный physical/public gate и полный project DONE имеют разную доказательную силу; одна статусная строка не должна смешивать эти уровни |
+| DEV-143 | 2026-08-27 | После явного разрешения отправить только `main`, проверить exact remote SHA и дождаться terminal GitHub Actions result; tag/release/key оставить отдельным полномочием | Push исходников и создание production trust identity имеют разный риск и не должны объединяться одним подразумеваемым разрешением |
 
 ## Журнал разработки
+
+### Сессия 062 — public main и exact remote CI — 2026-08-27
+
+**Разрешение и push:** пользователь явно написал `Разрешаю git push origin main`. Выполнен только push branch `main`; GitHub принял диапазон `8fe6f1b..5d86e14`. `git ls-remote` подтвердил `refs/heads/main = 5d86e14ab648309d84052d005c3732b3b2198783`, local tracking branch синхронизировалась. Tags, Releases и signing keys не затрагивались.
+
+**Remote CI:** поскольку `gh` CLI на host отсутствует, состояние читалось через публичный GitHub Actions REST API по exact `head_sha`. Workflow `Gateway VPN CI`, run `33024593573`, event `push`, завершился `success` для `5d86e14`.
+
+**Job evidence:** `Go, packaging and syntax gates` прошёл checkout exact revision, pinned Go toolchain, formatting, race-enabled suite, vet, сборку всех Linux release entrypoints и JavaScript/shell syntax. `Linux nftables fail-closed gate` прошёл native Linux build, реальное восстановление owned firewall без direct route и `systemd-analyze` verification Gateway/VPS units на pinned Ubuntu 24.04. Обе jobs и все их steps имеют terminal `completed/success`.
+
+**Что изменилось в DoD:** remote CI часть пункта 21 теперь доказана, но сам пункт остаётся `PARTIAL_EXTERNAL`: production-signed immutable GitHub version/assets и real Gateway+VPS `READY` ещё отсутствуют. Остальные H1/H2/VPS/endurance статусы не повышались.
+
+**Следующий шаг:** выбрать безопасное место создания и резервного хранения production/hardware-test Ed25519 private key, отдельно подтвердить полномочие на key generation и затем создать новую immutable version/tag/draft Release. Без этого не создавать долгоживущий key и не переиспользовать disposable validation versions.
 
 ### Сессия 061 — requirement-by-requirement completion audit — 2026-08-27
 
