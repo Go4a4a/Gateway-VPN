@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Exact signed `.26` из commit `9235e42` прошёл clean Ubuntu 24.04/systemd install, portable backup, corrupt rejection, verified staging, destructive restore success и reboot. Host-side power cut в `APPLYING` выявил auto-retry defect; commits `0725413`, `dd56903` и `ddcc407` ввели отдельный `APPLY_REQUESTED`, одноразовый nonce, durable `ROLLED_BACK`, идемпотентный rollback и single-pass boot cleanup. Актуальный unsigned binary из `ddcc407` уже прошёл staging-only reboot, success и exit-137 rollback/no-auto-retry на Ubuntu/systemd. Следующий шаг — повторить ту же матрицу exact signed `.27`, затем bare-metal Gateway/VPS/HiLink/Keenetic и 72-часовой endurance
+**Текущий этап:** Exact signed `0.1.0-systemd.27` из commit `ddcc407` прошёл на двух clean Ubuntu 24.04/systemd rootfs полную destructive restore matrix: signature/dry-run/install, portable backup, corrupt rejection, `STAGED` reboot без применения, explicit success/reboot, host-side exit `137` в `APPLYING` после трёх replacements, boot rollback/no-auto-retry/cleanup, новое explicit Apply и success/reboot. Restore/recovery Docker gate закрыт; следующий шаг — bare-metal Gateway + реальный VPS/HiLink/Keenetic, production signing/release и 72-часовой endurance
 
-**Оценка прогресса:** около `97%` программной реализации и около `87%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные exact-signed restore retest, permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `97%` программной реализации и около `89%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -45,19 +45,19 @@
 | API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 78 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, privileged fixed-command host snapshot, audit/rate limit и WebUI download покрыты adversarial tests; реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
-| Backup / restore | `DEV_SYSTEMD_POWER_CUT_PASS / EXACT_RETEST_PENDING / HOST_NOT_RUN` | Exact signed `.26` прошёл success/reboot, но exit-137 выявил auto-retry. Актуальный `ddcc407` на Ubuntu/systemd доказал: `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, не повторяет Apply, очищает root temp records и возвращает management. Нужен повтор этой матрицы на новом exact signed `.27` и bare-metal power cut |
+| Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
-| Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` дополнительно доказали systemd update/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
+| Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` доказали systemd update/recovery, `.27` — destructive restore/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.26` — restore success, а latest dev binary — исправленный restore power-cut/no-auto-retry. Удалённый CI для local-ahead commits ещё не выполнен |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore success/power-cut/no-auto-retry/retry/reboot. Удалённый CI для local-ahead commits ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: собрать exact signed `.27` строго из clean commit `ddcc407` и повторить clean Ubuntu 24.04 staging-only reboot, success, corrupt rejection, partial activation + host SIGKILL, boot rollback/no-auto-retry, explicit retry и reboot. Затем нужны bare-metal Gateway + реальный VPS, HiLink/Keenetic packet-capture matrix и 72-часовой endurance. Положительный Ubuntu 20.04 acceptance остаётся отдельным внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. До production tag/assets по-прежнему нужен отдельно backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий инкремент: подготовить реальный bare-metal Ubuntu 24.04 Gateway и VPS, выполнить exact public-GitHub install dry-run/apply, reboot и внешний WireGuard handshake, затем HiLink/Keenetic packet-capture matrix минимум с одним модемом. Multi-modem gate требует отдельно минимум два модема с разными management-подсетями. Положительный Ubuntu 20.04 acceptance остаётся внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. До production tag/assets нужен отдельно backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
-При неизменном scope основной оставшийся путь — exact-signed restore retest, release/hardware integration acceptance и найденные при ней исправления. Signed update/reboot/power-cut matrix и latest dev restore matrix уже пройдены в privileged Docker/systemd; отдельно ещё требуются exact signed restore `.27`, production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой endurance.
+При неизменном scope основной оставшийся путь — release/hardware integration acceptance и найденные при ней исправления. Signed update и restore reboot/power-cut matrices уже пройдены в privileged Docker/systemd; отдельно ещё требуются production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой endurance.
 
 Если целевые Linux Gateway, VPS и модемы доступны без пауз, оптимистичный календарный ориентир до проверенного release — `4–8 дней`: примерно `1–3` интенсивных дня на оставшийся код и интеграционные исправления, затем минимум `72 часа` endurance. Это не обещанная дата: отсутствие стенда, найденные routing/hardware defects либо расширение scope сдвигают срок. Без фактического доступа к Linux/VPS/оборудованию можно завершить код и synthetic tests, но нельзя честно поставить production status `DONE`.
 
@@ -69,7 +69,7 @@
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
 6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact disposable signed `.13` прошёл clean orchestration/handshake, а `.21/.22` — systemd update/recovery; отдельный backed-up long-lived key и реальный production tag/release ещё не подготовлены, CI не получает release secrets.
-7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS и exact signed update прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, finalized reboot и host-side container exit 137 в `HEALTH_CHECKING`. Exact signed restore `.26` прошёл success, а исправленный `ddcc407` — unsigned systemd power-cut matrix; exact signed `.27` ещё не собран. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине, uninstall или USB hotplug.
+7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS, exact signed update и exact signed restore `.27` прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новый PID 1, success/reboot и host-side container exit 137 в durable update/restore состояниях. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине, uninstall или USB hotplug.
 8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
 ## Реестр решений реализации
@@ -198,6 +198,34 @@
 | DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
 
 ## Журнал разработки
+
+### Сессия 046 — exact signed `.27` destructive restore/recovery acceptance — 2026-08-26
+
+**Reproducible signed fixture:**
+
+- локальный journal commit `18be89f` зафиксировал предыдущую unsigned acceptance; исполняемый release намеренно собран из clean code commit `ddcc407d72971299b5bbec5ec986105fb34a2695`;
+- `0.1.0-systemd.27` собран с `--network none`, read-only source/module mounts и read-only rootfs; build/work cache находились в tmpfs, private Ed25519 key — только в `noexec` tmpfs и был уничтожен до успешного выхода builder;
+- signer fingerprint `cf88bcabd71d83539bb191e6146e576ca31192a0cdf12d9d35210511c2020163`, archive SHA-256 `b7fa2172400496fb0fe90b8d747f8c4b94f97859e761b67d16b126abac5093f8`, public-key file SHA-256 `99b4d61fb2151d90c59abdca5832cb42f593fb2f8876b2e709cabdbe9a6b339f`; all 44 manifest files прошли detached Ed25519 verification;
+- disposable key не является будущим production identity; его public key и fixture предназначены только для acceptance.
+
+**Clean install, staging и success:**
+
+- первый контейнер создан прямо из `gateway-vpn-systemd-rehearsal:ubuntu24-reboot`, а не через `docker commit` установленного Gateway; clean release verify, installer dry-run и apply — PASS, report `INSTALLED_NOT_READY`, Mihomo inactive;
+- Web API: обязательная смена bootstrap password, encrypted portable backup, size/SHA header verification, truncated/corrupt upload rejection, live-state mutation и verified `STAGED` — PASS;
+- после нескольких reboot `STAGED` сохранил byte-identical config/secret/marker, не создал root journal/`last-restore`, вернул management и не включил Mihomo;
+- explicit Apply восстановил DB/config/secrets/subscriptions, отозвал старую сессию, удалил временного пользователя, создал verified pre-restore snapshot и оставил пустой TUN gate/`PATH_BLOCKED`; следующий reboot сохранил `last-restore=APPLIED` и работающий HTTPS management.
+
+**Host-side power cut и retry:**
+
+- второй контейнер также установлен в новом clean rootfs; watcher дождался durable `APPLYING`, остановил helper после `applied_items=3`, затем host выполнил `SIGKILL`; Docker подтвердил exit `137`;
+- новый boot выполнил rollback к mutation state, оставил operation `STAGED / RESTORE_INTERRUPTED_ROLLED_BACK`, отозвал authorization nonce, удалил root journal и orphan `.recovery-record-*`, вернул broker/WebUI и сохранил Mihomo/TUN закрытыми;
+- hash state за отдельные пять секунд не изменился: автоматического повторного Apply нет;
+- новое explicit Apply после rollback было принято и завершилось success; финальный reboot сохранил `APPLIED`, отсутствие pending/journal/temp, active management и `PATH_BLOCKED`.
+
+**Проблемы стенда и итог:**
+
+- две ранние staging-reboot команды дали false negative из-за ошибочного ожидания отсутствующего `reason_code` и Windows/`bash` quoting в диагностическом `grep`; состояние продукта было прочитано отдельно, ожидание исправлено, после чего полный hash-based reboot прошёл. Эти ошибки не меняли live restore state;
+- exact-signed Docker restore/recovery gate закрыт. Уровень мышления можно вернуть с `xhigh` на `High`; следующий блок — реальный Gateway/VPS/HiLink/Keenetic и production release/endurance.
 
 ### Сессия 045 — destructive restore, найденный auto-retry и boot-safe recovery — 2026-08-26
 
