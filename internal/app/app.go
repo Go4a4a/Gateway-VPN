@@ -30,6 +30,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/reconcile"
+	retentionpkg "gateway-vpn/internal/retention"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/tlsbootstrap"
@@ -39,27 +40,30 @@ import (
 )
 
 type Runtime struct {
-	Config          config.Config
-	Database        *sql.DB
-	API             *webapi.Server
-	Admin           bootstrap.AdminResult
-	TLS             tlsbootstrap.Result
-	Refresh         *subscription.RefreshCoordinator
-	RefreshWorker   *subscription.RefreshWorker
-	Mihomo          *mihomo.TransactionController
-	Reconciler      *reconcile.Reconciler
-	Routing         interface{ SyncRouting(context.Context) error }
-	WireGuard       interface{ SyncWireGuard(context.Context) error }
-	ModemRunner     *hilink.Runner
-	HealthRunner    *candidateruntime.PeriodicRunner
-	Logging         *loggingpkg.Controller
-	LoggingSync     webapi.LoggingSynchronizer
-	Backups         *backup.Manager
-	Updates         *updatepkg.Stager
-	States          *state.Repository
-	logger          *slog.Logger
-	routingLogger   *slog.Logger
-	wireGuardLogger *slog.Logger
+	Config                config.Config
+	Database              *sql.DB
+	API                   *webapi.Server
+	Admin                 bootstrap.AdminResult
+	TLS                   tlsbootstrap.Result
+	Refresh               *subscription.RefreshCoordinator
+	RefreshWorker         *subscription.RefreshWorker
+	Mihomo                *mihomo.TransactionController
+	Reconciler            *reconcile.Reconciler
+	Routing               interface{ SyncRouting(context.Context) error }
+	WireGuard             interface{ SyncWireGuard(context.Context) error }
+	ModemRunner           *hilink.Runner
+	HealthRunner          *candidateruntime.PeriodicRunner
+	Logging               *loggingpkg.Controller
+	LoggingSync           webapi.LoggingSynchronizer
+	Backups               *backup.Manager
+	Retention             *retentionpkg.Cleaner
+	Updates               *updatepkg.Stager
+	States                *state.Repository
+	logger                *slog.Logger
+	routingLogger         *slog.Logger
+	wireGuardLogger       *slog.Logger
+	retentionInterval     time.Duration
+	retentionBacklogDelay time.Duration
 }
 
 type brokerHostDiagnostics struct {
@@ -237,7 +241,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger}, nil
 }
 
 func (application *Runtime) Serve(ctx context.Context) error {
@@ -252,7 +256,7 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	application.logger.Info("management TLS ready", "certificate_sha256", application.TLS.Fingerprint)
 	workerContext, stopWorker := context.WithCancel(ctx)
-	workerDone := make(chan error, 7)
+	workerDone := make(chan error, 8)
 	workers := 0
 	if application.RefreshWorker != nil {
 		workers++
@@ -281,6 +285,10 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	if application.Backups != nil && application.States != nil {
 		workers++
 		go func() { workerDone <- application.runBackupLoop(workerContext) }()
+	}
+	if application.Retention != nil {
+		workers++
+		go func() { workerDone <- application.runRetentionLoop(workerContext) }()
 	}
 	serveErr := ServeHTTPS(ctx, application.Config.API.Listen, application.Config.API.TLSCert, application.Config.API.TLSKey, application.API, application.logger)
 	stopWorker()

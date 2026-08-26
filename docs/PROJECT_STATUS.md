@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-26
 **Общее состояние:** `IN_PROGRESS`  
-**Текущий этап:** Exact signed `0.1.0-systemd.27` из commit `ddcc407` прошёл полную destructive restore/recovery matrix на clean Ubuntu 24.04/systemd. Дополнительно Gateway exact `.27` и byte-identical current VPS uninstaller прошли preserve/reboot/reinstall/explicit-purge acceptance: owned network/systemd state удаляется, данные и WireGuard key сохраняются по умолчанию, purge требует отдельного флага. Restore и uninstall Docker gates закрыты; следующий шаг — bare-metal Gateway + реальный VPS/HiLink/Keenetic, production signing/release и 72-часовой endurance
+**Текущий этап:** Bounded production DB retention подключён к runtime: временные данные и immutable subscription versions сходятся к политике малыми транзакциями, payload cleanup восстанавливается после interruption, `VACUUM` не запускается. Полные Windows и offline Linux/amd64 test/vet проходят. Telemetry+retention prerequisites для 24-часового developer endurance закрыты; реальный bare-metal Gateway, VPS/HiLink/Keenetic, production signing/release и 72-часовой release endurance остаются впереди
 
-**Оценка прогресса:** около `97%` программной реализации и около `90%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
+**Оценка прогресса:** около `98%` программной реализации и около `90%` полной production-готовности. Вторая оценка намеренно ниже: она включает ещё не выполненные permanent signing/production GitHub release, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательный 72-часовой endurance, которые нельзя заменить disposable signing, privileged Docker/systemd, netns или cross-build.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -40,7 +40,7 @@
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `CODE_PASS / LINUX_NOT_RUN` | Stable-number CRUD, protected URL secrets, priority/enable/delete lifecycle и modem×subscription status WebUI подключены; реальный mobile fetch/qualification не запускался |
 | Qualification / scheduler | `CODE_PASS / LINUX_NOT_RUN` | Durable ACTIVE/STANDBY schedule, restart-safe hysteresis, scheduler budget deferral, independent target-outage confirmation и exact `DEGRADED_TARGET` recovery подключены; реальный Mihomo listener и mobile traffic budget ещё не проверены |
-| SQLite | `PASS` | Migrations v1–v11, checksum/version guard, case-insensitive local-user identity, durable policy/health/logging settings и retention convergence state, monotonic numbers, WAL/PRAGMAs и integrity tests готовы |
+| SQLite | `PASS` | Migrations v1–v11, checksum/version guard, durable settings, WAL/PRAGMAs и integrity tests готовы; production worker каждые 10 минут удаляет health старше 7 дней, events старше 30 дней, traffic старше 24 месяцев и лишние immutable versions малыми batch, повторяя orphan payload cleanup после interruption без автоматического `VACUUM` |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
 | API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 79 `/api/v1` routes покрыты OpenAPI; signed Ubuntu install реально слушает `192.168.200.1:8443`, возвращает HTTP 200 и CSP/Permissions-Policy/no-sniff; реальная LAN-карта/браузер клиента ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
@@ -49,17 +49,17 @@
 | Signed update | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact `.21 → .22` прошёл clean Web API stage/apply, pre-update snapshot, atomic `current`/DB switch, непривилегированный candidate health, active 24h finalize timer, forced health/finalize rollback, finalized reboot и host-side exit 137 в durable `HEALTH_CHECKING`; boot recovery вернул `.21`+DB, broker/control и пустой TUN gate. Bare-metal power cut ещё не выполнялся |
 | Packaging | `SIGNED_REHEARSAL_ACCEPTANCE_PASS / PRODUCTION_RELEASE_PENDING` | Signed `.13` double-build/one-command orchestration и handshake прошли; disposable `.21/.22` доказали systemd update/recovery, `.27` — destructive restore/recovery. Permanent key, production tag/assets и установка с публичного GitHub release ещё не выполнены |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
-| Endurance | `TELEMETRY_READY / RUN_NOT_STARTED` | Authenticated secret-free runtime endpoint отдаёт uptime/goroutines/heap/stack/alloc/GC и Linux RSS/FD, ограничен 20 запросами/минуту на session; OpenAPI и 24/72h evaluation policy задокументированы. Ни 24h developer, ни 72h release run ещё не выполнялись; до запуска нужен DB retention worker |
+| Endurance | `TELEMETRY_AND_RETENTION_READY / RUN_NOT_STARTED` | Authenticated secret-free runtime endpoint отдаёт uptime/goroutines/heap/stack/alloc/GC и Linux RSS/FD; bounded DB/payload retention подключён к production lifecycle. OpenAPI и 24/72h evaluation policy задокументированы, но ни 24h developer, ни 72h release run ещё не выполнялись |
 | Traffic accounting | `FOUNDATION_PASS` | Option A: общий authoritative total и Mihomo cross-check доступны в repository/API/UI; реальные nft counters ещё не считывались |
-| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для `ddcc407`; systemd graph проходит `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore и Gateway uninstall; byte-identical current VPS uninstaller прошёл preserve/reinstall/purge. Удалённый CI для local-ahead commits ещё не выполнен |
+| Автоматические тесты | `LOCAL_WINDOWS_AND_LINUX_PASS / REMOTE_PENDING` | Полный Windows и offline Linux/amd64 `go test ./...`/`go vet ./...` проходят для текущего retention-инкремента; systemd graph ранее прошёл `systemd-analyze verify`. Exact signed `.13` подтвердила orchestration/handshake, `.21/.22` — update recovery, `.27` — restore и Gateway uninstall; byte-identical current VPS uninstaller прошёл preserve/reinstall/purge. Удалённый CI для local-ahead commits ещё не выполнен |
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент: подготовить реальный bare-metal Ubuntu 24.04 Gateway и VPS, выполнить exact public-GitHub install dry-run/apply, reboot и внешний WireGuard handshake, затем HiLink/Keenetic packet-capture matrix минимум с одним модемом. Multi-modem gate требует отдельно минимум два модема с разными management-подсетями. Положительный Ubuntu 20.04 acceptance остаётся внешним gate на Pro-attached VPS; vanilla 20.04 negative gate уже пройден. До production tag/assets нужен отдельно backed-up long-lived Ed25519 key и подтверждённое место его хранения.
+Следующий локальный инкремент: подготовить воспроизводимый harness и выполнить 24-часовой developer endurance на exact committed Linux build с минутными samples, DB/retention diagnostics и автоматической оценкой. Параллельный внешний путь — bare-metal Ubuntu 24.04 Gateway и VPS: exact public-GitHub install dry-run/apply, reboot, внешний WireGuard handshake и HiLink/Keenetic packet-capture matrix минимум с одним модемом. Multi-modem gate требует отдельно минимум два модема с разными management-подсетями. Положительный Ubuntu 20.04 acceptance остаётся внешним gate на Pro-attached VPS; до production tag/assets нужен backed-up long-lived Ed25519 key и подтверждённое место его хранения.
 
 ## Критический путь до release
 
-При неизменном scope основной оставшийся путь — release/hardware integration acceptance и найденные при ней исправления. Signed update и restore reboot/power-cut matrices уже пройдены в privileged Docker/systemd; отдельно ещё требуются production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой endurance.
+При неизменном scope основной оставшийся путь — developer endurance, release/hardware integration acceptance и найденные при ней исправления. Signed update и restore reboot/power-cut matrices уже пройдены в privileged Docker/systemd; отдельно ещё требуются 24-часовой developer run, production GitHub/Ubuntu deploy, VPS reboot, Keenetic/HiLink packet-capture matrix и не сокращаемый 72-часовой release endurance.
 
 Если целевые Linux Gateway, VPS и модемы доступны без пауз, оптимистичный календарный ориентир до проверенного release — `4–8 дней`: примерно `1–3` интенсивных дня на оставшийся код и интеграционные исправления, затем минимум `72 часа` endurance. Это не обещанная дата: отсутствие стенда, найденные routing/hardware defects либо расширение scope сдвигают срок. Без фактического доступа к Linux/VPS/оборудованию можно завершить код и synthetic tests, но нельзя честно поставить production status `DONE`.
 
@@ -199,8 +199,30 @@
 | DEV-119 | 2026-08-26 | Успешный restore rollback сначала фиксирует root journal `ROLLED_BACK`, затем отзывает nonce и возвращает operation в `STAGED`; повторный rollback идемпотентен, а новый Apply получает другой nonce | Power cut после rollback, но до marker update мог повторно удалить уже возвращённые original destinations либо автоматически повторить destructive apply |
 | DEV-120 | 2026-08-26 | Boot restore unit имеет `RemainAfterExit=yes` и удаляет только root-owned regular `0600` `.recovery-record-<digits>` перед state decision | Несколько `Wants=` повторно запускали helper в одном boot, а SIGKILL оставлял безопасный, но неограниченно накапливающийся atomic temp record |
 | DEV-121 | 2026-08-26 | Endurance использует authenticated `/api/v1/system/runtime-metrics`: только bounded Go/process counters, Linux RSS/FD и отдельный per-session rate limit 20/min | RSS/FD доступны через `/proc`, но число goroutines иначе нельзя достоверно измерять снаружи; endpoint не должен раскрывать argv/environment/config/IDs/secrets или позволять hammering `runtime.ReadMemStats` |
+| DEV-122 | 2026-08-26 | DB retention запускается немедленно и каждые 10 минут, удаляет максимум 500 time-series rows и 20 versions за транзакционный pass, а известный backlog повторяет через 250 ms; DB row удаляется до payload directory, orphan scan идемпотентен, `.payload-*` не трогается, автоматический `VACUUM` запрещён | Размер SQLite должен сходиться к PLAN §12.3 без длинной write lock; power loss между DB commit и filesystem delete не должен навсегда сохранять proxy payload либо затронуть текущий refresh |
 
 ## Журнал разработки
+
+### Сессия 049 — bounded DB retention и production lifecycle — 2026-08-26
+
+**Реализация:**
+
+- добавлен отдельный `internal/retention` с валидируемой policy: raw health 7 дней, events 30 дней, daily traffic 24 месяца (`0` оставляет traffic unlimited), active LKG и все `CANDIDATE` защищены, для каждой подписки сохраняются два последних `RETAINED` и два последних `FAILED`;
+- каждая категория удаляется отдельным bounded SQL statement/transaction; один pass ограничен 500 time-series rows и 20 version rows, `VACUUM` worker не вызывает;
+- version row и зависимые nodes сначала атомарно удаляются из SQLite, затем удаляется только проверенный non-symlink payload directory `0700`; interruption между операциями исправляет следующий orphan scan;
+- orphan inventory просматривается полностью в пределах общего portable-backup bound 4096, поэтому поздний orphan не блокируется большим числом ранних referenced payload; временные `.payload-*` текущего refresh никогда не удаляются;
+- production `Runtime` получил восьмой cancellable worker: первый pass выполняется сразу, известный backlog повторяется через 250 ms малыми batch, стабильное состояние проверяется каждые 10 минут, постоянная ошибка не создаёт tight loop;
+- журналирование содержит только bounded counts и sanitized error, без subscription/version IDs или содержимого payload.
+
+**Проверки:**
+
+- targeted Windows tests `internal/subscription`, `internal/retention`, `internal/app` — PASS; проверены точные retention boundaries, protected states, batch convergence, unlimited traffic, idempotent delete, orphan после referenced payload, сохранение in-flight directory, immediate worker и context stop;
+- полный Windows `go test ./...` и `go vet ./...` — PASS;
+- полный offline Linux/amd64 `go test ./...` и `go vet ./...` без сети — PASS;
+- первый холодный параллельный Linux run один раз превысил прежний односекундный test-only timeout polling firewall guard; isolated Linux test затем прошёл 20/20, timeout harness увеличен до 3 секунд, повторный полный Linux test+vet прошёл;
+- `git diff --check` — PASS. Реальные 24/72-часовые endurance runs не запускались и не считаются выполненными.
+
+**Следующий шаг:** подготовить exact-build endurance harness, выполнить 24-часовой developer run и оценить RSS/FD/goroutines/heap/live objects вместе с SQLite integrity, WAL/DB size и фактической сходимостью retention. Реальные Gateway/VPS/HiLink/Keenetic и production release gates не изменились.
 
 ### Сессия 048 — измеримая endurance telemetry и completion-аудит retention — 2026-08-26
 

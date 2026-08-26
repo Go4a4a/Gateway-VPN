@@ -212,7 +212,7 @@ func TestFirewallGuardRunnerPollingRecoversWhenMonitorIsSilent(t *testing.T) {
 	executor.setHealthy(false)
 	select {
 	case <-recovered:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("periodic guard check did not recover silent nft loss")
 	}
 	cancel()

@@ -14,6 +14,11 @@ import (
 
 const normalizedPayloadFilename = "payload.yaml"
 
+type PayloadRef struct {
+	SubscriptionID string
+	VersionID      string
+}
+
 // WriteNormalizedPayload writes an immutable, sanitized Clash payload. Proxy
 // credentials remain outside SQLite and are protected with directory 0700 and
 // file 0600 permissions.
@@ -147,6 +152,102 @@ func DeleteSubscriptionPayloads(root, subscriptionID string) error {
 		return fmt.Errorf("delete subscription payload directory: %w", err)
 	}
 	return syncPayloadDirectory(root)
+}
+
+// DeleteVersionPayload removes one immutable version after its database row
+// has been pruned. It never follows symlinks and is idempotent so a later
+// retention pass can finish filesystem cleanup after a power loss.
+func DeleteVersionPayload(root, subscriptionID, versionID string) (bool, error) {
+	if root == "" || !safePayloadSegment(subscriptionID) || !safePayloadSegment(versionID) {
+		return false, errors.New("payload root and safe subscription/version ids are required")
+	}
+	subscriptionDirectory := filepath.Join(root, subscriptionID)
+	if err := requirePayloadDirectory(subscriptionDirectory); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	destination := filepath.Join(subscriptionDirectory, versionID)
+	if err := requirePayloadDirectory(destination); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	if err := os.RemoveAll(destination); err != nil {
+		return false, fmt.Errorf("delete subscription version payload: %w", err)
+	}
+	if err := syncPayloadDirectory(subscriptionDirectory); err != nil {
+		// Removal already happened. Report that fact even when the directory
+		// durability barrier failed so callers do not publish a false count.
+		// The idempotent orphan scan will verify the final state on a later pass.
+		return true, fmt.Errorf("sync subscription payload directory after deletion: %w", err)
+	}
+	return true, nil
+}
+
+// ListVersionPayloads returns only published version directories. Temporary
+// .payload-* directories are skipped because an in-flight refresh may own
+// them; their crash recovery is a separate age-based concern.
+func ListVersionPayloads(root string, limit int) ([]PayloadRef, error) {
+	if root == "" || limit < 1 || limit > 4096 {
+		return nil, errors.New("payload root and bounded list limit are required")
+	}
+	if err := requirePayloadDirectory(root); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	subscriptions, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("list subscription payload root: %w", err)
+	}
+	result := make([]PayloadRef, 0, limit)
+	for _, subscriptionEntry := range subscriptions {
+		if len(result) == limit {
+			break
+		}
+		if !safePayloadSegment(subscriptionEntry.Name()) || subscriptionEntry.Type()&os.ModeSymlink != 0 || !subscriptionEntry.IsDir() {
+			return nil, errors.New("subscription payload root contains an unsafe entry")
+		}
+		subscriptionDirectory := filepath.Join(root, subscriptionEntry.Name())
+		if err := requirePayloadDirectory(subscriptionDirectory); err != nil {
+			return nil, err
+		}
+		versions, err := os.ReadDir(subscriptionDirectory)
+		if err != nil {
+			return nil, fmt.Errorf("list subscription version payloads: %w", err)
+		}
+		for _, versionEntry := range versions {
+			if len(result) == limit {
+				break
+			}
+			if strings.HasPrefix(versionEntry.Name(), ".payload-") {
+				continue
+			}
+			if !safePayloadSegment(versionEntry.Name()) || versionEntry.Type()&os.ModeSymlink != 0 || !versionEntry.IsDir() {
+				return nil, errors.New("subscription directory contains an unsafe version payload")
+			}
+			if err := requirePayloadDirectory(filepath.Join(subscriptionDirectory, versionEntry.Name())); err != nil {
+				return nil, err
+			}
+			result = append(result, PayloadRef{SubscriptionID: subscriptionEntry.Name(), VersionID: versionEntry.Name()})
+		}
+	}
+	return result, nil
+}
+
+func requirePayloadDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("subscription payload path is not a regular directory")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		return errors.New("subscription payload directory mode is unsafe")
+	}
+	return nil
 }
 
 func safePayloadSegment(value string) bool {

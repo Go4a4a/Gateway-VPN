@@ -64,3 +64,35 @@ func TestNormalizedPayloadRejectsTraversalAndSymlink(t *testing.T) {
 		t.Fatal("LoadNormalizedPayload(symlink) error = nil")
 	}
 }
+
+func TestVersionPayloadListingAndIdempotentDeletion(t *testing.T) {
+	imported, err := Import([]byte("vless://11111111-1111-1111-1111-111111111111@one.example:443#one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "subscriptions")
+	for _, versionID := range []string{"version-1", "version-2"} {
+		if _, err := WriteNormalizedPayload(root, "sub-a", versionID, imported); err != nil {
+			t.Fatal(err)
+		}
+	}
+	temporary := filepath.Join(root, "sub-a", ".payload-in-flight")
+	if err := os.Mkdir(temporary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	items, err := ListVersionPayloads(root, 10)
+	if err != nil || len(items) != 2 || items[0].VersionID != "version-1" || items[1].VersionID != "version-2" {
+		t.Fatalf("ListVersionPayloads() = %+v, %v", items, err)
+	}
+	removed, err := DeleteVersionPayload(root, "sub-a", "version-1")
+	if err != nil || !removed {
+		t.Fatalf("DeleteVersionPayload() = %t, %v", removed, err)
+	}
+	removed, err = DeleteVersionPayload(root, "sub-a", "version-1")
+	if err != nil || removed {
+		t.Fatalf("idempotent DeleteVersionPayload() = %t, %v", removed, err)
+	}
+	if _, err := os.Stat(temporary); err != nil {
+		t.Fatalf("in-flight payload directory was removed: %v", err)
+	}
+}
