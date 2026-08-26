@@ -703,7 +703,10 @@ func copyPrivateTree(ctx context.Context, source, destination string, directoryM
 		}
 		files++
 		bytesCopied += entryInfo.Size()
-		return copyPrivateFile(ctx, current, target, fileMode, uid, gid, setOwnership)
+		// The final metadata pass applies the requested ownership after every
+		// chmod. Keeping copied entries root-owned until then avoids a redundant
+		// CAP_FOWNER requirement in the hardened restore unit.
+		return copyPrivateFile(ctx, current, target, fileMode, 0, 0, setOwnership)
 	})
 	if err != nil {
 		return err
