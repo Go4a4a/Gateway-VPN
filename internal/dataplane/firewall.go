@@ -74,6 +74,10 @@ func (backend FirewallBackend) apply(ctx context.Context, desired PathState) err
 		"hook forward priority filter; policy drop",
 		"gateway-vpn PATH_BLOCKED",
 		"oifname @" + activeTUNSet,
+		"counter user_upload",
+		"counter user_download",
+		"counter service_upload",
+		"counter service_download",
 	} {
 		if !strings.Contains(current.Stdout, marker) {
 			return fmt.Errorf("owned data-plane table is missing integrity marker %q", marker)

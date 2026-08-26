@@ -104,6 +104,10 @@ func (guard *Guard) Inspect(ctx context.Context) error {
 		"set hilink_interfaces",
 		"set wireguard_endpoint_v4",
 		"set mihomo_endpoint_tcp_v4",
+		"counter user_upload",
+		"counter user_download",
+		"counter service_upload",
+		"counter service_download",
 		"chain input {",
 		"hook input priority filter; policy drop",
 		"chain forward {",
@@ -159,11 +163,11 @@ func validateSchemaGeneration(payload []byte) error {
 		if len(set.Elem) == 1 {
 			switch value := set.Elem[0].(type) {
 			case float64:
-				if value == 1 {
+				if value == SchemaGeneration {
 					return nil
 				}
 			case map[string]any:
-				if nested, ok := value["val"].(float64); ok && nested == 1 {
+				if nested, ok := value["val"].(float64); ok && nested == SchemaGeneration {
 					return nil
 				}
 			}

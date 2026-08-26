@@ -1,0 +1,116 @@
+table inet gateway_vpn {
+    set firewall_schema_generation {
+		type mark
+        elements = { 2 }
+    }
+
+    set hilink_interfaces {
+        type ifname
+        flags dynamic
+    }
+
+    set hilink_management_v4 {
+		type ifname . ipv4_addr
+    }
+
+	set wireguard_endpoint_v4 {
+		type ifname . mark . ipv4_addr
+	}
+
+	set wireguard_endpoint_generation {
+		type mark
+	}
+
+    set bootstrap_dns_v4 {
+		type ifname . mark . ipv4_addr
+    }
+
+    set bootstrap_http_v4 {
+		type ifname . mark . ipv4_addr . inet_service
+		flags timeout
+		timeout 2m
+	}
+
+	set mihomo_endpoint_tcp_v4 {
+		type ifname . mark . ipv4_addr . inet_service
+	}
+
+	set mihomo_endpoint_udp_v4 {
+		type ifname . mark . ipv4_addr . inet_service
+	}
+
+	set mihomo_endpoint_generation {
+		type mark
+	}
+
+	set service_context_generation {
+		type mark
+	}
+
+	set active_tun_interfaces {
+        type ifname
+    }
+
+    set active_path_generation {
+		type mark
+    }
+
+    counter user_upload {
+        comment "gateway-vpn authoritative user upload"
+    }
+
+    counter user_download {
+        comment "gateway-vpn authoritative user download"
+    }
+
+    counter service_upload {
+        comment "gateway-vpn authoritative direct service upload"
+    }
+
+    counter service_download {
+        comment "gateway-vpn authoritative direct service download"
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept comment "gateway-vpn loopback"
+        ct state invalid drop
+        iifname @hilink_interfaces ct state { established, related } counter name service_download accept comment "gateway-vpn direct service download"
+        ct state { established, related } accept
+        iifname "enp2s0" udp sport 68 udp dport 67 accept comment "gateway-vpn LAN DHCP request"
+        iifname "enp2s0" udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
+        iifname "enp2s0" tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
+        iifname "enp2s0" tcp dport 8443 accept comment "gateway-vpn LAN API"
+        iifname "wg-mgmt" tcp dport 8443 accept comment "gateway-vpn WireGuard API"
+        iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state invalid drop
+        meta nfproto ipv4 iifname "enp2s0" oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
+        meta nfproto ipv4 iifname @active_tun_interfaces oifname "enp2s0" ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
+        counter comment "gateway-vpn PATH_BLOCKED"
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept comment "gateway-vpn loopback"
+        ct state invalid drop
+        oifname @hilink_interfaces ct state { established, related } counter name service_upload accept comment "gateway-vpn direct service upload"
+        ct state { established, related } accept
+        oifname "enp2s0" udp sport 67 udp dport 68 accept comment "gateway-vpn LAN DHCP reply"
+        oifname @hilink_interfaces udp sport 68 udp dport 67 counter name service_upload accept comment "gateway-vpn modem DHCP request"
+		oifname . ip daddr @hilink_management_v4 tcp dport { 80, 443 } counter name service_upload accept comment "gateway-vpn modem management"
+		oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 counter name service_upload accept comment "gateway-vpn WireGuard endpoint"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS UDP"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS TCP"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4 counter name service_upload accept comment "gateway-vpn subscription HTTPS"
+		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn root endpoint DNS UDP"
+		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn root endpoint DNS TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS UDP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . udp dport @mihomo_endpoint_udp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy UDP"
+    }
+}

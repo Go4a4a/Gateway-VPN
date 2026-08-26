@@ -35,6 +35,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/tlsbootstrap"
+	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
@@ -59,11 +60,13 @@ type Runtime struct {
 	LoggingSync           webapi.LoggingSynchronizer
 	Backups               *backup.Manager
 	Retention             *retentionpkg.Cleaner
+	TrafficRunner         *traffic.Runner
 	Updates               *updatepkg.Stager
 	States                *state.Repository
 	logger                *slog.Logger
 	routingLogger         *slog.Logger
 	wireGuardLogger       *slog.Logger
+	trafficLogger         *slog.Logger
 	retentionInterval     time.Duration
 	retentionBacklogDelay time.Duration
 	reconcileNow          chan struct{}
@@ -151,6 +154,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	healthLogger := logger.With("component", loggingpkg.ComponentPathHealth)
 	routingLogger := logger.With("component", loggingpkg.ComponentRoutingFirewall)
 	wireGuardLogger := logger.With("component", loggingpkg.ComponentWireGuard)
+	trafficLogger := logger.With("component", loggingpkg.ComponentTraffic)
 	dataPlane.RefreshWorker.OnError = func(subscriptionID string, err error) {
 		subscriptionLogger.Warn("scheduled subscription refresh failed", "subscription_id", subscriptionID, "error", err)
 	}
@@ -170,6 +174,15 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	}
 	dataPlane.HealthRunner.OnError = func(err error) {
 		healthLogger.Warn("periodic path health cycle failed", "error", err)
+	}
+	trafficSessionID, err := traffic.NewSessionID()
+	if err != nil {
+		return fail(err)
+	}
+	trafficRunner := &traffic.Runner{
+		Collector: traffic.Collector{Database: database}, Authoritative: networkBroker, Mihomo: dataPlane.MihomoClient,
+		Interval: traffic.DefaultCheckpointInterval, SessionID: trafficSessionID, SessionStartedAt: time.Now().UTC(),
+		OnError: func(err error) { trafficLogger.Warn("authoritative traffic checkpoint failed", "error", err) },
 	}
 	loggingController.OnError = func(err error) {
 		systemLogger.Warn("logging debug expiry persistence failed", "error", err)
@@ -254,7 +267,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
 }
 
 // RequestReconcile coalesces fixed SIGHUP requests from the privileged
@@ -311,6 +324,9 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.Retention != nil {
 		startWorker("retention", application.runRetentionLoop)
+	}
+	if application.TrafficRunner != nil {
+		startWorker("traffic-accounting", application.TrafficRunner.Run)
 	}
 	startWorker("control-heartbeat", application.runWatchdogHeartbeatLoop)
 	serveDone := make(chan error, 1)

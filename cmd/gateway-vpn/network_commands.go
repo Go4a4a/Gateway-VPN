@@ -26,6 +26,7 @@ import (
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/traffic"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -115,7 +116,7 @@ func runNetworkBroker(args []string) int {
 		Executor: executor, IP: "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg",
 		Uname: "/usr/bin/uname", MihomoBinary: "/opt/gateway-vpn/current/libexec/mihomo", OSReleaseFile: "/etc/os-release",
 	}
-	server, err := networkapply.NewBrokerServerWithUpdateRuntime(
+	server, err := networkapply.NewBrokerServerWithTrafficRuntime(
 		engine,
 		mihomoruntime.SystemdAdmin{Executor: executor, Systemctl: "/usr/bin/systemctl"},
 		firewallBackend,
@@ -130,6 +131,7 @@ func runNetworkBroker(args []string) int {
 			Executor: executor, Systemctl: "/usr/bin/systemctl",
 			JournalRoot: filepath.Join(defaultPrivilegedRoot, "update-transactions"),
 		},
+		traffic.NFTReader{Executor: executor, NFT: "/usr/sbin/nft"},
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create network broker: %v\n", err)

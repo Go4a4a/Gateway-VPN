@@ -14,7 +14,10 @@ import (
 	"gateway-vpn/internal/platformexec"
 )
 
-const TableName = "gateway_vpn"
+const (
+	TableName        = "gateway_vpn"
+	SchemaGeneration = 2
+)
 
 type BootConfig struct {
 	LANInterface        string
@@ -40,7 +43,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	text := fmt.Sprintf(`table inet %s {
     set firewall_schema_generation {
 		type mark
-        elements = { 1 }
+        elements = { %d }
     }
 
     set hilink_interfaces {
@@ -102,17 +105,26 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         comment "gateway-vpn authoritative user download"
     }
 
+    counter service_upload {
+        comment "gateway-vpn authoritative direct service upload"
+    }
+
+    counter service_download {
+        comment "gateway-vpn authoritative direct service download"
+    }
+
     chain input {
         type filter hook input priority filter; policy drop;
         iifname "lo" accept comment "gateway-vpn loopback"
         ct state invalid drop
+        iifname @hilink_interfaces ct state { established, related } counter name service_download accept comment "gateway-vpn direct service download"
         ct state { established, related } accept
         iifname %s udp sport 68 udp dport 67 accept comment "gateway-vpn LAN DHCP request"
         iifname %s udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
         iifname %s tcp dport %d accept comment "gateway-vpn LAN API"
         iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
-        iifname @hilink_interfaces udp sport 67 udp dport 68 accept comment "gateway-vpn modem DHCP reply"
+        iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
 
     chain forward {
@@ -127,24 +139,26 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         type filter hook output priority filter; policy drop;
         oifname "lo" accept comment "gateway-vpn loopback"
         ct state invalid drop
+        oifname @hilink_interfaces ct state { established, related } counter name service_upload accept comment "gateway-vpn direct service upload"
         ct state { established, related } accept
         oifname %s udp sport 67 udp dport 68 accept comment "gateway-vpn LAN DHCP reply"
-        oifname @hilink_interfaces udp sport 68 udp dport 67 accept comment "gateway-vpn modem DHCP request"
-		oifname . ip daddr @hilink_management_v4 tcp dport { 80, 443 } accept comment "gateway-vpn modem management"
-		oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport %d accept comment "gateway-vpn WireGuard endpoint"
-		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 accept comment "gateway-vpn control bootstrap DNS UDP"
-		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 accept comment "gateway-vpn control bootstrap DNS TCP"
-		meta skuid "gateway-vpn" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4 accept comment "gateway-vpn subscription HTTPS"
-		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 accept comment "gateway-vpn root endpoint DNS UDP"
-		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 accept comment "gateway-vpn root endpoint DNS TCP"
-		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 accept comment "gateway-vpn Mihomo bootstrap DNS UDP"
-		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 accept comment "gateway-vpn Mihomo bootstrap DNS TCP"
-		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4 accept comment "gateway-vpn Mihomo proxy TCP"
-		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . udp dport @mihomo_endpoint_udp_v4 accept comment "gateway-vpn Mihomo proxy UDP"
+        oifname @hilink_interfaces udp sport 68 udp dport 67 counter name service_upload accept comment "gateway-vpn modem DHCP request"
+		oifname . ip daddr @hilink_management_v4 tcp dport { 80, 443 } counter name service_upload accept comment "gateway-vpn modem management"
+		oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport %d counter name service_upload accept comment "gateway-vpn WireGuard endpoint"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS UDP"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS TCP"
+		meta skuid "gateway-vpn" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4 counter name service_upload accept comment "gateway-vpn subscription HTTPS"
+		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn root endpoint DNS UDP"
+		meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn root endpoint DNS TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS UDP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy TCP"
+		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . udp dport @mihomo_endpoint_udp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy UDP"
     }
 }
 `,
 		TableName,
+		SchemaGeneration,
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),

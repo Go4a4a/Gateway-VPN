@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "generated_cases": [
+    {"name": "empty", "bytes": 0, "expected": "reject"},
+    {"name": "oversized", "bytes": 4194305, "fill": "x", "expected": "reject"},
+    {"name": "invalid-utf8-name", "hex": "70726f786965733a0a20202d206e616d653a20ff", "expected": "reject"}
+  ]
+}

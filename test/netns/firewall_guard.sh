@@ -95,7 +95,7 @@ wait_recovery() {
   local attempt
   for attempt in $(seq 1 100); do
     if ip netns exec "$GW" nft list table inet gateway_vpn >/dev/null 2>&1 \
-      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*1[[:space:]]*\]' >/dev/null \
+      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*2[[:space:]]*\]' >/dev/null \
       && ip -n "$GW" -json link show dev lan0 | grep '"UP"' >/dev/null \
       && [[ $(grep -c 'recovered=true' "$WORK/guard.log" || true) -ge $expected_count ]]; then
       return 0

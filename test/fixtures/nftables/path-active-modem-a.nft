@@ -1,0 +1,4 @@
+flush set inet gateway_vpn active_tun_interfaces
+flush set inet gateway_vpn active_path_generation
+add element inet gateway_vpn active_path_generation { 101 }
+add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }

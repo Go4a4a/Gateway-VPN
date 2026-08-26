@@ -1,0 +1,4 @@
+proxies:
+  - {name: "LTE whitelist 01", type: vless, server: lte.example.com, port: 443, uuid: 44444444-4444-4444-4444-444444444444}
+  - {name: "White-list mobile", type: trojan, server: white.example.com, port: 443, password: fixture-password}
+  - {name: "General VPN", type: trojan, server: general.example.com, port: 443, password: fixture-password-two}

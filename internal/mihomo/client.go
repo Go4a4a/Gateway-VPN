@@ -3,6 +3,10 @@ package mihomo
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +43,20 @@ type ProxyState struct {
 	Now  string `json:"now"`
 }
 
+type TrafficSnapshot struct {
+	UploadBPS     uint64 `json:"up"`
+	DownloadBPS   uint64 `json:"down"`
+	UploadTotal   uint64 `json:"upTotal"`
+	DownloadTotal uint64 `json:"downTotal"`
+}
+
+type ConnectionsSummary struct {
+	DownloadTotal uint64          `json:"downloadTotal"`
+	UploadTotal   uint64          `json:"uploadTotal"`
+	Connections   json.RawMessage `json:"connections"`
+	Memory        uint64          `json:"memory"`
+}
+
 func NewClient(controllerURL, secret string, httpClient *http.Client) (*Client, error) {
 	parsed, err := url.Parse(controllerURL)
 	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -70,6 +88,67 @@ func (client *Client) GetVersion(ctx context.Context) (Version, error) {
 		return Version{}, errors.New("Mihomo version response is empty")
 	}
 	return result, nil
+}
+
+func (client *Client) GetConnectionsSummary(ctx context.Context) (ConnectionsSummary, error) {
+	var result ConnectionsSummary
+	if err := client.doJSON(ctx, http.MethodGet, "/connections", nil, http.StatusOK, &result); err != nil {
+		return ConnectionsSummary{}, err
+	}
+	trimmed := bytes.TrimSpace(result.Connections)
+	if !bytes.Equal(trimmed, []byte("null")) && (len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']') {
+		return ConnectionsSummary{}, errors.New("Mihomo connections response is invalid")
+	}
+	return result, nil
+}
+
+// Traffic reads exactly one bounded message from Mihomo's official /traffic
+// WebSocket. The controller is loopback-only and authenticated by the same
+// bearer secret as the other local API operations.
+func (client *Client) Traffic(ctx context.Context) (TrafficSnapshot, error) {
+	if client == nil || client.baseURL == nil || client.httpClient == nil {
+		return TrafficSnapshot{}, errors.New("Mihomo API client is not configured")
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return TrafficSnapshot{}, errors.New("create Mihomo traffic WebSocket nonce failed")
+	}
+	key := base64.StdEncoding.EncodeToString(nonce)
+	endpoint := *client.baseURL
+	endpoint.Path = "/traffic"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return TrafficSnapshot{}, errors.New("create Mihomo traffic request failed")
+	}
+	request.Header.Set("Authorization", "Bearer "+client.secret)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	request.Header.Set("Sec-WebSocket-Key", key)
+	request.Header.Set("Sec-WebSocket-Version", "13")
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return TrafficSnapshot{}, errors.New("Mihomo traffic API is unavailable")
+	}
+	defer response.Body.Close()
+	acceptDigest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	expectedAccept := base64.StdEncoding.EncodeToString(acceptDigest[:])
+	if response.StatusCode != http.StatusSwitchingProtocols || !headerHasToken(response.Header, "Connection", "upgrade") || !headerHasToken(response.Header, "Upgrade", "websocket") || response.Header.Get("Sec-WebSocket-Accept") != expectedAccept {
+		return TrafficSnapshot{}, errors.New("Mihomo traffic WebSocket handshake is invalid")
+	}
+	payload, err := readWebSocketText(response.Body, maxAPIResponseBytes)
+	if err != nil {
+		return TrafficSnapshot{}, err
+	}
+	var snapshot TrafficSnapshot
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil {
+		return TrafficSnapshot{}, errors.New("Mihomo traffic response is invalid")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return TrafficSnapshot{}, errors.New("Mihomo traffic response has trailing data")
+	}
+	return snapshot, nil
 }
 
 func (client *Client) Reload(ctx context.Context, relativeConfigPath string) error {
@@ -150,6 +229,69 @@ func delayQuery(targetURL string, timeout time.Duration, expectedStatus string) 
 		values.Set("expected", expectedStatus)
 	}
 	return values.Encode(), nil
+}
+
+func headerHasToken(header http.Header, name, expected string) bool {
+	for _, value := range header.Values(name) {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), expected) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readWebSocketText(reader io.Reader, maximum int64) ([]byte, error) {
+	for frames := 0; frames < 8; frames++ {
+		header := make([]byte, 2)
+		if _, err := io.ReadFull(reader, header); err != nil {
+			return nil, errors.New("read Mihomo traffic WebSocket frame failed")
+		}
+		if header[0]&0x70 != 0 || header[1]&0x80 != 0 {
+			return nil, errors.New("Mihomo traffic WebSocket frame flags are invalid")
+		}
+		final := header[0]&0x80 != 0
+		opcode := header[0] & 0x0f
+		length := uint64(header[1] & 0x7f)
+		switch length {
+		case 126:
+			extended := make([]byte, 2)
+			if _, err := io.ReadFull(reader, extended); err != nil {
+				return nil, errors.New("read Mihomo traffic WebSocket length failed")
+			}
+			length = uint64(binary.BigEndian.Uint16(extended))
+		case 127:
+			extended := make([]byte, 8)
+			if _, err := io.ReadFull(reader, extended); err != nil {
+				return nil, errors.New("read Mihomo traffic WebSocket length failed")
+			}
+			length = binary.BigEndian.Uint64(extended)
+		}
+		if length > uint64(maximum) {
+			return nil, errors.New("Mihomo traffic WebSocket frame is oversized")
+		}
+		payload := make([]byte, int(length))
+		if _, err := io.ReadFull(reader, payload); err != nil {
+			return nil, errors.New("read Mihomo traffic WebSocket payload failed")
+		}
+		switch opcode {
+		case 0x1:
+			if !final {
+				return nil, errors.New("fragmented Mihomo traffic WebSocket message is unsupported")
+			}
+			return payload, nil
+		case 0x8:
+			return nil, errors.New("Mihomo traffic WebSocket closed before a sample")
+		case 0x9, 0xa:
+			if !final || length > 125 {
+				return nil, errors.New("Mihomo traffic WebSocket control frame is invalid")
+			}
+		default:
+			return nil, errors.New("Mihomo traffic WebSocket opcode is unsupported")
+		}
+	}
+	return nil, errors.New("Mihomo traffic WebSocket did not produce a data frame")
 }
 
 func (client *Client) doJSON(ctx context.Context, method, endpoint string, requestBody any, expectedStatus int, responseBody any) error {

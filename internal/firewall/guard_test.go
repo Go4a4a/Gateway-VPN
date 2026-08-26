@@ -38,7 +38,7 @@ func (executor *guardExecutor) Run(_ context.Context, request platformexec.Reque
 	case "/usr/sbin/nft --json list set inet gateway_vpn firewall_schema_generation":
 		value := 9
 		if executor.schema {
-			value = 1
+			value = SchemaGeneration
 		}
 		return platformexec.Result{Stdout: fmt.Sprintf(`{"nftables":[{"set":{"family":"inet","table":"gateway_vpn","name":"firewall_schema_generation","elem":[%d]}}]}`, value)}, nil
 	case "/usr/sbin/nft --check --file -":
@@ -239,6 +239,10 @@ set active_path_generation
 set hilink_interfaces
 set wireguard_endpoint_v4
 set mihomo_endpoint_tcp_v4
+counter user_upload
+counter user_download
+counter service_upload
+counter service_download
 chain input { type filter hook input priority filter; policy drop; }
 chain forward { type filter hook forward priority filter; policy drop; oifname @active_tun_interfaces counter comment "gateway-vpn PATH_BLOCKED" }
 chain output { type filter hook output priority filter; policy drop; oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 accept }

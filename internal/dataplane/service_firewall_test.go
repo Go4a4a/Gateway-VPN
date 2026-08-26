@@ -258,6 +258,8 @@ set mihomo_endpoint_tcp_v4
 set mihomo_endpoint_udp_v4
 set mihomo_endpoint_generation
 set service_context_generation
+counter service_upload
+counter service_download
 chain output { type filter hook output priority filter; policy drop;
 oifname . meta mark . ip daddr @bootstrap_dns_v4 }
 }`

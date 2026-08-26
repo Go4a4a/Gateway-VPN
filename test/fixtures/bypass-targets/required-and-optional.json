@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "targets": [
+    {"id": "target-required", "name": "Основной сайт", "kind": "url", "value": "https://required.example.com/generate_204", "required": true, "timeout_seconds": 5, "success_mode": "expected_status", "expected_status": "200-399", "expected_body_substring": ""},
+    {"id": "target-optional", "name": "Дополнительный сайт", "kind": "url", "value": "https://optional.example.com/health", "required": false, "timeout_seconds": 8, "success_mode": "expected_body", "expected_status": "200", "expected_body_substring": "fixture-ok"}
+  ]
+}

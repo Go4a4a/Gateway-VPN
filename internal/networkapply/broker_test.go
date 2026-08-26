@@ -13,6 +13,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/traffic"
 )
 
 type fakeDataPlaneAdmin struct {
@@ -65,6 +66,17 @@ type fakeUpdateAdmin struct {
 	err       error
 	status    UpdateTransactionStatus
 	statusErr error
+}
+
+type fakeTrafficAdmin struct {
+	calls    int
+	snapshot traffic.AuthoritativeSnapshot
+	err      error
+}
+
+func (admin *fakeTrafficAdmin) ReadTrafficCounters(context.Context) (traffic.AuthoritativeSnapshot, error) {
+	admin.calls++
+	return admin.snapshot, admin.err
 }
 
 func (admin *fakeUpdateAdmin) ApplyPendingUpdate(context.Context) error {
@@ -558,6 +570,41 @@ func TestBrokerUpdateApplyIsParameterFreeAndRedactsErrors(t *testing.T) {
 	admin.err = errors.New("private staged release path and systemd detail")
 	if err := client.ApplyPendingUpdate(ctx); err == nil || strings.Contains(err.Error(), "staged release path") || strings.Contains(err.Error(), "systemd detail") {
 		t.Fatalf("redacted update apply error = %v", err)
+	}
+}
+
+func TestBrokerTrafficCountersAreParameterFreeAndRedactRootErrors(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	admin := &fakeTrafficAdmin{snapshot: traffic.AuthoritativeSnapshot{
+		Counters: traffic.Counters{UploadBytes: 123, DownloadBytes: 456, ServiceUploadBytes: 12, ServiceDownloadBytes: 34},
+		BootID:   "11111111-2222-3333-4444-555555555555", FirewallGeneration: 19,
+	}}
+	server, err := NewBrokerServerWithTrafficRuntime(engine, &fakeDataPlaneAdmin{}, &fakePathAdmin{}, &fakeRoutingAdmin{}, &fakeBootstrapAdmin{}, &fakeWireGuardAdmin{}, &fakeLoggingAdmin{}, &fakeJournalAdmin{}, &fakeHostDiagnosticsAdmin{}, &fakeRestoreAdmin{}, &fakeUpdateAdmin{}, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	snapshot, err := client.ReadTrafficCounters(ctx)
+	if err != nil || snapshot != admin.snapshot || admin.calls != 1 {
+		t.Fatalf("ReadTrafficCounters() = %+v calls=%d error=%v", snapshot, admin.calls, err)
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/traffic/counters", strings.NewReader(`{"table":"attacker"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || admin.calls != 1 {
+		t.Fatalf("parameterized traffic status/calls = %d/%d", response.StatusCode, admin.calls)
+	}
+	admin.err = errors.New("private nftables command and namespace detail")
+	if _, err := client.ReadTrafficCounters(ctx); err == nil || strings.Contains(err.Error(), "nftables command") || strings.Contains(err.Error(), "namespace detail") {
+		t.Fatalf("redacted traffic error = %v", err)
 	}
 }
 

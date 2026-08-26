@@ -47,6 +47,7 @@ type dataPlaneComponents struct {
 	ProbeScheduler *scheduler.Scheduler
 	ModemRunner    *hilink.Runner
 	Discoveries    *hilink.DiscoveryRegistry
+	MihomoClient   *mihomo.Client
 }
 
 func initializeDataPlane(ctx context.Context, database *sql.DB, configuration config.Config, subscriptions *subscription.Repository, modems *modem.Repository, paths *pathmatrix.Repository, targets *bypass.Repository, matchers *subscription.MatcherRepository, states *state.Repository, broker *networkapply.BrokerClient) (dataPlaneComponents, error) {
@@ -181,7 +182,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		},
 		Config: candidateruntime.DefaultPeriodicConfig(),
 	}
-	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries}, nil
+	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client}, nil
 }
 
 func readBoundedSecret(filename string, maximum int64) (string, error) {

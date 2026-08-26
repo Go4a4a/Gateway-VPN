@@ -654,25 +654,25 @@ paths:
     get:
       tags: [Traffic]
       operationId: getCurrentTraffic
-      summary: Текущая общая скорость и authoritative counters
+      summary: Текущая общая скорость, пользовательские VPN counters и отдельные служебные direct counters
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/traffic/daily:
     get:
       tags: [Traffic]
       operationId: getDailyTraffic
-      summary: Дневные общие VPN totals без per-subscription attribution
+      summary: Дневные общие VPN totals и отдельные служебные direct totals без per-subscription attribution
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/traffic/monthly:
     get:
       tags: [Traffic]
       operationId: getMonthlyTraffic
-      summary: Месячные общие VPN totals
+      summary: Месячные общие VPN totals и отдельные служебные direct totals
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/traffic/export.csv:
     get:
       tags: [Traffic]
       operationId: exportTrafficCSV
-      summary: Скачать общую traffic history в CSV
+      summary: Скачать пользовательскую VPN и отдельную служебную direct traffic history в CSV
       responses:
         '200': {$ref: '#/components/responses/CSV'}
         default: {$ref: '#/components/responses/Error'}
@@ -924,7 +924,7 @@ components:
         application/vnd.gateway-vpn.backup:
           schema: {type: string, format: binary}
     CSV:
-      description: UTF-8 CSV с общей traffic history.
+      description: UTF-8 CSV с пользовательской VPN и отдельной служебной direct traffic history.
       content:
         text/csv:
           schema: {type: string}

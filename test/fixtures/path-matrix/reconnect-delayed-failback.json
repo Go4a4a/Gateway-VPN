@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "current_active_modem": "modem-b",
+  "preferred_reconnected_modem": "modem-a",
+  "stable_interval_seconds": 120,
+  "cooldown_seconds": 300,
+  "timeline": [
+    {"at_seconds": 0, "modem_a_state": "MODEM_READY", "expected_active_modem": "modem-b"},
+    {"at_seconds": 119, "modem_a_state": "QUALIFIED", "expected_active_modem": "modem-b"},
+    {"at_seconds": 300, "modem_a_state": "QUALIFIED", "expected_active_modem": "modem-a"}
+  ]
+}

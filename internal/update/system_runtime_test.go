@@ -1,13 +1,92 @@
 package update
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/watchdog"
 )
+
+type systemRuntimeExecutor struct {
+	requests []platformexec.Request
+	failSync bool
+}
+
+func (executor *systemRuntimeExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
+	executor.requests = append(executor.requests, request)
+	if reflect.DeepEqual(request.Arguments, []string{"restart", firewallUnit, guardUnit}) {
+		if executor.failSync {
+			return platformexec.Result{Stderr: "private systemd detail"}, os.ErrPermission
+		}
+		return platformexec.Result{}, nil
+	}
+	if strings.HasSuffix(request.Executable, filepath.Join("bin", "gateway-vpn")) && reflect.DeepEqual(request.Arguments, []string{"--version"}) {
+		return platformexec.Result{Stdout: "gateway-vpn 1.2.3 (test)\n"}, nil
+	}
+	if strings.HasSuffix(request.Executable, filepath.Join("bin", "gateway-vpnctl")) && len(request.Arguments) == 4 && request.Arguments[0] == "status" {
+		return platformexec.Result{Stdout: "{}\n"}, nil
+	}
+	return platformexec.Result{}, nil
+}
+
+func TestUpdateRuntimeQuiesceAtomicallySelectsFailClosedFirewallAndGuard(t *testing.T) {
+	executor := &systemRuntimeExecutor{}
+	runtime := SystemRuntime{Executor: executor, Systemctl: filepath.Join(t.TempDir(), "systemctl"), ReleaseRoot: filepath.Join(t.TempDir(), "gateway-vpn")}
+	if err := runtime.Quiesce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.requests) != 2 {
+		t.Fatalf("quiesce requests = %+v", executor.requests)
+	}
+	if !reflect.DeepEqual(executor.requests[0].Arguments, []string{"stop", controlUnit, "gateway-vpn-network-broker.service", brokerUnit, mihomoUnit, dnsmasqUnit}) {
+		t.Fatalf("quiesce stop = %v", executor.requests[0].Arguments)
+	}
+	if !reflect.DeepEqual(executor.requests[1].Arguments, []string{"restart", firewallUnit, guardUnit}) {
+		t.Fatalf("firewall schema transaction = %v", executor.requests[1].Arguments)
+	}
+}
+
+func TestUpdateRecoverySynchronizesSelectedFirewallBeforeAcceptingRelease(t *testing.T) {
+	executor := &systemRuntimeExecutor{}
+	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn")
+	runtime := SystemRuntime{Executor: executor, Systemctl: filepath.Join(t.TempDir(), "systemctl"), ReleaseRoot: releaseRoot, RecoveryOnly: true}
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.requests) != 3 || !reflect.DeepEqual(executor.requests[0].Arguments, []string{"restart", firewallUnit, guardUnit}) {
+		t.Fatalf("recovery requests = %+v", executor.requests)
+	}
+	executor = &systemRuntimeExecutor{failSync: true}
+	runtime.Executor = executor
+	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 1 {
+		t.Fatalf("failed firewall synchronization was not fatal: requests=%+v error=%v", executor.requests, err)
+	}
+}
+
+func TestUpdateLifecycleUnitsDoNotRequireTheFirewallPairTheyRestart(t *testing.T) {
+	for _, name := range []string{"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service"} {
+		content, err := os.ReadFile(filepath.Join("..", "..", "packaging", "systemd", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(content)
+		if !strings.Contains(text, "After=") || !strings.Contains(text, firewallUnit) || !strings.Contains(text, guardUnit) || !strings.Contains(text, "Wants=") {
+			t.Errorf("%s does not order and weakly activate the firewall pair", name)
+		}
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "Requires=") && (strings.Contains(line, firewallUnit) || strings.Contains(line, guardUnit)) {
+				t.Errorf("%s has a self-terminating dependency while restarting the firewall pair: %s", name, line)
+			}
+		}
+	}
+}
 
 func TestUpdateRuntimeRequiresFreshWatchdogAndControlEvidence(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "gateway-vpn-watchdog")

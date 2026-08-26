@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "cells": [
+    {"modem_id": "modem-a", "modem_priority": 10, "subscription_id": "subscription-a", "subscription_priority": 10, "state": "QUALIFIED", "node_id": "node-a", "latency_ms": 80},
+    {"modem_id": "modem-a", "modem_priority": 10, "subscription_id": "subscription-b", "subscription_priority": 20, "state": "FAILED", "reason_code": "REQUIRED_TARGET_FAILED"},
+    {"modem_id": "modem-b", "modem_priority": 20, "subscription_id": "subscription-a", "subscription_priority": 10, "state": "QUALIFIED", "node_id": "node-c", "latency_ms": 120},
+    {"modem_id": "modem-b", "modem_priority": 20, "subscription_id": "subscription-b", "subscription_priority": 20, "state": "MODEM_OFFLINE"}
+  ],
+  "expected_active": {"modem_id": "modem-a", "subscription_id": "subscription-a", "node_id": "node-a"}
+}

@@ -1,0 +1,3 @@
+proxies:
+  - {name: "one", type: vless, server: duplicate.example.com, port: 443, uuid: same-fixture}
+  - {name: "two", type: vless, server: duplicate.example.com, port: 443, uuid: same-fixture}

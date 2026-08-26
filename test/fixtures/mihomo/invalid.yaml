@@ -1,0 +1,7 @@
+external-controller: 0.0.0.0:9090
+proxy-groups:
+  - name: invalid
+    type: unsupported-fixture-type
+    proxies: [DIRECT]
+rules:
+  - this is not a valid rule

@@ -23,6 +23,7 @@ const (
 	ComponentMihomo          = "mihomo"
 	ComponentRoutingFirewall = "routing_firewall"
 	ComponentWireGuard       = "wireguard"
+	ComponentTraffic         = "traffic"
 	ComponentAuthAudit       = "auth_audit"
 
 	LevelError   = "error"
@@ -49,6 +50,7 @@ var componentOrder = []string{
 	ComponentMihomo,
 	ComponentRoutingFirewall,
 	ComponentWireGuard,
+	ComponentTraffic,
 	ComponentAuthAudit,
 }
 

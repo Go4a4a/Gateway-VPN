@@ -221,7 +221,10 @@ func (probe *SystemProbe) firewallHealthy(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	for _, marker := range []string{"table inet " + firewall.TableName, "firewall_schema_generation", "chain forward {", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, marker := range []string{
+		"table inet " + firewall.TableName, "firewall_schema_generation", "chain forward {", "policy drop", "gateway-vpn PATH_BLOCKED",
+		"counter user_upload", "counter user_download", "counter service_upload", "counter service_download",
+	} {
 		if !strings.Contains(result.Stdout, marker) {
 			return false
 		}

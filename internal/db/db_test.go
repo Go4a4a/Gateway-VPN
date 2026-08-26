@@ -116,7 +116,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 12 {
+	if err != nil || version != 13 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -140,7 +140,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 12 {
+	if err != nil || latest != 13 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -201,8 +201,14 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 12 {
-		t.Fatalf("SchemaVersion() = %d, want 12", version)
+	if version != 13 {
+		t.Fatalf("SchemaVersion() = %d, want 13", version)
+	}
+	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
+		var count int
+		if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('traffic_daily_totals') WHERE name=?", column).Scan(&count); err != nil || count != 1 {
+			t.Errorf("traffic service column %s count = %d, %v", column, count, err)
+		}
 	}
 	if _, err := database.ExecContext(ctx, `
 INSERT INTO subscriptions (
@@ -240,8 +246,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 12 {
-		t.Fatalf("migration count = %d, want 12", count)
+	if count != 13 {
+		t.Fatalf("migration count = %d, want 13", count)
 	}
 }
 

@@ -1,0 +1,51 @@
+{
+  "format_version": 1,
+  "mihomo_version": "v1.19.30",
+  "controller": "loopback HTTP with Bearer authentication",
+  "endpoints": {
+    "/version": {
+      "transport": "http-json",
+      "status": 200,
+      "required_fields": {
+        "meta": "boolean",
+        "version": "string"
+      },
+      "observed_example": {
+        "meta": true,
+        "version": "v1.19.30"
+      }
+    },
+    "/connections": {
+      "transport": "http-json",
+      "status": 200,
+      "required_fields": {
+        "downloadTotal": "non-negative integer",
+        "uploadTotal": "non-negative integer",
+        "connections": "array or null",
+        "memory": "non-negative integer"
+      },
+      "observed_idle_example": {
+        "downloadTotal": 0,
+        "uploadTotal": 0,
+        "connections": null,
+        "memory": 0
+      }
+    },
+    "/traffic": {
+      "transport": "rfc6455-websocket",
+      "status": 101,
+      "required_message_fields": {
+        "up": "non-negative integer bytes/second",
+        "down": "non-negative integer bytes/second",
+        "upTotal": "non-negative integer process total",
+        "downTotal": "non-negative integer process total"
+      },
+      "observed_idle_example": {
+        "up": 0,
+        "down": 0,
+        "upTotal": 0,
+        "downTotal": 0
+      }
+    }
+  }
+}

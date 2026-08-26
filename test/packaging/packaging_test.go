@@ -20,7 +20,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 1 }", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 2 }", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
@@ -855,7 +855,8 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"GATEWAY_VPN_UPDATE_UNIT=1",
 		"ExecStartPre=/opt/gateway-vpn/recovery/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply",
 		"update-apply --config /etc/gateway-vpn/config.yaml --apply",
-		"Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service",
+		"Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service",
+		"Requires=gateway-vpn-update-recovery.service",
 		"OnFailure=gateway-vpn-update-resume.service",
 		"ReadWritePaths=/opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run",
 		"CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN",
@@ -880,6 +881,13 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 	if strings.Contains(recovery, "ExecStartPost=") || strings.Contains(recovery, "systemctl start --no-block") {
 		t.Fatal("update recovery must finish before a separate owner resumes management")
 	}
+	for name, unit := range map[string]string{"update": update, "recovery": recovery} {
+		for _, line := range strings.Split(unit, "\n") {
+			if strings.HasPrefix(line, "Requires=") && (strings.Contains(line, "gateway-vpn-firewall.service") || strings.Contains(line, "gateway-vpn-firewall-guard.service")) {
+				t.Errorf("%s unit can self-terminate while replacing firewall schema: %s", name, line)
+			}
+		}
+	}
 	finalize := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-finalize.service"))
 	timer := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-finalize.timer"))
 	if !strings.Contains(finalize, "GATEWAY_VPN_UPDATE_FINALIZE_UNIT=1") || !strings.Contains(finalize, "ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-finalize") || !strings.Contains(finalize, "OnFailure=gateway-vpn-update-resume.service") || !strings.Contains(timer, "OnUnitActiveSec=15min") || !strings.Contains(timer, "Persistent=true") {
@@ -888,6 +896,9 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 	resume := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-resume.service"))
 	if !strings.Contains(resume, "systemctl restart gateway-vpn-update-recovery.service") || !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") {
 		t.Fatal("failed update does not recover before resuming management")
+	}
+	if !strings.Contains(resume, "Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service") || strings.Contains(resume, "Requires=gateway-vpn-firewall.service") {
+		t.Fatal("update resume can self-terminate while recovery replaces firewall schema")
 	}
 	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
 	for _, required := range []string{

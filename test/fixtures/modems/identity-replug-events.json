@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "identity_salt_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "events": [
+    {"action": "add", "interface_name": "enx001", "vendor_id": "12d1", "product_id": "14dc", "usb_serial": "FIXTURE-SERIAL-A", "permanent_mac": "02:00:00:00:00:01", "usb_topology": "pci/usb1/1-1"},
+    {"action": "remove", "interface_name": "enx001"},
+    {"action": "add", "interface_name": "enx099", "vendor_id": "12d1", "product_id": "14dc", "usb_serial": "FIXTURE-SERIAL-A", "permanent_mac": "02:00:00:00:00:99", "usb_topology": "pci/usb2/2-3"}
+  ],
+  "expected_same_identity": true
+}

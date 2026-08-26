@@ -89,6 +89,64 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestTrafficAPIKeepsUserAndDirectServiceAccountingSeparate(t *testing.T) {
+	server, ctx := testServer(t)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	server.dependencies.Now = func() time.Time { return now }
+	if _, err := server.dependencies.Database.ExecContext(ctx, `
+INSERT INTO traffic_daily_totals(
+    date, download_bytes, upload_bytes, service_download_bytes,
+    service_upload_bytes, mihomo_download_bytes, mihomo_upload_bytes, checkpointed_at
+) VALUES ('2026-08-26', 200, 100, 20, 10, 180, 90, '2026-08-26T11:59:30Z')`); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"traffic_session_upload": "70", "traffic_session_download": "80",
+		"traffic_session_service_upload": "7", "traffic_session_service_download": "8",
+		"traffic_session_started_at": `"2026-08-26T10:00:00Z"`, "traffic_last_mihomo_available": "1",
+	} {
+		if _, err := server.dependencies.Database.ExecContext(ctx, "INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?)", key, value, now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cookie, _ := login(t, server)
+	request := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, req)
+		return response
+	}
+
+	current := request("/api/v1/traffic/current")
+	if current.Code != http.StatusOK {
+		t.Fatalf("current traffic = %d %s", current.Code, current.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(current.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range map[string]float64{
+		"upload_bytes": 100, "download_bytes": 200, "service_upload_bytes": 10, "service_download_bytes": 20,
+		"session_upload_bytes": 70, "session_download_bytes": 80, "session_service_upload_bytes": 7, "session_service_download_bytes": 8,
+	} {
+		if payload[key] != expected {
+			t.Errorf("current traffic %s = %v, want %v", key, payload[key], expected)
+		}
+	}
+	for _, path := range []string{"/api/v1/traffic/daily?from=2026-08-26&to=2026-08-26", "/api/v1/traffic/monthly?from=2026-08-26&to=2026-08-26"} {
+		response := request(path)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"service_upload_bytes":10`) || !strings.Contains(response.Body.String(), `"service_download_bytes":20`) {
+			t.Errorf("traffic aggregation %s = %d %s", path, response.Code, response.Body.String())
+		}
+	}
+	csvResponse := request("/api/v1/traffic/export.csv?from=2026-08-26&to=2026-08-26")
+	if csvResponse.Code != http.StatusOK || !strings.Contains(csvResponse.Body.String(), "service_upload_bytes,service_download_bytes") || !strings.Contains(csvResponse.Body.String(), "2026-08-26,100,200,10,20,90,180") {
+		t.Fatalf("traffic CSV = %d %s", csvResponse.Code, csvResponse.Body.String())
+	}
+}
+
 func TestRuntimeMetricsRequiresSessionAndExposesOnlyBoundedProcessCounters(t *testing.T) {
 	server, _ := testServer(t)
 	server.startedAt = time.Now().UTC().Add(-2 * time.Minute)

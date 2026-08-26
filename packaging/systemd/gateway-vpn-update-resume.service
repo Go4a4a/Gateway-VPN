@@ -2,7 +2,7 @@
 Description=Recover failed Gateway VPN update and resume management
 Documentation=file:///opt/gateway-vpn/recovery/share/doc/OPERATIONS.md
 After=gateway-vpn-update.service gateway-vpn-update-finalize.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
+Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
 
 [Service]
 LogNamespace=gateway-vpn

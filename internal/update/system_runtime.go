@@ -18,6 +18,7 @@ const (
 	brokerUnit   = "gateway-vpn-network-broker.socket"
 	mihomoUnit   = "gateway-vpn-mihomo.service"
 	dnsmasqUnit  = "gateway-vpn-dnsmasq.service"
+	firewallUnit = "gateway-vpn-firewall.service"
 	guardUnit    = "gateway-vpn-firewall-guard.service"
 	watchdogUnit = "gateway-vpn-watchdog.service"
 
@@ -59,6 +60,14 @@ func (runtime SystemRuntime) Quiesce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("quiesce Gateway VPN managed services: %w", err)
 	}
+	// Stop order and start order are resolved by the existing systemd
+	// Before=/After= relationship: guard stops first, then the oneshot firewall
+	// reloads a PATH_BLOCKED table from the selected release, then guard starts.
+	// A single transaction prevents a live guard from racing a structural
+	// firewall schema replacement.
+	if err := runtime.synchronizeFailClosedFirewall(ctx); err != nil {
+		return fmt.Errorf("enforce fail-closed firewall while quiescing: %w", err)
+	}
 	return nil
 }
 
@@ -98,6 +107,9 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 	if !versionPattern.MatchString(expectedVersion) || !filepath.IsAbs(databasePath) {
 		return errors.New("expected release version and database path are required")
 	}
+	if err := runtime.synchronizeFailClosedFirewall(ctx); err != nil {
+		return fmt.Errorf("activate selected release firewall schema: %w", err)
+	}
 	if runtime.RecoveryOnly {
 		return runtime.checkVersionAndState(ctx, expectedVersion, databasePath)
 	}
@@ -114,7 +126,7 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: append([]string{"start"}, units...), MaxOutputBytes: 64 << 10}); err != nil {
 		return fmt.Errorf("start switched Gateway VPN services: %w", err)
 	}
-	required := []string{guardUnit, watchdogUnit, brokerUnit, controlUnit}
+	required := []string{firewallUnit, guardUnit, watchdogUnit, brokerUnit, controlUnit}
 	if previous.MihomoActive {
 		required = append(required, mihomoUnit)
 	}
@@ -163,6 +175,21 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 		case <-timer.C:
 		}
 	}
+}
+
+func (runtime SystemRuntime) synchronizeFailClosedFirewall(ctx context.Context) error {
+	if err := runtime.validate(); err != nil {
+		return err
+	}
+	_, err := runtime.Executor.Run(ctx, platformexec.Request{
+		Executable:     runtime.Systemctl,
+		Arguments:      []string{"restart", firewallUnit, guardUnit},
+		MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		return fmt.Errorf("restart selected firewall and integrity guard: %w", err)
+	}
+	return nil
 }
 
 func checkWatchdogRuntimeFiles(statusPath, heartbeatPath string, now time.Time) error {

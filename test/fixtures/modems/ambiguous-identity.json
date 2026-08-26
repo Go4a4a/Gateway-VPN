@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "devices": [
+    {"interface_name": "enx001", "vendor_id": "12d1", "product_id": "14dc", "usb_serial": "DUPLICATE-FIXTURE"},
+    {"interface_name": "enx002", "vendor_id": "12d1", "product_id": "14dc", "usb_serial": "DUPLICATE-FIXTURE"}
+  ],
+  "expected_state": "AMBIGUOUS"
+}

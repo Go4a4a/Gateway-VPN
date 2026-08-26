@@ -1,0 +1,2 @@
+proxies:
+  - {name: "unsafe interface", type: vless, server: public.example.com, port: 443, uuid: fixture, interface-name: eth0}

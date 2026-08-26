@@ -1,0 +1,6 @@
+flush set inet gateway_vpn hilink_interfaces
+flush set inet gateway_vpn hilink_management_v4
+flush set inet gateway_vpn bootstrap_dns_v4
+add element inet gateway_vpn hilink_interfaces { "enx001", "enx002" }
+add element inet gateway_vpn hilink_management_v4 { "enx001" . 192.168.8.1, "enx002" . 192.168.9.1 }
+add element inet gateway_vpn bootstrap_dns_v4 { "enx001" . 4353 . 1.1.1.1, "enx002" . 4354 . 1.1.1.1 }

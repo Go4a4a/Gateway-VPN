@@ -462,6 +462,8 @@ func (backend *ServiceFirewallBackend) inspectIntegrity(ctx context.Context) err
 		"set " + mihomoEndpointUDPSet,
 		"set " + mihomoEndpointGeneration,
 		"set " + serviceContextGeneration,
+		"counter service_upload",
+		"counter service_download",
 		"policy drop",
 		"oifname . meta mark . ip daddr @" + bootstrapDNSSet,
 	} {

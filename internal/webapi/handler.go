@@ -2786,17 +2786,21 @@ func (server *Server) writeLoggingSettings(writer http.ResponseWriter, ctx conte
 }
 
 func (server *Server) trafficCurrent(writer http.ResponseWriter, request *http.Request) {
-	date := server.now().Format("2006-01-02")
-	items, err := (traffic.Collector{Database: server.dependencies.Database}).Daily(request.Context(), date, date)
+	current, err := (traffic.Collector{Database: server.dependencies.Database}).Current(request.Context(), server.now())
 	if err != nil {
 		writeInternalError(writer, err)
 		return
 	}
-	if len(items) == 0 {
-		writeJSON(writer, http.StatusOK, map[string]any{"date": date, "upload_bytes": 0, "download_bytes": 0, "per_subscription": nil})
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"date": date, "upload_bytes": items[0].UploadBytes, "download_bytes": items[0].DownloadBytes, "checkpointed_at": items[0].CheckpointedAt, "per_subscription": nil})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"date": current.Date, "upload_bytes": current.UploadBytes, "download_bytes": current.DownloadBytes,
+		"service_upload_bytes": current.ServiceUploadBytes, "service_download_bytes": current.ServiceDownloadBytes,
+		"mihomo_upload_bytes": current.MihomoUploadBytes, "mihomo_download_bytes": current.MihomoDownloadBytes,
+		"current_upload_bps": current.CurrentUploadBPS, "current_download_bps": current.CurrentDownloadBPS,
+		"session_upload_bytes": current.SessionUploadBytes, "session_download_bytes": current.SessionDownloadBytes,
+		"session_service_upload_bytes": current.SessionServiceUploadBytes, "session_service_download_bytes": current.SessionServiceDownloadBytes,
+		"session_started_at": current.SessionStartedAt, "mihomo_available": current.MihomoAvailable,
+		"checkpointed_at": current.CheckpointedAt, "per_subscription": nil,
+	})
 }
 
 func (server *Server) trafficDaily(writer http.ResponseWriter, request *http.Request) {
@@ -2816,13 +2820,15 @@ func (server *Server) trafficMonthly(writer http.ResponseWriter, request *http.R
 		writeDomainError(writer, err)
 		return
 	}
-	type total struct{ Upload, Download uint64 }
+	type total struct{ Upload, Download, ServiceUpload, ServiceDownload uint64 }
 	months := make(map[string]total)
 	for _, item := range items {
 		month := item.Date[:7]
 		value := months[month]
 		value.Upload += item.UploadBytes
 		value.Download += item.DownloadBytes
+		value.ServiceUpload += item.ServiceUploadBytes
+		value.ServiceDownload += item.ServiceDownloadBytes
 		months[month] = value
 	}
 	keys := make([]string, 0, len(months))
@@ -2833,7 +2839,10 @@ func (server *Server) trafficMonthly(writer http.ResponseWriter, request *http.R
 	result := make([]map[string]any, 0, len(keys))
 	for _, month := range keys {
 		value := months[month]
-		result = append(result, map[string]any{"month": month, "upload_bytes": value.Upload, "download_bytes": value.Download})
+		result = append(result, map[string]any{
+			"month": month, "upload_bytes": value.Upload, "download_bytes": value.Download,
+			"service_upload_bytes": value.ServiceUpload, "service_download_bytes": value.ServiceDownload,
+		})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": result, "attribution": "TOTAL_ONLY"})
 }
@@ -2849,9 +2858,13 @@ func (server *Server) trafficCSV(writer http.ResponseWriter, request *http.Reque
 	writer.Header().Set("Content-Disposition", "attachment; filename=gateway-vpn-traffic.csv")
 	writer.WriteHeader(http.StatusOK)
 	csvWriter := csv.NewWriter(writer)
-	_ = csvWriter.Write([]string{"date", "upload_bytes", "download_bytes", "mihomo_upload_bytes", "mihomo_download_bytes", "checkpointed_at"})
+	_ = csvWriter.Write([]string{"date", "upload_bytes", "download_bytes", "service_upload_bytes", "service_download_bytes", "mihomo_upload_bytes", "mihomo_download_bytes", "checkpointed_at"})
 	for _, item := range items {
-		_ = csvWriter.Write([]string{item.Date, strconv.FormatUint(item.UploadBytes, 10), strconv.FormatUint(item.DownloadBytes, 10), strconv.FormatUint(item.MihomoUploadBytes, 10), strconv.FormatUint(item.MihomoDownloadBytes, 10), item.CheckpointedAt})
+		_ = csvWriter.Write([]string{
+			item.Date, strconv.FormatUint(item.UploadBytes, 10), strconv.FormatUint(item.DownloadBytes, 10),
+			strconv.FormatUint(item.ServiceUploadBytes, 10), strconv.FormatUint(item.ServiceDownloadBytes, 10),
+			strconv.FormatUint(item.MihomoUploadBytes, 10), strconv.FormatUint(item.MihomoDownloadBytes, 10), item.CheckpointedAt,
+		})
 	}
 	csvWriter.Flush()
 }

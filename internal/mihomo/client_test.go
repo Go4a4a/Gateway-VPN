@@ -2,7 +2,10 @@ package mihomo
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +14,35 @@ import (
 	"testing"
 	"time"
 )
+
+func TestTrafficReadsAuthenticatedBoundedWebSocketSample(t *testing.T) {
+	server := newLoopbackServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/traffic" || request.Header.Get("Authorization") != "Bearer secret" || !headerHasToken(request.Header, "Connection", "upgrade") {
+			t.Errorf("traffic request = %s headers=%v", request.URL.Path, request.Header)
+		}
+		connection, buffer, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack traffic connection: %v", err)
+			return
+		}
+		defer connection.Close()
+		digest := sha1.Sum([]byte(request.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+		fmt.Fprintf(buffer, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(digest[:]))
+		payload := []byte(`{"up":11,"down":22,"upTotal":333,"downTotal":444}`)
+		buffer.Write([]byte{0x81, byte(len(payload))})
+		buffer.Write(payload)
+		_ = buffer.Flush()
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.Traffic(context.Background())
+	if err != nil || snapshot.UploadBPS != 11 || snapshot.DownloadBPS != 22 || snapshot.UploadTotal != 333 || snapshot.DownloadTotal != 444 {
+		t.Fatalf("Traffic() = %+v, %v", snapshot, err)
+	}
+}
 
 func TestClientUsesBearerAuthAndOfficialEndpoints(t *testing.T) {
 	var requests []string
@@ -22,6 +54,8 @@ func TestClientUsesBearerAuthAndOfficialEndpoints(t *testing.T) {
 		switch request.URL.Path {
 		case "/version":
 			json.NewEncoder(writer).Encode(Version{Meta: true, Version: "test"})
+		case "/connections":
+			json.NewEncoder(writer).Encode(ConnectionsSummary{DownloadTotal: 12, UploadTotal: 34, Connections: json.RawMessage("null"), Memory: 56})
 		case "/configs":
 			writer.WriteHeader(http.StatusNoContent)
 		case "/proxies/path-a":
@@ -46,6 +80,9 @@ func TestClientUsesBearerAuthAndOfficialEndpoints(t *testing.T) {
 	if version, err := client.GetVersion(context.Background()); err != nil || version.Version != "test" {
 		t.Fatalf("GetVersion() = %+v, %v", version, err)
 	}
+	if connections, err := client.GetConnectionsSummary(context.Background()); err != nil || connections.DownloadTotal != 12 || connections.UploadTotal != 34 || string(connections.Connections) != "null" {
+		t.Fatalf("GetConnectionsSummary() = %+v, %v", connections, err)
+	}
 	if err := client.Reload(context.Background(), "generation/config.yaml"); err != nil {
 		t.Fatalf("Reload() error = %v", err)
 	}
@@ -64,6 +101,7 @@ func TestClientUsesBearerAuthAndOfficialEndpoints(t *testing.T) {
 	}
 	want := []string{
 		"GET /version",
+		"GET /connections",
 		"PUT /configs?force=true",
 		"PUT /proxies/path-a",
 		"GET /proxies/path-a",

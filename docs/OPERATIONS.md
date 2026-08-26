@@ -292,6 +292,39 @@ Retention policy имеет отдельный durable state `UNKNOWN/PENDING/AP
 
 Audit входов, policy/settings mutations, manual activation, update/restore и destructive actions не отключается и имеет жёсткий minimum `info`, даже если global level равен `warning` или `error`. Pre-logger handler удаляет subscription URL/token, passwords, private/API keys, proxy credentials, modem serial/identity hash, response body, полный subscription payload и несаницированный Mihomo config также из вложенных map/struct/error. Journal reader и diagnostic builder выполняют независимый второй redaction pass и не полагаются на текущий log level.
 
+## Учёт трафика
+
+Вкладка **Трафик** разделяет два не пересекающихся класса:
+
+- `user_upload` / `user_download` — только пользовательский IPv4-трафик между transit LAN и подтверждённым Mihomo TUN. Это authoritative общий VPN total без приблизительной разбивки по подпискам или proxy nodes;
+- `service_upload` / `service_download` — прямой служебный трафик самого Gateway через HiLink: DHCP модема, HiLink management, WireGuard endpoint, bootstrap DNS/HTTPS и разрешённые Mihomo DNS/proxy endpoints. Он показывается отдельно и никогда не прибавляется к пользовательскому total.
+
+Named counters принадлежат только таблице `inet gateway_vpn`. Control plane не получает `CAP_NET_ADMIN`: каждые 30 секунд он вызывает parameter-free UID-bound root broker, который читает только четыре фиксированных имени counters, `boot_id` и handle owned table. Пара `boot_id + table handle` образует epoch. После reboot, firewall recovery или замены ruleset первый checkpoint новой epoch начинает новую delta-базу и не вычитает старое значение. Потеря при аварийном завершении ограничена последним checkpoint interval; штатное завершение делает отдельный bounded финальный checkpoint.
+
+`Mihomo /traffic` читается как authenticated WebSocket и используется только для текущей общей скорости, process totals и cross-check. Недоступность Mihomo API не останавливает authoritative nftables checkpoints: UI показывает API как недоступный, а user/service totals продолжают сохраняться. Active-session totals начинаются при старте текущего control process и также разделены на user/service. Daily rows сохраняются в SQLite, monthly endpoint агрегирует их без отдельной приблизительной атрибуции, CSV содержит оба класса и Mihomo cross-check columns.
+
+Authenticated read-only endpoints:
+
+```text
+GET /api/v1/traffic/current
+GET /api/v1/traffic/daily?from=YYYY-MM-DD&to=YYYY-MM-DD
+GET /api/v1/traffic/monthly?from=YYYY-MM-DD&to=YYYY-MM-DD
+GET /api/v1/traffic/export.csv?from=YYYY-MM-DD&to=YYYY-MM-DD
+```
+
+Диагностика источника без изменения counters:
+
+```bash
+sudo nft list counters table inet gateway_vpn
+sudo nft --json list tables
+sudo cat /proc/sys/kernel/random/boot_id
+sudo journalctl --namespace=gateway-vpn -u gateway-vpn.service --since=-15min
+```
+
+Отсутствие любого из четырёх counters является нарушением firewall schema: guard/watchdog оставляют data path fail-closed и восстанавливают полный owned ruleset. Signed update и rollback сначала quiesce-ят data plane, затем одной systemd-транзакцией перезапускают `gateway-vpn-firewall.service` и `gateway-vpn-firewall-guard.service` из уже выбранного release. Update/recovery units используют `Wants/After`, а не `Requires` для этой пары, чтобы собственный restart не завершил transaction process сигналом `SIGTERM`.
+
+До реального hardware traffic spike нельзя утверждать точное расхождение nftables и Mihomo, фактическую стоимость служебных probes или отсутствие packet-classification особенностей конкретного HiLink/оператора. Эти значения фиксируются на физическом Gateway; Docker/netns доказывают синтаксис, fail-closed, epoch/parser и kernel counters, но не заменяют packet capture на Huawei/Keenetic.
+
 ## Самоконтроль 24/7
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** отдельно показываются локальное состояние процессов/SQLite/firewall, доступность глобального Интернета, active maintenance и durable restart/reboot budgets. Потеря модемов, операторов, подписок, targets, VPS или всего внешнего Интернета отображается как connectivity outage и сама по себе никогда не запускает restart либо reboot.
@@ -493,7 +526,7 @@ sudo systemctl kill -s SIGKILL gateway-vpn-mihomo.service
 
 После остановки Mihomo новый LAN traffic не должен попасть в HiLink напрямую. `nft flush ruleset`, reboot, unplug/replug обоих модемов и обратный USB-порядок входят в integration/hardware matrix и не заменяются unit-тестами.
 
-`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, schema generation `1` и критические rules. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
+`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `2`, четыре named traffic counters и критические rules. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
 
 Диагностика guard:
 

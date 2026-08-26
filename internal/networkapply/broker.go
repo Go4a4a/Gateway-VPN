@@ -15,6 +15,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/traffic"
 )
 
 const maxBrokerMessageBytes = 64 << 10
@@ -31,6 +32,7 @@ type BrokerServer struct {
 	Diagnostics HostDiagnosticsAdmin
 	Restore     RestoreAdmin
 	Update      UpdateAdmin
+	Traffic     TrafficAdmin
 	handler     http.Handler
 }
 
@@ -97,6 +99,14 @@ type UpdateAdmin interface {
 	UpdateStatus(context.Context) (UpdateTransactionStatus, error)
 }
 
+// TrafficAdmin exposes one read-only, parameter-free snapshot. The root
+// implementation reads only the two named counters in the owned nftables
+// table plus the boot/table epoch; callers cannot supply an nft object or
+// executable across the privilege boundary.
+type TrafficAdmin interface {
+	ReadTrafficCounters(context.Context) (traffic.AuthoritativeSnapshot, error)
+}
+
 // UpdateTransactionStatus is the only update-journal information exposed to
 // the unprivileged control plane. It intentionally omits filesystem paths,
 // database hashes, snapshot identifiers and service-manager diagnostics.
@@ -160,10 +170,14 @@ func NewBrokerServerWithRestoreRuntime(engine *Engine, dataPlane DataPlaneAdmin,
 }
 
 func NewBrokerServerWithUpdateRuntime(engine *Engine, dataPlane DataPlaneAdmin, pathPlane PathAdmin, routingAdmin RoutingAdmin, bootstrapAdmin BootstrapAdmin, wireGuardAdmin WireGuardAdmin, loggingAdmin LoggingAdmin, journalAdmin JournalAdmin, diagnosticsAdmin HostDiagnosticsAdmin, restoreAdmin RestoreAdmin, updateAdmin UpdateAdmin) (*BrokerServer, error) {
+	return NewBrokerServerWithTrafficRuntime(engine, dataPlane, pathPlane, routingAdmin, bootstrapAdmin, wireGuardAdmin, loggingAdmin, journalAdmin, diagnosticsAdmin, restoreAdmin, updateAdmin, nil)
+}
+
+func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin, pathPlane PathAdmin, routingAdmin RoutingAdmin, bootstrapAdmin BootstrapAdmin, wireGuardAdmin WireGuardAdmin, loggingAdmin LoggingAdmin, journalAdmin JournalAdmin, diagnosticsAdmin HostDiagnosticsAdmin, restoreAdmin RestoreAdmin, updateAdmin UpdateAdmin, trafficAdmin TrafficAdmin) (*BrokerServer, error) {
 	if engine == nil {
 		return nil, errors.New("network apply engine is required")
 	}
-	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin}
+	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/stage", server.stage)
 	mux.HandleFunc("POST /v1/apply", server.apply)
@@ -204,12 +218,29 @@ func NewBrokerServerWithUpdateRuntime(engine *Engine, dataPlane DataPlaneAdmin, 
 		mux.HandleFunc("POST /v1/update/apply", server.applyPendingUpdate)
 		mux.HandleFunc("POST /v1/update/status", server.updateTransactionStatus)
 	}
+	if trafficAdmin != nil {
+		mux.HandleFunc("POST /v1/traffic/counters", server.readTrafficCounters)
+	}
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) readTrafficCounters(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	snapshot, err := server.Traffic.ReadTrafficCounters(request.Context())
+	if err != nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "TRAFFIC_COUNTERS_UNAVAILABLE")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, snapshot)
 }
 
 func (server *BrokerServer) applyPendingUpdate(writer http.ResponseWriter, request *http.Request) {
@@ -597,6 +628,12 @@ func (client *BrokerClient) AuthorizeSubscriptionBootstrap(ctx context.Context, 
 
 func (client *BrokerClient) AuthorizeMihomoVersions(ctx context.Context, versionIDs []string) error {
 	return client.call(ctx, "/v1/mihomo/endpoints/authorize", dataplane.MihomoEndpointAuthorization{VersionIDs: append([]string(nil), versionIDs...)}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) ReadTrafficCounters(ctx context.Context) (traffic.AuthoritativeSnapshot, error) {
+	var snapshot traffic.AuthoritativeSnapshot
+	err := client.call(ctx, "/v1/traffic/counters", struct{}{}, http.StatusOK, &snapshot)
+	return snapshot, err
 }
 
 func (client *BrokerClient) call(ctx context.Context, endpoint string, input any, expectedStatus int, output any) error {

@@ -26,9 +26,13 @@ func (executor *firewallExecutor) Run(_ context.Context, request platformexec.Re
 			return platformexec.Result{Stdout: "table inet gateway_vpn { chain forward { } }"}, nil
 		}
 		return platformexec.Result{Stdout: `table inet gateway_vpn {
-set firewall_schema_generation { type mark; elements = { 1 }; }
+set firewall_schema_generation { type mark; elements = { 2 }; }
 set active_tun_interfaces { type ifname; }
 set active_path_generation { type mark; }
+counter user_upload
+counter user_download
+counter service_upload
+counter service_download
 chain forward { type filter hook forward priority filter; policy drop;
 meta nfproto ipv4 iifname "enp2s0" oifname @active_tun_interfaces accept
 counter comment "gateway-vpn PATH_BLOCKED" }

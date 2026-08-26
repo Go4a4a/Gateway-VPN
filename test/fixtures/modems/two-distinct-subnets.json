@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "lan_prefix": "192.168.200.0/24",
+  "wireguard_prefix": "10.80.0.0/24",
+  "modems": [
+    {"id": "modem-a", "priority": 10, "interface_name": "enx001", "management_prefix": "192.168.8.0/24", "gateway": "192.168.8.1", "routing_table_id": 1101, "fwmark": 4353},
+    {"id": "modem-b", "priority": 20, "interface_name": "enx002", "management_prefix": "192.168.9.0/24", "gateway": "192.168.9.1", "routing_table_id": 1102, "fwmark": 4354}
+  ],
+  "expected": "valid"
+}

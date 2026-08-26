@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "target_id": "target-required",
+  "failure_thresholds": {"combinations": 3, "distinct_modems": 2, "distinct_subscriptions": 2},
+  "observations": [
+    {"modem_id": "modem-a", "subscription_id": "subscription-a", "passed": false},
+    {"modem_id": "modem-a", "subscription_id": "subscription-b", "passed": false},
+    {"modem_id": "modem-b", "subscription_id": "subscription-a", "passed": false}
+  ],
+  "expected_state": "TARGET_SUSPECT",
+  "expected_failover_suppressed": true
+}

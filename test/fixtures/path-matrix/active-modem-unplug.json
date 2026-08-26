@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "initial_active": {"modem_id": "modem-a", "subscription_id": "subscription-a", "node_id": "node-a"},
+  "event": {"type": "MODEM_REMOVED", "modem_id": "modem-a"},
+  "qualified_standby": {"modem_id": "modem-b", "subscription_id": "subscription-a", "node_id": "node-b"},
+  "expected_sequence": ["PATH_BLOCKED", "MODEM_OFFLINE", "STANDBY_REQUALIFIED", "PATH_ACTIVE"],
+  "expected_active_modem": "modem-b"
+}

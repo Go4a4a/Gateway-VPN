@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "cases": [
+    {"name": "plain-http", "value": "http://public.example.com/", "expected": "reject"},
+    {"name": "loopback-v4", "value": "https://127.0.0.1/", "expected": "reject"},
+    {"name": "loopback-v6", "value": "https://[::1]/", "expected": "reject"},
+    {"name": "private-v4", "value": "https://192.168.1.1/", "expected": "reject"},
+    {"name": "link-local", "value": "https://169.254.169.254/", "expected": "reject"},
+    {"name": "credentials", "value": "https://user:password@public.example.com/", "expected": "reject"},
+    {"name": "fragment", "value": "https://public.example.com/#fragment", "expected": "reject"}
+  ]
+}

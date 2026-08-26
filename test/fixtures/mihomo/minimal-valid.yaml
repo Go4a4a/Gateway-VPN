@@ -1,0 +1,20 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: false
+external-controller: 127.0.0.1:19090
+secret: fixture-secret-not-production
+tun:
+  enable: false
+  device: gateway-vpn-tun
+  stack: mixed
+proxies: []
+proxy-groups:
+  - name: gateway-vpn-active
+    type: select
+    proxies:
+      - DIRECT
+      - REJECT
+rules:
+  - MATCH,gateway-vpn-active

@@ -1,0 +1,2 @@
+proxies:
+  - {name: "private endpoint", type: vless, server: 192.168.1.2, port: 443, uuid: fixture}

@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "generator": {"modems": 5, "subscriptions": 20, "candidate_nodes_per_cell": 8, "required_targets": 4, "optional_targets": 2},
+  "policy": {"global_concurrency": 8, "per_modem_concurrency": 2, "requests_per_minute": 30, "active_reserve_percent": 30},
+  "expected": {"cells": 100, "maximum_in_flight": 8, "maximum_per_modem_in_flight": 2, "standby_can_be_deferred": true}
+}
