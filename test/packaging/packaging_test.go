@@ -646,6 +646,20 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 	if strings.Contains(restore, "WantedBy=") || strings.Contains(restore, "gateway-vpn-database-restore-boot.service") {
 		t.Fatal("destructive runtime restore unit must never join a boot target transaction")
 	}
+	dispatch := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-database-restore-dispatch.service"))
+	for _, required := range []string{
+		"ConditionPathExists=/var/lib/gateway-vpn/recovery/pending-restore.json",
+		"ExecStartPre=/usr/bin/sleep 1",
+		"ExecStart=/usr/bin/systemctl start --no-block gateway-vpn-database-restore.service",
+		"CapabilityBoundingSet=",
+	} {
+		if !strings.Contains(dispatch, required) {
+			t.Errorf("database restore dispatcher missing %q", required)
+		}
+	}
+	if strings.Contains(dispatch, "WantedBy=") || strings.Contains(dispatch, "CAP_") {
+		t.Fatal("database restore dispatcher must be static and capability-free")
+	}
 	bootRestore := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-database-restore-boot.service"))
 	for _, required := range []string{
 		"DefaultDependencies=no",
@@ -682,7 +696,7 @@ func TestDatabaseRestoreIsBootOrderedFailClosedAndRootTransactionScoped(t *testi
 	}
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, unit := range []string{"gateway-vpn-database-restore-boot.service", "gateway-vpn-database-restore.service", "gateway-vpn-database-restore-resume.service"} {
+	for _, unit := range []string{"gateway-vpn-database-restore-boot.service", "gateway-vpn-database-restore-dispatch.service", "gateway-vpn-database-restore.service", "gateway-vpn-database-restore-resume.service"} {
 		if !strings.Contains(installer, unit) || !strings.Contains(uninstaller, unit) {
 			t.Errorf("installer lifecycle is missing %s", unit)
 		}

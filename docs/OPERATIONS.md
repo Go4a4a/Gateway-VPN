@@ -313,7 +313,7 @@ Audit входов, policy/settings mutations, manual activation, update/restore
 1. выбрать `.gvpn` и ввести passphrase; control plane потоково принимает файл, проверяет AEAD/final record, ZIP paths/types/count/size, manifest SHA-256, SQLite integrity/schema/FK и fixed config paths; upload, passphrase и plaintext ZIP удаляются, live-состояние не меняется;
 2. проверить displayed restore/snapshot/schema/size/SHA-256, ввести `ВОССТАНОВИТЬ` и отдельно подтвердить destructive apply. Неверный staging можно удалить кнопкой **Удалить staging** без изменения live-файлов.
 
-После Apply Web/API сначала закрывает data path и сохраняет blocked runtime. Root broker принимает только пустой fixed request и запускает `gateway-vpn-database-restore.service`. Unit:
+После Apply Web/API сначала закрывает data path и сохраняет blocked runtime. Root broker принимает только пустой fixed request и ставит в очередь `gateway-vpn-database-restore-dispatch.service`. Fixed dispatcher ждёт одну секунду, чтобы ответ `202 Accepted` гарантированно ушёл через broker socket, и только затем запускает конфликтующий с management plane `gateway-vpn-database-restore.service`. Restore unit:
 
 1. останавливает control plane, broker/socket, Mihomo и dnsmasq;
 2. повторно загружает boot `PATH_BLOCKED` ruleset;
@@ -331,6 +331,7 @@ Boot recovery отделён от runtime destructive apply. Только бес
 
 ```bash
 sudo systemctl status gateway-vpn-database-restore.service
+sudo systemctl status gateway-vpn-database-restore-dispatch.service
 sudo systemctl status gateway-vpn-database-restore-boot.service
 sudo systemctl status gateway-vpn-database-restore-resume.service
 sudo journalctl --namespace=gateway-vpn -u gateway-vpn-database-restore.service

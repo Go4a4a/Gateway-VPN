@@ -9,7 +9,7 @@ import (
 	"gateway-vpn/internal/platformexec"
 )
 
-const databaseRestoreUnit = "gateway-vpn-database-restore.service"
+const databaseRestoreDispatchUnit = "gateway-vpn-database-restore-dispatch.service"
 
 type SystemdRestoreAdmin struct {
 	Executor  platformexec.Executor
@@ -22,7 +22,7 @@ func (admin SystemdRestoreAdmin) ApplyPendingRestore(ctx context.Context) error 
 	}
 	if _, err := admin.Executor.Run(ctx, platformexec.Request{
 		Executable: admin.Systemctl,
-		Arguments:  []string{"start", "--no-block", databaseRestoreUnit},
+		Arguments:  []string{"start", "--no-block", databaseRestoreDispatchUnit},
 	}); err != nil {
 		return fmt.Errorf("start fixed database restore helper: %w", err)
 	}

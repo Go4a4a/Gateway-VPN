@@ -1,0 +1,34 @@
+[Unit]
+Description=Dispatch a verified Gateway VPN restore after broker acknowledgement
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+ConditionPathExists=/var/lib/gateway-vpn/recovery/pending-restore.json
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+# The runtime restore conflicts with the broker socket. A fixed delay lets the
+# already-queued HTTP 204 acknowledgement reach the unprivileged control plane
+# before systemd quiesces that socket and the management service.
+ExecStartPre=/usr/bin/sleep 1
+ExecStart=/usr/bin/systemctl start --no-block gateway-vpn-database-restore.service
+TimeoutStartSec=15s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native

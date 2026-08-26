@@ -268,7 +268,7 @@ else
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
-    /etc/systemd/system/gateway-vpn-database-restore-boot.service \
+    /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service \
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict" >&2; exit 1; }
   done
@@ -400,7 +400,7 @@ grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { ec
 for unit in gateway-vpn.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service \
-  gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
+  gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   install -D -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "/etc/systemd/system/$unit"
 done

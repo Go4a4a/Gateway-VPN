@@ -17,7 +17,7 @@ func TestSystemdRestoreAdminStartsOnlyFixedNoBlockUnit(t *testing.T) {
 	if err := admin.ApplyPendingRestore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.requests) != 1 || strings.Join(executor.requests[0].Arguments, " ") != "start --no-block gateway-vpn-database-restore.service" {
+	if len(executor.requests) != 1 || strings.Join(executor.requests[0].Arguments, " ") != "start --no-block gateway-vpn-database-restore-dispatch.service" {
 		t.Fatalf("restore systemctl requests = %+v", executor.requests)
 	}
 	executor.err = errors.New("private unit failure")
