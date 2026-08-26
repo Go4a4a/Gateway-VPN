@@ -119,6 +119,7 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 	// remain staged and non-destructive.
 	tornAuthorization := operation
 	tornAuthorization.State = RestoreStateApplyRequested
+	tornAuthorization.ApplyAuthorization = strings.Repeat("a", 64)
 	if err := writeJSONFile(restorer.pendingPath(), tornAuthorization, true); err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +131,12 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 		t.Fatalf("AuthorizeApply(other) error = %v", err)
 	}
 	authorized, err := restorer.AuthorizeApply(operation.RestoreID)
-	if err != nil || authorized.State != RestoreStateApplyRequested || authorized.ApplyErrorCode != "" {
+	if err != nil || authorized.State != RestoreStateApplyRequested || !validDigest(authorized.ApplyAuthorization) || authorized.ApplyErrorCode != "" {
 		t.Fatalf("AuthorizeApply() = %+v, %v", authorized, err)
+	}
+	idempotent, err := restorer.AuthorizeApply(operation.RestoreID)
+	if err != nil || idempotent.ApplyAuthorization != authorized.ApplyAuthorization {
+		t.Fatalf("idempotent AuthorizeApply() = %+v, %v", idempotent, err)
 	}
 	if _, err := restorer.VerifyPending(ctx); err != nil {
 		t.Fatalf("VerifyPending after authorization = %v", err)
@@ -155,7 +160,7 @@ func TestRestoreStageAuthenticatesExtractsVerifiesAndPersistsNoPassphrase(t *tes
 		t.Fatalf("VerifyPending after failed apply error = %v", err)
 	}
 	reauthorized, err := restorer.AuthorizeApply(operation.RestoreID)
-	if err != nil || reauthorized.State != RestoreStateApplyRequested || reauthorized.ApplyErrorCode != "" {
+	if err != nil || reauthorized.State != RestoreStateApplyRequested || !validDigest(reauthorized.ApplyAuthorization) || reauthorized.ApplyAuthorization == authorized.ApplyAuthorization || reauthorized.ApplyErrorCode != "" {
 		t.Fatalf("retry AuthorizeApply() = %+v, %v", reauthorized, err)
 	}
 	if err := restorer.markApplyFailure(operation.RestoreID, "RETRY_CANCELLED_FOR_DISCARD"); err != nil {

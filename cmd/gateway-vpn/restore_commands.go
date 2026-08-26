@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -83,6 +84,17 @@ func runDatabaseRestore(args []string) int {
 	defer stop()
 	result, err := applier.Apply(ctx)
 	if err != nil {
+		if *bootRecovery && errors.Is(err, backup.ErrRestoreSafelyRolledBack) {
+			fmt.Fprintln(os.Stderr, "interrupted Gateway VPN restore was rolled back; explicit WebUI Apply is required")
+			return 0
+		}
+		if *bootRecovery {
+			operation, pending, statusErr := manager.Status()
+			if statusErr == nil && pending && operation.State == backup.RestoreStateStaged {
+				fmt.Fprintln(os.Stderr, "confirmed Gateway VPN restore failed before activation and returned to STAGED; explicit WebUI Apply is required")
+				return 0
+			}
+		}
 		fmt.Fprintf(os.Stderr, "verified database restore failed and remains fail-closed: %v\n", err)
 		return 1
 	}

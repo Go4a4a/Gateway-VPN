@@ -2121,6 +2121,9 @@ func (server *Server) restoreStatus(writer http.ResponseWriter, _ *http.Request)
 		writeError(writer, http.StatusServiceUnavailable, "RESTORE_STATUS_UNAVAILABLE", "Состояние восстановления временно недоступно")
 		return
 	}
+	// The authorization nonce binds the root-owned journal to one explicit
+	// destructive confirmation and is never part of the public API DTO.
+	operation.ApplyAuthorization = ""
 	writeJSON(writer, http.StatusOK, map[string]any{"pending": pending, "operation": operation, "apply_available": server.dependencies.RestoreApply != nil})
 }
 

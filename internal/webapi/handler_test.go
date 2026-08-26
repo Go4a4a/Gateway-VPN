@@ -840,6 +840,13 @@ func TestRestoreStatusAndApplyAreFailClosedBeforePrivilegedTrigger(t *testing.T)
 	if applyResponse.Code != http.StatusAccepted || runtime.blocks != 1 || stager.authorizations != 1 || trigger.calls != 1 || strings.Join(sequence, ",") != "firewall-block,apply-authorized,privileged-trigger" || !strings.Contains(applyResponse.Body.String(), `"management_reconnect_required":true`) {
 		t.Fatalf("restore apply = %d blocks=%d authorizations=%d triggers=%d sequence=%v %s", applyResponse.Code, runtime.blocks, stager.authorizations, trigger.calls, sequence, applyResponse.Body.String())
 	}
+	authorizedStatus := httptest.NewRequest(http.MethodGet, "/api/v1/system/restore", nil)
+	authorizedStatus.AddCookie(cookie)
+	authorizedResponse := httptest.NewRecorder()
+	server.ServeHTTP(authorizedResponse, authorizedStatus)
+	if authorizedResponse.Code != http.StatusOK || !strings.Contains(authorizedResponse.Body.String(), `"state":"APPLY_REQUESTED"`) || strings.Contains(authorizedResponse.Body.String(), "apply_authorization") || strings.Contains(authorizedResponse.Body.String(), strings.Repeat("a", 64)) {
+		t.Fatalf("authorized restore status leaked root nonce = %d %s", authorizedResponse.Code, authorizedResponse.Body.String())
+	}
 }
 
 func TestRestoreDiscardRequiresExactConfirmationAndAudits(t *testing.T) {
@@ -1917,6 +1924,9 @@ func (stager *fakeRestoreStager) AuthorizeApply(restoreID string) (backup.Restor
 	}
 	if !stager.pending || restoreID != stager.operation.RestoreID || (stager.operation.State != backup.RestoreStateStaged && stager.operation.State != backup.RestoreStateApplyRequested) {
 		return backup.RestoreOperation{}, backup.ErrRestoreNotPending
+	}
+	if stager.operation.State == backup.RestoreStateStaged {
+		stager.operation.ApplyAuthorization = strings.Repeat("a", 64)
 	}
 	stager.operation.State = backup.RestoreStateApplyRequested
 	stager.operation.ApplyErrorCode = ""

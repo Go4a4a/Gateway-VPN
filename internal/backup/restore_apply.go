@@ -20,10 +20,13 @@ import (
 const restoreApplyJournalVersion = 1
 
 const (
-	restoreApplyPrepared  = "PREPARED"
-	restoreApplyApplying  = "APPLYING"
-	restoreApplyCommitted = "COMMITTED"
+	restoreApplyPrepared   = "PREPARED"
+	restoreApplyApplying   = "APPLYING"
+	restoreApplyCommitted  = "COMMITTED"
+	restoreApplyRolledBack = "ROLLED_BACK"
 )
+
+var ErrRestoreSafelyRolledBack = errors.New("restore transaction was safely rolled back; explicit retry is required")
 
 type RestoreApplyResult struct {
 	RestoreID          string `json:"restore_id"`
@@ -45,12 +48,14 @@ type restoreSwapItem struct {
 }
 
 type restoreApplyJournal struct {
-	FormatVersion int                `json:"format_version"`
-	RestoreID     string             `json:"restore_id"`
-	State         string             `json:"state"`
-	AppliedItems  int                `json:"applied_items"`
-	Items         []restoreSwapItem  `json:"items"`
-	Result        RestoreApplyResult `json:"result"`
+	FormatVersion      int                `json:"format_version"`
+	RestoreID          string             `json:"restore_id"`
+	State              string             `json:"state"`
+	AppliedItems       int                `json:"applied_items"`
+	ApplyAuthorization string             `json:"apply_authorization,omitempty"`
+	RollbackErrorCode  string             `json:"rollback_error_code,omitempty"`
+	Items              []restoreSwapItem  `json:"items"`
+	Result             RestoreApplyResult `json:"result"`
 }
 
 type RestoreApplier struct {
@@ -60,6 +65,7 @@ type RestoreApplier struct {
 	OwnerGID        int
 	Now             func() time.Time
 	AfterActivate   func(int) error
+	AfterRollback   func() error
 	setOwnership    func(string, int, int) error
 	validateOwner   func(os.FileInfo) error
 }
@@ -88,7 +94,10 @@ func (applier *RestoreApplier) Apply(ctx context.Context) (RestoreApplyResult, e
 	items := applier.restoreItems(verified)
 	journalPath := applier.journalPath(verified.Operation.RestoreID)
 	if _, err := os.Lstat(journalPath); err == nil {
-		return applier.resumeInterrupted(ctx, verified, items, journalPath)
+		result, retryFresh, resumeErr := applier.resumeInterrupted(ctx, verified, items, journalPath)
+		if !retryFresh || resumeErr != nil {
+			return result, resumeErr
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return RestoreApplyResult{}, errors.New("inspect restore transaction journal failed")
 	}
@@ -107,7 +116,7 @@ func (applier *RestoreApplier) Apply(ctx context.Context) (RestoreApplyResult, e
 		_ = applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_CANDIDATE_PREPARATION_FAILED")
 		return RestoreApplyResult{}, err
 	}
-	journal := restoreApplyJournal{FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID, State: restoreApplyPrepared, Items: items, Result: result}
+	journal := restoreApplyJournal{FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID, State: restoreApplyPrepared, ApplyAuthorization: verified.Operation.ApplyAuthorization, Items: items, Result: result}
 	if err := applier.writeJournal(journalPath, journal, false); err != nil {
 		_ = applier.cleanupCandidates(items)
 		_ = applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_JOURNAL_CREATE_FAILED")
@@ -115,64 +124,77 @@ func (applier *RestoreApplier) Apply(ctx context.Context) (RestoreApplyResult, e
 	}
 	journal.State = restoreApplyApplying
 	if err := applier.writeJournal(journalPath, journal, true); err != nil {
-		return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+		return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 	}
 	for index := range journal.Items {
 		if err := applier.activateItem(journal.Items[index]); err != nil {
-			return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+			return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 		}
 		journal.AppliedItems = index + 1
 		if err := applier.writeJournal(journalPath, journal, true); err != nil {
-			return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+			return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 		}
 		if applier.AfterActivate != nil {
 			if err := applier.AfterActivate(index); err != nil {
-				return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+				return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 			}
 		}
 	}
 	if err := applier.verifyActivated(ctx, verified, result); err != nil {
-		return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+		return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 	}
 	result.AppliedAt = applier.now().Format(time.RFC3339Nano)
 	journal.State = restoreApplyCommitted
 	journal.Result = result
 	if err := applier.writeJournal(journalPath, journal, true); err != nil {
-		return applier.rollbackFailure(verified.Operation.RestoreID, items, journalPath, err)
+		return applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, err)
 	}
 	return applier.finalizeCommitted(items, journalPath, result)
 }
 
-func (applier *RestoreApplier) resumeInterrupted(ctx context.Context, verified VerifiedRestore, items []restoreSwapItem, journalPath string) (RestoreApplyResult, error) {
+func (applier *RestoreApplier) resumeInterrupted(ctx context.Context, verified VerifiedRestore, items []restoreSwapItem, journalPath string) (RestoreApplyResult, bool, error) {
 	journal, err := applier.readJournal(journalPath)
-	recoveryItems := items
-	if err == nil {
-		if validationErr := validateApplyJournal(journal, verified.Operation.RestoreID, items); validationErr != nil {
-			err = validationErr
-		} else {
-			recoveryItems = journal.Items
-		}
+	if err != nil {
+		return RestoreApplyResult{}, false, errors.Join(errors.New("interrupted restore journal cannot be read safely"), err)
 	}
-	if err == nil && journal.State == restoreApplyCommitted {
+	if err := validateApplyJournal(journal, verified.Operation.RestoreID, items); err != nil {
+		return RestoreApplyResult{}, false, errors.Join(errors.New("interrupted restore journal cannot be trusted"), err)
+	}
+	if journal.State == restoreApplyRolledBack {
+		if journal.ApplyAuthorization != "" && journal.ApplyAuthorization != verified.Operation.ApplyAuthorization {
+			if err := applier.removeJournal(journalPath); err != nil {
+				return RestoreApplyResult{}, false, err
+			}
+			return RestoreApplyResult{}, true, nil
+		}
+		return RestoreApplyResult{}, false, applier.finalizeRolledBack(verified.Operation.RestoreID, journalPath, journal.RollbackErrorCode)
+	}
+	if journal.ApplyAuthorization != "" && journal.ApplyAuthorization != verified.Operation.ApplyAuthorization {
+		return RestoreApplyResult{}, false, errors.New("interrupted restore journal belongs to a different apply authorization")
+	}
+	if journal.State == restoreApplyCommitted {
 		if verifyErr := applier.verifyActivated(ctx, verified, journal.Result); verifyErr != nil {
-			return applier.rollbackFailure(verified.Operation.RestoreID, recoveryItems, journalPath, verifyErr)
+			result, applyErr := applier.rollbackFailure(verified.Operation.RestoreID, journal, journalPath, verifyErr)
+			return result, false, applyErr
 		}
-		return applier.finalizeCommitted(recoveryItems, journalPath, journal.Result)
+		result, finalizeErr := applier.finalizeCommitted(journal.Items, journalPath, journal.Result)
+		return result, false, finalizeErr
 	}
-	if rollbackErr := applier.rollbackItems(recoveryItems); rollbackErr != nil {
-		_ = applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_INTERRUPTED_ROLLBACK_FAILED")
-		return RestoreApplyResult{}, errors.Join(errors.New("interrupted restore transaction is unsafe"), err, rollbackErr)
+	if rollbackErr := applier.rollbackItems(journal.Items); rollbackErr != nil {
+		return RestoreApplyResult{}, false, errors.Join(errors.New("interrupted restore transaction is unsafe"), rollbackErr)
 	}
-	// Revoke authorization before removing the recovery journal. A crash in
-	// either direction may leave a harmless stale journal, but it must never
-	// leave APPLY_REQUESTED without evidence that rollback is still required.
-	if markErr := applier.Manager.markApplyFailure(verified.Operation.RestoreID, "RESTORE_INTERRUPTED_ROLLED_BACK"); markErr != nil {
-		return RestoreApplyResult{}, errors.Join(errors.New("interrupted restore was rolled back but authorization could not be revoked"), markErr)
+	if applier.AfterRollback != nil {
+		if err := applier.AfterRollback(); err != nil {
+			return RestoreApplyResult{}, false, err
+		}
 	}
-	if removeErr := applier.removeJournal(journalPath); removeErr != nil {
-		return RestoreApplyResult{}, removeErr
+	journal.State = restoreApplyRolledBack
+	journal.ApplyAuthorization = verified.Operation.ApplyAuthorization
+	journal.RollbackErrorCode = "RESTORE_INTERRUPTED_ROLLED_BACK"
+	if err := applier.writeJournal(journalPath, journal, true); err != nil {
+		return RestoreApplyResult{}, false, errors.Join(errors.New("interrupted restore was rolled back but the durable rollback record failed"), err)
 	}
-	return RestoreApplyResult{}, errors.New("interrupted restore transaction was rolled back; explicit retry is required")
+	return RestoreApplyResult{}, false, applier.finalizeRolledBack(verified.Operation.RestoreID, journalPath, journal.RollbackErrorCode)
 }
 
 func (applier *RestoreApplier) createPreRestoreSnapshot(ctx context.Context, restoreID string) (Snapshot, error) {
@@ -413,18 +435,34 @@ func (applier *RestoreApplier) verifyActivated(ctx context.Context, verified Ver
 	return nil
 }
 
-func (applier *RestoreApplier) rollbackFailure(restoreID string, items []restoreSwapItem, journalPath string, cause error) (RestoreApplyResult, error) {
-	rollbackErr := applier.rollbackItems(items)
+func (applier *RestoreApplier) rollbackFailure(restoreID string, journal restoreApplyJournal, journalPath string, cause error) (RestoreApplyResult, error) {
+	rollbackErr := applier.rollbackItems(journal.Items)
 	if rollbackErr != nil {
-		_ = applier.Manager.markApplyFailure(restoreID, "RESTORE_ROLLBACK_FAILED")
 		return RestoreApplyResult{}, errors.Join(cause, rollbackErr)
 	}
-	markErr := applier.Manager.markApplyFailure(restoreID, "RESTORE_APPLY_FAILED_ROLLED_BACK")
-	if markErr != nil {
-		return RestoreApplyResult{}, errors.Join(cause, markErr)
+	if applier.AfterRollback != nil {
+		if err := applier.AfterRollback(); err != nil {
+			return RestoreApplyResult{}, errors.Join(cause, err)
+		}
 	}
-	removeErr := applier.removeJournal(journalPath)
-	return RestoreApplyResult{}, errors.Join(cause, removeErr)
+	journal.State = restoreApplyRolledBack
+	journal.RollbackErrorCode = "RESTORE_APPLY_FAILED_ROLLED_BACK"
+	if err := applier.writeJournal(journalPath, journal, true); err != nil {
+		return RestoreApplyResult{}, errors.Join(cause, errors.New("restore rollback completed but its durable record failed"), err)
+	}
+	return RestoreApplyResult{}, errors.Join(cause, applier.finalizeRolledBack(restoreID, journalPath, journal.RollbackErrorCode))
+}
+
+func (applier *RestoreApplier) finalizeRolledBack(restoreID, journalPath, code string) error {
+	if !validRestoreErrorCode(code) {
+		return errors.New("restore rollback record has an invalid error code")
+	}
+	markErr := applier.Manager.markApplyFailure(restoreID, code)
+	removeErr := error(nil)
+	if markErr == nil {
+		removeErr = applier.removeJournal(journalPath)
+	}
+	return errors.Join(ErrRestoreSafelyRolledBack, markErr, removeErr)
 }
 
 func (applier *RestoreApplier) rollbackItems(items []restoreSwapItem) error {
@@ -442,7 +480,7 @@ func (applier *RestoreApplier) rollbackItems(items []restoreSwapItem) error {
 				failures = append(failures, err)
 				continue
 			}
-		} else if item.Candidate != "" && !candidateExists {
+		} else if !item.OriginalExists && item.Candidate != "" && !candidateExists {
 			// The candidate was consumed without a rollback path, so the
 			// destination was originally absent and must be removed.
 			if err := removeManagedRestorePath(item.Destination); err != nil {
@@ -582,7 +620,7 @@ func validateApplyJournal(journal restoreApplyJournal, restoreID string, expecte
 		return errors.New("restore transaction journal contract is invalid")
 	}
 	switch journal.State {
-	case restoreApplyPrepared, restoreApplyApplying, restoreApplyCommitted:
+	case restoreApplyPrepared, restoreApplyApplying, restoreApplyCommitted, restoreApplyRolledBack:
 	default:
 		return errors.New("restore transaction journal state is invalid")
 	}
@@ -599,6 +637,16 @@ func validateApplyJournal(journal restoreApplyJournal, restoreID string, expecte
 		if _, err := time.Parse(time.RFC3339Nano, journal.Result.AppliedAt); err != nil {
 			return errors.New("committed restore journal timestamp is invalid")
 		}
+	}
+	if journal.ApplyAuthorization != "" && !validDigest(journal.ApplyAuthorization) {
+		return errors.New("restore transaction journal authorization is invalid")
+	}
+	if journal.State == restoreApplyRolledBack {
+		if !validRestoreErrorCode(journal.RollbackErrorCode) {
+			return errors.New("restore rollback journal code is invalid")
+		}
+	} else if journal.RollbackErrorCode != "" {
+		return errors.New("restore transaction journal has an unexpected rollback code")
 	}
 	return nil
 }

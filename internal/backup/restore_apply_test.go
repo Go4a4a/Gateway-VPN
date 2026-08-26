@@ -147,7 +147,7 @@ func TestRestoreApplyRecoversPowerLossJournalBeforeRequiringRetry(t *testing.T) 
 	if err := fixture.applier.prepareCandidates(fixture.ctx, verified, items, &result); err != nil {
 		t.Fatal(err)
 	}
-	journal := restoreApplyJournal{FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID, State: restoreApplyApplying, Items: items, Result: result}
+	journal := restoreApplyJournal{FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID, State: restoreApplyApplying, ApplyAuthorization: verified.Operation.ApplyAuthorization, Items: items, Result: result}
 	journalPath := fixture.applier.journalPath(verified.Operation.RestoreID)
 	if err := fixture.applier.writeJournal(journalPath, journal, false); err != nil {
 		t.Fatal(err)
@@ -178,6 +178,103 @@ func TestRestoreApplyRecoversPowerLossJournalBeforeRequiringRetry(t *testing.T) 
 	if _, err := fixture.applier.Apply(fixture.ctx); err != nil {
 		t.Fatalf("restore after recovered power loss failed: %v", err)
 	}
+}
+
+func TestRestoreRollbackIsIdempotentAcrossPowerLossBeforeRollbackRecord(t *testing.T) {
+	fixture := newRestoreApplyFixture(t)
+	fixture.applier.AfterActivate = func(index int) error {
+		if index == 4 {
+			return errors.New("injected activation failure")
+		}
+		return nil
+	}
+	fixture.applier.AfterRollback = func() error { return errors.New("injected power loss after filesystem rollback") }
+	if _, err := fixture.applier.Apply(fixture.ctx); err == nil || !strings.Contains(err.Error(), "power loss after filesystem rollback") {
+		t.Fatalf("first rollback interruption error = %v", err)
+	}
+	operation, pending, err := fixture.restorer.Status()
+	if err != nil || !pending || operation.State != RestoreStateApplyRequested {
+		t.Fatalf("interrupted rollback authorization = %+v, %t, %v", operation, pending, err)
+	}
+	assertOldRestoreFixtureLive(t, fixture)
+	fixture.applier.AfterActivate = nil
+	fixture.applier.AfterRollback = nil
+	if _, err := fixture.applier.Apply(fixture.ctx); !errors.Is(err, ErrRestoreSafelyRolledBack) {
+		t.Fatalf("repeated idempotent rollback error = %v", err)
+	}
+	operation, pending, err = fixture.restorer.Status()
+	if err != nil || !pending || operation.State != RestoreStateStaged || operation.ApplyErrorCode != "RESTORE_INTERRUPTED_ROLLED_BACK" {
+		t.Fatalf("repeated rollback status = %+v, %t, %v", operation, pending, err)
+	}
+	assertOldRestoreFixtureLive(t, fixture)
+}
+
+func TestRestoreNewAuthorizationConsumesStaleRolledBackJournalAndApplies(t *testing.T) {
+	fixture := newRestoreApplyFixture(t)
+	verified, err := fixture.restorer.VerifyPending(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAuthorization := verified.Operation.ApplyAuthorization
+	items := fixture.applier.restoreItems(verified)
+	result := RestoreApplyResult{RestoreID: verified.Operation.RestoreID, SnapshotID: verified.Operation.SnapshotID, ReconcileRequired: true}
+	if err := fixture.applier.prepareCandidates(fixture.ctx, verified, items, &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.applier.rollbackItems(items); err != nil {
+		t.Fatal(err)
+	}
+	journal := restoreApplyJournal{
+		FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID,
+		State: restoreApplyRolledBack, ApplyAuthorization: firstAuthorization,
+		RollbackErrorCode: "RESTORE_INTERRUPTED_ROLLED_BACK", Items: items, Result: result,
+	}
+	journalPath := fixture.applier.journalPath(verified.Operation.RestoreID)
+	if err := fixture.applier.writeJournal(journalPath, journal, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.restorer.markApplyFailure(verified.Operation.RestoreID, journal.RollbackErrorCode); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := fixture.restorer.AuthorizeApply(verified.Operation.RestoreID)
+	if err != nil || authorized.ApplyAuthorization == firstAuthorization {
+		t.Fatalf("new restore authorization = %+v, %v", authorized, err)
+	}
+	if _, err := fixture.applier.Apply(fixture.ctx); err != nil {
+		t.Fatalf("explicit retry with stale rolled-back journal failed: %v", err)
+	}
+}
+
+func TestRestoreRejectsActiveJournalFromDifferentAuthorizationWithoutMutation(t *testing.T) {
+	fixture := newRestoreApplyFixture(t)
+	verified, err := fixture.restorer.VerifyPending(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := fixture.applier.restoreItems(verified)
+	preRestore, err := fixture.applier.createPreRestoreSnapshot(fixture.ctx, verified.Operation.RestoreID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := RestoreApplyResult{RestoreID: verified.Operation.RestoreID, SnapshotID: verified.Operation.SnapshotID, PreRestoreSnapshot: preRestore.Manifest.SnapshotID, ReconcileRequired: true}
+	if err := fixture.applier.prepareCandidates(fixture.ctx, verified, items, &result); err != nil {
+		t.Fatal(err)
+	}
+	journal := restoreApplyJournal{
+		FormatVersion: restoreApplyJournalVersion, RestoreID: verified.Operation.RestoreID,
+		State: restoreApplyApplying, ApplyAuthorization: strings.Repeat("f", 64), Items: items, Result: result,
+	}
+	if err := fixture.applier.writeJournal(fixture.applier.journalPath(verified.Operation.RestoreID), journal, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.applier.Apply(fixture.ctx); err == nil || !strings.Contains(err.Error(), "different apply authorization") {
+		t.Fatalf("mismatched restore journal error = %v", err)
+	}
+	operation, pending, err := fixture.restorer.Status()
+	if err != nil || !pending || operation.State != RestoreStateApplyRequested {
+		t.Fatalf("mismatched journal changed authorization = %+v, %t, %v", operation, pending, err)
+	}
+	assertOldRestoreFixtureLive(t, fixture)
 }
 
 func TestVerifyPendingRejectsTreeAndManifestTampering(t *testing.T) {

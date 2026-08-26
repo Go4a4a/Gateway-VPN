@@ -36,20 +36,21 @@ const (
 )
 
 type RestoreOperation struct {
-	FormatVersion  int    `json:"format_version"`
-	RestoreID      string `json:"restore_id"`
-	State          string `json:"state"`
-	CreatedAt      string `json:"created_at"`
-	SnapshotID     string `json:"snapshot_id"`
-	SchemaVersion  int64  `json:"schema_version"`
-	GatewayVersion string `json:"gateway_version"`
-	PortableBytes  int64  `json:"portable_bytes"`
-	PortableSHA256 string `json:"portable_sha256"`
-	ArchiveBytes   int64  `json:"archive_bytes"`
-	PayloadBytes   int64  `json:"payload_bytes"`
-	Files          int    `json:"files"`
-	ApplyErrorCode string `json:"apply_error_code,omitempty"`
-	AppliedAt      string `json:"applied_at,omitempty"`
+	FormatVersion      int    `json:"format_version"`
+	RestoreID          string `json:"restore_id"`
+	State              string `json:"state"`
+	CreatedAt          string `json:"created_at"`
+	SnapshotID         string `json:"snapshot_id"`
+	SchemaVersion      int64  `json:"schema_version"`
+	GatewayVersion     string `json:"gateway_version"`
+	PortableBytes      int64  `json:"portable_bytes"`
+	PortableSHA256     string `json:"portable_sha256"`
+	ArchiveBytes       int64  `json:"archive_bytes"`
+	PayloadBytes       int64  `json:"payload_bytes"`
+	Files              int    `json:"files"`
+	ApplyAuthorization string `json:"apply_authorization,omitempty"`
+	ApplyErrorCode     string `json:"apply_error_code,omitempty"`
+	AppliedAt          string `json:"applied_at,omitempty"`
 }
 
 type VerifiedRestore struct {
@@ -215,6 +216,13 @@ func (manager *RestoreManager) AuthorizeApply(restoreID string) (RestoreOperatio
 	if operation.State != RestoreStateStaged && operation.State != RestoreStateApplyRequested {
 		return RestoreOperation{}, ErrRestoreNotPending
 	}
+	if operation.State == RestoreStateStaged {
+		authorization, err := newApplyAuthorization()
+		if err != nil {
+			return RestoreOperation{}, err
+		}
+		operation.ApplyAuthorization = authorization
+	}
 	operation.State = RestoreStateApplyRequested
 	operation.ApplyErrorCode = ""
 	operation.AppliedAt = ""
@@ -310,17 +318,18 @@ func (manager *RestoreManager) Discard(_ context.Context, restoreID string) erro
 func (manager *RestoreManager) markApplyFailure(restoreID, code string) error {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-	if !restoreIDPattern.MatchString(restoreID) || code == "" || len(code) > 128 {
+	if !restoreIDPattern.MatchString(restoreID) || !validRestoreErrorCode(code) {
 		return errors.New("valid restore id and apply failure code are required")
 	}
 	operation, pending, err := manager.readPending()
 	if err != nil {
 		return err
 	}
-	if !pending || operation.RestoreID != restoreID {
+	if !pending || operation.RestoreID != restoreID || operation.State != RestoreStateApplyRequested {
 		return ErrRestoreNotPending
 	}
 	operation.State = RestoreStateStaged
+	operation.ApplyAuthorization = ""
 	operation.ApplyErrorCode = code
 	if err := writeJSONFile(filepath.Join(manager.Root, restoreID, "operation.json"), operation, true); err != nil {
 		return err
@@ -335,13 +344,14 @@ func (manager *RestoreManager) complete(restoreID, appliedAt string) error {
 	if err != nil {
 		return err
 	}
-	if !pending || operation.RestoreID != restoreID {
+	if !pending || operation.RestoreID != restoreID || operation.State != RestoreStateApplyRequested {
 		return ErrRestoreNotPending
 	}
 	if _, err := time.Parse(time.RFC3339Nano, appliedAt); err != nil {
 		return errors.New("valid restore completion timestamp is required")
 	}
 	operation.State = RestoreStateApplied
+	operation.ApplyAuthorization = ""
 	operation.AppliedAt = appliedAt
 	operation.ApplyErrorCode = ""
 	if err := writeJSONFile(filepath.Join(manager.StateDirectory, "recovery", "last-restore.json"), operation, true); err != nil {
@@ -689,11 +699,11 @@ func validRestoreOperation(operation RestoreOperation) bool {
 	}
 	switch operation.State {
 	case RestoreStateStaged:
-		return operation.AppliedAt == ""
+		return operation.ApplyAuthorization == "" && operation.AppliedAt == "" && (operation.ApplyErrorCode == "" || validRestoreErrorCode(operation.ApplyErrorCode))
 	case RestoreStateApplyRequested:
-		return operation.ApplyErrorCode == "" && operation.AppliedAt == ""
+		return validDigest(operation.ApplyAuthorization) && operation.ApplyErrorCode == "" && operation.AppliedAt == ""
 	case RestoreStateApplied:
-		if operation.ApplyErrorCode != "" {
+		if operation.ApplyAuthorization != "" || operation.ApplyErrorCode != "" {
 			return false
 		}
 		_, err := time.Parse(time.RFC3339Nano, operation.AppliedAt)
@@ -701,6 +711,26 @@ func validRestoreOperation(operation RestoreOperation) bool {
 	default:
 		return false
 	}
+}
+
+func newApplyAuthorization() (string, error) {
+	value := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, value); err != nil {
+		return "", errors.New("generate restore apply authorization failed")
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func validRestoreErrorCode(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character != '_' && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func sameRestoreIdentity(left, right RestoreOperation) bool {
