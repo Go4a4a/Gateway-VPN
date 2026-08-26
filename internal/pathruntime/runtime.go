@@ -161,7 +161,11 @@ func (actuator *Actuator) Block(ctx context.Context, _ string) error {
 	if blockErr != nil {
 		return errors.Join(fmt.Errorf("block TUN firewall gate: %w", blockErr), actuator.Broker.FailClosedMihomo(ctx), selectErr)
 	}
-	return selectErr
+	// The nftables TUN gate is the authoritative fail-closed boundary. Mihomo
+	// can legitimately have no API before the first validated generation or
+	// after a crash; once the gate is proven closed, a best-effort REJECT
+	// selection must not turn an already-safe blocked state into a noisy error.
+	return nil
 }
 
 func (actuator *Actuator) activationFailure(ctx context.Context, cause error) error {

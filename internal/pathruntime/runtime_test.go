@@ -29,6 +29,7 @@ type fakeBroker struct {
 	activations []uint32
 	failClosed  int
 	err         error
+	blockErr    error
 	authorized  [][]string
 }
 
@@ -49,10 +50,14 @@ func (broker *fakeBroker) ActivatePath(_ context.Context, generation uint32) err
 
 func (broker *fakeBroker) BlockPath(context.Context) error {
 	broker.events = append(broker.events, "firewall:block")
-	if broker.err == nil {
+	err := broker.blockErr
+	if err == nil {
+		err = broker.err
+	}
+	if err == nil {
 		broker.state = dataplane.PathState{}
 	}
-	return broker.err
+	return err
 }
 
 func (broker *fakeBroker) ObservePath(context.Context) (dataplane.PathState, error) {
@@ -189,6 +194,36 @@ func TestFailedEndToEndRecheckKeepsFirewallBlockedAndSelectsReject(t *testing.T)
 	snapshot, _ := fixture.state.Get(fixture.ctx)
 	if snapshot.PathState != state.PathBlocked || snapshot.ActivePathID != "" {
 		t.Fatalf("desired state after failed activation = %+v", snapshot)
+	}
+}
+
+func TestBlockTreatsUnavailableMihomoAPIAsSafelyBlockedAfterFirewallCloses(t *testing.T) {
+	fixture := newFixture(t)
+	defer fixture.database.Close()
+	fixture.broker.state = dataplane.PathState{Active: true, Generation: 7}
+	fixture.mihomo.selectErr = errors.New("Mihomo API unavailable")
+
+	if err := fixture.reconciler.Actuator.(*Actuator).Block(fixture.ctx, "ALL_MODEMS_OFFLINE"); err != nil {
+		t.Fatalf("Block(closed firewall, unavailable Mihomo) error = %v", err)
+	}
+	if fixture.broker.state.Active || fixture.broker.failClosed != 0 {
+		t.Fatalf("blocked state = %+v, emergency fail-closed calls = %d", fixture.broker.state, fixture.broker.failClosed)
+	}
+}
+
+func TestBlockEscalatesWhenAuthoritativeFirewallGateCannotClose(t *testing.T) {
+	fixture := newFixture(t)
+	defer fixture.database.Close()
+	fixture.broker.state = dataplane.PathState{Active: true, Generation: 7}
+	fixture.broker.blockErr = errors.New("firewall block failed")
+	fixture.mihomo.selectErr = errors.New("Mihomo API unavailable")
+
+	err := fixture.reconciler.Actuator.(*Actuator).Block(fixture.ctx, "OBSERVATION_FAILED")
+	if err == nil || !errors.Is(err, fixture.broker.blockErr) || !errors.Is(err, fixture.mihomo.selectErr) {
+		t.Fatalf("Block(failed firewall) error = %v", err)
+	}
+	if !fixture.broker.state.Active || fixture.broker.failClosed != 1 {
+		t.Fatalf("failed block state = %+v, emergency fail-closed calls = %d", fixture.broker.state, fixture.broker.failClosed)
 	}
 }
 
