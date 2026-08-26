@@ -57,6 +57,39 @@
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
 | Автоматические тесты | `47297A7_REPRO_INSTALL_PASS / REMOTE_CI_PENDING` | Code commit `3c13b09` прошёл полный Windows и offline native Linux `go test ./... -count=1`/`go vet ./...`; docs-complete `47297a7` дополнительно прошёл double-build equality, signed-tree verification, fresh install/idempotency и новый PID 1. Remote CI ждёт будущий push |
 
+## Матрица доказательств Definition of Done
+
+Статусы ниже относятся к каждому точному пункту §20 `PLAN_v1.1.md`: `PASS_LOCAL` означает, что требование доказано текущими автоматическими/privileged Docker gates, но само по себе не повышает весь проект до production `DONE`; `PARTIAL_EXTERNAL` означает, что локальная часть прошла, а обязательное физическое или публичное evidence отсутствует; `NOT_RUN_EXTERNAL` означает, что требуемый длительный или hardware gate не запускался. Архитектурные чекбоксы в `PLAN_v1.1.md` не используются как изменяемый журнал.
+
+| DoD | Статус | Авторитетное evidence и остающийся gate |
+|---:|---|---|
+| 1 | `NOT_RUN_EXTERNAL` | H2 требует минимум два реальных HiLink, включая Huawei E3372h-325, и целевой Keenetic; runbook готов, hardware evidence отсутствует |
+| 2 | `PARTIAL_EXTERNAL` | Unit/integration/netns failure matrix и точечные systemd recovery gates проходят; полная H1/H2 matrix на физическом packet path не запускалась |
+| 3 | `PARTIAL_EXTERNAL` | Kernel/netns fail-closed и IPv6 policy проверены; обязательные IPv4/DNS/IPv6 captures за Keenetic и через реальные HiLink отсутствуют |
+| 4 | `PASS_LOCAL` | Invalid subscription/config сохраняют LKG; signed format-2 update имеет доказанные rollback `13 → 12`, recovery и terminal no-op |
+| 5 | `PARTIAL_EXTERNAL` | Fresh/repeated PID 1 стартует в `PATH_BLOCKED` без failed units; автоматическое восстановление реального qualified mobile path после reboot не проверено |
+| 6 | `PARTIAL_EXTERNAL` | Production broker и synthetic WireGuard handshake/failover прошли; реальный VPS/provider UDP и переключение между physical modem uplinks не проверены |
+| 7 | `PASS_LOCAL` | Exact Ubuntu/systemd install слушает HTTPS только на management LAN; auth/bootstrap/session/CSRF/rate-limit и bind allowlist покрыты tests |
+| 8 | `PASS_LOCAL` | Logging, API serializers и diagnostic bundle используют fixed allowlists/redaction; adversarial tests не допускают secrets/paths/backend text |
+| 9 | `PARTIAL_EXTERNAL` | Installer/update/rollback/backup/restore/uninstall прошли clean disposable systemd и power-cut gates; произвольный bare-metal clean host и real VPS provider остаются внешними |
+| 10 | `PASS_LOCAL` | `README.md`, `PLAN_v1.1.md`, `NETWORKING.md`, `OPERATIONS.md` и H1/H2 recovery runbook входят в проверенный signed tree; subscription formats описаны в плане и fixtures |
+| 11 | `PASS_LOCAL` | Mihomo `v1.19.30` и SHA-256 находятся в signed metadata; `test/fixtures/mihomo/expected-api-schema.json` сохраняет API contract |
+| 12 | `PASS_LOCAL` | Firewall schema `2`, storage/API/CSV/UI реализуют только authoritative total user/service counters; per-subscription traffic отсутствует |
+| 13 | `PASS_LOCAL` | Path-scoped qualification отклоняет stale policy/route generations и активирует только current required-target-qualified tuple; matrix tests проходят |
+| 14 | `PASS_LOCAL` | Matcher fallback, manual include/exclude, target CRUD/priority и malicious/empty/name fixtures покрыты integration tests |
+| 15 | `PASS_LOCAL` | Independent target-outage confirmation и `DEGRADED_TARGET` recovery не запускают node/subscription/modem loop; scheduler/reconciler tests проходят |
+| 16 | `PARTIAL_EXTERNAL` | Stable identity, priority/history и reverse-order event fixtures проходят; реальные USB identity sources, десять reboot/replug и H2 не запускались |
+| 17 | `PASS_LOCAL` | Modems, Subscriptions и Path Matrix читают одну canonical matrix model; двустороннее UI/API представление покрыто handler/browser tests |
+| 18 | `PARTIAL_EXTERNAL` | Ranking `node → subscription → modem` и отсутствие main-table direct route доказаны model/netns tests; physical active-modem loss/capture не проверены |
+| 19 | `PARTIAL_EXTERNAL` | Restart-safe stable interval/cooldown/failback hysteresis покрыты durable tests; реальный recovered preferred modem не проверен |
+| 20 | `PARTIAL_EXTERNAL` | Per-modem fwmark/table, DHCP, DNS, proxy и WireGuard route isolation проходят render/kernel/netns gates; реальные operator subnets/interfaces не зафиксированы |
+| 21 | `PARTIAL_EXTERNAL` | Reproducible signed Gateway/VPS/bootstrap/deploy artifacts и SSH orchestrator rehearsals прошли локально; GitHub version/tag/assets, remote CI и real two-host `READY` отсутствуют |
+| 22 | `PASS_LOCAL` | Exact signed systemd watchdog обнаруживает hang/crash/restart storm, имеет bounded dependency-aware recovery и публикует UI/events/diagnostics evidence |
+| 23 | `PASS_LOCAL` | External outage отделён от local failure; default host reboot выключен, optional action имеет durable budget и transaction suppression |
+| 24 | `NOT_RUN_EXTERNAL` | Exact endurance harness и smoke готовы, но обязательные непрерывные 24- и 72-часовые runs не запускались |
+
+**Итог аудита:** `12 PASS_LOCAL`, `10 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут и не может быть объявлен без publish/remote CI, H1/H2/VPS и 24/72h evidence.
+
 ## Ближайший следующий инкремент
 
 Следующий инкремент — внешний release/hardware gate. После явного разрешения пользователя: push локальных commits, remote CI, создание отдельной production/hardware-test signing identity и новой immutable publish version из актуального clean commit. Затем — установка одной командой на физический Ubuntu 24.04 Gateway и реальный VPS, фиксация фактического LAN interface, HiLink/Keenetic/WireGuard packet captures и исправление только реально найденных отклонений. Versions `0.1.0-traffic.3c13b09` и `0.1.0-validation.47297a7` другими signed artifacts не заменяются; push/tag/release и работа с долгоживущим key без отдельного разрешения не выполняются.
@@ -223,8 +256,21 @@
 | DEV-139 | 2026-08-27 | Exact `0.1.0-traffic.3c13b09` считать локально готовым к первой установке на физическое железо; production-ready статус не присваивать до publish, real hardware/VPS и 24/72h gates | Reproducible build, fresh install, schema migration/rollback/finalize и новый PID 1 доказаны, но Docker/disposable signer не подтверждают USB, mobile network, provider VPS и длительную эксплуатацию |
 | DEV-140 | 2026-08-27 | Разделить первый hardware gate на H1 с одним модемом и полный H2 минимум с двумя модемами; только H2 закрывает multi-modem часть этапа 0 и Definition of Done | Рабочая установка обязана поддерживать `1..N` и не требовать резервного modem, но failover/reverse-order/раздельные operator routes невозможно доказать на одном устройстве |
 | DEV-141 | 2026-08-27 | `0.1.0-validation.47297a7` считать локальным docs-complete successor для hardware handoff; будущая публичная сборка получает новую version и не переиспользует обе локальные validation identities | Signed OPERATIONS входит в immutable release tree, поэтому исправленный H1/H2 runbook нужно доказать внутри exact artifact, но disposable acceptance key и локальная version не должны превращаться в production identity задним числом |
+| DEV-142 | 2026-08-27 | Вести явную 24-пунктную DoD evidence matrix в `PROJECT_STATUS.md`, не отмечая архитектурные чекбоксы `PLAN_v1.1.md` задним числом | Локальный test PASS, обязательный physical/public gate и полный project DONE имеют разную доказательную силу; одна статусная строка не должна смешивать эти уровни |
 
 ## Журнал разработки
+
+### Сессия 061 — requirement-by-requirement completion audit — 2026-08-27
+
+**Причина:** продолжение цели не является явным разрешением на внешнее `git push`. Вместо изменения remote выполнен новый read-only/локальный аудит всех 24 пунктов Definition of Done, этапов 0–6, fixtures, workflows, release evidence и незакрытых gates.
+
+**Результат аудита:** локальная реализация этапов 1–6 присутствует и покрыта 475 Go test functions, fixtures, kernel/netns, disposable systemd и signed lifecycle rehearsals. Создана отдельная DoD evidence matrix: 12 пунктов имеют `PASS_LOCAL`, 10 требуют внешнего продолжения после локального PASS, 2 (`H2 hardware` и `24/72h endurance`) не запускались. Полный проект намеренно не помечен `DONE`.
+
+**Повторная проверка текущего HEAD:** portable Go `1.26.7` выполнил последовательные `go test ./... -count=1` и `go vet ./...` — PASS для всех packages; `git diff --check` — PASS. Первые два вызова focused packaging test использовали ошибочные PowerShell paths к portable Go и завершились до запуска Go; корректный путь `.tools/go1.26.7/go/bin/go.exe` затем дал PASS, файлы не менялись.
+
+**Граница полномочий:** `git push`, tag, GitHub Release и production signing key не создавались. Следующий внешний шаг остаётся прежним: только после явного разрешения пользователя push `main`, затем remote CI; signing identity/version и hardware installation — отдельные решения.
+
+**Следующий шаг:** зафиксировать audit локальным коммитом и сохранить clean worktree. Если явного push permission по-прежнему нет, не изменять GitHub и продолжить только с теми локальными проверками, которые дают новое evidence.
 
 ### Сессия 060 — docs-complete reproducible successor и fresh reboot — 2026-08-27
 
