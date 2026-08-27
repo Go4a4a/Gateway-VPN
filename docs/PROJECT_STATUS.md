@@ -329,6 +329,7 @@
 
 - добавлены source-only `test/release-gate/cmd/force-update-deadline` и `stage-signed-update`; они не входят в allowlist release builder и требуют environment + explicit flag + absolute paths + exact identity/state;
 - staging helper теперь выводит state/DB только из strict production config, а deadline helper запрещает регрессию journal timestamps и reread-проверяет checksummed copies;
+- read-only `validate_gateway_systemd.sh` сводит exact release/schema/SQLite, canonical blocked runtime, watchdog/systemd/restarts, HTTPS/SSH/DNS/DHCP, IPv6, nft gates, install report и current-boot failure signatures в один повторяемый fresh/reboot acceptance; CI теперь проверяет его shell syntax;
 - focused helper tests/vet, full `go test ./... -count=1`, full `go vet ./...`, четыре CGO-free Linux/amd64 builds, `node --check`, shell `bash -n` и `git diff --check` — PASS.
 
 **Неуспешные/непродуктовые запуски:** первая offline helper-сборка использовала builder без mounted Go module cache и ожидаемо отказалась обращаться в сеть; повтор с read-only pinned cache прошёл. Попытка создать новый privileged fresh-install container не стартовала из-за `502 auth_unavailable` approval-сервиса Codex, поэтому не является product failure и не засчитывается как fresh gate.

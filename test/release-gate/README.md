@@ -40,6 +40,16 @@ It is used only to prepare a candidate before a controlled systemd interruption
 test. Actual apply/recovery/finalization must still be performed by the exact
 production systemd units.
 
+## `validate_gateway_systemd.sh`
+
+This read-only validator checks an already installed or rebooted release. It
+requires the exact version, schema, an explicitly supplied sqlite3 binary, LAN
+identity, and firewall generation. It verifies release signatures, SQLite
+integrity, canonical blocked runtime state, watchdog evidence, systemd units
+and restart counters, HTTPS security headers, SSH/DNS/DHCP listeners, IPv6
+policy, empty direct/TUN gates, install report, and current-boot failure
+signatures. It does not install packages or change host state.
+
 ## Evidence boundary
 
 These helpers may shorten a release-gate setup step, but they never prove

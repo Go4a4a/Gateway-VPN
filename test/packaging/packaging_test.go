@@ -374,7 +374,7 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	}
 	for _, required := range []string{
 		"permissions:\n  contents: read", "runs-on: ubuntu-24.04", "go test -race ./... -count=1",
-		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh",
+		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh", "test/release-gate/*.sh",
 		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
 		"persist-credentials: false",
 	} {
