@@ -55,7 +55,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_5D86E14_PASS` | Exact GitHub Actions run `33024593573`: race-enabled suite, vet, Linux release entrypoints, JS/shell syntax, native nft/netns fail-closed и Gateway/VPS systemd verification на Ubuntu 24.04 — PASS |
+| Автоматические тесты | `REMOTE_CI_7F36928_PASS` | Exact GitHub Actions run `33026304197` для key-custody HEAD: race-enabled suite, vet, Linux release entrypoints, JS/shell syntax, native nft/netns fail-closed и Gateway/VPS systemd verification на Ubuntu 24.04 — PASS |
 
 ## Матрица доказательств Definition of Done
 
@@ -262,6 +262,16 @@
 | DEV-145 | 2026-08-27 | Первый public hardware candidate должен использовать новую pre-release SemVer (предпочтительно `0.1.0-rc.1`), а stable `0.1.0` не резервировать до успешных H1/H2 | Public namespace пуст, но production-ready stable version до physical/endurance gates создала бы ложное обещание качества; tag/version создаются только отдельной авторизованной transaction |
 
 ## Журнал разработки
+
+### Сессия 064 — remote CI hardened key custody — 2026-08-27
+
+**Exact public identity:** security increment зафиксирован commit `7f36928f439cd645e17367be8423281ca996a30e` и отправлен в разрешённую ветку `main`; `git ls-remote` подтвердил тот же SHA. Production key/tag/release не создавались.
+
+**Remote evidence:** GitHub Actions workflow `Gateway VPN CI`, run `33026304197`, завершился `completed/success` для exact `7f36928`. Первая job прошла formatting, race-enabled full suite, vet, четыре Linux entrypoint builds и JS/shell syntax. Вторая job прошла native nftables fail-closed/no-direct-route gate и Gateway/VPS systemd verification на Ubuntu 24.04.
+
+**Текущий внешний blocker:** keygen contract теперь готов, но production/hardware-test identity нельзя безопасно создать без двух заранее выбранных storage locations: primary encrypted/offline Linux-visible directory и независимый encrypted backup. Также требуется отдельное явное разрешение именно на генерацию key; прежнее разрешение относилось только к `git push origin main`.
+
+**Следующий шаг:** получить два абсолютных пути и подтверждение `Разрешаю создать production signing key`. Затем на trusted Linux builder проверить mounts/ownership/modes/free space, создать pair только в primary, независимо проверить fingerprint, скопировать private/public backup с verification и только потом строить новую immutable `0.1.0-rc.1` candidate. Tag/draft Release остаются последующей отдельной transaction.
 
 ### Сессия 063 — keyless release preflight и hardening key custody — 2026-08-27
 
