@@ -112,6 +112,15 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 			t.Errorf("installer missing %q", required)
 		}
 	}
+	for _, required := range []string{
+		"APPLY == 0 || SIMULATION_RESULT != 10",
+		"Refreshing configured APT indexes before installing exact missing Gateway packages",
+		"APT Gateway dependency simulation failed after index refresh",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway clean-host dependency refresh contract missing %q", required)
+		}
+	}
 	if strings.Contains(installer, "apt upgrade") || strings.Contains(installer, "apt-get upgrade") || strings.Contains(installer, "apt-get full-upgrade") || strings.Contains(installer, "apt-get dist-upgrade") || strings.Contains(installer, "autoremove") || strings.Contains(installer, "curl |") {
 		t.Fatal("installer contains an unsafe opaque upgrade/download path")
 	}
@@ -449,6 +458,15 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("VPS installer missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"APPLY == 0 || SIMULATION_RESULT != 10",
+		"Refreshing configured APT indexes before installing exact missing VPS packages",
+		"APT dependency simulation failed after index refresh",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("VPS clean-host dependency refresh contract missing %q", required)
 		}
 	}
 	for _, forbidden := range []string{"apt upgrade", "apt-get upgrade", "apt-get full-upgrade", "apt-get dist-upgrade", "nft flush ruleset", "AllowedIPs = 10.80.0.0/24"} {

@@ -234,7 +234,13 @@ if ((${#MISSING_PACKAGES[@]})); then
       echo "Gateway dependency preflight incomplete; no packages or Gateway VPN files were changed" >&2
       exit 10
     fi
-    exit 1
+    # A clean Ubuntu host may not have package indexes yet. Only the generic
+    # apt simulation failure is recoverable by an explicitly requested apply;
+    # semantic rejections (remove/upgrade/empty plan) remain terminal and must
+    # never be changed into an apt mutation.
+    if ((APPLY == 0 || SIMULATION_RESULT != 10)); then
+      exit 1
+    fi
   fi
   if ((APPLY == 0)); then
     echo "Gateway dependency plan validated; full host preflight NOT_RUN because required packages are missing."

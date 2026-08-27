@@ -167,8 +167,14 @@ func prepareAdminConfigPath(filename string) error {
 		return errors.New("administrator config directory must be a protected real directory")
 	}
 	if runtime.GOOS == "windows" {
+		if err := validateWindowsAdminDirectoryComponents(directory, true); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return errors.New("create administrator config directory failed")
+		}
+		if err := validateWindowsAdminDirectoryComponents(directory, false); err != nil {
+			return err
 		}
 		return validateAdminDirectory(directory)
 	}
@@ -210,6 +216,34 @@ func prepareAdminConfigPath(filename string) error {
 		parentInfo = info
 	}
 	return validateAdminDirectory(directory)
+}
+
+func validateWindowsAdminDirectoryComponents(directory string, allowMissing bool) error {
+	volume := filepath.VolumeName(directory)
+	if volume == "" {
+		return errors.New("administrator config directory must be a protected real directory")
+	}
+	current := volume + string(os.PathSeparator)
+	relative := strings.TrimPrefix(directory, current)
+	if relative == directory {
+		return errors.New("administrator config directory must be a protected real directory")
+	}
+	missing := false
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("administrator config directory must be a protected real directory")
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) && allowMissing {
+			missing = true
+			continue
+		}
+		if err != nil || missing || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("administrator config directory must be a protected real directory")
+		}
+	}
+	return nil
 }
 
 func validateAdminDirectory(directory string) error {

@@ -200,7 +200,12 @@ if ((${#MISSING_PACKAGES[@]})); then
       echo "VPS dependency preflight incomplete; no packages or Gateway VPN files were changed" >&2
       exit 10
     fi
-    exit 1
+    # A clean supported host may not have package indexes yet. Only the
+    # generic apt simulation failure is recoverable by an explicit apply;
+    # semantic remove/upgrade/empty-plan rejections remain terminal.
+    if ((APPLY == 0 || SIMULATION_RESULT != 10)); then
+      exit 1
+    fi
   fi
   if ((APPLY == 0)); then
     echo "VPS dependency plan validated; full host preflight NOT_RUN because required packages are missing."
