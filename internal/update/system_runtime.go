@@ -181,6 +181,20 @@ func (runtime SystemRuntime) synchronizeFailClosedFirewall(ctx context.Context) 
 	if err := runtime.validate(); err != nil {
 		return err
 	}
+	// A rejected release can legitimately select PATH_BLOCKED several times in
+	// quick succession: quiesce, candidate activation, rollback quiesce, old
+	// release activation, and then boot/OnFailure recovery. systemd counts even
+	// successful oneshot starts towards the unit start limit, so without an
+	// explicit reset a healthy rollback can be stranded at start-limit-hit.
+	// Reset only the two owned units immediately before their atomic restart;
+	// this neither weakens fail-closed policy nor touches unrelated services.
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{
+		Executable:     runtime.Systemctl,
+		Arguments:      []string{"reset-failed", firewallUnit, guardUnit},
+		MaxOutputBytes: 64 << 10,
+	}); err != nil {
+		return fmt.Errorf("reset selected firewall and integrity guard start limits: %w", err)
+	}
 	_, err := runtime.Executor.Run(ctx, platformexec.Request{
 		Executable:     runtime.Systemctl,
 		Arguments:      []string{"restart", firewallUnit, guardUnit},

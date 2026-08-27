@@ -14,12 +14,19 @@ import (
 )
 
 type systemRuntimeExecutor struct {
-	requests []platformexec.Request
-	failSync bool
+	requests  []platformexec.Request
+	failReset bool
+	failSync  bool
 }
 
 func (executor *systemRuntimeExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
 	executor.requests = append(executor.requests, request)
+	if reflect.DeepEqual(request.Arguments, []string{"reset-failed", firewallUnit, guardUnit}) {
+		if executor.failReset {
+			return platformexec.Result{Stderr: "private systemd detail"}, os.ErrPermission
+		}
+		return platformexec.Result{}, nil
+	}
 	if reflect.DeepEqual(request.Arguments, []string{"restart", firewallUnit, guardUnit}) {
 		if executor.failSync {
 			return platformexec.Result{Stderr: "private systemd detail"}, os.ErrPermission
@@ -41,14 +48,15 @@ func TestUpdateRuntimeQuiesceAtomicallySelectsFailClosedFirewallAndGuard(t *test
 	if err := runtime.Quiesce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.requests) != 2 {
+	if len(executor.requests) != 3 {
 		t.Fatalf("quiesce requests = %+v", executor.requests)
 	}
 	if !reflect.DeepEqual(executor.requests[0].Arguments, []string{"stop", controlUnit, "gateway-vpn-network-broker.service", brokerUnit, mihomoUnit, dnsmasqUnit}) {
 		t.Fatalf("quiesce stop = %v", executor.requests[0].Arguments)
 	}
-	if !reflect.DeepEqual(executor.requests[1].Arguments, []string{"restart", firewallUnit, guardUnit}) {
-		t.Fatalf("firewall schema transaction = %v", executor.requests[1].Arguments)
+	if !reflect.DeepEqual(executor.requests[1].Arguments, []string{"reset-failed", firewallUnit, guardUnit}) ||
+		!reflect.DeepEqual(executor.requests[2].Arguments, []string{"restart", firewallUnit, guardUnit}) {
+		t.Fatalf("firewall schema transaction = %+v", executor.requests[1:])
 	}
 }
 
@@ -60,13 +68,20 @@ func TestUpdateRecoverySynchronizesSelectedFirewallBeforeAcceptingRelease(t *tes
 	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.requests) != 3 || !reflect.DeepEqual(executor.requests[0].Arguments, []string{"restart", firewallUnit, guardUnit}) {
+	if len(executor.requests) != 4 ||
+		!reflect.DeepEqual(executor.requests[0].Arguments, []string{"reset-failed", firewallUnit, guardUnit}) ||
+		!reflect.DeepEqual(executor.requests[1].Arguments, []string{"restart", firewallUnit, guardUnit}) {
 		t.Fatalf("recovery requests = %+v", executor.requests)
 	}
 	executor = &systemRuntimeExecutor{failSync: true}
 	runtime.Executor = executor
-	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 1 {
+	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 2 {
 		t.Fatalf("failed firewall synchronization was not fatal: requests=%+v error=%v", executor.requests, err)
+	}
+	executor = &systemRuntimeExecutor{failReset: true}
+	runtime.Executor = executor
+	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 1 {
+		t.Fatalf("failed start-limit reset was not fatal: requests=%+v error=%v", executor.requests, err)
 	}
 }
 
