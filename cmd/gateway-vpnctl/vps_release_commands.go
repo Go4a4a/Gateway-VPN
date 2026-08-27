@@ -19,6 +19,9 @@ func runVPSReleaseSign(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *releaseDirectory == "" || *privateKeyPath == "" {
 		return 2
 	}
+	if !requireTrustedLinuxKeyOperation() {
+		return 1
+	}
 	privateKey, err := updatepkg.LoadPrivateKey(*privateKeyPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "load VPS release signing key failed")

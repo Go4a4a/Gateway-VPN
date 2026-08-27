@@ -131,10 +131,15 @@ func LoadPublicKey(filename string) (ed25519.PublicKey, error) {
 }
 
 func LoadPrivateKey(filename string) (ed25519.PrivateKey, error) {
+	filename, err := validatePrivateKeyPath(filename)
+	if err != nil {
+		return nil, err
+	}
 	content, err := readBoundedRegular(filename, 32<<10)
 	if err != nil {
 		return nil, fmt.Errorf("read release signing key: %w", err)
 	}
+	defer clear(content)
 	block, rest := pem.Decode(content)
 	if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
 		return nil, errors.New("release signing key must be one PKCS#8 PRIVATE KEY PEM block")
@@ -159,7 +164,7 @@ func PublicKeyFingerprint(key ed25519.PublicKey) (string, error) {
 }
 
 func WriteKeyPair(privatePath, publicPath string) (string, error) {
-	directory, privatePath, publicPath, err := validateKeyPairPaths(privatePath, publicPath)
+	directory, privatePath, publicPath, err := validateKeyPairDestinationPaths(privatePath, publicPath)
 	if err != nil {
 		return "", err
 	}
@@ -168,6 +173,64 @@ func WriteKeyPair(privatePath, publicPath string) (string, error) {
 		return "", errors.New("generate Ed25519 update key failed")
 	}
 	defer clear(privateKey)
+	return writeVerifiedKeyPair(directory, privatePath, publicPath, privateKey, publicKey)
+}
+
+func VerifyKeyPair(privatePath, publicPath string) (string, error) {
+	privatePath, publicPath, err := validateExistingKeyPairPaths(privatePath, publicPath)
+	if err != nil {
+		return "", err
+	}
+	privateKey, err := LoadPrivateKey(privatePath)
+	if err != nil {
+		return "", err
+	}
+	defer clear(privateKey)
+	publicKey, err := LoadPublicKey(publicPath)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
+		return "", errors.New("release signing private and public keys do not match")
+	}
+	return PublicKeyFingerprint(publicKey)
+}
+
+func BackupKeyPair(privatePath, publicPath, backupPrivatePath, backupPublicPath string) (string, error) {
+	sourcePrivatePath, sourcePublicPath, err := validateExistingKeyPairPaths(privatePath, publicPath)
+	if err != nil {
+		return "", err
+	}
+	directory, backupPrivatePath, backupPublicPath, err := validateKeyPairDestinationPaths(backupPrivatePath, backupPublicPath)
+	if err != nil {
+		return "", err
+	}
+	if sameFilesystemPath(filepath.Dir(sourcePrivatePath), directory) {
+		return "", errors.New("release signing backup must use a different secure directory")
+	}
+	privateKey, err := LoadPrivateKey(sourcePrivatePath)
+	if err != nil {
+		return "", err
+	}
+	defer clear(privateKey)
+	publicKey, err := LoadPublicKey(sourcePublicPath)
+	if err != nil || !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
+		return "", errors.New("source release signing key pair is invalid")
+	}
+	fingerprint, err := writeVerifiedKeyPair(directory, backupPrivatePath, backupPublicPath, privateKey, publicKey)
+	if err != nil {
+		return "", err
+	}
+	if fingerprint == "" {
+		return "", errors.New("backup release signing key fingerprint is empty")
+	}
+	return fingerprint, nil
+}
+
+func writeVerifiedKeyPair(directory, privatePath, publicPath string, privateKey ed25519.PrivateKey, publicKey ed25519.PublicKey) (string, error) {
+	if len(privateKey) != ed25519.PrivateKeySize || len(publicKey) != ed25519.PublicKeySize || !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
+		return "", errors.New("valid matching Ed25519 key pair is required")
+	}
 	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
 		return "", errors.New("encode update private key failed")
@@ -192,21 +255,10 @@ func WriteKeyPair(privatePath, publicPath string) (string, error) {
 		_ = os.Remove(privatePath)
 		_ = syncDirectory(directory)
 	}
-	loadedPrivate, err := LoadPrivateKey(privatePath)
+	fingerprint, err := VerifyKeyPair(privatePath, publicPath)
 	if err != nil {
 		cleanup()
-		return "", errors.New("verify generated private key failed")
-	}
-	defer clear(loadedPrivate)
-	loadedPublic, err := LoadPublicKey(publicPath)
-	if err != nil || !bytes.Equal(loadedPrivate.Public().(ed25519.PublicKey), loadedPublic) {
-		cleanup()
-		return "", errors.New("verify generated key pair failed")
-	}
-	fingerprint, err := PublicKeyFingerprint(loadedPublic)
-	if err != nil {
-		cleanup()
-		return "", errors.New("fingerprint generated key pair failed")
+		return "", errors.New("verify written release signing key pair failed")
 	}
 	if err := syncDirectory(directory); err != nil {
 		cleanup()
@@ -215,7 +267,7 @@ func WriteKeyPair(privatePath, publicPath string) (string, error) {
 	return fingerprint, nil
 }
 
-func validateKeyPairPaths(privatePath, publicPath string) (string, string, string, error) {
+func validateKeyPairDestinationPaths(privatePath, publicPath string) (string, string, string, error) {
 	if !filepath.IsAbs(privatePath) || !filepath.IsAbs(publicPath) {
 		return "", "", "", errors.New("absolute private and public key paths are required")
 	}
@@ -225,31 +277,84 @@ func validateKeyPairPaths(privatePath, publicPath string) (string, string, strin
 		return "", "", "", errors.New("distinct private and public key paths in one secure directory are required")
 	}
 	directory := filepath.Dir(privatePath)
+	if err := validateSecureKeyDirectory(directory); err != nil {
+		return "", "", "", err
+	}
+	return directory, privatePath, publicPath, nil
+}
+
+func validateExistingKeyPairPaths(privatePath, publicPath string) (string, string, error) {
+	if !filepath.IsAbs(privatePath) || !filepath.IsAbs(publicPath) {
+		return "", "", errors.New("absolute release signing key paths are required")
+	}
+	privatePath = filepath.Clean(privatePath)
+	publicPath = filepath.Clean(publicPath)
+	if sameFilesystemPath(privatePath, publicPath) || !sameFilesystemPath(filepath.Dir(privatePath), filepath.Dir(publicPath)) {
+		return "", "", errors.New("release signing key pair must use one secure directory")
+	}
+	if _, err := validatePrivateKeyPath(privatePath); err != nil {
+		return "", "", err
+	}
+	info, err := os.Lstat(publicPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("release signing public key must be a regular non-symlink file")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return "", "", errors.New("release signing public key must not be writable by group or others")
+	}
+	return privatePath, publicPath, nil
+}
+
+func validatePrivateKeyPath(filename string) (string, error) {
+	if !filepath.IsAbs(filename) {
+		return "", errors.New("release signing private key path must be absolute")
+	}
+	filename = filepath.Clean(filename)
+	if err := validateSecureKeyDirectory(filepath.Dir(filename)); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(filename)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("release signing private key must be a regular non-symlink file")
+	}
+	if runtime.GOOS != "windows" {
+		resolved, err := filepath.EvalSymlinks(filename)
+		if err != nil || !sameFilesystemPath(filepath.Clean(resolved), filename) {
+			return "", errors.New("release signing private key path must not contain symlink components")
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return "", errors.New("release signing private key must not be accessible to group or others")
+		}
+	}
+	return filename, nil
+}
+
+func validateSecureKeyDirectory(directory string) error {
 	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", "", "", errors.New("key destination must be an existing real directory")
+		return errors.New("key destination must be an existing real directory")
 	}
 	if runtime.GOOS != "windows" {
 		resolved, err := filepath.EvalSymlinks(directory)
 		if err != nil || !sameFilesystemPath(filepath.Clean(resolved), directory) {
-			return "", "", "", errors.New("key destination path must not contain symlink components")
+			return errors.New("key destination path must not contain symlink components")
 		}
 		if info.Mode().Perm()&0o077 != 0 {
-			return "", "", "", errors.New("key destination directory must not be accessible to group or others")
+			return errors.New("key destination directory must not be accessible to group or others")
 		}
 	}
 	for current := directory; ; current = filepath.Dir(current) {
 		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
-			return "", "", "", errors.New("release signing keys must not be created inside a Git worktree")
+			return errors.New("release signing keys must not be created inside a Git worktree")
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", "", "", errors.New("inspect key destination ancestors failed")
+			return errors.New("inspect key destination ancestors failed")
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
 			break
 		}
 	}
-	return directory, privatePath, publicPath, nil
+	return nil
 }
 
 func sameFilesystemPath(left, right string) bool {

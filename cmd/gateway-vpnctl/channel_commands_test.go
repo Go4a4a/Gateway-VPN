@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +14,9 @@ import (
 )
 
 func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("private-key CLI operations are intentionally Linux-only")
+	}
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)

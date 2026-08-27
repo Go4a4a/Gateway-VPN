@@ -10,19 +10,29 @@ Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS 
 
 Release закрепляет конкретный Mihomo binary и его SHA-256. Ed25519 identity создаётся один раз на изолированном trusted builder; private key не помещается в репозиторий или GitHub Release:
 
-`release-keygen` намеренно работает только на Linux. Оба destination должны быть абсолютными путями в одном заранее созданном real-каталоге без symlink-компонентов; каталог не может находиться внутри Git worktree и на Linux обязан быть закрыт от group/others (`0700`). Существующие файлы никогда не перезаписываются. После exclusive-create и fsync keypair перечитывается, public key повторно выводится из private key и сверяется с сохранённым public key/fingerprint. До генерации оператор отдельно выбирает encrypted/offline storage и резервную копию; builder не создаёт и не экспортирует backup автоматически.
+Операции signing identity намеренно работают только на Linux. Оба файла должны иметь абсолютные пути в одном заранее созданном real-каталоге без symlink-компонентов; каталог не может находиться внутри Git worktree и обязан быть закрыт от group/others (`0700`). Private key при каждом использовании снова требует secure absolute path и отсутствие group/other permissions. Существующие primary/backup файлы никогда не перезаписываются. После exclusive-create и fsync keypair перечитывается, public key повторно выводится из private key и сверяется с сохранённым public key/fingerprint. До генерации оператор отдельно выбирает primary encrypted/offline storage и независимый encrypted backup; CLI проверяет целостность копии, но не может доказать encryption либо физическую независимость носителей.
 
 ```bash
-install -d -m 0700 /secure
+install -d -m 0700 /secure/primary /secure-backup/gateway-vpn
 ./bin/gateway-vpnctl release-keygen \
-  --private-key /secure/release-signing.pem \
-  --public-key /secure/update-signing.pub
+  --private-key /secure/primary/release-signing.pem \
+  --public-key /secure/primary/update-signing.pub
+
+./bin/gateway-vpnctl release-key-verify \
+  --private-key /secure/primary/release-signing.pem \
+  --public-key /secure/primary/update-signing.pub
+
+./bin/gateway-vpnctl release-key-backup \
+  --private-key /secure/primary/release-signing.pem \
+  --public-key /secure/primary/update-signing.pub \
+  --backup-private-key /secure-backup/gateway-vpn/release-signing.pem \
+  --backup-public-key /secure-backup/gateway-vpn/update-signing.pub
 
 ./scripts/build-release.sh \
   0.1.0 vX.Y.Z /path/to/mihomo <64-hex-sha256> \
-  /secure/release-signing.pem
+  /secure/primary/release-signing.pem
 
-./scripts/build-vps-release.sh 0.1.0 /secure/release-signing.pem
+./scripts/build-vps-release.sh 0.1.0 /secure/primary/release-signing.pem
 ./scripts/build-deploy.sh 0.1.0
 ```
 
@@ -43,7 +53,7 @@ Builder требует clean committed Git tree и создаёт:
 
 ./scripts/build-release-bundle.sh \
   0.1.0 test vX.Y.Z /secure/build-input/mihomo \
-  /secure/release-signing.pem /secure/update-signing.pub \
+  /secure/primary/release-signing.pem /secure/primary/update-signing.pub \
   OWNER/REPOSITORY v0.1.0 \
   enp2s0 192.168.200.1/24 --enable-dhcp
 ```
@@ -59,7 +69,7 @@ Fetcher принимает только официальный compatible `mihom
 ```bash
 ./scripts/build-channel.sh \
   0.1.0 stable \
-  /secure/release-signing.pem /secure/update-signing.pub \
+  /secure/primary/release-signing.pem /secure/primary/update-signing.pub \
   OWNER/REPOSITORY v0.1.0 \
   enp2s0 192.168.200.1/24 \
   bootstrap=dist/gateway-vpn-bootstrap-0.1.0-linux-amd64 \
@@ -109,7 +119,7 @@ First-install transaction сериализована `/run/lock/gateway-vpn-inst
 VPS artifact собирается на том же trusted Linux builder и подписывается тем же release key:
 
 ```bash
-./scripts/build-vps-release.sh 0.1.0 /secure/release-signing.pem
+./scripts/build-vps-release.sh 0.1.0 /secure/primary/release-signing.pem
 ```
 
 Builder требует clean committed worktree и создаёт `dist/gateway-vpn-vps-0.1.0-linux-amd64/` и одноимённый `.tar.gz`. Release metadata фиксирует только профили `ubuntu-20.04`, `ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`, `debian-12`, interface `wg-mgmt`, subnet `10.80.0.0/24` и UDP port `51821`.
@@ -185,7 +195,7 @@ Exit code `0` выдаётся только для `READY`. Если обе ро
 ```bash
 sudo ./scripts/install-gateway.sh \
   --release-dir ./dist/gateway-vpn-gateway-0.1.0-linux-amd64 \
-  --trusted-update-key /secure/update-signing.pub \
+  --trusted-update-key /secure/primary/update-signing.pub \
   --version 0.1.0 \
   --lan-interface enp2s0 \
   --lan-address 192.168.200.1/24 \

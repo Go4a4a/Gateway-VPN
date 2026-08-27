@@ -263,7 +263,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	bundle := read(t, filepath.Join(root, "scripts", "build-release-bundle.sh"))
 	for _, required := range []string{
 		"build-release.sh", "build-vps-release.sh", "build-deploy.sh", "build-channel.sh",
-		"release-verify", "--initial-install", "vps-release-verify", "channel-verify",
+		"release-key-verify", "release-verify", "--initial-install", "vps-release-verify", "channel-verify",
 		"--artifact \"bootstrap=", "--artifact \"deploy=", "--artifact \"gateway=", "--artifact \"vps=",
 		"bootstrap=$ROOT/dist/", "deploy=$ROOT/dist/", "gateway=$ROOT/dist/", "vps=$ROOT/dist/",
 		"regular non-symlink files", "PRIVATE_MODE", "absent dist directory", "clean committed worktree",
@@ -302,13 +302,13 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 		}
 	}
 	keygen := read(t, filepath.Join(root, "cmd", "gateway-vpnctl", "release_commands.go"))
-	for _, required := range []string{"runtime.GOOS != \"linux\"", "isolated trusted Linux builder", "updatepkg.WriteKeyPair"} {
+	for _, required := range []string{"requireTrustedLinuxKeyOperation", "release signing identity operations require", "updatepkg.WriteKeyPair", "updatepkg.VerifyKeyPair", "updatepkg.BackupKeyPair"} {
 		if !strings.Contains(keygen, required) {
 			t.Errorf("release key generator missing %q", required)
 		}
 	}
 	keyContract := read(t, filepath.Join(root, "internal", "update", "contract.go"))
-	for _, required := range []string{"absolute private and public key paths", "one secure directory", "must not contain symlink components", "must not be accessible to group or others", "must not be created inside a Git worktree", "verify generated key pair", "syncDirectory"} {
+	for _, required := range []string{"absolute private and public key paths", "one secure directory", "must not contain symlink components", "must not be accessible to group or others", "must not be created inside a Git worktree", "verify written release signing key pair", "release signing backup must use a different secure directory", "release signing private and public keys do not match", "syncDirectory"} {
 		if !strings.Contains(keyContract, required) {
 			t.Errorf("release key custody contract missing %q", required)
 		}

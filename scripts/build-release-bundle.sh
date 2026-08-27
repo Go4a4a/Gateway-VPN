@@ -45,6 +45,14 @@ COMMIT=$(git -C "$ROOT" rev-parse --verify HEAD)
   exit 1
 }
 
+# Reject a mismatched, relocated, permission-weakened, symlinked or otherwise
+# unsafe signing identity before the expensive release build starts.
+(
+  cd -- "$ROOT"
+  go run ./cmd/gateway-vpnctl release-key-verify \
+    --private-key "$SIGNING_PRIVATE_KEY" --public-key "$SIGNING_PUBLIC_KEY"
+)
+
 MIHOMO_SHA256=$(sha256sum --binary "$MIHOMO_BINARY" | awk '{print $1}')
 "$ROOT/scripts/build-release.sh" "$VERSION" "$MIHOMO_VERSION" "$MIHOMO_BINARY" "$MIHOMO_SHA256" "$SIGNING_PRIVATE_KEY"
 "$ROOT/scripts/build-vps-release.sh" "$VERSION" "$SIGNING_PRIVATE_KEY"

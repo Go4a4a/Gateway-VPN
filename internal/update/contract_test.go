@@ -35,6 +35,10 @@ func TestWriteKeyPairRequiresSecureAbsoluteExclusivePaths(t *testing.T) {
 	if err != nil || fingerprint != wantFingerprint || !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
 		t.Fatalf("generated key pair fingerprint=%q want=%q err=%v", fingerprint, wantFingerprint, err)
 	}
+	verifiedFingerprint, err := VerifyKeyPair(privatePath, publicPath)
+	if err != nil || verifiedFingerprint != fingerprint {
+		t.Fatalf("VerifyKeyPair() fingerprint=%q err=%v", verifiedFingerprint, err)
+	}
 	if runtime.GOOS != "windows" {
 		privateInfo, err := os.Stat(privatePath)
 		if err != nil {
@@ -76,6 +80,81 @@ func TestWriteKeyPairRequiresSecureAbsoluteExclusivePaths(t *testing.T) {
 	}
 	if _, err := WriteKeyPair(filepath.Join(directory, "other-private.pem"), filepath.Join(otherDirectory, "other-public.pem")); err == nil {
 		t.Fatal("key destinations in different directories were accepted")
+	}
+}
+
+func TestBackupKeyPairIsExclusiveAndCryptographicallyVerified(t *testing.T) {
+	source := t.TempDir()
+	backup := t.TempDir()
+	for _, directory := range []string{source, backup} {
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	privatePath := filepath.Join(source, "release-signing.pem")
+	publicPath := filepath.Join(source, "update-signing.pub")
+	fingerprint, err := WriteKeyPair(privatePath, publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupPrivatePath := filepath.Join(backup, "release-signing.pem")
+	backupPublicPath := filepath.Join(backup, "update-signing.pub")
+	backupFingerprint, err := BackupKeyPair(privatePath, publicPath, backupPrivatePath, backupPublicPath)
+	if err != nil || backupFingerprint != fingerprint {
+		t.Fatalf("BackupKeyPair() fingerprint=%q want=%q err=%v", backupFingerprint, fingerprint, err)
+	}
+	verifiedBackupFingerprint, err := VerifyKeyPair(backupPrivatePath, backupPublicPath)
+	if err != nil || verifiedBackupFingerprint != fingerprint {
+		t.Fatalf("verify backup fingerprint=%q want=%q err=%v", verifiedBackupFingerprint, fingerprint, err)
+	}
+	backupPrivateBefore, _ := os.ReadFile(backupPrivatePath)
+	backupPublicBefore, _ := os.ReadFile(backupPublicPath)
+	if _, err := BackupKeyPair(privatePath, publicPath, backupPrivatePath, backupPublicPath); err == nil {
+		t.Fatal("existing release signing backup was overwritten")
+	}
+	backupPrivateAfter, _ := os.ReadFile(backupPrivatePath)
+	backupPublicAfter, _ := os.ReadFile(backupPublicPath)
+	if !bytes.Equal(backupPrivateBefore, backupPrivateAfter) || !bytes.Equal(backupPublicBefore, backupPublicAfter) {
+		t.Fatal("failed repeat backup changed the existing identity")
+	}
+	if _, err := BackupKeyPair(privatePath, publicPath, filepath.Join(source, "backup-private.pem"), filepath.Join(source, "backup-public.pem")); err == nil {
+		t.Fatal("same-directory backup was accepted")
+	}
+
+	other := t.TempDir()
+	if err := os.Chmod(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	otherPrivate := filepath.Join(other, "other-private.pem")
+	otherPublic := filepath.Join(other, "other-public.pem")
+	if _, err := WriteKeyPair(otherPrivate, otherPublic); err != nil {
+		t.Fatal(err)
+	}
+	wrongPublic := filepath.Join(source, "wrong-public.pem")
+	content, err := os.ReadFile(otherPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrongPublic, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyKeyPair(privatePath, wrongPublic); err == nil {
+		t.Fatal("mismatched release signing pair was accepted")
+	}
+	mismatchBackup := t.TempDir()
+	if err := os.Chmod(mismatchBackup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BackupKeyPair(privatePath, wrongPublic, filepath.Join(mismatchBackup, "private.pem"), filepath.Join(mismatchBackup, "public.pem")); err == nil {
+		t.Fatal("mismatched source release signing pair was backed up")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(privatePath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadPrivateKey(privatePath); err == nil {
+			t.Fatal("permission-weakened private key was loaded")
+		}
 	}
 }
 

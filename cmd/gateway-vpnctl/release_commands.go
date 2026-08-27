@@ -19,8 +19,7 @@ func runReleaseKeygen(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *privateKey == "" || *publicKey == "" {
 		return 2
 	}
-	if runtime.GOOS != "linux" {
-		fmt.Fprintln(os.Stderr, "release signing identity must be generated on an isolated trusted Linux builder")
+	if !requireTrustedLinuxKeyOperation() {
 		return 1
 	}
 	fingerprint, err := updatepkg.WriteKeyPair(*privateKey, *publicKey)
@@ -32,6 +31,66 @@ func runReleaseKeygen(args []string) int {
 	return 0
 }
 
+func runReleaseKeyVerify(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpnctl release-key-verify", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	privateKey := flags.String("private-key", "", "PKCS#8 Ed25519 private key path")
+	publicKey := flags.String("public-key", "", "PKIX Ed25519 public key path")
+	jsonOutput := flags.Bool("json", false, "emit bounded JSON")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *privateKey == "" || *publicKey == "" {
+		return 2
+	}
+	if !requireTrustedLinuxKeyOperation() {
+		return 1
+	}
+	fingerprint, err := updatepkg.VerifyKeyPair(*privateKey, *publicKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "verify release signing identity failed")
+		return 1
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"signer_key_sha256": fingerprint, "verified": true})
+	} else {
+		fmt.Printf("Ed25519 release signing identity verified; public key SHA-256=%s\n", fingerprint)
+	}
+	return 0
+}
+
+func runReleaseKeyBackup(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpnctl release-key-backup", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	privateKey := flags.String("private-key", "", "source PKCS#8 Ed25519 private key path")
+	publicKey := flags.String("public-key", "", "source PKIX Ed25519 public key path")
+	backupPrivateKey := flags.String("backup-private-key", "", "new backup private key path")
+	backupPublicKey := flags.String("backup-public-key", "", "new backup public key path")
+	jsonOutput := flags.Bool("json", false, "emit bounded JSON")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *privateKey == "" || *publicKey == "" || *backupPrivateKey == "" || *backupPublicKey == "" {
+		return 2
+	}
+	if !requireTrustedLinuxKeyOperation() {
+		return 1
+	}
+	fingerprint, err := updatepkg.BackupKeyPair(*privateKey, *publicKey, *backupPrivateKey, *backupPublicKey)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "backup release signing identity failed")
+		return 1
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"signer_key_sha256": fingerprint, "backup_verified": true})
+	} else {
+		fmt.Printf("Ed25519 release signing identity backup created and verified; public key SHA-256=%s\n", fingerprint)
+	}
+	return 0
+}
+
+func requireTrustedLinuxKeyOperation() bool {
+	if runtime.GOOS == "linux" {
+		return true
+	}
+	fmt.Fprintln(os.Stderr, "release signing identity operations require an isolated trusted Linux builder")
+	return false
+}
+
 func runReleaseSign(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpnctl release-sign", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -40,6 +99,9 @@ func runReleaseSign(args []string) int {
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *releaseDir == "" || *privateKeyPath == "" {
 		return 2
+	}
+	if !requireTrustedLinuxKeyOperation() {
+		return 1
 	}
 	privateKey, err := updatepkg.LoadPrivateKey(*privateKeyPath)
 	if err != nil {

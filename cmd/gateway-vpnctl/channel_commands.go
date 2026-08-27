@@ -43,6 +43,9 @@ func runChannelSign(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *version == "" || *commit == "" || *privateKeyPath == "" || *outputDirectory == "" || len(artifacts) == 0 {
 		return 2
 	}
+	if !requireTrustedLinuxKeyOperation() {
+		return 1
+	}
 	generated := time.Now().UTC().Truncate(time.Second)
 	if *generatedAt != "" {
 		parsed, err := time.Parse(time.RFC3339, *generatedAt)
