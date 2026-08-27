@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/mihomo"
@@ -55,6 +56,7 @@ type Runtime struct {
 	Modems         *modem.Repository
 	Targets        *bypass.Repository
 	Paths          *pathmatrix.Repository
+	Preferences    *accesspolicy.PreferenceRepository
 	State          *state.Repository
 	TargetStates   TargetStateEvaluator
 	Controller     GenerationController
@@ -326,7 +328,7 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 }
 
 func (current *Runtime) validate() error {
-	if current.Subscriptions == nil || current.Versions == nil || current.Modems == nil || current.Targets == nil || current.Paths == nil || current.State == nil || current.TargetStates == nil || current.Controller == nil || current.Selector == nil || current.Routing == nil || current.EndpointAccess == nil || current.Prober == nil || strings.TrimSpace(current.PayloadRoot) == "" {
+	if current.Subscriptions == nil || current.Versions == nil || current.Modems == nil || current.Targets == nil || current.Paths == nil || current.Preferences == nil || current.State == nil || current.TargetStates == nil || current.Controller == nil || current.Selector == nil || current.Routing == nil || current.EndpointAccess == nil || current.Prober == nil || strings.TrimSpace(current.PayloadRoot) == "" {
 		return errors.New("candidate runtime dependencies are incomplete")
 	}
 	if current.EvidenceTTL < 0 {
@@ -550,8 +552,13 @@ func (current *Runtime) qualifyPaths(ctx context.Context, material candidateMate
 			return nil, fmt.Errorf("read path matrix cell for qualification: %w", err)
 		}
 		healthPath := health.Path{ID: cell.ID, ModemID: generatedPath.ModemID, SubscriptionID: material.Subscription.ID, ProviderName: generatedPath.ProviderName, ProbeGroupName: generatedPath.ProbeGroupName}
+		stickyNodeID := ""
 		if transitioning && !generatedPath.QualificationOnly && transition.ActivePathID == cell.ID && transition.PolicyTransitionGeneration == cell.PolicyGeneration {
-			healthPath.PreferredNodeID = transition.ActiveNodeID
+			stickyNodeID = transition.ActiveNodeID
+		}
+		healthPath.PreferredNodeIDs, err = current.preferredNodeIDs(ctx, material, stickyNodeID)
+		if err != nil {
+			return nil, err
 		}
 		for _, identity := range identities {
 			healthPath.Candidates = append(healthPath.Candidates, health.Candidate{NodeID: identity.ID, Fingerprint: identity.Fingerprint, ProviderNodeName: generatedPath.NodePrefix + identity.ExternalName})
@@ -563,6 +570,48 @@ func (current *Runtime) qualifyPaths(ctx context.Context, material candidateMate
 		results = append(results, qualification{Result: result, PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration})
 	}
 	return results, nil
+}
+
+func (current *Runtime) preferredNodeIDs(ctx context.Context, material candidateMaterial, stickyNodeID string) ([]string, error) {
+	preferences, err := current.Preferences.List(ctx, material.Subscription.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read preferred nodes for subscription %s: %w", material.Subscription.ID, err)
+	}
+	byFingerprint := make(map[string]string, len(material.NodesByID))
+	for _, identity := range material.NodesByID {
+		byFingerprint[identity.Fingerprint] = identity.ID
+	}
+	result := make([]string, 0, len(preferences)+1)
+	seen := make(map[string]struct{}, len(preferences)+1)
+	appendNode := func(nodeID string) {
+		if nodeID == "" {
+			return
+		}
+		if _, exists := seen[nodeID]; exists {
+			return
+		}
+		seen[nodeID] = struct{}{}
+		result = append(result, nodeID)
+	}
+	if stickyNodeID != "" {
+		if _, exists := material.NodesByID[stickyNodeID]; exists {
+			appendNode(stickyNodeID)
+		} else {
+			for _, preference := range preferences {
+				if preference.ActiveNodeID == stickyNodeID {
+					appendNode(byFingerprint[preference.Fingerprint])
+					break
+				}
+			}
+		}
+	}
+	for _, preference := range preferences {
+		if preference.PreferredRank <= 0 || preference.SelectionOverride == subscription.OverrideExclude {
+			continue
+		}
+		appendNode(byFingerprint[preference.Fingerprint])
+	}
+	return result, nil
 }
 
 func (current *Runtime) policyTransition(ctx context.Context) (state.Snapshot, bool, error) {

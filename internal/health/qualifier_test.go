@@ -112,6 +112,40 @@ func TestPreferredActiveNodeFailureFallsThroughToRemainingCandidates(t *testing.
 	}
 }
 
+func TestPreferredOrderTriesNodesSequentiallyAndSelectsFirstQualified(t *testing.T) {
+	prober := &fakeProber{
+		transport: map[string]ProbeResult{"node-a": pass(1), "node-b": pass(100), "node-c": pass(1)},
+		targets: map[string]map[string]ProbeResult{
+			"node-a": {"required": pass(1), "optional": pass(1)},
+			"node-b": {"required": pass(100), "optional": pass(100)},
+			"node-c": {"required": pass(1), "optional": pass(1)},
+		},
+	}
+	path := testPath()
+	path.PreferredNodeIDs = []string{"node-b", "node-a"}
+	result, err := (Qualifier{MaxConcurrency: 3}).QualifyCell(context.Background(), prober, path, testTargets())
+	if err != nil || result.SelectedNodeID != "node-b" || len(result.Nodes) != 1 {
+		t.Fatalf("ordered preferred qualification = %+v, %v", result, err)
+	}
+}
+
+func TestPreferredOrderBreaksEqualLimitedTieBeforeLatency(t *testing.T) {
+	prober := &fakeProber{
+		transport: map[string]ProbeResult{"node-a": pass(1), "node-b": pass(100), "node-c": pass(1)},
+		targets: map[string]map[string]ProbeResult{
+			"node-a": {"required": {State: ProbeFailed}, "optional": pass(1)},
+			"node-b": {"required": {State: ProbeFailed}, "optional": pass(100)},
+			"node-c": {"required": {State: ProbeFailed}, "optional": pass(1)},
+		},
+	}
+	path := testPath()
+	path.PreferredNodeIDs = []string{"node-b", "node-a"}
+	result, err := (Qualifier{MaxConcurrency: 3, ContinueAfterRequiredFailure: true}).QualifyCell(context.Background(), prober, path, testTargets())
+	if err != nil || result.State != CellDegraded || result.SelectedNodeID != "node-b" || len(result.Nodes) != 3 {
+		t.Fatalf("ordered preferred limited qualification = %+v, %v", result, err)
+	}
+}
+
 func testPath() Path {
 	return Path{
 		ID: "path-a", ModemID: "modem-a", SubscriptionID: "sub-a", ProviderName: "provider-a",

@@ -24,8 +24,11 @@ type ActiveNode struct {
 	SubscriptionName   string
 	ExternalName       string
 	ProxyType          string
+	Fingerprint        string
 	Enabled            bool
 	SelectionOverride  string
+	PreferredRank      int64
+	UserLabel          string
 	CandidateSource    string
 	MatchedMatcherID   string
 	Modems             []NodeModemStatus
@@ -81,10 +84,12 @@ func (repository *NodeRepository) ListActive(ctx context.Context, subscriptionID
 	}
 	query := `
 SELECT n.id, n.version_id, s.id, s.display_number, s.name,
-       n.external_name, n.proxy_type, n.enabled, n.selection_override,
-       n.candidate_source, n.matched_matcher_id
+	   n.external_name, n.proxy_type, n.fingerprint, n.enabled, n.selection_override,
+	   pref.preferred_rank, pref.user_label, n.candidate_source, n.matched_matcher_id
 FROM subscriptions AS s
-JOIN nodes AS n ON n.version_id=s.active_version_id`
+JOIN nodes AS n ON n.version_id=s.active_version_id
+LEFT JOIN subscription_node_preferences AS pref
+	   ON pref.subscription_id=s.id AND pref.fingerprint=n.fingerprint`
 	arguments := []any{}
 	if strings.TrimSpace(subscriptionID) != "" {
 		query += " WHERE s.id=?"
@@ -100,11 +105,14 @@ JOIN nodes AS n ON n.version_id=s.active_version_id`
 	for rows.Next() {
 		var item ActiveNode
 		var enabled int
-		var matched sql.NullString
-		if err := rows.Scan(&item.ID, &item.VersionID, &item.SubscriptionID, &item.SubscriptionNumber, &item.SubscriptionName, &item.ExternalName, &item.ProxyType, &enabled, &item.SelectionOverride, &item.CandidateSource, &matched); err != nil {
+		var rank sql.NullInt64
+		var label, matched sql.NullString
+		if err := rows.Scan(&item.ID, &item.VersionID, &item.SubscriptionID, &item.SubscriptionNumber, &item.SubscriptionName, &item.ExternalName, &item.ProxyType, &item.Fingerprint, &enabled, &item.SelectionOverride, &rank, &label, &item.CandidateSource, &matched); err != nil {
 			return nil, fmt.Errorf("scan active subscription node: %w", err)
 		}
 		item.Enabled = enabled != 0
+		item.PreferredRank = rank.Int64
+		item.UserLabel = label.String
 		item.MatchedMatcherID = matched.String
 		result = append(result, item)
 	}

@@ -1323,8 +1323,35 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	request.AddCookie(cookie)
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "reason_code") {
+	var matrixPayload struct {
+		Items []pathReadItem `json:"items"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &matrixPayload) != nil || len(matrixPayload.Items) != 2 {
 		t.Fatalf("matrix response = %d %s", response.Code, response.Body.String())
+	}
+	kinds := map[string]pathReadItem{}
+	for _, item := range matrixPayload.Items {
+		kinds[item.Kind] = item
+	}
+	if kinds[accesspolicy.MethodDirect].MethodID != accesspolicy.DirectMethodID || kinds[accesspolicy.MethodDirect].MethodName != "Прямой интернет" || kinds[accesspolicy.MethodDirect].ModemID != "modem-a" {
+		t.Fatalf("direct matrix row = %+v", kinds[accesspolicy.MethodDirect])
+	}
+	if kinds[accesspolicy.MethodSubscription].SubscriptionID != "sub-a" || kinds[accesspolicy.MethodSubscription].MethodID != "access:subscription:sub-a" {
+		t.Fatalf("subscription matrix row = %+v", kinds[accesspolicy.MethodSubscription])
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/modems", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"direct_path":{"id":"direct:path:modem-a"`) || !strings.Contains(response.Body.String(), `"paths":[`) {
+		t.Fatalf("modem path read model = %d %s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/subscriptions", nil)
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"direct_paths":[`) || !strings.Contains(response.Body.String(), `"paths":[`) {
+		t.Fatalf("subscription path read model = %d %s", response.Code, response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/gateway/status", nil)
 	request.AddCookie(cookie)
@@ -1481,6 +1508,63 @@ func TestAccessMethodsPolicyDirectOnlyAndOperationsAPI(t *testing.T) {
 	response = call(http.MethodDelete, "/api/v1/operations/completed?limit=10", "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"deleted":1`) {
 		t.Fatalf("clear operations = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPreferredNodeOrderAPIUsesActiveNodeIDsAndPreservesRuntime(t *testing.T) {
+	server, ctx := testServer(t)
+	versions := subscription.NewVersionRepository(server.dependencies.Database)
+	staged, err := versions.Stage(ctx, subscription.StageInput{
+		VersionID: "preferred-version", SubscriptionID: "sub-a",
+		Payload: []byte("vless://11111111-1111-1111-1111-111111111111@one.example:443#LTE-one\n" +
+			"vless://22222222-2222-2222-2222-222222222222@two.example:443#LTE-two\n"),
+	})
+	if err != nil || len(staged.Nodes) != 2 {
+		t.Fatalf("stage preferred nodes = %+v, %v", staged, err)
+	}
+	if err := versions.Activate(ctx, staged.Version.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.dependencies.Database.ExecContext(ctx, `
+UPDATE runtime_state SET gateway_state='ONLINE', path_state='PATH_ACTIVE',
+active_method_id='access:direct', active_method_kind='DIRECT',
+active_direct_path_id='direct:path:modem-a', active_modem_id='modem-a'
+WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := login(t, server)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	orderedIDs := []string{staged.Nodes[1].ID, staged.Nodes[0].ID}
+	response := call(http.MethodPut, "/api/v1/subscriptions/sub-a/nodes/priorities", `{"ids":["`+orderedIDs[0]+`","`+orderedIDs[1]+`"]}`)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"active_path_preserved":true`) {
+		t.Fatalf("preferred reorder = %d %s", response.Code, response.Body.String())
+	}
+	preferences, err := server.dependencies.NodePreferences.List(ctx, "sub-a")
+	if err != nil || len(preferences) != 2 || preferences[0].ActiveNodeID != orderedIDs[0] || preferences[0].PreferredRank != 10 || preferences[1].ActiveNodeID != orderedIDs[1] || preferences[1].PreferredRank != 20 {
+		t.Fatalf("stored preferred order = %+v, %v", preferences, err)
+	}
+	snapshot, err := server.dependencies.State.Get(ctx)
+	if err != nil || snapshot.PathState != state.PathActive || snapshot.ActiveDirectPathID != "direct:path:modem-a" {
+		t.Fatalf("runtime changed by preferred reorder = %+v, %v", snapshot, err)
+	}
+	response = call(http.MethodGet, "/api/v1/nodes?subscription_id=sub-a", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"preferred_rank":10`) || !strings.Contains(response.Body.String(), `"fingerprint"`) {
+		t.Fatalf("preferred node read model = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/subscriptions/sub-a/nodes/priorities", `{"ids":["`+orderedIDs[0]+`","`+orderedIDs[0]+`"]}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("duplicate preferred ids = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/subscriptions/missing/nodes/priorities", `{"ids":[]}`)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing preferred subscription = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -2410,6 +2494,9 @@ func testServer(t *testing.T) (*Server, context.Context) {
 	}
 	paths := pathmatrix.NewRepository(database)
 	if err := paths.ReconcileCells(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := accesspolicy.NewDirectPathRepository(database).Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	matchers := subscription.NewMatcherRepository(database)

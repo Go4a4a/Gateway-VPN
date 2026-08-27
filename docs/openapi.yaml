@@ -414,12 +414,21 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/{id}/nodes/priorities:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Nodes]
+      operationId: reorderPreferredSubscriptionNodes
+      summary: Сохранить частичный preferred-порядок активных разрешённых узлов подписки
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/paths/matrix:
     get:
       tags: [Paths]
       operationId: getPathMatrix
-      summary: Каноническая modem × subscription матрица
+      summary: Каноническая modem × access method матрица для direct и VPN
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/paths/{id}/nodes:
     parameters: [{$ref: '#/components/parameters/ID'}]

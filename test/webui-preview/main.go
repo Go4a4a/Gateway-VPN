@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/bypass"
@@ -374,6 +375,31 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		return err
 	}
 	previewNow := time.Now().UTC()
+	directPaths := accesspolicy.NewDirectPathRepository(database)
+	if err := directPaths.Reconcile(ctx); err != nil {
+		return err
+	}
+	allDirectPaths, err := directPaths.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, path := range allDirectPaths {
+		if path.ModemID != "modem-a" {
+			continue
+		}
+		if err := directPaths.Publish(ctx, accesspolicy.DirectResultUpdate{
+			PathID: path.ID, ExpectedPolicyGeneration: path.PolicyGeneration, ExpectedRouteGeneration: path.RouteGeneration,
+			TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 2002,
+			RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, OptionalTargetsPassed: 1, OptionalTargetsTotal: 1,
+			LatencyMS: 47, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute),
+			Targets: []accesspolicy.DirectTargetResult{
+				{TargetID: "target-required", State: "PASSED", LatencyMS: 21, HTTPStatus: 204, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
+				{TargetID: "target-optional", State: "PASSED", LatencyMS: 26, HTTPStatus: 200, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
+			},
+		}); err != nil {
+			return err
+		}
+	}
 	activePath, err := paths.Get(ctx, "modem-a", "sub-a")
 	if err != nil {
 		return err
@@ -440,6 +466,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
+		DirectPaths:         directPaths,
 		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,
 		BootIDReader: func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }, SubscriptionSecretRoot: secretRoot,
 		SubscriptionPayloadRoot: payloadRoot, ModemRuntime: previewRuntime{},

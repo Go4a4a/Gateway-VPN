@@ -80,6 +80,8 @@ type Dependencies struct {
 	SubscriptionRefresh     SubscriptionRefresher
 	SubscriptionDispatch    SubscriptionRefreshDispatcher
 	AccessPolicy            *accesspolicy.Repository
+	DirectPaths             *accesspolicy.DirectPathRepository
+	NodePreferences         *accesspolicy.PreferenceRepository
 	Operations              *operations.Repository
 	BootIDReader            func() (string, error)
 	SubscriptionSecretRoot  string
@@ -225,6 +227,12 @@ func New(dependencies Dependencies) (*Server, error) {
 	if dependencies.AccessPolicy == nil {
 		dependencies.AccessPolicy = accesspolicy.NewRepository(dependencies.Database)
 	}
+	if dependencies.DirectPaths == nil {
+		dependencies.DirectPaths = accesspolicy.NewDirectPathRepository(dependencies.Database)
+	}
+	if dependencies.NodePreferences == nil {
+		dependencies.NodePreferences = accesspolicy.NewPreferenceRepository(dependencies.Database)
+	}
 	if dependencies.Operations == nil {
 		dependencies.Operations = operations.NewRepository(dependencies.Database)
 	}
@@ -288,6 +296,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/subscriptions/refresh", server.protected(http.HandlerFunc(server.refreshSubscriptions)))
 	mux.Handle("GET /api/v1/nodes", server.protected(http.HandlerFunc(server.nodes)))
 	mux.Handle("PATCH /api/v1/nodes/{id}", server.protected(http.HandlerFunc(server.updateNode)))
+	mux.Handle("PUT /api/v1/subscriptions/{id}/nodes/priorities", server.protected(http.HandlerFunc(server.reorderPreferredNodes)))
 	mux.Handle("GET /api/v1/paths/matrix", server.protected(http.HandlerFunc(server.matrix)))
 	mux.Handle("GET /api/v1/paths/{id}/nodes", server.protected(http.HandlerFunc(server.pathNodes)))
 	mux.Handle("POST /api/v1/paths/{id}/qualify", server.protected(http.HandlerFunc(server.qualifyPath)))
@@ -967,8 +976,25 @@ func (server *Server) modems(writer http.ResponseWriter, request *http.Request) 
 		writeInternalError(writer, err)
 		return
 	}
+	paths, err := server.readAccessPaths(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	pathsByModem := make(map[string][]pathReadItem, len(items))
+	for _, path := range paths {
+		pathsByModem[path.ModemID] = append(pathsByModem[path.ModemID], path)
+	}
 	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
+		modemPaths := pathsByModem[item.ID]
+		var directPath any
+		for index := range modemPaths {
+			if modemPaths[index].Kind == accesspolicy.MethodDirect {
+				directPath = modemPaths[index]
+				break
+			}
+		}
 		result = append(result, map[string]any{
 			"id": item.ID, "number": item.DisplayNumber, "name": item.Name,
 			"operator_label": item.OperatorLabel, "observed_operator": item.ObservedOperator,
@@ -978,6 +1004,7 @@ func (server *Server) modems(writer http.ResponseWriter, request *http.Request) 
 			"state": item.State, "telemetry_state": item.TelemetryState,
 			"management_reachability_state": item.ManagementReachabilityState,
 			"last_seen_at":                  item.LastSeenAt, "stable_since": item.StableSince,
+			"direct_path": directPath, "paths": modemPaths,
 		})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
@@ -1500,6 +1527,20 @@ func (server *Server) subscriptions(writer http.ResponseWriter, request *http.Re
 		writeInternalError(writer, err)
 		return
 	}
+	paths, err := server.readAccessPaths(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	pathsBySubscription := make(map[string][]pathReadItem, len(items))
+	directPaths := make([]pathReadItem, 0)
+	for _, path := range paths {
+		if path.Kind == accesspolicy.MethodDirect {
+			directPaths = append(directPaths, path)
+			continue
+		}
+		pathsBySubscription[path.SubscriptionID] = append(pathsBySubscription[path.SubscriptionID], path)
+	}
 	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		result = append(result, map[string]any{
@@ -1510,9 +1551,10 @@ func (server *Server) subscriptions(writer http.ResponseWriter, request *http.Re
 			"fallback_when_named_candidates_fail": item.FallbackWhenNamedCandidatesFail,
 			"status":                              item.Status, "active_version_id": item.ActiveVersionID,
 			"last_refresh_at": item.LastRefreshAt, "last_success_at": item.LastSuccessAt,
+			"paths": pathsBySubscription[item.ID],
 		})
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+	writeJSON(writer, http.StatusOK, map[string]any{"items": result, "direct_paths": directPaths})
 }
 
 func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {
@@ -1535,8 +1577,9 @@ func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {
 		result = append(result, map[string]any{
 			"id": item.ID, "version_id": item.VersionID,
 			"subscription_id": item.SubscriptionID, "subscription_number": item.SubscriptionNumber, "subscription_name": item.SubscriptionName,
-			"external_name": item.ExternalName, "proxy_type": item.ProxyType, "candidate": item.Enabled,
+			"external_name": item.ExternalName, "proxy_type": item.ProxyType, "fingerprint": item.Fingerprint, "candidate": item.Enabled,
 			"selection_override": item.SelectionOverride, "candidate_source": item.CandidateSource,
+			"preferred_rank": item.PreferredRank, "user_label": item.UserLabel,
 			"matched_matcher_id": item.MatchedMatcherID, "modems": modems,
 		})
 	}
@@ -1557,6 +1600,49 @@ func (server *Server) updateNode(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, map[string]any{"subscription_id": subscriptionID, "qualification": server.requalifyReadyModems(request.Context())})
+}
+
+func (server *Server) reorderPreferredNodes(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	subscriptionID := request.PathValue("id")
+	nodes, err := server.dependencies.Nodes.ListActive(request.Context(), subscriptionID)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	byID := make(map[string]subscription.ActiveNode, len(nodes))
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	fingerprints := make([]string, 0, len(input.IDs))
+	seen := make(map[string]struct{}, len(input.IDs))
+	for _, id := range input.IDs {
+		node, exists := byID[id]
+		if !exists || !node.Enabled || node.SelectionOverride == subscription.OverrideExclude {
+			writeDomainError(writer, store.ErrPrioritySetMismatch)
+			return
+		}
+		if _, duplicate := seen[id]; duplicate {
+			writeDomainError(writer, store.ErrPrioritySetMismatch)
+			return
+		}
+		seen[id] = struct{}{}
+		fingerprints = append(fingerprints, node.Fingerprint)
+	}
+	if err := server.dependencies.NodePreferences.ReorderPreferred(request.Context(), subscriptionID, fingerprints); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{
+		"subscription_id": subscriptionID, "preferred_node_ids": input.IDs,
+		"applies_on": "NEXT_QUALIFICATION_OR_FAILOVER", "active_path_preserved": true,
+	})
 }
 
 func (server *Server) refreshSubscription(writer http.ResponseWriter, request *http.Request) {
@@ -1643,29 +1729,12 @@ func (server *Server) writeRefreshDispatchError(writer http.ResponseWriter, err 
 }
 
 func (server *Server) matrix(writer http.ResponseWriter, request *http.Request) {
-	items, err := server.dependencies.Paths.List(request.Context())
+	items, err := server.readAccessPaths(request.Context())
 	if err != nil {
 		writeInternalError(writer, err)
 		return
 	}
-	now := server.now()
-	result := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		effectiveState, reason := effectivePathState(item, now)
-		result = append(result, map[string]any{
-			"id": item.ID, "modem_id": item.ModemID, "modem_number": item.ModemDisplayNumber,
-			"modem_name": item.ModemName, "modem_priority": item.ModemPriority,
-			"subscription_id": item.SubscriptionID, "subscription_name": item.SubscriptionName,
-			"subscription_priority": item.SubscriptionPriority, "state": effectiveState,
-			"stored_state": item.State, "reason_code": reason, "transport_state": item.TransportState,
-			"selected_node_id": item.SelectedNodeID, "candidate_nodes": item.CandidateNodes,
-			"qualified_nodes": item.QualifiedNodes, "required_targets_passed": item.RequiredTargetsPassed,
-			"required_targets_total": item.RequiredTargetsTotal, "latency_ms": item.LatencyMS,
-			"policy_generation": item.PolicyGeneration, "route_generation": item.RouteGeneration,
-			"last_checked_at": item.LastCheckedAt, "expires_at": item.ExpiresAt,
-		})
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 }
 
 func (server *Server) pathNodes(writer http.ResponseWriter, request *http.Request) {
@@ -3378,12 +3447,15 @@ func (server *Server) now() time.Time {
 }
 
 func effectivePathState(cell pathmatrix.Cell, now time.Time) (string, string) {
-	if cell.State == pathmatrix.StateQualified && cell.ExpiresAt != "" {
+	if cell.State == pathmatrix.StateQualified || cell.State == pathmatrix.StateDegraded {
 		expires, err := time.Parse(time.RFC3339Nano, cell.ExpiresAt)
 		if err != nil || !expires.After(now) {
 			return pathmatrix.StateStale, "RESULT_EXPIRED"
 		}
-		return cell.State, "FRESH_QUALIFIED"
+		if cell.State == pathmatrix.StateQualified {
+			return cell.State, "FRESH_FULL"
+		}
+		return cell.State, "FRESH_LIMITED"
 	}
 	return cell.State, cell.State
 }

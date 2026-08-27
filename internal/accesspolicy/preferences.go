@@ -97,6 +97,13 @@ func (repository *PreferenceRepository) ReorderPreferred(ctx context.Context, su
 		return fmt.Errorf("begin preferred node reorder: %w", err)
 	}
 	defer transaction.Rollback()
+	var subscriptionExists int
+	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscriptions WHERE id=?", subscriptionID).Scan(&subscriptionExists); err != nil {
+		return fmt.Errorf("validate preferred node subscription: %w", err)
+	}
+	if subscriptionExists != 1 {
+		return store.ErrNotFound
+	}
 	for _, fingerprint := range fingerprints {
 		var count int
 		if err := transaction.QueryRowContext(ctx, `
@@ -105,7 +112,8 @@ FROM subscription_node_preferences AS p
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN nodes AS n ON n.version_id=s.active_version_id AND n.fingerprint=p.fingerprint
 WHERE p.subscription_id=? AND p.fingerprint=?
-  AND p.selection_override<>'exclude'`, subscriptionID, fingerprint).Scan(&count); err != nil {
+  AND p.selection_override<>'exclude'
+  AND n.enabled=1 AND n.selection_override<>'exclude'`, subscriptionID, fingerprint).Scan(&count); err != nil {
 			return fmt.Errorf("validate preferred subscription node: %w", err)
 		}
 		if count != 1 {

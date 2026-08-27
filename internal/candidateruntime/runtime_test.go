@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/health"
@@ -109,6 +110,65 @@ type runtimeFixture struct {
 	oldVersionID     string
 	candidate        subscription.Candidate
 	candidateRuntime *Runtime
+}
+
+func TestPreferredNodeOrderAndStickyIdentityTransferByFingerprint(t *testing.T) {
+	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true})
+	defer fixture.database.Close()
+	stored, err := fixture.versions.ListNodes(fixture.ctx, fixture.oldVersionID, true)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("old active nodes = %+v, %v", stored, err)
+	}
+	if err := fixture.candidateRuntime.Preferences.ReorderPreferred(fixture.ctx, "sub-a", []string{stored[0].Fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	material := candidateMaterial{
+		Subscription: subscription.Subscription{ID: "sub-a"},
+		NodesByID: map[string]nodeIdentity{
+			"node-new-version": {ID: "node-new-version", Fingerprint: stored[0].Fingerprint, ExternalName: "renamed"},
+		},
+	}
+	ordered, err := fixture.candidateRuntime.preferredNodeIDs(fixture.ctx, material, stored[0].ID)
+	if err != nil || len(ordered) != 1 || ordered[0] != "node-new-version" {
+		t.Fatalf("transferred preferred order = %+v, %v", ordered, err)
+	}
+}
+
+func TestPreferredNodeOrderSelectsFirstQualifiedNodeInRuntimePath(t *testing.T) {
+	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true, "modem-b": true})
+	defer fixture.database.Close()
+	staged, err := fixture.versions.Stage(fixture.ctx, subscription.StageInput{
+		VersionID: "version-preferred", SubscriptionID: "sub-a",
+		Payload: []byte("vless://33333333-3333-3333-3333-333333333333@first.example.com:443#LTE-first\n" +
+			"vless://44444444-4444-4444-4444-444444444444@second.example.com:443#LTE-second\n"),
+	})
+	if err != nil || len(staged.Nodes) != 2 {
+		t.Fatalf("stage preferred runtime nodes = %+v, %v", staged, err)
+	}
+	if _, err := subscription.WriteNormalizedPayload(fixture.payloadRoot, "sub-a", staged.Version.ID, staged.Import); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.versions.Activate(fixture.ctx, staged.Version.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.candidateRuntime.Preferences.ReorderPreferred(fixture.ctx, "sub-a", []string{staged.Nodes[1].Fingerprint, staged.Nodes[0].Fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.paths.ReconcileCells(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	cell, err := fixture.paths.Get(fixture.ctx, "modem-a", "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := fixture.candidateRuntime.QualifyPath(fixture.ctx, cell.ID)
+	if err != nil || operation.Result.SelectedNodeID != staged.Nodes[1].ID || len(operation.Result.Nodes) != 1 {
+		t.Fatalf("preferred runtime qualification = %+v, %v", operation, err)
+	}
+	stored, err := fixture.paths.GetByID(fixture.ctx, cell.ID)
+	if err != nil || stored.SelectedNodeID != staged.Nodes[1].ID || stored.State != pathmatrix.StateQualified {
+		t.Fatalf("stored preferred runtime path = %+v, %v", stored, err)
+	}
 }
 
 func TestDisabledSubscriptionLKGRemainsServiceOnlyInMihomoBundle(t *testing.T) {
@@ -474,6 +534,7 @@ func newRuntimeFixture(t *testing.T, passing map[string]bool) runtimeFixture {
 		Modems:         modems,
 		Targets:        targets,
 		Paths:          paths,
+		Preferences:    accesspolicy.NewPreferenceRepository(database),
 		State:          state.NewRepository(database),
 		TargetStates:   &health.TargetOutageEvaluator{Database: database, Config: health.DefaultTargetOutageConfig()},
 		Controller:     controller,

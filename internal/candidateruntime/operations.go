@@ -170,8 +170,15 @@ func (current *Runtime) runPathOperation(ctx context.Context, pathID, nodeID str
 	if err != nil {
 		return PathOperationResult{}, restore(err)
 	}
+	stickyNodeID := ""
 	if nodeID == "" && transitioning && transition.ActivePathID == cell.ID && transition.PolicyTransitionGeneration == cell.PolicyGeneration {
-		healthPath.PreferredNodeID = transition.ActiveNodeID
+		stickyNodeID = transition.ActiveNodeID
+	}
+	if nodeID == "" {
+		healthPath.PreferredNodeIDs, err = current.preferredNodeIDs(ctx, material, stickyNodeID)
+		if err != nil {
+			return PathOperationResult{}, restore(err)
+		}
 	}
 	identities := make([]nodeIdentity, 0, len(material.NodesByID))
 	for _, identity := range material.NodesByID {

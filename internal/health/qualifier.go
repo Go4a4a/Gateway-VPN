@@ -41,13 +41,14 @@ type Candidate struct {
 }
 
 type Path struct {
-	ID              string
-	ModemID         string
-	SubscriptionID  string
-	ProviderName    string
-	ProbeGroupName  string
-	PreferredNodeID string
-	Candidates      []Candidate
+	ID               string
+	ModemID          string
+	SubscriptionID   string
+	ProviderName     string
+	ProbeGroupName   string
+	PreferredNodeID  string
+	PreferredNodeIDs []string
+	Candidates       []Candidate
 }
 
 type ProbeResult struct {
@@ -126,9 +127,21 @@ func (qualifier Qualifier) QualifyCell(ctx context.Context, prober Prober, curre
 	}
 	candidates := append([]Candidate(nil), currentPath.Candidates...)
 	results := make([]NodeResult, 0, len(candidates))
-	if currentPath.PreferredNodeID != "" {
+	preferredIDs := make([]string, 0, len(currentPath.PreferredNodeIDs)+1)
+	seenPreferred := make(map[string]struct{}, len(currentPath.PreferredNodeIDs)+1)
+	for _, nodeID := range append([]string{currentPath.PreferredNodeID}, currentPath.PreferredNodeIDs...) {
+		if nodeID == "" {
+			continue
+		}
+		if _, exists := seenPreferred[nodeID]; exists {
+			continue
+		}
+		seenPreferred[nodeID] = struct{}{}
+		preferredIDs = append(preferredIDs, nodeID)
+	}
+	for _, preferredNodeID := range preferredIDs {
 		for index, candidate := range candidates {
-			if candidate.NodeID != currentPath.PreferredNodeID {
+			if candidate.NodeID != preferredNodeID {
 				continue
 			}
 			preferred := qualifyNode(ctx, prober, currentPath, candidate, orderedTargets, requiredTotal, optionalTotal, qualifier.ContinueAfterRequiredFailure)
@@ -201,14 +214,24 @@ func buildCellResult(currentPath Path, candidateCount, requiredTotal, optionalTo
 	}
 	bestIndex := -1
 	limitedIndex := -1
+	preferredRank := make(map[string]int, len(currentPath.PreferredNodeIDs)+1)
+	nextRank := 0
+	for _, nodeID := range append([]string{currentPath.PreferredNodeID}, currentPath.PreferredNodeIDs...) {
+		if nodeID == "" {
+			continue
+		}
+		if _, exists := preferredRank[nodeID]; exists {
+			continue
+		}
+		preferredRank[nodeID] = nextRank
+		nextRank++
+	}
 	for index, result := range results {
 		if result.Transport.State == ProbePassed {
 			cell.TransportState = ProbePassed
 		}
 		if result.State != NodeQualified {
-			if result.State == NodeLimited && (limitedIndex == -1 || nodeFunctionalScore(result) > nodeFunctionalScore(results[limitedIndex]) ||
-				nodeFunctionalScore(result) == nodeFunctionalScore(results[limitedIndex]) && (result.AggregateLatencyMS < results[limitedIndex].AggregateLatencyMS ||
-					result.AggregateLatencyMS == results[limitedIndex].AggregateLatencyMS && result.NodeID < results[limitedIndex].NodeID)) {
+			if result.State == NodeLimited && (limitedIndex == -1 || betterLimitedNode(result, results[limitedIndex], preferredRank)) {
 				limitedIndex = index
 			}
 			continue
@@ -236,6 +259,22 @@ func buildCellResult(currentPath Path, candidateCount, requiredTotal, optionalTo
 		cell.LatencyMS = best.AggregateLatencyMS
 	}
 	return cell
+}
+
+func betterLimitedNode(candidate, current NodeResult, preferred map[string]int) bool {
+	if nodeFunctionalScore(candidate) != nodeFunctionalScore(current) {
+		return nodeFunctionalScore(candidate) > nodeFunctionalScore(current)
+	}
+	candidateRank, candidatePreferred := preferred[candidate.NodeID]
+	currentRank, currentPreferred := preferred[current.NodeID]
+	if candidatePreferred != currentPreferred {
+		return candidatePreferred
+	}
+	if candidatePreferred && candidateRank != currentRank {
+		return candidateRank < currentRank
+	}
+	return candidate.AggregateLatencyMS < current.AggregateLatencyMS ||
+		candidate.AggregateLatencyMS == current.AggregateLatencyMS && candidate.NodeID < current.NodeID
 }
 
 func qualifyNode(ctx context.Context, prober Prober, currentPath Path, candidate Candidate, targets []Target, requiredTotal, optionalTotal int, continueAfterRequiredFailure bool) NodeResult {

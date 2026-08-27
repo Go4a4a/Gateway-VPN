@@ -94,6 +94,9 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		return dataPlaneComponents{}, err
 	}
 	directPaths := accesspolicy.NewDirectPathRepository(database)
+	if err := directPaths.Reconcile(ctx); err != nil {
+		return dataPlaneComponents{}, fmt.Errorf("reconcile direct Internet paths: %w", err)
+	}
 	accessPolicies := accesspolicy.NewRepository(database)
 	directProber, err := directprobe.New(modems, directPaths, targets, broker, probeScheduler, configuration.Mihomo.BootstrapDNS)
 	if err != nil {
@@ -129,6 +132,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		Modems:         modems,
 		Targets:        targets,
 		Paths:          paths,
+		Preferences:    accesspolicy.NewPreferenceRepository(database),
 		State:          states,
 		TargetStates:   &health.TargetOutageEvaluator{Database: database, Config: health.DefaultTargetOutageConfig()},
 		Controller:     transactions,
