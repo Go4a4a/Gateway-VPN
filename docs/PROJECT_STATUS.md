@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-28
-**Общее состояние:** `UNIFIED_READ_MODEL_NODE_PREFERENCE_REMOTE_CI_PASS / RELEASE_GATES_PENDING`
-**Текущий этап:** единый typed read model `modem × access method` реализован для direct и VPN и используется API/WebUI вкладок «Модемы», «Подписки» и «Матрица путей». Preferred order VPN-серверов подключён к API, раскрываемому UI по подпискам и runtime qualification: первый FULL preferred node выбирается последовательно, equal-function LIMITED учитывает rank до latency, а active transition остаётся sticky. Exact commit `f5f4de9b5980d0324164b0ef9888e33bc4b68944` опубликован; GitHub Actions run `33117118977` подтвердил полный Go/race/packaging/syntax suite и Linux nftables/netns fail-closed gate.
+**Общее состояние:** `SIGNED_SUCCESSOR_9301E05_UPDATE_RECOVERY_PASS / FRESH_FINAL_GATES_PENDING`
+**Текущий этап:** exact signed successor `0.1.0-successor.9301e05` воспроизводимо собран из `9301e0581b879bfb2ecf05af9e4e1e40142f23af`. Controlled rejection доказал rollback `16 → 13`; successful update доказал миграцию `13 → 16`, ранний no-op finalizer, точную production finalization и новый PID 1. Аварийное завершение всего systemd host в durable `HEALTH_CHECKING` на следующем boot восстановило baseline/schema 13 с `BOOT_OR_PROCESS_RECOVERY` и `PATH_BLOCKED`. До install-ready handoff остаются clean fresh install/idempotency/reboot и повторный kernel/netns gate exact candidate, commit/push тестового harness и exact GitHub CI.
 
-**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `97%`: schema/domain, direct qualification, schema-v3 actuator, selector, resilient refresh, boot policy, management interface, единый direct/VPN read model и preferred-node runtime closure готовы локально. До нового install-ready candidate остаются публикация exact commit и повторные signed packaging, fresh Ubuntu systemd/netns install/update/rollback gates. Общая production-готовность оценивается примерно в `92–93%`; production publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance остаются отдельными несокращаемыми gates.
+**Оценка прогресса:** программная реализация unified-access successor выполнена примерно на `98%`; exact update/rollback/finalize и reboot/power-cut recovery прошли, а fresh final gates ещё не завершены. Общая production-готовность оценивается примерно в `93%`: public RC, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательные реальные 24/72-часовые endurance остаются отдельными несокращаемыми gates. Test-only перенос stability deadline не считается фактически прошедшими 24 часами.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -20,7 +20,7 @@
 ## Режим работы Codex
 
 - штатный уровень мышления для разработки — `High / Высокий`;
-- текущий явно подтверждённый пользователем уровень — `High / Высокий`; он сохраняется до другого явно подтверждённого переключения;
+- текущий явно подтверждённый пользователем уровень — `xhigh / Очень высокий`; он сохраняется до другого явно подтверждённого переключения;
 - обязательный протокол повышения и возврата уровня хранится в корневом `AGENTS.md`;
 - сообщение Codex о рекомендуемом уровне не является переключением;
 - перед любым повышением или понижением Codex обязан остановить проектную работу, сообщить уровень и причину и дождаться явного подтверждения переключения;
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_F5F4DE9 / REMOTE_CI_PASS` | Unified read-model/preference block опубликован в `Go4a4a/Gateway-VPN`; exact GitHub Actions run `33117118977` для `f5f4de9b5980d0324164b0ef9888e33bc4b68944` завершён `success`. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_66D0D09 / LOCAL_9301E05_PLUS_GATE_HARNESS` | `origin/main` содержит CI evidence commit `66d0d09`; product fixes находятся в чистом local HEAD `9301e0581b879bfb2ecf05af9e4e1e40142f23af`, новый source-only release-gate harness пока не зафиксирован. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -45,18 +45,18 @@
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
 | Unified access methods | `READ_MODEL_PREFERENCES_REMOTE_CI_PASS / RELEASE_GATES_PENDING` | Direct + subscriptions имеют один authenticated ordered list и один server-side read model. Каждый modem показывает direct и все VPN methods; каждая subscription — все modem paths; matrix содержит оба kind. Preferred node order, fingerprint transfer и sticky transition подключены к runtime без немедленного обрыва active path |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
-| SQLite | `V16_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15 → 16`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
+| SQLite | `V16_EXACT_SIGNED_UPDATE_ROLLBACK_RECOVERY_PASS` | Exact candidate мигрировал schema-13 baseline до 16; controlled rejection и аварийный boot recovery вернули verified schema 13. Successful finalization/reboot сохранили 16; во всех состояниях `quick_check=ok`, foreign-key violations `0` |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
 | API / Web UI | `98_ROUTE_CONTRACT_LOCAL_PASS / HOST_NOT_RUN` | OpenAPI покрывает все 98 зарегистрированных method routes. Direct/VPN status приходит одинаковым typed DTO во все три вкладки; «VPN-серверы» раскрываются по подпискам и позволяют AUTO/INCLUDE/EXCLUDE и partial preferred order. Loopback API preview прошёл; actual signed browser smoke и реальная LAN-карта ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, host snapshot, audit/rate limit и WebUI download покрыты tests; fixed `database/retention.json` дополнительно даёт path-free policy, table ranges/counts, version excess и DB/WAL/page/freelist sizes. Реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
-| Signed update | `FORMAT2_UPDATE_ROLLBACK_FINALIZE_REBOOT_PASS` | Exact schema `1 → 2` миграция, controlled health-failure rollback `2 → 1`, повторный update, successful finalization и finalized reboot прошли с правильными firewall/current/recovery/DB. `FINALIZED`/`ROLLED_BACK` timer ticks имеют code `0`, failed units отсутствуют, host contract baseline/candidate совпадает |
-| Packaging | `PRODUCTION_GVKEY_READY / GENERIC_COMMAND_LOCAL_PASS / PUBLIC_RELEASE_PENDING` | Permanent primary и byte-identical backup созданы hidden-password workflow. Release/channel builders больше не кодируют NIC/CIDR; unit/packaging/shell/cross-build gates проходят. Новый exact disposable full-bundle gate ещё требуется; public tags/releases отсутствуют |
+| Signed update | `EXACT_13_TO_16_ROLLBACK_FINALIZE_REBOOT_POWER_CUT_PASS` | Candidate `9301e05` прошёл controlled health rejection, successful `13 → 16`, early finalizer no-op, exact finalization, finalized reboot и whole-host interruption в `HEALTH_CHECKING`. Recovery вернул baseline/schema 13 с `BOOT_OR_PROCESS_RECOVERY`; `PATH_BLOCKED` сохранялся. Реальные 24 часа не ожидались и не заявляются |
+| Packaging | `PRODUCTION_GVKEY_READY / REPRODUCIBLE_9301E05_SIGNED / FRESH_GATE_PENDING` | Две offline сборки exact candidate совпали по SHA-256/mode/size всех 78 файлов. Signer fingerprint `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`; generic installer не кодирует NIC/CIDR. Public tags/releases отсутствуют |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_F5F4DE9_PASS` | Exact commit `f5f4de9b5980d0324164b0ef9888e33bc4b68944` прошёл GitHub Actions run `33117118977`: Go/race/packaging/syntax job — 2m25s, Linux nftables/netns job — 1m14s, весь run — 3m46s; обе обязательные jobs завершены `success` |
+| Автоматические тесты | `LOCAL_9301E05_PLUS_HARNESS_PASS / REMOTE_CI_PENDING` | Full Windows `go test ./... -count=1`, full `go vet ./...`, четыре CGO-free Linux/amd64 builds, JS/shell syntax и release-gate helper tests проходят. Exact remote race/netns CI будет авторитетным только после commit/push |
 
 ## Матрица доказательств Definition of Done
 
@@ -67,7 +67,7 @@
 | 1 | `NOT_RUN_EXTERNAL` | H2 требует минимум два реальных HiLink, включая Huawei E3372h-325, и целевой Keenetic; runbook готов, hardware evidence отсутствует |
 | 2 | `PARTIAL_EXTERNAL` | Unit/integration/netns failure matrix и точечные systemd recovery gates проходят; полная H1/H2 matrix на физическом packet path не запускалась |
 | 3 | `PARTIAL_EXTERNAL` | Kernel/netns fail-closed и IPv6 policy проверены; обязательные IPv4/DNS/IPv6 captures за Keenetic и через реальные HiLink отсутствуют |
-| 4 | `PASS_LOCAL` | Invalid subscription/config сохраняют LKG; signed format-2 update имеет доказанные rollback `13 → 12`, recovery и terminal no-op |
+| 4 | `PASS_LOCAL` | Invalid subscription/config сохраняют LKG; exact signed format-2 candidate имеет доказанные migration `13 → 16`, controlled rollback и boot/process recovery `16 → 13`, finalization/reboot и terminal no-op |
 | 5 | `PARTIAL_EXTERNAL` | ON/OFF startup policy подключена к реальному Linux boot ID, runtime и firewall-gated actuator: ON инвалидирует старое evidence, OFF разрешает одно exact LKG/direct recovery и не отключает quarantine. Реальный reboot на физическом Gateway ещё не выполнен |
 | 6 | `PARTIAL_EXTERNAL` | Production broker и synthetic WireGuard handshake/failover прошли; реальный VPS/provider UDP и переключение между physical modem uplinks не проверены |
 | 7 | `PASS_LOCAL` | Exact Ubuntu/systemd install слушает HTTPS только на management LAN; auth/bootstrap/session/CSRF/rate-limit и bind allowlist покрыты tests |
@@ -283,8 +283,57 @@
 | DEV-161 | 2026-08-27 | Manual subscription refresh сначала атомарно получает durable lease и создаёт `QUEUED` operation, затем передаётся в bounded dispatcher `2 workers / 64 capacity`; HTTP request context после ответа не используется. Повторный manual/scheduled request возвращает owner ID действующего lease. На process restart старые leases освобождаются, а QUEUED/RUNNING operations терминализируются `PROCESS_RESTART` | UI должен немедленно получить стабильный ID без второго fetch, goroutine/queue не могут расти без границ, а crash не должен оставлять ложное вечное RUNNING или блокировать refresh до 30-минутного lease timeout |
 | DEV-162 | 2026-08-28 | Единственный Web/API read model является `modem × access method` и содержит как immutable direct row каждого модема, так и VPN row каждой subscription; effective freshness, quality, evidence, active identity и reason вычисляются только backend. Modems и Subscriptions получают проекции тех же typed rows, а не пересчитывают health | Три логические вкладки не должны показывать разные состояния одного пути. Frontend aggregation скрывала direct path и могла считать просроченный LIMITED результат рабочим |
 | DEV-163 | 2026-08-28 | Preferred node API принимает active version node IDs, но durable порядок хранит по fingerprint. Runtime переводит fingerprint в новый version-scoped ID, последовательно проверяет preferred nodes до первого FULL, использует rank раньше latency при равном LIMITED score и ставит active transition node первым. Reorder не закрывает текущий путь и применяется при следующей qualification/failover | Пользователю нужны постоянный основной сервер и упорядоченный резерв без потери выбора после refresh. Одновременное переключение при редактировании порядка создало бы flap; хранение node ID не пережило бы immutable version update |
+| DEV-164 | 2026-08-28 | Перед повторными update health/rollback/recovery starts сбрасывать start-limit только у фиксированного набора owned firewall/guard/runtime units после установки `PATH_BLOCKED`; реальные start/health ошибки не маскировать | Systemd считает даже успешные oneshot starts: несколько штатных quiesce/activation/rollback cycles блокировали firewall, затем network-recovery, хотя сами команды были корректны. Scoped `reset-failed` не открывает data path и не касается чужих units |
+| DEV-165 | 2026-08-28 | Сокращение 24-часового update stability window допускается только source-only release-gate helper с двойным подтверждением, exact update ID и состоянием `STABILIZING`; результат доказывает finalizer mechanics, но никогда не доказывает реальную 24-часовую стабильность | Ожидание суток не нужно для проверки atomic recovery pointer/checksum/terminal state, однако искусственное время нельзя смешивать с endurance evidence или production acceptance |
 
 ## Журнал разработки
+
+### Сессия 080 — xhigh signed successor, update recovery и test harness — 2026-08-28
+
+**Точный candidate:**
+
+- product commit: `9301e0581b879bfb2ecf05af9e4e1e40142f23af`;
+- version: `0.1.0-successor.9301e05`, Mihomo `v1.19.30`, schema `1..16`;
+- signer SHA-256: `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`;
+- host contract: `db8de3d29a520938f98f2a24baa304b75875ba3606d7fd3c0bb0b267f5eeaa41`;
+- Gateway archive: `cfa72be651ea0fd03e108052128598fb29c902821110b996407bea21ccdf87e7`;
+- VPS archive: `afaa286c1ec77f014ab6948f28765511bbc1ac13f10c903b879fd008f0b712e8`;
+- bootstrap: `4c1acf859a30f03cddf9a782a0703e93f2bbcc853c1fe704d1779eb421b7b0a9`;
+- deploy: `ddee5835b3080e62fcaef2a14a06d6182af50e00c4f3e1f7b13c6a6564c46eba`;
+- channel: `92238a368b0eeb517d190a94cd93916a4bf2244cac8732b9bbc481c2d59e2bfd`;
+- две независимые clean/offline Linux-сборки совпали по SHA-256, Unix mode и size всех `78` файлов.
+
+**Найдено и исправлено xhigh gates:**
+
+- candidate `4038525` доказал, что повторные штатные fail-closed firewall/guard restarts могут накопить systemd `start-limit-hit`; commit `35d2d06` добавил scoped reset только этих owned units непосредственно перед atomic restart;
+- повторный candidate `35d2d06` дошёл дальше и выявил тот же счётчик у `gateway-vpn-network-recovery.service` и managed runtime dependencies; commit `9301e05` после уже установленного `PATH_BLOCKED` сбрасывает только fixed owned runtime set, затем по-прежнему требует настоящий start и три health observations;
+- fresh installer с пустыми APT indexes и Windows admin-key path через symlink-parent были исправлены ранее в `4038525`; ни один rejected candidate не назначен install-ready.
+
+**Exact update/rollback evidence:**
+
+- честная test-only schema-13 baseline `0.1.0-baseline.13.fixed9301e05` построена из исторического schema-13 дерева с backport только двух updater start-limit fixes; это fixture, не release;
+- controlled candidate-health rejection завершился `ROLLED_BACK / NEW_RELEASE_HEALTH_FAILED`: `current`/`recovery` на baseline, live schema `13`, `quick_check=ok`, foreign-key rows `0`, staging очищен, `PATH_BLOCKED`, managed services active, `NRestarts=0`, failed units отсутствуют;
+- successful transaction `update-20260827T231151Z-61402155e4441acce26a5395` мигрировала `13 → 16`, сохранила `16` migration records, `quick_check=ok`, foreign-key rows `0`, candidate current и baseline recovery в `STABILIZING`;
+- ранний exact `gateway-vpn-update-finalize.service` завершился code `0` с `release stability window is still active`, не изменив journal/recovery;
+- source-only helper изменил deadline только exact `STABILIZING` journal через production `JournalStore`; wrong ID и отсутствие двойного gate-confirmation завершались отказом. После этого exact production finalizer записал `FINALIZED`, перевёл обе ссылки на candidate и оставил `PATH_BLOCKED`; это проверка mechanics, не реальные 24 часа;
+- новый systemd PID 1 после finalized rootfs сохранил candidate current/recovery, schema 16, terminal journal, active managed services, `NRestarts=0`, пустой `systemctl --failed` и `PATH_BLOCKED`.
+
+**Interrupted-update recovery:**
+
+- signed candidate штатно staged production verifier-ом на чистой schema-13 baseline;
+- exact `gateway-vpn-update.service` наблюдался в `PREPARED → QUIESCED → HEALTH_CHECKING`; в durable `HEALTH_CHECKING`, уже после DB/current switch, весь container был завершён `SIGKILL` до `OnFailure`;
+- новый PID 1 использовал закреплённый recovery binary и записал `ROLLED_BACK / BOOT_OR_PROCESS_RECOVERY`; обе ссылки вернулись на baseline, migration count/max `13`, `quick_check=ok`, foreign-key rows `0`, failed units отсутствуют, firewall остался `PATH_BLOCKED`;
+- management/broker/dnsmasq завершили boot ordering примерно за `1.6s` monotonic time с `NRestarts=0`. Первая выборка попала между достижением target и завершением jobs; wall-clock Docker совершил скачок, но `systemd-analyze critical-chain`, journal и последующая active-проверка подтвердили bounded normal boot, а не 47-секундный product stall.
+
+**Версионируемый harness и проверки:**
+
+- добавлены source-only `test/release-gate/cmd/force-update-deadline` и `stage-signed-update`; они не входят в allowlist release builder и требуют environment + explicit flag + absolute paths + exact identity/state;
+- staging helper теперь выводит state/DB только из strict production config, а deadline helper запрещает регрессию journal timestamps и reread-проверяет checksummed copies;
+- focused helper tests/vet, full `go test ./... -count=1`, full `go vet ./...`, четыре CGO-free Linux/amd64 builds, `node --check`, shell `bash -n` и `git diff --check` — PASS.
+
+**Неуспешные/непродуктовые запуски:** первая offline helper-сборка использовала builder без mounted Go module cache и ожидаемо отказалась обращаться в сеть; повтор с read-only pinned cache прошёл. Попытка создать новый privileged fresh-install container не стартовала из-за `502 auth_unavailable` approval-сервиса Codex, поэтому не является product failure и не засчитывается как fresh gate.
+
+**Остаётся:** после явного разрешения privileged Docker выполнить clean exact fresh install, strict idempotency, новый PID 1 и kernel/netns gates; затем обновить journal, commit/push `main`, дождаться exact GitHub CI и очистить временные Docker/.tools ресурсы, не удаляя production `.gvkey`.
 
 ### Сессия 079 — публикация unified read model и remote CI — 2026-08-28
 
