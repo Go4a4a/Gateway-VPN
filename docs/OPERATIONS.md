@@ -10,7 +10,10 @@ Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS 
 
 Release закрепляет конкретный Mihomo binary и его SHA-256. Ed25519 identity создаётся один раз на изолированном trusted builder; private key не помещается в репозиторий или GitHub Release:
 
+`release-keygen` намеренно работает только на Linux. Оба destination должны быть абсолютными путями в одном заранее созданном real-каталоге без symlink-компонентов; каталог не может находиться внутри Git worktree и на Linux обязан быть закрыт от group/others (`0700`). Существующие файлы никогда не перезаписываются. После exclusive-create и fsync keypair перечитывается, public key повторно выводится из private key и сверяется с сохранённым public key/fingerprint. До генерации оператор отдельно выбирает encrypted/offline storage и резервную копию; builder не создаёт и не экспортирует backup автоматически.
+
 ```bash
+install -d -m 0700 /secure
 ./bin/gateway-vpnctl release-keygen \
   --private-key /secure/release-signing.pem \
   --public-key /secure/update-signing.pub

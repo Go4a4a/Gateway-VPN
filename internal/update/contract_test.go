@@ -1,14 +1,145 @@
 package update
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestWriteKeyPairRequiresSecureAbsoluteExclusivePaths(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	privatePath := filepath.Join(directory, "release-signing.pem")
+	publicPath := filepath.Join(directory, "update-signing.pub")
+	fingerprint, err := WriteKeyPair(privatePath, publicPath)
+	if err != nil {
+		t.Fatalf("WriteKeyPair() error = %v", err)
+	}
+	privateKey, err := LoadPrivateKey(privatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := LoadPublicKey(publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFingerprint, err := PublicKeyFingerprint(publicKey)
+	if err != nil || fingerprint != wantFingerprint || !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
+		t.Fatalf("generated key pair fingerprint=%q want=%q err=%v", fingerprint, wantFingerprint, err)
+	}
+	if runtime.GOOS != "windows" {
+		privateInfo, err := os.Stat(privatePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if privateInfo.Mode().Perm() != 0o600 {
+			t.Fatalf("private key mode=%v", privateInfo.Mode().Perm())
+		}
+		publicInfo, err := os.Stat(publicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if publicInfo.Mode().Perm() != 0o644 {
+			t.Fatalf("public key mode=%v", publicInfo.Mode().Perm())
+		}
+	}
+	privateBefore, err := os.ReadFile(privatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicBefore, err := os.ReadFile(publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteKeyPair(privatePath, publicPath); err == nil {
+		t.Fatal("existing signing identity was overwritten")
+	}
+	privateAfter, _ := os.ReadFile(privatePath)
+	publicAfter, _ := os.ReadFile(publicPath)
+	if !bytes.Equal(privateBefore, privateAfter) || !bytes.Equal(publicBefore, publicAfter) {
+		t.Fatal("failed repeat key generation changed the existing identity")
+	}
+	if _, err := WriteKeyPair("relative-private.pem", "relative-public.pem"); err == nil {
+		t.Fatal("relative key destinations were accepted")
+	}
+	otherDirectory := t.TempDir()
+	if err := os.Chmod(otherDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteKeyPair(filepath.Join(directory, "other-private.pem"), filepath.Join(otherDirectory, "other-public.pem")); err == nil {
+		t.Fatal("key destinations in different directories were accepted")
+	}
+}
+
+func TestWriteKeyPairRejectsUnsafeDestinationAndCleansPartialPair(t *testing.T) {
+	insecure := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(insecure, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := WriteKeyPair(filepath.Join(insecure, "private.pem"), filepath.Join(insecure, "public.pem")); err == nil {
+			t.Fatal("group-readable key destination was accepted")
+		}
+	}
+
+	worktree := t.TempDir()
+	if err := os.Chmod(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(worktree, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(worktree, "keys")
+	if err := os.Mkdir(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteKeyPair(filepath.Join(keys, "private.pem"), filepath.Join(keys, "public.pem")); err == nil {
+		t.Fatal("key destination inside a Git worktree was accepted")
+	}
+
+	linkedRoot := t.TempDir()
+	if err := os.Chmod(linkedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkedDirectory := filepath.Join(linkedRoot, "linked")
+	if err := os.Symlink(target, linkedDirectory); err == nil {
+		if _, err := WriteKeyPair(filepath.Join(linkedDirectory, "private.pem"), filepath.Join(linkedDirectory, "public.pem")); err == nil {
+			t.Fatal("symlink key destination was accepted")
+		}
+	}
+
+	partial := t.TempDir()
+	if err := os.Chmod(partial, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	privatePath := filepath.Join(partial, "private.pem")
+	publicPath := filepath.Join(partial, "public.pem")
+	if err := os.WriteFile(publicPath, []byte("existing public destination"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteKeyPair(privatePath, publicPath); err == nil {
+		t.Fatal("existing public destination was overwritten")
+	}
+	if _, err := os.Lstat(privatePath); !os.IsNotExist(err) {
+		t.Fatalf("partial private key was retained: %v", err)
+	}
+	content, err := os.ReadFile(publicPath)
+	if err != nil || string(content) != "existing public destination" {
+		t.Fatalf("existing public destination changed: %q err=%v", content, err)
+	}
+}
 
 func TestSignedReleaseVerificationRejectsTamperUnknownFilesAndWrongSigner(t *testing.T) {
 	root, publicKey, privateKey := signedReleaseFixture(t, "1.2.0", 11, 12)

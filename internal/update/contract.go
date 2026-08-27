@@ -159,29 +159,110 @@ func PublicKeyFingerprint(key ed25519.PublicKey) (string, error) {
 }
 
 func WriteKeyPair(privatePath, publicPath string) (string, error) {
-	if privatePath == "" || publicPath == "" || filepath.Clean(privatePath) == filepath.Clean(publicPath) {
-		return "", errors.New("distinct private and public key paths are required")
+	directory, privatePath, publicPath, err := validateKeyPairPaths(privatePath, publicPath)
+	if err != nil {
+		return "", err
 	}
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return "", errors.New("generate Ed25519 update key failed")
 	}
+	defer clear(privateKey)
 	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
 		return "", errors.New("encode update private key failed")
 	}
+	defer clear(privateDER)
 	publicDER, err := x509.MarshalPKIXPublicKey(publicKey)
 	if err != nil {
 		return "", errors.New("encode update public key failed")
 	}
-	if err := writeExclusive(privatePath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	defer clear(privatePEM)
+	if err := writeExclusive(privatePath, privatePEM, 0o600); err != nil {
 		return "", err
 	}
 	if err := writeExclusive(publicPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER}), 0o644); err != nil {
 		_ = os.Remove(privatePath)
+		_ = syncDirectory(directory)
 		return "", err
 	}
-	return PublicKeyFingerprint(publicKey)
+	cleanup := func() {
+		_ = os.Remove(publicPath)
+		_ = os.Remove(privatePath)
+		_ = syncDirectory(directory)
+	}
+	loadedPrivate, err := LoadPrivateKey(privatePath)
+	if err != nil {
+		cleanup()
+		return "", errors.New("verify generated private key failed")
+	}
+	defer clear(loadedPrivate)
+	loadedPublic, err := LoadPublicKey(publicPath)
+	if err != nil || !bytes.Equal(loadedPrivate.Public().(ed25519.PublicKey), loadedPublic) {
+		cleanup()
+		return "", errors.New("verify generated key pair failed")
+	}
+	fingerprint, err := PublicKeyFingerprint(loadedPublic)
+	if err != nil {
+		cleanup()
+		return "", errors.New("fingerprint generated key pair failed")
+	}
+	if err := syncDirectory(directory); err != nil {
+		cleanup()
+		return "", errors.New("sync generated key directory failed")
+	}
+	return fingerprint, nil
+}
+
+func validateKeyPairPaths(privatePath, publicPath string) (string, string, string, error) {
+	if !filepath.IsAbs(privatePath) || !filepath.IsAbs(publicPath) {
+		return "", "", "", errors.New("absolute private and public key paths are required")
+	}
+	privatePath = filepath.Clean(privatePath)
+	publicPath = filepath.Clean(publicPath)
+	if sameFilesystemPath(privatePath, publicPath) || !sameFilesystemPath(filepath.Dir(privatePath), filepath.Dir(publicPath)) {
+		return "", "", "", errors.New("distinct private and public key paths in one secure directory are required")
+	}
+	directory := filepath.Dir(privatePath)
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", "", errors.New("key destination must be an existing real directory")
+	}
+	if runtime.GOOS != "windows" {
+		resolved, err := filepath.EvalSymlinks(directory)
+		if err != nil || !sameFilesystemPath(filepath.Clean(resolved), directory) {
+			return "", "", "", errors.New("key destination path must not contain symlink components")
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return "", "", "", errors.New("key destination directory must not be accessible to group or others")
+		}
+	}
+	for current := directory; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return "", "", "", errors.New("release signing keys must not be created inside a Git worktree")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", "", "", errors.New("inspect key destination ancestors failed")
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return directory, privatePath, publicPath, nil
+}
+
+func sameFilesystemPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func clear(content []byte) {
+	for index := range content {
+		content[index] = 0
+	}
 }
 
 func SignRelease(root string, privateKey ed25519.PrivateKey) (Manifest, error) {
@@ -635,6 +716,11 @@ func writeExclusive(filename string, content []byte, mode os.FileMode) error {
 		_ = os.Remove(filename)
 		return errors.New("write signed release metadata failed")
 	}
+	if err := file.Chmod(mode); err != nil {
+		file.Close()
+		_ = os.Remove(filename)
+		return errors.New("set signed release metadata permissions failed")
+	}
 	if err := file.Sync(); err != nil {
 		file.Close()
 		_ = os.Remove(filename)
@@ -644,7 +730,19 @@ func writeExclusive(filename string, content []byte, mode os.FileMode) error {
 		_ = os.Remove(filename)
 		return errors.New("close signed release metadata failed")
 	}
-	return os.Chmod(filename, mode)
+	return nil
+}
+
+func syncDirectory(directory string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	file, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
 }
 
 func equalFileRecords(left, right []FileRecord) bool {

@@ -14,6 +14,9 @@ import (
 
 func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) {
 	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	privateKey := filepath.Join(directory, "release-private.pem")
 	publicKey := filepath.Join(directory, "update-signing.pub")
 	if _, err := updatepkg.WriteKeyPair(privateKey, publicKey); err != nil {

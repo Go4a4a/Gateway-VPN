@@ -19,6 +19,10 @@ func runReleaseKeygen(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *privateKey == "" || *publicKey == "" {
 		return 2
 	}
+	if runtime.GOOS != "linux" {
+		fmt.Fprintln(os.Stderr, "release signing identity must be generated on an isolated trusted Linux builder")
+		return 1
+	}
 	fingerprint, err := updatepkg.WriteKeyPair(*privateKey, *publicKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate release signing identity: %v\n", err)

@@ -301,6 +301,18 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 			t.Errorf("GitHub draft publisher contains forbidden %q", forbidden)
 		}
 	}
+	keygen := read(t, filepath.Join(root, "cmd", "gateway-vpnctl", "release_commands.go"))
+	for _, required := range []string{"runtime.GOOS != \"linux\"", "isolated trusted Linux builder", "updatepkg.WriteKeyPair"} {
+		if !strings.Contains(keygen, required) {
+			t.Errorf("release key generator missing %q", required)
+		}
+	}
+	keyContract := read(t, filepath.Join(root, "internal", "update", "contract.go"))
+	for _, required := range []string{"absolute private and public key paths", "one secure directory", "must not contain symlink components", "must not be accessible to group or others", "must not be created inside a Git worktree", "verify generated key pair", "syncDirectory"} {
+		if !strings.Contains(keyContract, required) {
+			t.Errorf("release key custody contract missing %q", required)
+		}
+	}
 }
 
 func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
