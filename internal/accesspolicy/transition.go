@@ -40,6 +40,9 @@ func EvaluateTransition(input TransitionInput) (TransitionDecision, error) {
 	if strings.TrimSpace(input.ProposedKey) == "" || input.Now.IsZero() {
 		return TransitionDecision{}, errors.New("proposed access candidate and current time are required")
 	}
+	if input.ProposedKey == input.CurrentKey && input.HardFailure {
+		return TransitionDecision{Allow: true, ClearPending: true, Reason: "HARD_FAILURE_REACTIVATE"}, nil
+	}
 	if input.ProposedKey == input.CurrentKey {
 		return TransitionDecision{ClearPending: input.Runtime.PendingCandidateKey != "", Reason: "CURRENT_PATH_REMAINS_BEST"}, nil
 	}

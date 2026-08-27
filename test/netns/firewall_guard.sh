@@ -4,9 +4,11 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BINARY=${1:-$ROOT/dist/gateway-vpn-netns}
+DATAPLANE_TEST=${2:-$ROOT/dist/gateway-vpn-dataplane-test}
 [[ $EUID -eq 0 ]] || { echo "firewall_guard.sh requires root" >&2; exit 1; }
 [[ -x $BINARY ]] || { echo "Build a Linux gateway-vpn binary and pass its absolute path" >&2; exit 2; }
-for command in ip nft sed grep mktemp getent useradd userdel; do
+[[ -x $DATAPLANE_TEST ]] || { echo "Build the Linux dataplane test binary and pass its absolute path" >&2; exit 2; }
+for command in ip nft sed grep mktemp getent useradd userdel ping; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 
@@ -84,8 +86,34 @@ if ip netns exec "$GW" ip route get 1.1.1.1 >/dev/null 2>&1; then
   exit 1
 fi
 
+# Exercise the production renderer, atomic transactions and nft JSON decoder
+# against the Ubuntu kernel/userspace combination used by CI.
+ip netns exec "$GW" env GATEWAY_VPN_NFT_PATH_INTEGRATION=1 "$DATAPLANE_TEST" \
+  -test.run '^TestFirewallBackendAgainstKernelNFTables$' -test.count=1
+
 ip netns exec "$GW" "$BINARY" firewall-boot --config "$WORK/config.yaml" --apply
 ip netns exec "$GW" nft list table inet gateway_vpn | grep 'policy drop' >/dev/null
+
+# PATH_BLOCKED must prevent LAN traffic even to the modem's connected subnet.
+if ip netns exec "$CLIENT" ping -c 1 -W 1 192.168.8.1 >/dev/null 2>&1; then
+  echo "PATH_BLOCKED leaked LAN traffic to the modem" >&2
+  exit 1
+fi
+
+# Open exactly wan0+fwmark 0x1101. The selected direct path must pass, then a
+# TUN activation must atomically remove every direct gate again.
+sed 's/"enp2s0"/"lan0"/' "$ROOT/test/fixtures/nftables/path-direct-modem-a.nft" >"$WORK/path-direct.nft"
+ip netns exec "$GW" nft --check --file "$WORK/path-direct.nft"
+ip netns exec "$GW" nft --file "$WORK/path-direct.nft"
+ip netns exec "$CLIENT" ping -c 1 -W 2 192.168.8.1 >/dev/null
+ip netns exec "$GW" nft --file "$ROOT/test/fixtures/nftables/path-active-modem-a.nft"
+if ip netns exec "$CLIENT" ping -c 1 -W 1 192.168.8.1 >/dev/null 2>&1; then
+  echo "TUN activation left the previous direct path open" >&2
+  exit 1
+fi
+
+# Leave the guard test itself at the boot-safe baseline.
+ip netns exec "$GW" "$BINARY" firewall-boot --config "$WORK/config.yaml" --apply
 
 ip netns exec "$GW" "$BINARY" firewall-guard --config "$WORK/config.yaml" --marker-path "$WORK/quarantine" --apply >"$WORK/guard.log" 2>&1 &
 GUARD_PID=$!
@@ -95,7 +123,7 @@ wait_recovery() {
   local attempt
   for attempt in $(seq 1 100); do
     if ip netns exec "$GW" nft list table inet gateway_vpn >/dev/null 2>&1 \
-      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*2[[:space:]]*\]' >/dev/null \
+      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*3[[:space:]]*\]' >/dev/null \
       && ip -n "$GW" -json link show dev lan0 | grep '"UP"' >/dev/null \
       && [[ $(grep -c 'recovered=true' "$WORK/guard.log" || true) -ge $expected_count ]]; then
       return 0

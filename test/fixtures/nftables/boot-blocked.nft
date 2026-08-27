@@ -1,7 +1,7 @@
 table inet gateway_vpn {
     set firewall_schema_generation {
 		type mark
-        elements = { 2 }
+        elements = { 3 }
     }
 
     set hilink_interfaces {
@@ -51,9 +51,25 @@ table inet gateway_vpn {
         type ifname
     }
 
+	set active_direct_interfaces {
+		type ifname
+	}
+
+	set active_direct_context {
+		type ifname . mark
+	}
+
+	map active_direct_marks {
+		type ifname : mark
+	}
+
     set active_path_generation {
 		type mark
     }
+
+	set active_route_generation {
+		type mark
+	}
 
     counter user_upload {
         comment "gateway-vpn authoritative user upload"
@@ -70,6 +86,11 @@ table inet gateway_vpn {
     counter service_download {
         comment "gateway-vpn authoritative direct service download"
     }
+
+    chain prerouting {
+		type filter hook prerouting priority mangle;
+		meta nfproto ipv4 iifname "enp2s0" meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct modem mark"
+	}
 
     chain input {
         type filter hook input priority filter; policy drop;
@@ -91,8 +112,15 @@ table inet gateway_vpn {
         ct state invalid drop
         meta nfproto ipv4 iifname "enp2s0" oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
         meta nfproto ipv4 iifname @active_tun_interfaces oifname "enp2s0" ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
+		meta nfproto ipv4 iifname "enp2s0" oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct modem"
+		meta nfproto ipv4 iifname @active_direct_interfaces oifname "enp2s0" ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct modem to LAN"
         counter comment "gateway-vpn PATH_BLOCKED"
     }
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat;
+		meta nfproto ipv4 iifname "enp2s0" oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct modem NAT"
+	}
 
     chain output {
         type filter hook output priority filter; policy drop;

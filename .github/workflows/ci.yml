@@ -80,11 +80,15 @@ jobs:
       - name: Refresh Ubuntu package indexes
         run: sudo apt-get update
       - name: Install netns test dependencies
-        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps
+        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping
       - name: Build native Linux netns binary
-        run: go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
+          go test -c -o /tmp/gateway-vpn-dataplane-test ./internal/dataplane
       - name: Prove owned firewall recovery and no direct route
-        run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns
+        run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
       - name: Prove multi-port LAN bridge SSH and uplink isolation
         run: sudo ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04

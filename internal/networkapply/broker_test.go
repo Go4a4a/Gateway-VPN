@@ -24,9 +24,13 @@ type fakeDataPlaneAdmin struct {
 
 type fakePathAdmin struct {
 	activations []uint32
-	blocks      int
-	state       dataplane.PathState
-	err         error
+	direct      []struct {
+		modemID         string
+		routeGeneration int64
+	}
+	blocks int
+	state  dataplane.PathState
+	err    error
 }
 
 type fakeRoutingAdmin struct {
@@ -143,8 +147,16 @@ func (admin *fakeRoutingAdmin) SyncRouting(context.Context) error {
 func (admin *fakePathAdmin) ActivatePath(_ context.Context, generation uint32) error {
 	admin.activations = append(admin.activations, generation)
 	if admin.err == nil {
-		admin.state = dataplane.PathState{Active: true, Generation: generation}
+		admin.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: generation}
 	}
+	return admin.err
+}
+
+func (admin *fakePathAdmin) ActivateDirectPath(_ context.Context, modemID string, routeGeneration int64) error {
+	admin.direct = append(admin.direct, struct {
+		modemID         string
+		routeGeneration int64
+	}{modemID: modemID, routeGeneration: routeGeneration})
 	return admin.err
 }
 
@@ -272,14 +284,37 @@ func TestBrokerPathOperationsCarryOnlyGenerationAndRedactBackendErrors(t *testin
 		t.Fatalf("ActivatePath() error = %v", err)
 	}
 	state, err := client.ObservePath(ctx)
-	if err != nil || state != (dataplane.PathState{Active: true, Generation: 17}) {
+	if err != nil || state != (dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: 17}) {
 		t.Fatalf("ObservePath() = %+v, %v", state, err)
+	}
+	if err := client.ActivateDirectPath(ctx, "modem-a", 9); err != nil {
+		t.Fatalf("ActivateDirectPath() error = %v", err)
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/path/direct/activate", strings.NewReader(`{"modem_id":"modem-a","route_generation":9,"interface_name":"attacker0","fwmark":1}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || len(pathAdmin.direct) != 1 {
+		t.Fatalf("parameterized direct activation status/calls = %d/%d", response.StatusCode, len(pathAdmin.direct))
+	}
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/path/direct/activate", strings.NewReader(`{"modem_id":"","route_generation":0}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err = httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || len(pathAdmin.direct) != 1 {
+		t.Fatalf("unbounded direct activation status/calls = %d/%d", response.StatusCode, len(pathAdmin.direct))
 	}
 	if err := client.BlockPath(ctx); err != nil {
 		t.Fatalf("BlockPath() error = %v", err)
 	}
-	if len(pathAdmin.activations) != 1 || pathAdmin.activations[0] != 17 || pathAdmin.blocks != 1 {
-		t.Fatalf("path admin calls = %v/%d", pathAdmin.activations, pathAdmin.blocks)
+	if len(pathAdmin.activations) != 1 || pathAdmin.activations[0] != 17 || len(pathAdmin.direct) != 1 || pathAdmin.direct[0].modemID != "modem-a" || pathAdmin.direct[0].routeGeneration != 9 || pathAdmin.blocks != 1 {
+		t.Fatalf("path admin calls = %v/%+v/%d", pathAdmin.activations, pathAdmin.direct, pathAdmin.blocks)
 	}
 	pathAdmin.err = errors.New("private nftables command detail")
 	if err := client.ActivatePath(ctx, 18); err == nil || strings.Contains(err.Error(), "nftables command") {

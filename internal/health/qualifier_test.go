@@ -66,7 +66,7 @@ func TestOutageConfirmationContinuesAfterRequiredFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Nodes) != 1 || len(result.Nodes[0].Targets) != 2 || result.Nodes[0].State != NodeFailed {
+	if len(result.Nodes) != 1 || len(result.Nodes[0].Targets) != 2 || result.Nodes[0].State != NodeLimited || result.State != CellDegraded || result.SelectedNodeID != "node-a" || result.FunctionalScore != 1 {
 		t.Fatalf("exhaustive outage result = %+v", result)
 	}
 }

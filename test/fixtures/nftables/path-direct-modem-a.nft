@@ -1,0 +1,11 @@
+flush set inet gateway_vpn active_tun_interfaces
+flush set inet gateway_vpn active_direct_interfaces
+flush set inet gateway_vpn active_direct_context
+flush map inet gateway_vpn active_direct_marks
+flush set inet gateway_vpn active_path_generation
+flush set inet gateway_vpn active_route_generation
+add element inet gateway_vpn active_path_generation { 303 }
+add element inet gateway_vpn active_route_generation { 1 }
+add element inet gateway_vpn active_direct_interfaces { "wan0" }
+add element inet gateway_vpn active_direct_context { "wan0" . 0x00001101 }
+add element inet gateway_vpn active_direct_marks { "enp2s0" : 0x00001101 }

@@ -29,6 +29,7 @@ SET gateway_state='VERIFYING_POLICY',
     policy_transition_generation=?, policy_transition_started_at=?,
     policy_transition_deadline=?, updated_at=?
 WHERE singleton_id=1 AND path_state='PATH_ACTIVE'
+  AND active_method_kind='SUBSCRIPTION' AND active_direct_path_id IS NULL
   AND active_modem_id IS NOT NULL AND active_path_id IS NOT NULL
   AND active_subscription_id IS NOT NULL AND active_node_id IS NOT NULL`,
 		generation, updatedAt, deadline, updatedAt)

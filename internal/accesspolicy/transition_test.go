@@ -32,6 +32,10 @@ func TestEvaluateTransitionUsesStableWindowCooldownAndHardFailure(t *testing.T) 
 	if err != nil || !decision.Allow || decision.Reason != "HARD_FAILURE_FAST_PATH" {
 		t.Fatalf("hard failure decision = %+v, %v", decision, err)
 	}
+	decision, err = EvaluateTransition(TransitionInput{CurrentKey: "direct", ProposedKey: "direct", HardFailure: true, Policy: policy, Now: now})
+	if err != nil || !decision.Allow || decision.Reason != "HARD_FAILURE_REACTIVATE" {
+		t.Fatalf("same-path recovery decision = %+v, %v", decision, err)
+	}
 }
 
 func TestTemporaryDirectOnlySurvivesProcessRestartButNotHostReboot(t *testing.T) {

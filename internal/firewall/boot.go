@@ -16,7 +16,7 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 2
+	SchemaGeneration = 3
 )
 
 type BootConfig struct {
@@ -93,9 +93,25 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         type ifname
     }
 
+	set active_direct_interfaces {
+		type ifname
+	}
+
+	set active_direct_context {
+		type ifname . mark
+	}
+
+	map active_direct_marks {
+		type ifname : mark
+	}
+
     set active_path_generation {
 		type mark
     }
+
+	set active_route_generation {
+		type mark
+	}
 
     counter user_upload {
         comment "gateway-vpn authoritative user upload"
@@ -112,6 +128,11 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
     counter service_download {
         comment "gateway-vpn authoritative direct service download"
     }
+
+    chain prerouting {
+		type filter hook prerouting priority mangle;
+		meta nfproto ipv4 iifname %s meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct modem mark"
+	}
 
     chain input {
         type filter hook input priority filter; policy drop;
@@ -133,8 +154,15 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         ct state invalid drop
         meta nfproto ipv4 iifname %s oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
         meta nfproto ipv4 iifname @active_tun_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
+		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct modem"
+		meta nfproto ipv4 iifname @active_direct_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct modem to LAN"
         counter comment "gateway-vpn PATH_BLOCKED"
     }
+
+	chain postrouting {
+		type nat hook postrouting priority srcnat;
+		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct modem NAT"
+	}
 
     chain output {
         type filter hook output priority filter; policy drop;
@@ -164,10 +192,14 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
+		nftString(config.LANInterface),
 		config.APIPort,
 		nftString(config.LANInterface),
 		nftString(config.WireGuardInterface),
 		config.APIPort,
+		nftString(config.LANInterface),
+		nftString(config.LANInterface),
+		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),

@@ -284,20 +284,22 @@ func (repository *DirectPathRepository) Candidates(ctx context.Context, directOn
 	}
 	result := []Candidate{}
 	directRows, err := repository.database.QueryContext(ctx, `
-SELECT p.id, a.id, p.modem_id, p.quality_class, p.functional_score,
-       a.priority, m.priority
+SELECT p.id, p.id, a.id, p.modem_id, p.quality_class, p.functional_score,
+       a.priority, m.priority, p.policy_generation, p.route_generation
 FROM direct_modem_paths AS p
 JOIN modems AS m ON m.id=p.modem_id
 JOIN access_methods AS a ON a.id='access:direct'
 WHERE a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'
-	AND p.quality_class IN ('FULL', 'LIMITED') AND julianday(p.expires_at)>julianday(?)
+	AND ((p.quality_class='FULL' AND p.state='QUALIFIED')
+	     OR (p.quality_class='LIMITED' AND p.state='DEGRADED'))
+	AND p.transport_state='PASSED' AND julianday(p.expires_at)>julianday(?)
   AND p.policy_generation=? AND p.route_generation=m.route_generation`, now, policyGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("list direct access candidates: %w", err)
 	}
 	for directRows.Next() {
 		var item Candidate
-		if err := directRows.Scan(&item.Key, &item.MethodID, &item.ModemID, &item.Quality, &item.FunctionalScore, &item.MethodPriority, &item.ModemPriority); err != nil {
+		if err := directRows.Scan(&item.Key, &item.PathID, &item.MethodID, &item.ModemID, &item.Quality, &item.FunctionalScore, &item.MethodPriority, &item.ModemPriority, &item.PolicyGeneration, &item.RouteGeneration); err != nil {
 			directRows.Close()
 			return nil, err
 		}
@@ -316,27 +318,32 @@ WHERE a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'
 		return result, nil
 	}
 	vpnRows, err := repository.database.QueryContext(ctx, `
-SELECT p.id || ':' || n.id, a.id, p.modem_id, p.subscription_id, n.id,
+SELECT p.id || ':' || n.id, p.id, a.id, p.modem_id, p.subscription_id, n.id,
        p.quality_class, p.functional_score, a.priority, m.priority,
-       COALESCE(pref.preferred_rank, 1000000000)
+       COALESCE(pref.preferred_rank, 1000000000), p.policy_generation, p.route_generation
 FROM subscription_modem_paths AS p
 JOIN modems AS m ON m.id=p.modem_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN access_methods AS a ON a.subscription_id=s.id AND a.kind='SUBSCRIPTION'
 JOIN nodes AS n ON n.id=p.selected_node_id AND n.version_id=s.active_version_id
+JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=n.id
 LEFT JOIN subscription_node_preferences AS pref
        ON pref.subscription_id=s.id AND pref.fingerprint=n.fingerprint
 WHERE a.enabled=1 AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'
   AND n.enabled=1 AND n.selection_override<>'exclude'
-	AND p.quality_class IN ('FULL', 'LIMITED') AND julianday(p.expires_at)>julianday(?)
-  AND p.policy_generation=? AND p.route_generation=m.route_generation`, now, policyGeneration)
+	AND p.transport_state='PASSED' AND julianday(p.expires_at)>julianday(?)
+  AND pn.qualification_generation=p.policy_generation
+  AND pn.route_generation=p.route_generation AND julianday(pn.qualification_expires_at)>julianday(?)
+  AND ((p.quality_class='FULL' AND p.state='QUALIFIED' AND pn.qualification_state='BYPASS_QUALIFIED')
+       OR (p.quality_class='LIMITED' AND p.state='DEGRADED' AND pn.qualification_state='BYPASS_LIMITED'))
+  AND p.policy_generation=? AND p.route_generation=m.route_generation`, now, now, policyGeneration)
 	if err != nil {
 		return nil, fmt.Errorf("list VPN access candidates: %w", err)
 	}
 	defer vpnRows.Close()
 	for vpnRows.Next() {
 		var item Candidate
-		if err := vpnRows.Scan(&item.Key, &item.MethodID, &item.ModemID, &item.SubscriptionID, &item.NodeID, &item.Quality, &item.FunctionalScore, &item.MethodPriority, &item.ModemPriority, &item.NodePriority); err != nil {
+		if err := vpnRows.Scan(&item.Key, &item.PathID, &item.MethodID, &item.ModemID, &item.SubscriptionID, &item.NodeID, &item.Quality, &item.FunctionalScore, &item.MethodPriority, &item.ModemPriority, &item.NodePriority, &item.PolicyGeneration, &item.RouteGeneration); err != nil {
 			return nil, err
 		}
 		item.MethodKind = MethodSubscription

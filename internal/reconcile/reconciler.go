@@ -11,16 +11,19 @@ import (
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/store"
 )
 
 type Observed struct {
-	FirewallReady bool
-	MihomoReady   bool
-	TUNReady      bool
-	ActivePathID  string
-	ActiveNodeID  string
+	FirewallReady      bool
+	MihomoReady        bool
+	TUNReady           bool
+	MethodKind         string
+	ActivePathID       string
+	ActiveDirectPathID string
+	ActiveNodeID       string
 }
 
 type Observer interface {
@@ -28,6 +31,10 @@ type Observer interface {
 }
 
 type Candidate struct {
+	Key              string
+	MethodID         string
+	MethodKind       string
+	QualityClass     string
 	PathID           string
 	ModemID          string
 	SubscriptionID   string
@@ -52,11 +59,13 @@ type Actuator interface {
 }
 
 type Reconciler struct {
-	Observer  Observer
-	Inventory Inventory
-	State     *state.Repository
-	Actuator  Actuator
-	Now       func() time.Time
+	Observer     Observer
+	Inventory    Inventory
+	State        *state.Repository
+	Actuator     Actuator
+	AccessPaths  *accesspolicy.DirectPathRepository
+	AccessPolicy *accesspolicy.Repository
+	Now          func() time.Time
 
 	mutex sync.Mutex
 }
@@ -97,6 +106,12 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) (Result, error) {
 	}
 	if !hasModems {
 		return reconciler.block(ctx, state.GatewayAllModemsOffline, "ALL_MODEMS_OFFLINE", nil)
+	}
+	if reconciler.AccessPaths != nil || reconciler.AccessPolicy != nil {
+		if reconciler.AccessPaths == nil || reconciler.AccessPolicy == nil {
+			return reconciler.block(ctx, state.GatewayBlocked, "UNIFIED_POLICY_UNAVAILABLE", errors.New("both unified access repositories are required"))
+		}
+		return reconciler.reconcileUnified(ctx, observed, desired, hasTargets)
 	}
 	if !observed.MihomoReady || !observed.TUNReady {
 		return reconciler.block(ctx, state.GatewayBlocked, "MIHOMO_OR_TUN_NOT_READY", nil)
@@ -151,6 +166,189 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) (Result, error) {
 		return reconciler.block(ctx, state.GatewayBlocked, "PATH_INVENTORY_FAILED", err)
 	}
 	return reconciler.activate(ctx, candidate)
+}
+
+func (reconciler *Reconciler) reconcileUnified(ctx context.Context, observed Observed, desired state.Snapshot, hasTargets bool) (Result, error) {
+	if desired.PolicyTransitionActive() {
+		return reconciler.reconcileUnifiedPolicyTransition(ctx, observed, desired, hasTargets)
+	}
+	if !hasTargets {
+		return reconciler.block(ctx, state.GatewayNoBypassTargets, "NO_BYPASS_TARGETS", nil)
+	}
+	policy, err := reconciler.AccessPolicy.GetPolicy(ctx)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_POLICY_UNAVAILABLE", err)
+	}
+	runtimeState, err := reconciler.AccessPolicy.GetSelectionRuntime(ctx)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_SELECTION_RUNTIME_UNAVAILABLE", err)
+	}
+	items, err := reconciler.AccessPaths.Candidates(ctx, runtimeState.TemporaryDirectOnly)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_CANDIDATE_INVENTORY_FAILED", err)
+	}
+	currentKey := activeCandidateKey(desired)
+	currentHealthy := false
+	hardFailure := false
+	filtered := make([]accesspolicy.Candidate, 0, len(items))
+	for _, item := range items {
+		if item.MethodKind == accesspolicy.MethodSubscription && (!observed.MihomoReady || !observed.TUNReady) {
+			continue
+		}
+		filtered = append(filtered, item)
+		if item.Key == currentKey {
+			currentHealthy = observedCandidateMatches(observed, desired, item)
+		}
+	}
+	if currentKey != "" && (desired.PathState == state.PathVerifying ||
+		desired.PathState == state.PathActive && !observedRuntimeMatches(observed, desired)) {
+		hardFailure = true
+	}
+	decision, err := accesspolicy.Rank(filtered, currentKey)
+	if errors.Is(err, accesspolicy.ErrNoCandidate) {
+		return reconciler.block(ctx, state.GatewayNoWorkingSubscription, "NO_FRESH_ACCESS_METHOD", nil)
+	}
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_RANKING_FAILED", err)
+	}
+	transition, err := accesspolicy.EvaluateTransition(accesspolicy.TransitionInput{
+		CurrentKey: currentKey, ProposedKey: decision.Candidate.Key,
+		CurrentHealthy: currentHealthy, HardFailure: hardFailure,
+		Policy: policy, Runtime: runtimeState, Now: reconciler.now(),
+	})
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_TRANSITION_FAILED", err)
+	}
+	if transition.TrackPending {
+		if err := reconciler.AccessPolicy.TrackPendingCandidate(ctx, decision.Candidate.Key); err != nil {
+			return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_PENDING_STATE_FAILED", err)
+		}
+		return Result{Action: transition.Reason, Candidate: candidateFromAccess(decision.Candidate)}, nil
+	}
+	if transition.ClearPending {
+		if err := reconciler.AccessPolicy.ClearPendingCandidate(ctx); err != nil {
+			return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_PENDING_CLEAR_FAILED", err)
+		}
+	}
+	if decision.Candidate.Key == currentKey && currentHealthy {
+		return Result{Action: "NO_CHANGE", Candidate: candidateFromAccess(decision.Candidate)}, nil
+	}
+	if !transition.Allow {
+		return Result{Action: transition.Reason, Candidate: candidateFromAccess(decision.Candidate)}, nil
+	}
+	result, err := reconciler.activate(ctx, candidateFromAccess(decision.Candidate))
+	if err != nil {
+		return result, err
+	}
+	if err := reconciler.AccessPolicy.MarkSwitched(ctx, transition.Reason); err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_SWITCH_RECORD_FAILED", err)
+	}
+	result.Action = "ACCESS_METHOD_ACTIVATED"
+	return result, nil
+}
+
+func (reconciler *Reconciler) reconcileUnifiedPolicyTransition(ctx context.Context, observed Observed, desired state.Snapshot, hasTargets bool) (Result, error) {
+	deadline, err := time.Parse(time.RFC3339Nano, desired.PolicyTransitionDeadline)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "POLICY_DEADLINE_INVALID", err)
+	}
+	expired := !reconciler.now().Before(deadline)
+	if !observedRuntimeMatches(observed, desired) {
+		return reconciler.block(ctx, state.GatewayBlocked, "POLICY_ACTIVE_TUPLE_LOST", nil)
+	}
+	if !hasTargets {
+		if !expired {
+			return Result{Action: "POLICY_VERIFICATION_PENDING"}, nil
+		}
+		return reconciler.block(ctx, state.GatewayNoBypassTargets, "NO_BYPASS_TARGETS_AFTER_POLICY_GRACE", nil)
+	}
+	runtimeState, err := reconciler.AccessPolicy.GetSelectionRuntime(ctx)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_SELECTION_RUNTIME_UNAVAILABLE", err)
+	}
+	items, err := reconciler.AccessPaths.Candidates(ctx, runtimeState.TemporaryDirectOnly)
+	if err != nil {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_CANDIDATE_INVENTORY_FAILED", err)
+	}
+	currentKey := activeCandidateKey(desired)
+	eligible := make([]accesspolicy.Candidate, 0, len(items))
+	for _, item := range items {
+		if item.MethodKind == accesspolicy.MethodSubscription && (!observed.MihomoReady || !observed.TUNReady) {
+			continue
+		}
+		eligible = append(eligible, item)
+		if item.Key == currentKey && item.MethodKind == accesspolicy.MethodSubscription && item.PolicyGeneration == desired.PolicyTransitionGeneration {
+			if _, _, err := reconciler.State.FinishPolicyVerification(ctx, desired.PolicyTransitionGeneration); err != nil {
+				return reconciler.block(ctx, state.GatewayBlocked, "POLICY_VERIFICATION_COMMIT_FAILED", err)
+			}
+			return Result{Action: "POLICY_VERIFIED", Candidate: candidateFromAccess(item)}, nil
+		}
+	}
+	decision, rankErr := accesspolicy.Rank(eligible, currentKey)
+	if rankErr == nil {
+		result, activateErr := reconciler.activate(ctx, candidateFromAccess(decision.Candidate))
+		if activateErr != nil {
+			return result, activateErr
+		}
+		if err := reconciler.AccessPolicy.MarkSwitched(ctx, "POLICY_REPLACEMENT"); err != nil {
+			return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_SWITCH_RECORD_FAILED", err)
+		}
+		result.Action = "ACCESS_METHOD_ACTIVATED"
+		return result, nil
+	}
+	if !errors.Is(rankErr, accesspolicy.ErrNoCandidate) {
+		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_RANKING_FAILED", rankErr)
+	}
+	if !expired {
+		return Result{Action: "POLICY_VERIFICATION_PENDING"}, nil
+	}
+	return reconciler.block(ctx, state.GatewayNoWorkingSubscription, "POLICY_GRACE_EXPIRED", nil)
+}
+
+func (reconciler *Reconciler) now() time.Time {
+	if reconciler.Now != nil {
+		return reconciler.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func activeCandidateKey(snapshot state.Snapshot) string {
+	switch snapshot.ActiveMethodKind {
+	case accesspolicy.MethodDirect:
+		return snapshot.ActiveDirectPathID
+	case accesspolicy.MethodSubscription:
+		if snapshot.ActivePathID != "" && snapshot.ActiveNodeID != "" {
+			return snapshot.ActivePathID + ":" + snapshot.ActiveNodeID
+		}
+	}
+	return ""
+}
+
+func observedRuntimeMatches(observed Observed, snapshot state.Snapshot) bool {
+	if snapshot.PathState != state.PathActive || observed.MethodKind != snapshot.ActiveMethodKind {
+		return false
+	}
+	switch snapshot.ActiveMethodKind {
+	case accesspolicy.MethodDirect:
+		return observed.ActiveDirectPathID == snapshot.ActiveDirectPathID
+	case accesspolicy.MethodSubscription:
+		return observed.ActivePathID == snapshot.ActivePathID && observed.ActiveNodeID == snapshot.ActiveNodeID
+	default:
+		return false
+	}
+}
+
+func observedCandidateMatches(observed Observed, snapshot state.Snapshot, candidate accesspolicy.Candidate) bool {
+	return observedRuntimeMatches(observed, snapshot) && candidate.Key == activeCandidateKey(snapshot)
+}
+
+func candidateFromAccess(candidate accesspolicy.Candidate) Candidate {
+	return Candidate{
+		Key: candidate.Key, MethodID: candidate.MethodID, MethodKind: candidate.MethodKind,
+		QualityClass: candidate.Quality, PathID: candidate.PathID, ModemID: candidate.ModemID,
+		SubscriptionID: candidate.SubscriptionID, NodeID: candidate.NodeID,
+		PolicyGeneration: candidate.PolicyGeneration, RouteGeneration: candidate.RouteGeneration,
+	}
 }
 
 // ActivateExact performs a user-requested activation only after the exact
@@ -251,7 +449,13 @@ func (reconciler *Reconciler) reconcilePolicyTransition(ctx context.Context, obs
 }
 
 func (reconciler *Reconciler) activate(ctx context.Context, candidate Candidate) (Result, error) {
-	intent, _, err := reconciler.State.BeginNodeActivation(ctx, candidate.PathID, candidate.NodeID, candidate.PolicyGeneration, candidate.RouteGeneration)
+	var intent state.Snapshot
+	var err error
+	if candidate.MethodKind == accesspolicy.MethodDirect {
+		intent, _, err = reconciler.State.BeginDirectActivation(ctx, candidate.PathID, candidate.PolicyGeneration, candidate.RouteGeneration)
+	} else {
+		intent, _, err = reconciler.State.BeginNodeActivation(ctx, candidate.PathID, candidate.NodeID, candidate.PolicyGeneration, candidate.RouteGeneration)
+	}
 	if err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "ACTIVATION_INTENT_REJECTED", err)
 	}
@@ -259,7 +463,12 @@ func (reconciler *Reconciler) activate(ctx context.Context, candidate Candidate)
 	if err := reconciler.Actuator.Activate(ctx, candidate); err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "PATH_ACTIVATION_FAILED", err)
 	}
-	if _, _, err := reconciler.State.FinishNodeActivation(ctx, candidate.PathID, candidate.NodeID, candidate.PolicyGeneration, candidate.RouteGeneration); err != nil {
+	if candidate.MethodKind == accesspolicy.MethodDirect {
+		_, _, err = reconciler.State.FinishDirectActivation(ctx, candidate.PathID, candidate.PolicyGeneration, candidate.RouteGeneration)
+	} else {
+		_, _, err = reconciler.State.FinishNodeActivation(ctx, candidate.PathID, candidate.NodeID, candidate.PolicyGeneration, candidate.RouteGeneration)
+	}
+	if err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "ACTIVATION_COMMIT_REJECTED", err)
 	}
 	return Result{Action: "PATH_ACTIVATED", Candidate: candidate}, nil

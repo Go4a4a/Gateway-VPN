@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/health"
@@ -23,6 +24,7 @@ import (
 
 type Broker interface {
 	ActivatePath(context.Context, uint32) error
+	ActivateDirectPath(context.Context, string, int64) error
 	BlockPath(context.Context) error
 	ObservePath(context.Context) (dataplane.PathState, error)
 	FailClosedMihomo(context.Context) error
@@ -82,6 +84,18 @@ func (actuator *Actuator) Activate(ctx context.Context, candidate reconcile.Cand
 	if err := actuator.Broker.BlockPath(ctx); err != nil {
 		return errors.Join(fmt.Errorf("block LAN before path activation: %w", err), actuator.Broker.FailClosedMihomo(ctx))
 	}
+	if candidate.MethodKind == accesspolicy.MethodDirect {
+		if candidate.PathID == "" || candidate.ModemID == "" || candidate.RouteGeneration <= 0 || candidate.PolicyGeneration < 0 || candidate.SubscriptionID != "" || candidate.NodeID != "" {
+			return actuator.activationFailure(ctx, errors.New("direct path activation candidate is invalid"))
+		}
+		// Direct mode does not depend on Mihomo health. REJECT is best-effort;
+		// nftables has already closed every previous TUN/direct gate.
+		_ = actuator.Mihomo.Select(ctx, mihomo.ActiveGroupName, "REJECT")
+		if err := actuator.Broker.ActivateDirectPath(ctx, candidate.ModemID, candidate.RouteGeneration); err != nil {
+			return actuator.activationFailure(ctx, fmt.Errorf("open verified direct firewall gate: %w", err))
+		}
+		return nil
+	}
 	selection, err := actuator.loadSelectedPath(ctx, candidate)
 	if err != nil {
 		return actuator.activationFailure(ctx, err)
@@ -110,7 +124,7 @@ func (actuator *Actuator) Activate(ctx context.Context, candidate reconcile.Cand
 	if activeState.Now != selection.Names.GroupName {
 		return actuator.activationFailure(ctx, fmt.Errorf("active Mihomo path is %q, expected %q", activeState.Now, selection.Names.GroupName))
 	}
-	targets, err := actuator.requiredTargets(ctx)
+	targets, err := actuator.activationTargets(ctx, candidate)
 	if err != nil {
 		return actuator.activationFailure(ctx, err)
 	}
@@ -192,14 +206,16 @@ JOIN nodes AS n ON n.id=?
 JOIN subscription_versions AS v ON v.id=n.version_id AND v.id=s.active_version_id
 JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=n.id
 WHERE p.id=? AND p.modem_id=? AND p.subscription_id=? AND n.id=?
-  AND p.state='QUALIFIED' AND p.policy_generation=? AND p.route_generation=?
-  AND p.expires_at>? AND pn.qualification_state='BYPASS_QUALIFIED'
+  AND p.policy_generation=? AND p.route_generation=? AND p.expires_at>?
+  AND (((?='' OR ?='FULL') AND p.state='QUALIFIED' AND p.quality_class='FULL' AND pn.qualification_state='BYPASS_QUALIFIED')
+       OR (?='LIMITED' AND p.state='DEGRADED' AND p.quality_class='LIMITED' AND pn.qualification_state='BYPASS_LIMITED'))
   AND pn.qualification_generation=p.policy_generation
 	  AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
 	  AND n.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY' AND s.enabled=1`,
 		candidate.NodeID, candidate.PathID, candidate.ModemID, candidate.SubscriptionID, candidate.NodeID,
 		candidate.PolicyGeneration, candidate.RouteGeneration,
-		now().UTC().Format(time.RFC3339Nano), now().UTC().Format(time.RFC3339Nano),
+		now().UTC().Format(time.RFC3339Nano), candidate.QualityClass, candidate.QualityClass,
+		candidate.QualityClass, now().UTC().Format(time.RFC3339Nano),
 	).Scan(&result.PathID, &result.ModemID, &result.SubscriptionID, &result.NodeID, &result.VersionID, &result.ExternalName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return selectedPath{}, errors.New("selected path became stale before activation")
@@ -212,6 +228,60 @@ WHERE p.id=? AND p.modem_id=? AND p.subscription_id=? AND n.id=?
 		return selectedPath{}, err
 	}
 	return result, nil
+}
+
+func (actuator *Actuator) activationTargets(ctx context.Context, candidate reconcile.Candidate) ([]bypass.Target, error) {
+	if candidate.QualityClass != accesspolicy.QualityLimited {
+		return actuator.requiredTargets(ctx)
+	}
+	rows, err := actuator.Database.QueryContext(ctx, `
+SELECT r.target_id
+FROM path_node_target_results AS r
+JOIN bypass_probe_targets AS t ON t.id=r.target_id AND t.enabled=1
+WHERE r.path_id=? AND r.node_id=? AND r.state='PASSED'
+  AND r.policy_generation=? AND r.route_generation=? AND r.expires_at>?
+ORDER BY t.priority, t.id`, candidate.PathID, candidate.NodeID,
+		candidate.PolicyGeneration, candidate.RouteGeneration,
+		actuator.now().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("read LIMITED path target evidence: %w", err)
+	}
+	defer rows.Close()
+	passed := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan LIMITED path target evidence: %w", err)
+		}
+		passed[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate LIMITED path target evidence: %w", err)
+	}
+	if len(passed) == 0 {
+		return nil, errors.New("LIMITED path has no fresh passed target evidence")
+	}
+	items, err := actuator.Targets.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list targets for LIMITED path activation: %w", err)
+	}
+	result := make([]bypass.Target, 0, len(passed))
+	for _, item := range items {
+		if _, exists := passed[item.ID]; exists && item.Enabled {
+			result = append(result, item)
+		}
+	}
+	if len(result) != len(passed) {
+		return nil, errors.New("LIMITED path evidence does not match active targets")
+	}
+	return result, nil
+}
+
+func (actuator *Actuator) now() time.Time {
+	if actuator.Now != nil {
+		return actuator.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (actuator *Actuator) requiredTargets(ctx context.Context) ([]bypass.Target, error) {
@@ -272,8 +342,33 @@ func (observer Observer) Observe(ctx context.Context) (reconcile.Observed, error
 	if err != nil {
 		return reconcile.Observed{}, err
 	}
-	if snapshot.ConfigGeneration <= 0 || snapshot.ConfigGeneration > math.MaxUint32 || uint32(snapshot.ConfigGeneration) != firewallState.Generation || snapshot.ActivePathID == "" || snapshot.ActiveModemID == "" || snapshot.ActiveSubscriptionID == "" {
+	if snapshot.ConfigGeneration <= 0 || snapshot.ConfigGeneration > math.MaxUint32 || uint32(snapshot.ConfigGeneration) != firewallState.Generation || snapshot.ActiveModemID == "" {
 		return reconcile.Observed{}, errors.New("active firewall generation does not match desired runtime state")
+	}
+	if snapshot.ActiveMethodKind == accesspolicy.MethodDirect {
+		if firewallState.Mode != dataplane.PathModeDirect || snapshot.ActiveDirectPathID == "" || snapshot.ActivePathID != "" || snapshot.ActiveSubscriptionID != "" || snapshot.ActiveNodeID != "" {
+			return reconcile.Observed{}, errors.New("active direct firewall does not match desired runtime state")
+		}
+		var interfaceName string
+		var fwmark, routeGeneration int64
+		err := observer.Database.QueryRowContext(ctx, `
+SELECT m.interface_name, m.fwmark, p.route_generation
+FROM direct_modem_paths AS p
+JOIN modems AS m ON m.id=p.modem_id
+WHERE p.id=? AND p.modem_id=? AND p.route_generation=m.route_generation`,
+			snapshot.ActiveDirectPathID, snapshot.ActiveModemID).Scan(&interfaceName, &fwmark, &routeGeneration)
+		if err != nil || interfaceName != firewallState.DirectInterface || fwmark <= 0 || uint32(fwmark) != firewallState.DirectMark || routeGeneration <= 0 || uint32(routeGeneration) != firewallState.RouteGeneration {
+			return reconcile.Observed{}, errors.New("active direct firewall context is stale")
+		}
+		result.MethodKind = accesspolicy.MethodDirect
+		result.ActiveDirectPathID = snapshot.ActiveDirectPathID
+		return result, nil
+	}
+	if snapshot.ActiveMethodKind != "" && snapshot.ActiveMethodKind != accesspolicy.MethodSubscription {
+		return reconcile.Observed{}, errors.New("active runtime method kind is invalid")
+	}
+	if firewallState.Mode != dataplane.PathModeTUN || snapshot.ActivePathID == "" || snapshot.ActiveSubscriptionID == "" || snapshot.ActiveNodeID == "" || snapshot.ActiveDirectPathID != "" {
+		return reconcile.Observed{}, errors.New("active TUN firewall does not match desired runtime state")
 	}
 	names, err := mihomo.StablePathNames(snapshot.ActiveModemID, snapshot.ActiveSubscriptionID)
 	if err != nil {
@@ -301,5 +396,6 @@ WHERE n.id=? AND s.id=?`, snapshot.ActiveNodeID, snapshot.ActiveSubscriptionID).
 	}
 	result.ActivePathID = snapshot.ActivePathID
 	result.ActiveNodeID = snapshot.ActiveNodeID
+	result.MethodKind = accesspolicy.MethodSubscription
 	return result, nil
 }

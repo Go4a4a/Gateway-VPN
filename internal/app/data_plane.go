@@ -92,6 +92,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		return dataPlaneComponents{}, err
 	}
 	directPaths := accesspolicy.NewDirectPathRepository(database)
+	accessPolicies := accesspolicy.NewRepository(database)
 	directProber, err := directprobe.New(modems, directPaths, targets, broker, probeScheduler, configuration.Mihomo.BootstrapDNS)
 	if err != nil {
 		return dataPlaneComponents{}, fmt.Errorf("initialize direct Internet prober: %w", err)
@@ -134,7 +135,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		EndpointAccess: broker,
 		Prober:         scheduledProber,
 		ProberForClass: proberForClass,
-		Qualifier:      health.Qualifier{MaxConcurrency: 2},
+		Qualifier:      health.Qualifier{MaxConcurrency: 2, ContinueAfterRequiredFailure: true},
 		PayloadRoot:    filepath.Join(configuration.System.StateDir, "subscriptions"),
 		BaseInput: mihomo.Input{
 			ExternalController: configuration.Mihomo.APIAddress,
@@ -182,7 +183,11 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	modemRunner := &hilink.Runner{Manager: modemManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}
 	pathActuator := &pathruntime.Actuator{Database: database, Targets: targets, Broker: broker, Mihomo: client, BodyProber: scheduledProber, OperationLock: operationLock}
 	pathObserver := pathruntime.Observer{Database: database, Broker: broker, Mihomo: client, TUN: tunInspector, State: states, TUNName: configuration.Mihomo.TunName, ExpectedVersion: buildinfo.MihomoVersion, OperationLock: operationLock}
-	reconciler := &reconcile.Reconciler{Observer: pathObserver, Inventory: reconcile.SQLiteInventory{Database: database}, State: states, Actuator: pathActuator}
+	reconciler := &reconcile.Reconciler{
+		Observer: pathObserver, Inventory: reconcile.SQLiteInventory{Database: database},
+		State: states, Actuator: pathActuator,
+		AccessPaths: directPaths, AccessPolicy: accessPolicies,
+	}
 	healthRunner := &candidateruntime.PeriodicRunner{
 		Runtime: candidateRuntime,
 		Schedules: health.PeriodicRepository{

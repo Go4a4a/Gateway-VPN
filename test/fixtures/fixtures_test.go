@@ -28,7 +28,7 @@ func TestRequiredFixtureInventory(t *testing.T) {
 		"bypass-targets/required-and-optional.json", "bypass-targets/target-outage-matrix.json", "bypass-targets/invalid-and-ssrf-cases.json",
 		"modems/two-distinct-subnets.json", "modems/identity-replug-events.json", "modems/ambiguous-identity.json", "modems/subnet-conflict.json",
 		"path-matrix/mixed-qualified-failed.json", "path-matrix/active-modem-unplug.json", "path-matrix/reconnect-delayed-failback.json", "path-matrix/large-scheduler-matrix.json",
-		"nftables/boot-blocked.nft", "nftables/two-modems-policy-routing.nft", "nftables/path-active-modem-a.nft", "nftables/path-active-modem-b.nft", "nftables/expected-ruleset.json", "nftables/validate-kernel.sh", "nftables/validate-traffic-reader.sh",
+		"nftables/boot-blocked.nft", "nftables/two-modems-policy-routing.nft", "nftables/path-active-modem-a.nft", "nftables/path-active-modem-b.nft", "nftables/path-direct-modem-a.nft", "nftables/expected-ruleset.json", "nftables/validate-kernel.sh", "nftables/validate-traffic-reader.sh",
 		"netns/topology.md", "netns/addresses.env",
 		"database/clean-v1.db", "database/wal-truncated-recoverable", "database/wal-invalid-checksum-recoverable", "database/page-corrupted.db", "database/partial-main-write.db",
 	}
@@ -222,7 +222,7 @@ func TestNFTFixturesMatchProductionRendererAndHashes(t *testing.T) {
 		Forbidden     []string          `json:"forbidden_markers"`
 	}
 	decodeStrict(t, "nftables/expected-ruleset.json", &manifest)
-	if manifest.FormatVersion != 1 || len(manifest.SHA256) != 4 {
+	if manifest.FormatVersion != 1 || len(manifest.SHA256) != 5 {
 		t.Fatalf("nft manifest = %+v", manifest)
 	}
 	for name, expected := range manifest.SHA256 {

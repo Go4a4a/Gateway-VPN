@@ -26,6 +26,17 @@ nft --check --file "$FIXTURE"
 nft --check --file "$rendered"
 nft --file "$FIXTURE"
 
+for transaction in path-active-modem-a.nft path-active-modem-b.nft path-direct-modem-a.nft; do
+  nft --check --file "$ROOT/test/fixtures/nftables/$transaction"
+done
+nft --file "$ROOT/test/fixtures/nftables/path-direct-modem-a.nft"
+nft --json list table inet gateway_vpn | grep -Fq 'active_direct_marks'
+nft --file "$ROOT/test/fixtures/nftables/path-active-modem-a.nft"
+if nft list set inet gateway_vpn active_direct_interfaces | grep -Fq 'elements'; then
+  echo "TUN transaction did not clear the direct interface gate" >&2
+  exit 1
+fi
+
 counters=$(nft --json list counters table inet gateway_vpn)
 for name in user_upload user_download service_upload service_download; do
   grep -Fq "\"name\": \"$name\"" <<<"$counters"

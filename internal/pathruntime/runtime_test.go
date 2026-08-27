@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/dataplane"
 	databasepkg "gateway-vpn/internal/db"
@@ -42,8 +43,16 @@ func (broker *fakeBroker) AuthorizeMihomoVersions(_ context.Context, versionIDs 
 func (broker *fakeBroker) ActivatePath(_ context.Context, generation uint32) error {
 	broker.events = append(broker.events, "firewall:activate")
 	if broker.err == nil {
-		broker.state = dataplane.PathState{Active: true, Generation: generation}
+		broker.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: generation}
 		broker.activations = append(broker.activations, generation)
+	}
+	return broker.err
+}
+
+func (broker *fakeBroker) ActivateDirectPath(_ context.Context, _ string, routeGeneration int64) error {
+	broker.events = append(broker.events, "firewall:activate-direct")
+	if broker.err == nil {
+		broker.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeDirect, Generation: 1, RouteGeneration: uint32(routeGeneration)}
 	}
 	return broker.err
 }
@@ -148,7 +157,7 @@ func TestReconcilerSelectsReverifiesAndOpensOnlyVerifiedTUNGate(t *testing.T) {
 	if err != nil || result.Action != "PATH_ACTIVATED" || result.Candidate.ConfigGeneration != 1 {
 		t.Fatalf("Reconcile() = %+v, %v", result, err)
 	}
-	if fixture.broker.state != (dataplane.PathState{Active: true, Generation: 1}) || len(fixture.broker.activations) != 1 {
+	if fixture.broker.state != (dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: 1}) || len(fixture.broker.activations) != 1 {
 		t.Fatalf("firewall state/activations = %+v/%v", fixture.broker.state, fixture.broker.activations)
 	}
 	names, _ := mihomo.StablePathNames("modem-a", "sub-a")
@@ -180,6 +189,70 @@ func TestReconcilerSelectsReverifiesAndOpensOnlyVerifiedTUNGate(t *testing.T) {
 	}
 }
 
+func TestLimitedVPNActivationReverifiesOnlyFreshPassedTargets(t *testing.T) {
+	fixture := newFixture(t)
+	defer fixture.database.Close()
+	actuator := fixture.reconciler.Actuator.(*Actuator)
+	if _, err := actuator.Targets.Create(fixture.ctx, bypass.CreateInput{
+		ID: "target-b", Name: "B", Kind: bypass.KindDomain, Value: "blocked.example",
+		Required: true, Timeout: 5 * time.Second, SuccessMode: bypass.SuccessAnyHTTPResponse,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paths := pathmatrix.NewRepository(fixture.database)
+	cell, err := paths.Get(fixture.ctx, "modem-a", "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nodeID string
+	if err := fixture.database.QueryRowContext(fixture.ctx, `
+SELECT n.id
+FROM nodes AS n
+JOIN subscription_versions AS v ON v.id=n.version_id
+WHERE v.subscription_id='sub-a'
+LIMIT 1`).Scan(&nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.StoreQualification(fixture.ctx, pathmatrix.QualificationSnapshot{
+		PathID: cell.ID, ExpectedPolicyGeneration: cell.PolicyGeneration, ExpectedRouteGeneration: cell.RouteGeneration,
+		State: pathmatrix.StateDegraded, TransportState: "PASSED", SelectedNodeID: nodeID,
+		RequiredTargetsPassed: 1, RequiredTargetsTotal: 2, FunctionalScore: 1000,
+		LatencyMS: 15, CheckedAt: fixture.now, ExpiresAt: fixture.now.Add(time.Hour),
+		Nodes: []pathmatrix.NodeEvidence{{
+			NodeID: nodeID, State: pathmatrix.NodeBypassLimited, LatencyMS: 15,
+			Targets: []pathmatrix.TargetEvidence{
+				{TargetID: "target-a", State: health.ProbePassed, LatencyMS: 10},
+				{TargetID: "target-b", State: health.ProbeFailed, ErrorCode: "TARGET_BLOCKED"},
+			},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := fixture.state.BeginNodeActivation(fixture.ctx, cell.ID, nodeID, cell.PolicyGeneration, cell.RouteGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := reconcile.Candidate{
+		MethodKind: accesspolicy.MethodSubscription, QualityClass: accesspolicy.QualityLimited,
+		PathID: cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
+		PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration,
+		ConfigGeneration: intent.ConfigGeneration,
+	}
+	if err := actuator.Activate(fixture.ctx, candidate); err != nil {
+		t.Fatalf("Activate(LIMITED) error = %v", err)
+	}
+	if fixture.mihomo.delayCalls != 1 {
+		t.Fatalf("LIMITED activation probes = %d, want only the one fresh passed target", fixture.mihomo.delayCalls)
+	}
+	if _, _, err := fixture.state.FinishNodeActivation(fixture.ctx, cell.ID, nodeID, cell.PolicyGeneration, cell.RouteGeneration); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := fixture.state.Get(fixture.ctx)
+	if snapshot.ActiveQualityClass != accesspolicy.QualityLimited || snapshot.PathState != state.PathActive {
+		t.Fatalf("LIMITED active runtime = %+v", snapshot)
+	}
+}
+
 func TestFailedEndToEndRecheckKeepsFirewallBlockedAndSelectsReject(t *testing.T) {
 	fixture := newFixture(t)
 	defer fixture.database.Close()
@@ -200,7 +273,7 @@ func TestFailedEndToEndRecheckKeepsFirewallBlockedAndSelectsReject(t *testing.T)
 func TestBlockTreatsUnavailableMihomoAPIAsSafelyBlockedAfterFirewallCloses(t *testing.T) {
 	fixture := newFixture(t)
 	defer fixture.database.Close()
-	fixture.broker.state = dataplane.PathState{Active: true, Generation: 7}
+	fixture.broker.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: 7}
 	fixture.mihomo.selectErr = errors.New("Mihomo API unavailable")
 
 	if err := fixture.reconciler.Actuator.(*Actuator).Block(fixture.ctx, "ALL_MODEMS_OFFLINE"); err != nil {
@@ -214,7 +287,7 @@ func TestBlockTreatsUnavailableMihomoAPIAsSafelyBlockedAfterFirewallCloses(t *te
 func TestBlockEscalatesWhenAuthoritativeFirewallGateCannotClose(t *testing.T) {
 	fixture := newFixture(t)
 	defer fixture.database.Close()
-	fixture.broker.state = dataplane.PathState{Active: true, Generation: 7}
+	fixture.broker.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: 7}
 	fixture.broker.blockErr = errors.New("firewall block failed")
 	fixture.mihomo.selectErr = errors.New("Mihomo API unavailable")
 
@@ -250,7 +323,7 @@ WHERE id='target-a'`, bypass.SuccessExpectedBody); err != nil {
 func TestObserverRejectsFirewallGenerationThatDoesNotMatchSQLite(t *testing.T) {
 	fixture := newFixture(t)
 	defer fixture.database.Close()
-	fixture.broker.state = dataplane.PathState{Active: true, Generation: 99}
+	fixture.broker.state = dataplane.PathState{Active: true, Mode: dataplane.PathModeTUN, Generation: 99}
 	if _, err := (fixture.reconciler.Observer).(Observer).Observe(fixture.ctx); err == nil {
 		t.Fatal("Observe(mismatched generation) error = nil")
 	}

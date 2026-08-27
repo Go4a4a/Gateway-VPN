@@ -43,9 +43,13 @@ type Snapshot struct {
 	PathState                  string
 	ActiveModemID              string
 	ActivePathID               string
+	ActiveDirectPathID         string
 	ManagementModemID          string
 	ActiveSubscriptionID       string
 	ActiveNodeID               string
+	ActiveMethodID             string
+	ActiveMethodKind           string
+	ActiveQualityClass         string
 	ConfigGeneration           int64
 	PolicyTransitionGeneration int64
 	PolicyTransitionStartedAt  string
@@ -56,7 +60,8 @@ type Snapshot struct {
 func (snapshot Snapshot) PolicyTransitionActive() bool {
 	return snapshot.GatewayState == GatewayVerifyingPolicy && snapshot.PathState == PathActive &&
 		snapshot.PolicyTransitionGeneration > 0 && snapshot.PolicyTransitionStartedAt != "" && snapshot.PolicyTransitionDeadline != "" &&
-		snapshot.ActiveModemID != "" && snapshot.ActivePathID != "" && snapshot.ActiveSubscriptionID != "" && snapshot.ActiveNodeID != ""
+		snapshot.ActiveModemID != "" && snapshot.ActivePathID != "" && snapshot.ActiveDirectPathID == "" &&
+		snapshot.ActiveSubscriptionID != "" && snapshot.ActiveNodeID != "" && snapshot.ActiveMethodKind == "SUBSCRIPTION"
 }
 
 type Event struct {
@@ -125,11 +130,14 @@ func (repository *Repository) beginActivation(ctx context.Context, pathID, nodeI
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
 SET gateway_state=?, path_state=?, active_modem_id=?, active_path_id=?,
-    active_subscription_id=?, active_node_id=?, config_generation=config_generation+1,
+    active_direct_path_id=NULL, active_subscription_id=?, active_node_id=?,
+    active_method_id=?, active_method_kind='SUBSCRIPTION', active_quality_class=?,
+    config_generation=config_generation+1,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
     policy_transition_deadline=NULL,
     updated_at=?
-WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.ModemID, path.ID, path.SubscriptionID, path.NodeID, now)
+WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.ModemID, path.ID,
+		path.SubscriptionID, path.NodeID, path.MethodID, path.QualityClass, now)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("record path activation intent: %w", err)
 	}
@@ -252,6 +260,101 @@ func (repository *Repository) FinishNodeActivation(ctx context.Context, pathID, 
 	return repository.finishActivation(ctx, pathID, nodeID, expectedPolicyGeneration, expectedRouteGeneration)
 }
 
+// BeginDirectActivation records an exact, generation-scoped direct Internet
+// intent. The direct path has its own foreign key and can never alias a VPN
+// subscription path.
+func (repository *Repository) BeginDirectActivation(ctx context.Context, pathID string, expectedPolicyGeneration, expectedRouteGeneration int64) (Snapshot, bool, error) {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("begin direct path activation intent: %w", err)
+	}
+	defer transaction.Rollback()
+	nowTime := repository.now().UTC()
+	path, err := readFreshDirectPath(ctx, transaction, pathID, expectedPolicyGeneration, expectedRouteGeneration, nowTime)
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	current, err := scanSnapshot(transaction.QueryRowContext(ctx, runtimeSelect))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	if current.PathState == PathVerifying && current.ActiveDirectPathID == path.ID && current.ActiveMethodKind == "DIRECT" {
+		return current, false, nil
+	}
+	now := nowTime.Format(time.RFC3339Nano)
+	_, err = transaction.ExecContext(ctx, `
+UPDATE runtime_state
+SET gateway_state=?, path_state=?, active_modem_id=?, active_path_id=NULL,
+    active_direct_path_id=?, active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id=?, active_method_kind='DIRECT', active_quality_class=?,
+    config_generation=config_generation+1,
+    policy_transition_generation=NULL, policy_transition_started_at=NULL,
+    policy_transition_deadline=NULL, updated_at=?
+WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.ModemID, path.ID,
+		path.MethodID, path.QualityClass, now)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("record direct path activation intent: %w", err)
+	}
+	if err := appendEventTx(ctx, transaction, now, EventInput{
+		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATION_STARTED", ModemID: path.ModemID,
+		PathID: path.ID, Details: map[string]any{
+			"quality_class": path.QualityClass, "policy_generation": expectedPolicyGeneration,
+			"route_generation": expectedRouteGeneration,
+		},
+	}); err != nil {
+		return Snapshot{}, false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Snapshot{}, false, fmt.Errorf("commit direct path activation intent: %w", err)
+	}
+	result, err := repository.Get(ctx)
+	return result, true, err
+}
+
+func (repository *Repository) FinishDirectActivation(ctx context.Context, pathID string, expectedPolicyGeneration, expectedRouteGeneration int64) (Snapshot, bool, error) {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("begin direct path activation completion: %w", err)
+	}
+	defer transaction.Rollback()
+	nowTime := repository.now().UTC()
+	path, err := readFreshDirectPath(ctx, transaction, pathID, expectedPolicyGeneration, expectedRouteGeneration, nowTime)
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	current, err := scanSnapshot(transaction.QueryRowContext(ctx, runtimeSelect))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	if current.PathState == PathActive && current.ActiveDirectPathID == path.ID && current.ActiveMethodKind == "DIRECT" {
+		return current, false, nil
+	}
+	if current.PathState != PathVerifying || current.ActiveDirectPathID != path.ID || current.ActiveMethodKind != "DIRECT" {
+		return Snapshot{}, false, store.ErrStaleGeneration
+	}
+	now := nowTime.Format(time.RFC3339Nano)
+	_, err = transaction.ExecContext(ctx, `
+UPDATE runtime_state
+SET gateway_state=?, path_state=?, active_quality_class=?,
+    policy_transition_generation=NULL, policy_transition_started_at=NULL,
+    policy_transition_deadline=NULL, updated_at=?
+WHERE singleton_id=1`, GatewayActive, PathActive, path.QualityClass, now)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("record active direct path: %w", err)
+	}
+	if err := appendEventTx(ctx, transaction, now, EventInput{
+		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATED", ModemID: path.ModemID,
+		PathID: path.ID, Details: map[string]any{"quality_class": path.QualityClass},
+	}); err != nil {
+		return Snapshot{}, false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Snapshot{}, false, fmt.Errorf("commit active direct path: %w", err)
+	}
+	result, err := repository.Get(ctx)
+	return result, true, err
+}
+
 func (repository *Repository) finishActivation(ctx context.Context, pathID, nodeID string, expectedPolicyGeneration, expectedRouteGeneration int64) (Snapshot, bool, error) {
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -310,15 +413,17 @@ func (repository *Repository) Block(ctx context.Context, gatewayState, reason st
 		return Snapshot{}, false, err
 	}
 	if current.GatewayState == gatewayState && current.PathState == PathBlocked &&
-		current.ActiveModemID == "" && current.ActivePathID == "" &&
-		current.ActiveSubscriptionID == "" && current.ActiveNodeID == "" {
+		current.ActiveModemID == "" && current.ActivePathID == "" && current.ActiveDirectPathID == "" &&
+		current.ActiveSubscriptionID == "" && current.ActiveNodeID == "" &&
+		current.ActiveMethodID == "" && current.ActiveMethodKind == "" && current.ActiveQualityClass == "" {
 		return current, false, nil
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
 SET gateway_state=?, path_state=?, active_modem_id=NULL, active_path_id=NULL,
-    active_subscription_id=NULL, active_node_id=NULL,
+    active_direct_path_id=NULL, active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id=NULL, active_method_kind=NULL, active_quality_class=NULL,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
     policy_transition_deadline=NULL,
     config_generation=config_generation+1, updated_at=?
@@ -364,34 +469,35 @@ func (repository *Repository) FinishPolicyVerification(ctx context.Context, expe
 		return Snapshot{}, false, ErrPolicyGraceExpired
 	}
 	formattedNow := nowTime.Format(time.RFC3339Nano)
-	var valid int
+	var qualityClass string
 	err = transaction.QueryRowContext(ctx, `
-SELECT COUNT(*)
+SELECT p.quality_class
 FROM subscription_modem_paths AS p
 JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=p.selected_node_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN modems AS m ON m.id=p.modem_id
 WHERE p.id=? AND p.modem_id=? AND p.subscription_id=? AND p.selected_node_id=?
-  AND p.state='QUALIFIED' AND p.policy_generation=? AND p.expires_at>?
-  AND pn.qualification_state='BYPASS_QUALIFIED'
+  AND p.policy_generation=? AND p.expires_at>?
+  AND ((p.state='QUALIFIED' AND p.quality_class='FULL' AND pn.qualification_state='BYPASS_QUALIFIED')
+       OR (p.state='DEGRADED' AND p.quality_class='LIMITED' AND pn.qualification_state='BYPASS_LIMITED'))
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
   AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
 		current.ActivePathID, current.ActiveModemID, current.ActiveSubscriptionID, current.ActiveNodeID,
-		expectedGeneration, formattedNow, formattedNow).Scan(&valid)
+		expectedGeneration, formattedNow, formattedNow).Scan(&qualityClass)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Snapshot{}, false, store.ErrStaleGeneration
+	}
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("validate active node under new policy: %w", err)
 	}
-	if valid != 1 {
-		return Snapshot{}, false, store.ErrStaleGeneration
-	}
 	result, err := transaction.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state=?, policy_transition_generation=NULL,
+SET gateway_state=?, active_quality_class=?, policy_transition_generation=NULL,
     policy_transition_started_at=NULL, policy_transition_deadline=NULL, updated_at=?
 WHERE singleton_id=1 AND gateway_state=? AND path_state=?
   AND policy_transition_generation=?`,
-		GatewayActive, formattedNow, GatewayVerifyingPolicy, PathActive, expectedGeneration)
+		GatewayActive, qualityClass, formattedNow, GatewayVerifyingPolicy, PathActive, expectedGeneration)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("finish policy verification: %w", err)
 	}
@@ -433,7 +539,8 @@ func (repository *Repository) RecoverPolicyTransition(ctx context.Context) (bool
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
 SET gateway_state=?, path_state=?, active_modem_id=NULL, active_path_id=NULL,
-    active_subscription_id=NULL, active_node_id=NULL,
+    active_direct_path_id=NULL, active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id=NULL, active_method_kind=NULL, active_quality_class=NULL,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
     policy_transition_deadline=NULL, config_generation=config_generation+1,
     updated_at=?
@@ -560,29 +667,67 @@ type freshPath struct {
 	ModemID        string
 	SubscriptionID string
 	NodeID         string
+	MethodID       string
+	QualityClass   string
 }
 
 func readFreshPath(ctx context.Context, transaction *sql.Tx, pathID, nodeID string, policyGeneration, routeGeneration int64, now time.Time) (freshPath, error) {
 	var path freshPath
 	err := transaction.QueryRowContext(ctx, `
-SELECT p.id, p.modem_id, p.subscription_id, pn.node_id
+SELECT p.id, p.modem_id, p.subscription_id, pn.node_id, a.id, p.quality_class
 FROM subscription_modem_paths AS p
 JOIN path_nodes AS pn ON pn.path_id=p.id
 JOIN nodes AS n ON n.id=pn.node_id
 JOIN subscription_versions AS v ON v.id=n.version_id
 JOIN subscriptions AS s ON s.id=p.subscription_id AND s.active_version_id=v.id
 JOIN modems AS m ON m.id=p.modem_id
-WHERE p.id=? AND p.state='QUALIFIED' AND p.policy_generation=? AND p.route_generation=?
+JOIN access_methods AS a ON a.subscription_id=s.id AND a.kind='SUBSCRIPTION'
+WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
   AND ((?='' AND pn.node_id=p.selected_node_id) OR (?<>'' AND pn.node_id=?))
-  AND p.expires_at>? AND pn.qualification_state='BYPASS_QUALIFIED'
+  AND p.expires_at>?
+  AND ((p.state='QUALIFIED' AND p.quality_class='FULL' AND pn.qualification_state='BYPASS_QUALIFIED')
+       OR (p.state='DEGRADED' AND p.quality_class='LIMITED' AND pn.qualification_state='BYPASS_LIMITED'))
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
-  AND n.enabled=1 AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`, pathID, policyGeneration, routeGeneration, nodeID, nodeID, nodeID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)).Scan(&path.ID, &path.ModemID, &path.SubscriptionID, &path.NodeID)
+  AND n.enabled=1 AND s.enabled=1 AND a.enabled=1
+  AND m.enabled=1 AND m.state='MODEM_READY'`, pathID, policyGeneration, routeGeneration, nodeID, nodeID, nodeID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)).Scan(&path.ID, &path.ModemID, &path.SubscriptionID, &path.NodeID, &path.MethodID, &path.QualityClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return freshPath{}, store.ErrStaleGeneration
 	}
 	if err != nil {
 		return freshPath{}, fmt.Errorf("validate fresh qualified path: %w", err)
+	}
+	return path, nil
+}
+
+type freshDirectPath struct {
+	ID           string
+	ModemID      string
+	MethodID     string
+	QualityClass string
+}
+
+func readFreshDirectPath(ctx context.Context, transaction *sql.Tx, pathID string, policyGeneration, routeGeneration int64, now time.Time) (freshDirectPath, error) {
+	var path freshDirectPath
+	err := transaction.QueryRowContext(ctx, `
+SELECT p.id, p.modem_id, a.id, p.quality_class
+FROM direct_modem_paths AS p
+JOIN modems AS m ON m.id=p.modem_id
+JOIN access_methods AS a ON a.id='access:direct' AND a.kind='DIRECT'
+WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
+  AND p.route_generation=m.route_generation
+  AND p.quality_class IN ('FULL', 'LIMITED')
+  AND p.state IN ('QUALIFIED', 'DEGRADED')
+  AND julianday(p.expires_at)>julianday(?)
+  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
+		pathID, policyGeneration, routeGeneration, now.Format(time.RFC3339Nano)).Scan(
+		&path.ID, &path.ModemID, &path.MethodID, &path.QualityClass,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return freshDirectPath{}, store.ErrStaleGeneration
+	}
+	if err != nil {
+		return freshDirectPath{}, fmt.Errorf("validate fresh direct path: %w", err)
 	}
 	return path, nil
 }
@@ -637,7 +782,8 @@ func nullString(value string) any {
 
 const runtimeSelect = `
 SELECT gateway_state, path_state, active_modem_id, active_path_id,
-       management_modem_id, active_subscription_id, active_node_id,
+       active_direct_path_id, management_modem_id, active_subscription_id, active_node_id,
+       active_method_id, active_method_kind, active_quality_class,
        config_generation, policy_transition_generation,
        policy_transition_started_at, policy_transition_deadline, updated_at
 FROM runtime_state WHERE singleton_id=1`
@@ -648,18 +794,25 @@ type scanner interface {
 
 func scanSnapshot(row scanner) (Snapshot, error) {
 	var snapshot Snapshot
-	var modemID, pathID, managementID, subscriptionID, nodeID sql.NullString
+	var modemID, pathID, directPathID, managementID, subscriptionID, nodeID sql.NullString
+	var methodID, methodKind, qualityClass sql.NullString
 	var transitionGeneration sql.NullInt64
 	var transitionStartedAt, transitionDeadline sql.NullString
-	err := row.Scan(&snapshot.GatewayState, &snapshot.PathState, &modemID, &pathID, &managementID, &subscriptionID, &nodeID, &snapshot.ConfigGeneration, &transitionGeneration, &transitionStartedAt, &transitionDeadline, &snapshot.UpdatedAt)
+	err := row.Scan(&snapshot.GatewayState, &snapshot.PathState, &modemID, &pathID, &directPathID,
+		&managementID, &subscriptionID, &nodeID, &methodID, &methodKind, &qualityClass,
+		&snapshot.ConfigGeneration, &transitionGeneration, &transitionStartedAt, &transitionDeadline, &snapshot.UpdatedAt)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("scan runtime state: %w", err)
 	}
 	snapshot.ActiveModemID = modemID.String
 	snapshot.ActivePathID = pathID.String
+	snapshot.ActiveDirectPathID = directPathID.String
 	snapshot.ManagementModemID = managementID.String
 	snapshot.ActiveSubscriptionID = subscriptionID.String
 	snapshot.ActiveNodeID = nodeID.String
+	snapshot.ActiveMethodID = methodID.String
+	snapshot.ActiveMethodKind = methodKind.String
+	snapshot.ActiveQualityClass = qualityClass.String
 	snapshot.PolicyTransitionGeneration = transitionGeneration.Int64
 	snapshot.PolicyTransitionStartedAt = transitionStartedAt.String
 	snapshot.PolicyTransitionDeadline = transitionDeadline.String

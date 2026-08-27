@@ -13,8 +13,10 @@ import (
 
 const (
 	CellQualified = "QUALIFIED"
+	CellDegraded  = "DEGRADED"
 	CellFailed    = "FAILED"
 	NodeQualified = "BYPASS_QUALIFIED"
+	NodeLimited   = "BYPASS_LIMITED"
 	NodeFailed    = "BYPASS_FAILED"
 	NodeCancelled = "CANCELLED"
 	ProbePassed   = "PASSED"
@@ -77,6 +79,8 @@ type NodeResult struct {
 	Targets            []TargetResult
 	RequiredPassed     int
 	RequiredTotal      int
+	OptionalPassed     int
+	OptionalTotal      int
 	AggregateLatencyMS int64
 }
 
@@ -91,6 +95,9 @@ type CellResult struct {
 	QualifiedNodes        int
 	RequiredTargetsPassed int
 	RequiredTargetsTotal  int
+	OptionalTargetsPassed int
+	OptionalTargetsTotal  int
+	FunctionalScore       int64
 	LatencyMS             int64
 	Nodes                 []NodeResult
 }
@@ -107,7 +114,7 @@ func (qualifier Qualifier) QualifyCell(ctx context.Context, prober Prober, curre
 	if currentPath.ID == "" || currentPath.ModemID == "" || currentPath.SubscriptionID == "" || currentPath.ProviderName == "" {
 		return CellResult{}, errors.New("complete path identity is required")
 	}
-	orderedTargets, requiredTotal, err := validateTargets(targets)
+	orderedTargets, requiredTotal, optionalTotal, err := validateTargets(targets)
 	if err != nil {
 		return CellResult{}, err
 	}
@@ -115,7 +122,7 @@ func (qualifier Qualifier) QualifyCell(ctx context.Context, prober Prober, curre
 		return CellResult{}, errors.New("at least one required bypass target is required")
 	}
 	if len(currentPath.Candidates) == 0 {
-		return CellResult{PathID: currentPath.ID, ModemID: currentPath.ModemID, SubscriptionID: currentPath.SubscriptionID, State: CellFailed, TransportState: ProbeFailed, RequiredTargetsTotal: requiredTotal}, nil
+		return CellResult{PathID: currentPath.ID, ModemID: currentPath.ModemID, SubscriptionID: currentPath.SubscriptionID, State: CellFailed, TransportState: ProbeFailed, RequiredTargetsTotal: requiredTotal, OptionalTargetsTotal: optionalTotal}, nil
 	}
 	candidates := append([]Candidate(nil), currentPath.Candidates...)
 	results := make([]NodeResult, 0, len(candidates))
@@ -124,27 +131,27 @@ func (qualifier Qualifier) QualifyCell(ctx context.Context, prober Prober, curre
 			if candidate.NodeID != currentPath.PreferredNodeID {
 				continue
 			}
-			preferred := qualifyNode(ctx, prober, currentPath, candidate, orderedTargets, requiredTotal, qualifier.ContinueAfterRequiredFailure)
+			preferred := qualifyNode(ctx, prober, currentPath, candidate, orderedTargets, requiredTotal, optionalTotal, qualifier.ContinueAfterRequiredFailure)
 			if err := ctx.Err(); err != nil {
 				return CellResult{}, err
 			}
 			results = append(results, preferred)
 			candidates = append(candidates[:index], candidates[index+1:]...)
 			if preferred.State == NodeQualified {
-				return buildCellResult(currentPath, len(currentPath.Candidates), requiredTotal, results), nil
+				return buildCellResult(currentPath, len(currentPath.Candidates), requiredTotal, optionalTotal, results), nil
 			}
 			break
 		}
 	}
-	remaining, err := qualifier.qualifyCandidates(ctx, prober, currentPath, candidates, orderedTargets, requiredTotal)
+	remaining, err := qualifier.qualifyCandidates(ctx, prober, currentPath, candidates, orderedTargets, requiredTotal, optionalTotal)
 	if err != nil {
 		return CellResult{}, err
 	}
 	results = append(results, remaining...)
-	return buildCellResult(currentPath, len(currentPath.Candidates), requiredTotal, results), nil
+	return buildCellResult(currentPath, len(currentPath.Candidates), requiredTotal, optionalTotal, results), nil
 }
 
-func (qualifier Qualifier) qualifyCandidates(ctx context.Context, prober Prober, currentPath Path, candidates []Candidate, targets []Target, requiredTotal int) ([]NodeResult, error) {
+func (qualifier Qualifier) qualifyCandidates(ctx context.Context, prober Prober, currentPath Path, candidates []Candidate, targets []Target, requiredTotal, optionalTotal int) ([]NodeResult, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -167,10 +174,10 @@ func (qualifier Qualifier) qualifyCandidates(ctx context.Context, prober Prober,
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
-				results[index] = NodeResult{NodeID: candidate.NodeID, Fingerprint: candidate.Fingerprint, State: NodeCancelled, RequiredTotal: requiredTotal}
+				results[index] = NodeResult{NodeID: candidate.NodeID, Fingerprint: candidate.Fingerprint, State: NodeCancelled, RequiredTotal: requiredTotal, OptionalTotal: optionalTotal}
 				return
 			}
-			results[index] = qualifyNode(ctx, prober, currentPath, candidate, targets, requiredTotal, qualifier.ContinueAfterRequiredFailure)
+			results[index] = qualifyNode(ctx, prober, currentPath, candidate, targets, requiredTotal, optionalTotal, qualifier.ContinueAfterRequiredFailure)
 		}()
 	}
 	wait.Wait()
@@ -180,7 +187,7 @@ func (qualifier Qualifier) qualifyCandidates(ctx context.Context, prober Prober,
 	return results, nil
 }
 
-func buildCellResult(currentPath Path, candidateCount, requiredTotal int, results []NodeResult) CellResult {
+func buildCellResult(currentPath Path, candidateCount, requiredTotal, optionalTotal int, results []NodeResult) CellResult {
 	cell := CellResult{
 		PathID:               currentPath.ID,
 		ModemID:              currentPath.ModemID,
@@ -189,14 +196,21 @@ func buildCellResult(currentPath Path, candidateCount, requiredTotal int, result
 		TransportState:       ProbeFailed,
 		CandidateNodes:       candidateCount,
 		RequiredTargetsTotal: requiredTotal,
+		OptionalTargetsTotal: optionalTotal,
 		Nodes:                results,
 	}
 	bestIndex := -1
+	limitedIndex := -1
 	for index, result := range results {
 		if result.Transport.State == ProbePassed {
 			cell.TransportState = ProbePassed
 		}
 		if result.State != NodeQualified {
+			if result.State == NodeLimited && (limitedIndex == -1 || nodeFunctionalScore(result) > nodeFunctionalScore(results[limitedIndex]) ||
+				nodeFunctionalScore(result) == nodeFunctionalScore(results[limitedIndex]) && (result.AggregateLatencyMS < results[limitedIndex].AggregateLatencyMS ||
+					result.AggregateLatencyMS == results[limitedIndex].AggregateLatencyMS && result.NodeID < results[limitedIndex].NodeID)) {
+				limitedIndex = index
+			}
 			continue
 		}
 		cell.QualifiedNodes++
@@ -209,13 +223,23 @@ func buildCellResult(currentPath Path, candidateCount, requiredTotal int, result
 		cell.State = CellQualified
 		cell.SelectedNodeID = best.NodeID
 		cell.RequiredTargetsPassed = best.RequiredPassed
+		cell.OptionalTargetsPassed = best.OptionalPassed
+		cell.FunctionalScore = nodeFunctionalScore(best)
+		cell.LatencyMS = best.AggregateLatencyMS
+	} else if limitedIndex >= 0 {
+		best := results[limitedIndex]
+		cell.State = CellDegraded
+		cell.SelectedNodeID = best.NodeID
+		cell.RequiredTargetsPassed = best.RequiredPassed
+		cell.OptionalTargetsPassed = best.OptionalPassed
+		cell.FunctionalScore = nodeFunctionalScore(best)
 		cell.LatencyMS = best.AggregateLatencyMS
 	}
 	return cell
 }
 
-func qualifyNode(ctx context.Context, prober Prober, currentPath Path, candidate Candidate, targets []Target, requiredTotal int, continueAfterRequiredFailure bool) NodeResult {
-	result := NodeResult{NodeID: candidate.NodeID, Fingerprint: candidate.Fingerprint, State: NodeFailed, RequiredTotal: requiredTotal}
+func qualifyNode(ctx context.Context, prober Prober, currentPath Path, candidate Candidate, targets []Target, requiredTotal, optionalTotal int, continueAfterRequiredFailure bool) NodeResult {
+	result := NodeResult{NodeID: candidate.NodeID, Fingerprint: candidate.Fingerprint, State: NodeFailed, RequiredTotal: requiredTotal, OptionalTotal: optionalTotal}
 	result.Transport = prober.ProbeTransport(ctx, currentPath, candidate)
 	if result.Transport.State != ProbePassed {
 		return result
@@ -232,6 +256,8 @@ func qualifyNode(ctx context.Context, prober Prober, currentPath Path, candidate
 			result.AggregateLatencyMS += probe.LatencyMS
 			if target.Required {
 				result.RequiredPassed++
+			} else {
+				result.OptionalPassed++
 			}
 			continue
 		}
@@ -241,26 +267,34 @@ func qualifyNode(ctx context.Context, prober Prober, currentPath Path, candidate
 	}
 	if result.RequiredPassed == requiredTotal {
 		result.State = NodeQualified
+	} else if result.RequiredPassed+result.OptionalPassed > 0 {
+		result.State = NodeLimited
 	}
 	return result
 }
 
-func validateTargets(targets []Target) ([]Target, int, error) {
+func nodeFunctionalScore(result NodeResult) int64 {
+	return int64(result.RequiredPassed*1000 + result.OptionalPassed)
+}
+
+func validateTargets(targets []Target) ([]Target, int, int, error) {
 	ordered := append([]Target(nil), targets...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
 	seenIDs := make(map[string]struct{}, len(ordered))
-	required := 0
+	required, optional := 0, 0
 	for _, target := range ordered {
 		if target.ID == "" || target.URL == "" || target.Timeout <= 0 || target.Timeout > 60*time.Second {
-			return nil, 0, fmt.Errorf("invalid probe target %q", target.ID)
+			return nil, 0, 0, fmt.Errorf("invalid probe target %q", target.ID)
 		}
 		if _, exists := seenIDs[target.ID]; exists {
-			return nil, 0, fmt.Errorf("duplicate probe target %q", target.ID)
+			return nil, 0, 0, fmt.Errorf("duplicate probe target %q", target.ID)
 		}
 		seenIDs[target.ID] = struct{}{}
 		if target.Required {
 			required++
+		} else {
+			optional++
 		}
 	}
-	return ordered, required, nil
+	return ordered, required, optional, nil
 }

@@ -100,7 +100,11 @@ func (guard *Guard) Inspect(ctx context.Context) error {
 		"table inet " + TableName,
 		"set " + SchemaGenerationSet,
 		"set active_tun_interfaces",
+		"set active_direct_interfaces",
+		"set active_direct_context",
+		"map active_direct_marks",
 		"set active_path_generation",
+		"set active_route_generation",
 		"set hilink_interfaces",
 		"set wireguard_endpoint_v4",
 		"set mihomo_endpoint_tcp_v4",
@@ -112,10 +116,16 @@ func (guard *Guard) Inspect(ctx context.Context) error {
 		"hook input priority filter; policy drop",
 		"chain forward {",
 		"hook forward priority filter; policy drop",
+		"chain prerouting {",
+		"hook prerouting priority mangle",
+		"chain postrouting {",
+		"hook postrouting priority srcnat",
 		"chain output {",
 		"hook output priority filter; policy drop",
 		"gateway-vpn PATH_BLOCKED",
 		"oifname @active_tun_interfaces",
+		"oifname . meta mark @active_direct_context",
+		"map @active_direct_marks",
 		"@wireguard_endpoint_v4 udp dport 51821",
 	} {
 		if !strings.Contains(result.Stdout, marker) {
@@ -126,7 +136,7 @@ func (guard *Guard) Inspect(ctx context.Context) error {
 	if err != nil {
 		return errors.New("firewall schema generation is unavailable")
 	}
-	if err := validateSchemaGeneration([]byte(generation.Stdout)); err != nil {
+	if err := ValidateSchemaGenerationJSON([]byte(generation.Stdout)); err != nil {
 		return err
 	}
 	return nil
@@ -139,7 +149,9 @@ func (guard *Guard) validate() error {
 	return nil
 }
 
-func validateSchemaGeneration(payload []byte) error {
+// ValidateSchemaGenerationJSON verifies that an nft JSON set response belongs
+// to the owned table and contains exactly the current schema generation.
+func ValidateSchemaGenerationJSON(payload []byte) error {
 	var document struct {
 		NFTables []map[string]json.RawMessage `json:"nftables"`
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -46,6 +47,7 @@ type DataPlaneAdmin interface {
 
 type PathAdmin interface {
 	ActivatePath(context.Context, uint32) error
+	ActivateDirectPath(context.Context, string, int64) error
 	BlockPath(context.Context) error
 	ObservePath(context.Context) (dataplane.PathState, error)
 }
@@ -190,6 +192,7 @@ func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin,
 	}
 	if pathPlane != nil {
 		mux.HandleFunc("POST /v1/path/activate", server.activatePath)
+		mux.HandleFunc("POST /v1/path/direct/activate", server.activateDirectPath)
 		mux.HandleFunc("POST /v1/path/block", server.blockPath)
 		mux.HandleFunc("POST /v1/path/observe", server.observePath)
 	}
@@ -229,6 +232,26 @@ func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin,
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) activateDirectPath(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		ModemID         string `json:"modem_id"`
+		RouteGeneration int64  `json:"route_generation"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if strings.TrimSpace(input.ModemID) == "" || len(input.ModemID) > 128 || input.RouteGeneration <= 0 || input.RouteGeneration > math.MaxUint32 {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if err := server.PathPlane.ActivateDirectPath(request.Context(), input.ModemID, input.RouteGeneration); err != nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "DIRECT_PATH_ACTIVATION_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (server *BrokerServer) readTrafficCounters(writer http.ResponseWriter, request *http.Request) {
@@ -583,6 +606,13 @@ func (client *BrokerClient) FailClosedMihomo(ctx context.Context) error {
 
 func (client *BrokerClient) ActivatePath(ctx context.Context, generation uint32) error {
 	return client.call(ctx, "/v1/path/activate", map[string]uint32{"generation": generation}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) ActivateDirectPath(ctx context.Context, modemID string, routeGeneration int64) error {
+	return client.call(ctx, "/v1/path/direct/activate", struct {
+		ModemID         string `json:"modem_id"`
+		RouteGeneration int64  `json:"route_generation"`
+	}{ModemID: modemID, RouteGeneration: routeGeneration}, http.StatusNoContent, nil)
 }
 
 func (client *BrokerClient) BlockPath(ctx context.Context) error {

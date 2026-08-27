@@ -73,14 +73,34 @@ add element inet gateway_vpn hilink_management_v4 { "enx001" . 192.168.8.1, "enx
 add element inet gateway_vpn bootstrap_dns_v4 { "enx001" . 4353 . 1.1.1.1, "enx002" . 4354 . 1.1.1.1 }
 `),
 		"path-active-modem-a.nft": []byte(`flush set inet gateway_vpn active_tun_interfaces
+flush set inet gateway_vpn active_direct_interfaces
+flush set inet gateway_vpn active_direct_context
+flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
+flush set inet gateway_vpn active_route_generation
 add element inet gateway_vpn active_path_generation { 101 }
 add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }
 `),
 		"path-active-modem-b.nft": []byte(`flush set inet gateway_vpn active_tun_interfaces
+flush set inet gateway_vpn active_direct_interfaces
+flush set inet gateway_vpn active_direct_context
+flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
+flush set inet gateway_vpn active_route_generation
 add element inet gateway_vpn active_path_generation { 202 }
 add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }
+`),
+		"path-direct-modem-a.nft": []byte(`flush set inet gateway_vpn active_tun_interfaces
+flush set inet gateway_vpn active_direct_interfaces
+flush set inet gateway_vpn active_direct_context
+flush map inet gateway_vpn active_direct_marks
+flush set inet gateway_vpn active_path_generation
+flush set inet gateway_vpn active_route_generation
+add element inet gateway_vpn active_path_generation { 303 }
+add element inet gateway_vpn active_route_generation { 1 }
+add element inet gateway_vpn active_direct_interfaces { "wan0" }
+add element inet gateway_vpn active_direct_context { "wan0" . 0x00001101 }
+add element inet gateway_vpn active_direct_marks { "enp2s0" : 0x00001101 }
 `),
 	}
 	manifest := nftManifest{

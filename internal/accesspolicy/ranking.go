@@ -24,21 +24,24 @@ var ErrNoCandidate = errors.New("no eligible access candidate")
 // ranker is deliberately independent from SQL so the exact failover ordering
 // is deterministic and can be tested without a network namespace.
 type Candidate struct {
-	Key             string
-	MethodID        string
-	MethodKind      string
-	ModemID         string
-	SubscriptionID  string
-	NodeID          string
-	Quality         string
-	FunctionalScore int64
-	MethodPriority  int64
-	ModemPriority   int64
-	NodePriority    int64
-	MethodEnabled   bool
-	ModemReady      bool
-	NodeAllowed     bool
-	Fresh           bool
+	Key              string
+	PathID           string
+	MethodID         string
+	MethodKind       string
+	ModemID          string
+	SubscriptionID   string
+	NodeID           string
+	Quality          string
+	FunctionalScore  int64
+	MethodPriority   int64
+	ModemPriority    int64
+	NodePriority     int64
+	MethodEnabled    bool
+	ModemReady       bool
+	NodeAllowed      bool
+	Fresh            bool
+	PolicyGeneration int64
+	RouteGeneration  int64
 }
 
 type Decision struct {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/pathmatrix"
@@ -87,6 +88,63 @@ VALUES ('node-a', 'version-a', 'A', 'a', 'fingerprint-a', 'vless')`); err != nil
 	}
 	if err != nil || len(pathEvents) != 3 || pathEvents[0].Type != "PATH_BLOCKED" || pathEvents[1].Type != "PATH_ACTIVATED" || pathEvents[2].Type != "PATH_ACTIVATION_STARTED" {
 		t.Fatalf("events = %+v, %v", events, err)
+	}
+}
+
+func TestDirectActivationUsesDedicatedForeignKeyAndClearsAtomically(t *testing.T) {
+	ctx, database := stateDatabase(t)
+	digest := sha256.Sum256([]byte("direct-modem"))
+	modems := modem.NewRepository(database, 1101, 0x1101)
+	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem-direct", Name: "Direct", IdentityKind: "usb_serial_hash", IdentityHash: hex.EncodeToString(digest[:])}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modems.ApplyLease(ctx, "modem-direct", modem.LeaseInput{
+		InterfaceName: "enxdirect", ManagementCIDR: "192.168.8.0/24",
+		Gateway: "192.168.8.1", DNS: []string{"192.168.8.1"}, MTU: 1500,
+		State: modem.StateReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO bypass_probe_targets (
+    id, name, target_kind, target_value, normalized_url, enabled, required,
+    priority, timeout_seconds, success_mode, state, created_at, updated_at
+) VALUES ('direct-target', 'Direct', 'domain', 'example.com', 'https://example.com/',
+          1, 1, 10, 8, 'any_http_response', 'UNKNOWN', ?, ?)`,
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	paths := accesspolicy.NewDirectPathRepository(database)
+	if err := paths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	items, err := paths.List(ctx)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("direct paths = %+v, %v", items, err)
+	}
+	path := items[0]
+	if err := paths.Publish(ctx, accesspolicy.DirectResultUpdate{
+		PathID: path.ID, ExpectedPolicyGeneration: path.PolicyGeneration, ExpectedRouteGeneration: path.RouteGeneration,
+		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
+		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 10,
+		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "direct-target", State: "PASSED", LatencyMS: 10, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewRepository(database)
+	intent, changed, err := repository.BeginDirectActivation(ctx, path.ID, path.PolicyGeneration, path.RouteGeneration)
+	if err != nil || !changed || intent.ActiveDirectPathID != path.ID || intent.ActivePathID != "" || intent.ActiveMethodKind != accesspolicy.MethodDirect || intent.ConfigGeneration != 1 {
+		t.Fatalf("BeginDirectActivation() = %+v/%v/%v", intent, changed, err)
+	}
+	active, changed, err := repository.FinishDirectActivation(ctx, path.ID, path.PolicyGeneration, path.RouteGeneration)
+	if err != nil || !changed || active.PathState != PathActive || active.ActiveDirectPathID != path.ID || active.ActiveQualityClass != accesspolicy.QualityFull {
+		t.Fatalf("FinishDirectActivation() = %+v/%v/%v", active, changed, err)
+	}
+	blocked, changed, err := repository.Block(ctx, GatewayBlocked, "direct-test")
+	if err != nil || !changed || blocked.ActiveDirectPathID != "" || blocked.ActiveMethodKind != "" || blocked.ActiveModemID != "" || blocked.ConfigGeneration != 2 {
+		t.Fatalf("Block(direct) = %+v/%v/%v", blocked, changed, err)
 	}
 }
 

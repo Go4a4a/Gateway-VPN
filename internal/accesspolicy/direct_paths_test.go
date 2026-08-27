@@ -277,19 +277,28 @@ func directUpdate(path DirectPath, checkedAt time.Time, quality string, score in
 
 func publishVPNResult(ctx context.Context, repository *pathmatrix.Repository, path pathmatrix.Cell, nodeID string, checkedAt time.Time, quality string, score int64) error {
 	state := pathmatrix.StateQualified
+	nodeState := pathmatrix.NodeBypassQualified
 	requiredPassed := int64(1)
+	requiredState := "PASSED"
 	if quality == QualityLimited {
 		state = pathmatrix.StateDegraded
+		nodeState = pathmatrix.NodeBypassLimited
 		requiredPassed = 0
+		requiredState = "FAILED"
 	}
-	return repository.UpdateResult(ctx, pathmatrix.ResultUpdate{
+	return repository.StoreQualification(ctx, pathmatrix.QualificationSnapshot{
 		PathID: path.ID, ExpectedPolicyGeneration: path.PolicyGeneration,
 		ExpectedRouteGeneration: path.RouteGeneration, State: state,
 		TransportState: "PASSED", SelectedNodeID: nodeID,
-		CandidateNodes: 1, QualifiedNodes: 1,
 		RequiredTargetsPassed: requiredPassed, RequiredTargetsTotal: 1,
-		OptionalTargetsPassed: 1, OptionalTargetsTotal: 1,
-		QualityClass: quality, FunctionalScore: score, LatencyMS: 70,
-		LastCheckedAt: checkedAt, ExpiresAt: checkedAt.Add(15 * time.Minute),
+		OptionalTargetsPassed: 1, OptionalTargetsTotal: 1, FunctionalScore: score,
+		LatencyMS: 70, CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(15 * time.Minute),
+		Nodes: []pathmatrix.NodeEvidence{{
+			NodeID: nodeID, State: nodeState, LatencyMS: 70,
+			Targets: []pathmatrix.TargetEvidence{
+				{TargetID: "target-required", State: requiredState, LatencyMS: 30},
+				{TargetID: "target-optional", State: "PASSED", LatencyMS: 30},
+			},
+		}},
 	})
 }

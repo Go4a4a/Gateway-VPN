@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/health"
@@ -305,6 +306,82 @@ VALUES ('node-b', 'version-a', 'B', 'b', 'fingerprint-b', 'vless')`); err != nil
 	}
 }
 
+func TestUnifiedReconcilerUsesDirectWithoutMihomoThenFailsOverWithHold(t *testing.T) {
+	ctx, database, vpn := reconcileFixture(t, true)
+	paths := accesspolicy.NewDirectPathRepository(database)
+	if err := paths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	directPaths, err := paths.List(ctx)
+	if err != nil || len(directPaths) != 1 {
+		t.Fatalf("direct paths = %+v, %v", directPaths, err)
+	}
+	now := time.Now().UTC()
+	direct := directPaths[0]
+	if err := paths.Publish(ctx, accesspolicy.DirectResultUpdate{
+		PathID: direct.ID, ExpectedPolicyGeneration: direct.PolicyGeneration, ExpectedRouteGeneration: direct.RouteGeneration,
+		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
+		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 9,
+		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", State: "PASSED", LatencyMS: 9, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+UPDATE access_policy
+SET failure_hold_seconds=5, recovery_stable_seconds=5, switch_cooldown_seconds=0
+WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	actuator := &fakeActuator{}
+	observer := &staticObserver{observed: Observed{FirewallReady: true, MihomoReady: false, TUNReady: false}}
+	states := state.NewRepository(database)
+	reconciler := &Reconciler{
+		Observer: observer, Inventory: SQLiteInventory{Database: database}, State: states, Actuator: actuator,
+		AccessPaths: paths, AccessPolicy: accesspolicy.NewRepository(database), Now: func() time.Time { return now },
+	}
+	result, err := reconciler.Reconcile(ctx)
+	if err != nil || result.Action != "ACCESS_METHOD_ACTIVATED" || result.Candidate.MethodKind != accesspolicy.MethodDirect || len(actuator.activations) != 1 {
+		t.Fatalf("direct without Mihomo = %+v activations=%+v err=%v", result, actuator.activations, err)
+	}
+	snapshot, err := states.Get(ctx)
+	if err != nil || snapshot.ActiveDirectPathID != direct.ID || snapshot.ActiveMethodKind != accesspolicy.MethodDirect || snapshot.ActivePathID != "" {
+		t.Fatalf("direct runtime = %+v, %v", snapshot, err)
+	}
+	observer.observed.MethodKind = accesspolicy.MethodDirect
+	observer.observed.ActiveDirectPathID = direct.ID
+	result, err = reconciler.Reconcile(ctx)
+	if err != nil || result.Action != "NO_CHANGE" || len(actuator.activations) != 1 {
+		t.Fatalf("stable direct = %+v activations=%+v err=%v", result, actuator.activations, err)
+	}
+
+	if _, err := database.ExecContext(ctx, "UPDATE direct_modem_paths SET expires_at=? WHERE id=?", now.Add(-time.Second).Format(time.RFC3339Nano), direct.ID); err != nil {
+		t.Fatal(err)
+	}
+	observer.observed.MihomoReady, observer.observed.TUNReady = true, true
+	result, err = reconciler.Reconcile(ctx)
+	if err != nil || result.Action != "FAILURE_HOLD_STARTED" || len(actuator.activations) != 1 {
+		t.Fatalf("failure hold start = %+v activations=%+v err=%v", result, actuator.activations, err)
+	}
+	reconciler.Now = func() time.Time { return now.Add(6 * time.Second) }
+	result, err = reconciler.Reconcile(ctx)
+	if err != nil || result.Action != "ACCESS_METHOD_ACTIVATED" || result.Candidate.PathID != vpn.PathID || result.Candidate.MethodKind != accesspolicy.MethodSubscription || len(actuator.activations) != 2 {
+		t.Fatalf("VPN failover = %+v activations=%+v err=%v", result, actuator.activations, err)
+	}
+	snapshot, _ = states.Get(ctx)
+	if snapshot.ActivePathID != vpn.PathID || snapshot.ActiveDirectPathID != "" || snapshot.ActiveMethodKind != accesspolicy.MethodSubscription {
+		t.Fatalf("VPN runtime after failover = %+v", snapshot)
+	}
+
+	if _, err := database.ExecContext(ctx, "UPDATE access_methods SET enabled=0"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = reconciler.Reconcile(ctx)
+	if err != nil || result.Action != "PATH_BLOCKED" || len(actuator.blocks) == 0 || actuator.blocks[len(actuator.blocks)-1] != "NO_FRESH_ACCESS_METHOD" {
+		t.Fatalf("no method block = %+v blocks=%+v err=%v", result, actuator.blocks, err)
+	}
+}
+
 func reconcileFixture(t *testing.T, withTarget bool) (context.Context, *sql.DB, Candidate) {
 	t.Helper()
 	ctx := context.Background()
@@ -317,10 +394,15 @@ func reconcileFixture(t *testing.T, withTarget bool) (context.Context, *sql.DB, 
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("modem-a"))
-	if _, err := modem.NewRepository(database, 1101, 0x1101).Adopt(ctx, modem.AdoptInput{ID: "modem-a", Name: "A", IdentityKind: "usb_serial_hash", IdentityHash: hex.EncodeToString(digest[:])}); err != nil {
+	modems := modem.NewRepository(database, 1101, 0x1101)
+	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem-a", Name: "A", IdentityKind: "usb_serial_hash", IdentityHash: hex.EncodeToString(digest[:])}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.ExecContext(ctx, "UPDATE modems SET state='MODEM_READY'"); err != nil {
+	if _, err := modems.ApplyLease(ctx, "modem-a", modem.LeaseInput{
+		InterfaceName: "enxmodema", ManagementCIDR: "192.168.8.0/24",
+		Gateway: "192.168.8.1", DNS: []string{"192.168.8.1"}, MTU: 1500,
+		State: modem.StateReady,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := subscription.NewRepository(database).Create(ctx, subscription.CreateInput{ID: "sub-a", Name: "A", SourceType: "url", SourceSecretRef: "/secret/a", RefreshInterval: time.Hour}); err != nil {
@@ -355,12 +437,13 @@ INSERT INTO bypass_probe_targets (
 	}
 	cell, _ := matrix.Get(ctx, "modem-a", "sub-a")
 	if err := matrix.StoreQualification(ctx, pathmatrix.QualificationSnapshot{
-		PathID: cell.ID, State: pathmatrix.StateQualified, TransportState: "PASSED", SelectedNodeID: "node-a",
+		PathID: cell.ID, ExpectedPolicyGeneration: cell.PolicyGeneration, ExpectedRouteGeneration: cell.RouteGeneration,
+		State: pathmatrix.StateQualified, TransportState: "PASSED", SelectedNodeID: "node-a",
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 10,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
 		Nodes: []pathmatrix.NodeEvidence{{NodeID: "node-a", State: pathmatrix.NodeBypassQualified, LatencyMS: 10}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return ctx, database, Candidate{PathID: cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: "node-a"}
+	return ctx, database, Candidate{PathID: cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: "node-a", PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration}
 }

@@ -1,49 +1,115 @@
 // Package dataplane owns the small privileged runtime surface that opens or
-// closes verified LAN traffic through the Mihomo TUN. It never creates a
-// LAN-to-modem rule and only mutates two sets in the Gateway VPN-owned table.
+// closes verified LAN traffic through exactly one selected access method. It
+// mutates only bounded gate collections in the Gateway VPN-owned table.
 package dataplane
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"gateway-vpn/internal/firewall"
+	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
 )
 
 const (
-	activeTUNSet        = "active_tun_interfaces"
-	activeGenerationSet = "active_path_generation"
+	PathModeTUN    = "TUN"
+	PathModeDirect = "DIRECT"
+
+	activeTUNSet             = "active_tun_interfaces"
+	activeDirectInterfaceSet = "active_direct_interfaces"
+	activeDirectContextSet   = "active_direct_context"
+	activeDirectMarkMap      = "active_direct_marks"
+	activeGenerationSet      = "active_path_generation"
+	activeRouteGenerationSet = "active_route_generation"
 )
 
 type PathState struct {
-	Active     bool   `json:"active"`
-	Generation uint32 `json:"generation"`
+	Active          bool   `json:"active"`
+	Mode            string `json:"mode,omitempty"`
+	Generation      uint32 `json:"generation"`
+	DirectInterface string `json:"direct_interface,omitempty"`
+	DirectMark      uint32 `json:"direct_mark,omitempty"`
+	RouteGeneration uint32 `json:"route_generation,omitempty"`
+}
+
+type RoutingSynchronizer interface {
+	SyncRouting(context.Context) error
 }
 
 type FirewallBackend struct {
+	Database *sql.DB
+	Modems   *modem.Repository
+	Routing  RoutingSynchronizer
 	Executor platformexec.Executor
 	NFT      string
 	TUNName  string
+	LANName  string
+	mutex    sync.Mutex
 }
 
-func (backend FirewallBackend) ActivatePath(ctx context.Context, generation uint32) error {
+func (backend *FirewallBackend) ActivatePath(ctx context.Context, generation uint32) error {
 	if generation == 0 {
 		return errors.New("active path generation must be non-zero")
 	}
-	return backend.apply(ctx, PathState{Active: true, Generation: generation})
+	return backend.apply(ctx, PathState{Active: true, Mode: PathModeTUN, Generation: generation})
 }
 
-func (backend FirewallBackend) BlockPath(ctx context.Context) error {
+func (backend *FirewallBackend) ActivateDirectPath(ctx context.Context, modemID string, routeGeneration int64) error {
+	if backend == nil || backend.Database == nil || backend.Modems == nil || backend.Routing == nil || !validInterfaceName(backend.LANName) || strings.TrimSpace(modemID) == "" || routeGeneration <= 0 || routeGeneration > math.MaxUint32 {
+		return errors.New("bounded authoritative direct path activation is required")
+	}
+	if err := backend.Routing.SyncRouting(ctx); err != nil {
+		return fmt.Errorf("synchronize direct modem routing before activation: %w", err)
+	}
+	currentModem, err := backend.Modems.Get(ctx, modemID)
+	if err != nil || !currentModem.Enabled || currentModem.State != modem.StateReady || currentModem.RouteGeneration != routeGeneration || !validInterfaceName(currentModem.InterfaceName) || currentModem.Fwmark == 0 {
+		return errors.New("direct activation modem context is unavailable or stale")
+	}
+	var configGeneration int64
+	err = backend.Database.QueryRowContext(ctx, `
+SELECT r.config_generation
+FROM runtime_state AS r
+JOIN direct_modem_paths AS p ON p.id=r.active_direct_path_id AND p.modem_id=r.active_modem_id
+JOIN access_methods AS a ON a.id=r.active_method_id AND a.id='access:direct'
+JOIN modems AS m ON m.id=p.modem_id
+WHERE r.singleton_id=1 AND r.gateway_state='VERIFYING' AND r.path_state='PATH_VERIFYING'
+  AND r.active_method_kind='DIRECT' AND r.active_subscription_id IS NULL AND r.active_node_id IS NULL
+  AND r.active_path_id IS NULL AND r.active_direct_path_id IS NOT NULL
+  AND r.active_modem_id=? AND p.route_generation=? AND p.route_generation=m.route_generation
+  AND p.quality_class IN ('FULL', 'LIMITED') AND julianday(p.expires_at)>julianday(?)
+  AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
+  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
+		modemID, routeGeneration, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&configGeneration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("direct activation intent or fresh evidence is unavailable")
+	}
+	if err != nil {
+		return fmt.Errorf("read authoritative direct activation intent: %w", err)
+	}
+	if configGeneration <= 0 || configGeneration > math.MaxUint32 {
+		return errors.New("direct activation config generation is invalid")
+	}
+	return backend.apply(ctx, PathState{
+		Active: true, Mode: PathModeDirect, Generation: uint32(configGeneration),
+		DirectInterface: currentModem.InterfaceName, DirectMark: currentModem.Fwmark,
+		RouteGeneration: uint32(routeGeneration),
+	})
+}
+
+func (backend *FirewallBackend) BlockPath(ctx context.Context) error {
 	return backend.apply(ctx, PathState{})
 }
 
-func (backend FirewallBackend) ObservePath(ctx context.Context) (PathState, error) {
+func (backend *FirewallBackend) ObservePath(ctx context.Context) (PathState, error) {
 	if err := backend.validate(); err != nil {
 		return PathState{}, err
 	}
@@ -51,14 +117,16 @@ func (backend FirewallBackend) ObservePath(ctx context.Context) (PathState, erro
 	if err != nil {
 		return PathState{}, fmt.Errorf("observe owned data-plane table: %w", err)
 	}
-	state, err := decodePathState([]byte(result.Stdout), backend.TUNName)
+	state, err := decodePathState([]byte(result.Stdout), backend.TUNName, backend.LANName)
 	if err != nil {
 		return PathState{}, fmt.Errorf("decode owned data-plane state: %w", err)
 	}
 	return state, nil
 }
 
-func (backend FirewallBackend) apply(ctx context.Context, desired PathState) error {
+func (backend *FirewallBackend) apply(ctx context.Context, desired PathState) error {
+	backend.mutex.Lock()
+	defer backend.mutex.Unlock()
 	if err := backend.validate(); err != nil {
 		return err
 	}
@@ -70,10 +138,16 @@ func (backend FirewallBackend) apply(ctx context.Context, desired PathState) err
 		"table inet " + firewall.TableName,
 		"set firewall_schema_generation",
 		"set " + activeTUNSet,
+		"set " + activeDirectInterfaceSet,
+		"set " + activeDirectContextSet,
+		"map " + activeDirectMarkMap,
 		"set " + activeGenerationSet,
+		"set " + activeRouteGenerationSet,
 		"hook forward priority filter; policy drop",
 		"gateway-vpn PATH_BLOCKED",
 		"oifname @" + activeTUNSet,
+		"oifname . meta mark @" + activeDirectContextSet,
+		"map @" + activeDirectMarkMap,
 		"counter user_upload",
 		"counter user_download",
 		"counter service_upload",
@@ -83,7 +157,17 @@ func (backend FirewallBackend) apply(ctx context.Context, desired PathState) err
 			return fmt.Errorf("owned data-plane table is missing integrity marker %q", marker)
 		}
 	}
-	payload := renderPathTransaction(desired, backend.TUNName)
+	generation, err := backend.Executor.Run(ctx, platformexec.Request{Executable: backend.NFT, Arguments: []string{"--json", "list", "set", "inet", firewall.TableName, firewall.SchemaGenerationSet}})
+	if err != nil {
+		return errors.New("owned data-plane schema generation is unavailable")
+	}
+	if err := firewall.ValidateSchemaGenerationJSON([]byte(generation.Stdout)); err != nil {
+		return fmt.Errorf("validate owned data-plane schema generation: %w", err)
+	}
+	payload, err := renderPathTransaction(desired, backend.TUNName, backend.LANName)
+	if err != nil {
+		return err
+	}
 	if result, err := backend.Executor.Run(ctx, platformexec.Request{Executable: backend.NFT, Arguments: []string{"--check", "--file", "-"}, Stdin: payload}); err != nil {
 		return fmt.Errorf("validate atomic data-plane state: %s: %w", bounded(result.Stderr), err)
 	}
@@ -100,14 +184,30 @@ func (backend FirewallBackend) apply(ctx context.Context, desired PathState) err
 	return nil
 }
 
-func (backend FirewallBackend) validate() error {
-	if backend.Executor == nil || backend.NFT != "/usr/sbin/nft" || !validInterfaceName(backend.TUNName) {
-		return errors.New("fixed Ubuntu nft executor and valid Mihomo TUN are required")
+func (backend *FirewallBackend) validate() error {
+	if backend == nil || backend.Executor == nil || backend.NFT != "/usr/sbin/nft" || !validInterfaceName(backend.TUNName) || !validInterfaceName(backend.LANName) {
+		return errors.New("fixed Ubuntu nft executor and valid Mihomo TUN/LAN interfaces are required")
 	}
 	return nil
 }
 
-func renderPathTransaction(state PathState, tunName string) []byte {
+func renderPathTransaction(state PathState, tunName, lanName string) ([]byte, error) {
+	if state.Active {
+		switch state.Mode {
+		case PathModeTUN:
+			if state.Generation == 0 || state.DirectInterface != "" || state.DirectMark != 0 || state.RouteGeneration != 0 {
+				return nil, errors.New("TUN path state is invalid")
+			}
+		case PathModeDirect:
+			if state.Generation == 0 || state.RouteGeneration == 0 || state.DirectMark == 0 || !validInterfaceName(state.DirectInterface) || !validInterfaceName(lanName) {
+				return nil, errors.New("direct path state is invalid")
+			}
+		default:
+			return nil, errors.New("active path mode is invalid")
+		}
+	} else if state != (PathState{}) {
+		return nil, errors.New("blocked path state must be empty")
+	}
 	var builder strings.Builder
 	builder.WriteString("flush set inet ")
 	builder.WriteString(firewall.TableName)
@@ -117,7 +217,27 @@ func renderPathTransaction(state PathState, tunName string) []byte {
 	builder.WriteString("flush set inet ")
 	builder.WriteString(firewall.TableName)
 	builder.WriteByte(' ')
+	builder.WriteString(activeDirectInterfaceSet)
+	builder.WriteByte('\n')
+	builder.WriteString("flush set inet ")
+	builder.WriteString(firewall.TableName)
+	builder.WriteByte(' ')
+	builder.WriteString(activeDirectContextSet)
+	builder.WriteByte('\n')
+	builder.WriteString("flush map inet ")
+	builder.WriteString(firewall.TableName)
+	builder.WriteByte(' ')
+	builder.WriteString(activeDirectMarkMap)
+	builder.WriteByte('\n')
+	builder.WriteString("flush set inet ")
+	builder.WriteString(firewall.TableName)
+	builder.WriteByte(' ')
 	builder.WriteString(activeGenerationSet)
+	builder.WriteByte('\n')
+	builder.WriteString("flush set inet ")
+	builder.WriteString(firewall.TableName)
+	builder.WriteByte(' ')
+	builder.WriteString(activeRouteGenerationSet)
 	builder.WriteByte('\n')
 	if state.Active {
 		builder.WriteString("add element inet ")
@@ -127,28 +247,46 @@ func renderPathTransaction(state PathState, tunName string) []byte {
 		builder.WriteString(" { ")
 		builder.WriteString(strconv.FormatUint(uint64(state.Generation), 10))
 		builder.WriteString(" }\n")
-		builder.WriteString("add element inet ")
-		builder.WriteString(firewall.TableName)
-		builder.WriteByte(' ')
-		builder.WriteString(activeTUNSet)
-		builder.WriteString(" { ")
-		builder.WriteString(strconv.Quote(tunName))
-		builder.WriteString(" }\n")
+		if state.Mode == PathModeTUN {
+			builder.WriteString("add element inet ")
+			builder.WriteString(firewall.TableName)
+			builder.WriteByte(' ')
+			builder.WriteString(activeTUNSet)
+			builder.WriteString(" { ")
+			builder.WriteString(strconv.Quote(tunName))
+			builder.WriteString(" }\n")
+		} else {
+			mark := fmt.Sprintf("0x%08x", state.DirectMark)
+			fmt.Fprintf(&builder, "add element inet %s %s { %d }\n", firewall.TableName, activeRouteGenerationSet, state.RouteGeneration)
+			fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, activeDirectInterfaceSet, strconv.Quote(state.DirectInterface))
+			fmt.Fprintf(&builder, "add element inet %s %s { %s . %s }\n", firewall.TableName, activeDirectContextSet, strconv.Quote(state.DirectInterface), mark)
+			fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(lanName), mark)
+		}
 	}
-	return []byte(builder.String())
+	return []byte(builder.String()), nil
 }
 
-func decodePathState(payload []byte, tunName string) (PathState, error) {
+func decodePathState(payload []byte, tunName, lanName string) (PathState, error) {
+	if !validInterfaceName(tunName) || !validInterfaceName(lanName) {
+		return PathState{}, errors.New("valid TUN and LAN interfaces are required")
+	}
 	var document struct {
 		NFTables []map[string]json.RawMessage `json:"nftables"`
 	}
 	if err := json.Unmarshal(payload, &document); err != nil {
 		return PathState{}, err
 	}
-	foundTUN, foundGeneration := false, false
-	var tunElements, generationElements []any
+	foundTUN, foundDirectInterfaces, foundDirectContext := false, false, false
+	foundDirectMarks, foundGeneration, foundRouteGeneration := false, false, false
+	var tunElements, directInterfaceElements, directContextElements []any
+	var directMarkElements, generationElements, routeGenerationElements []any
 	for _, object := range document.NFTables {
 		raw, exists := object["set"]
+		isMap := false
+		if !exists {
+			raw, exists = object["map"]
+			isMap = exists
+		}
 		if !exists {
 			continue
 		}
@@ -167,24 +305,57 @@ func decodePathState(payload []byte, tunName string) (PathState, error) {
 		switch set.Name {
 		case activeTUNSet:
 			foundTUN, tunElements = true, set.Elem
+		case activeDirectInterfaceSet:
+			foundDirectInterfaces, directInterfaceElements = true, set.Elem
+		case activeDirectContextSet:
+			foundDirectContext, directContextElements = true, set.Elem
+		case activeDirectMarkMap:
+			if !isMap && len(set.Elem) != 0 {
+				return PathState{}, errors.New("active direct mark object is not a map")
+			}
+			foundDirectMarks, directMarkElements = true, set.Elem
 		case activeGenerationSet:
 			foundGeneration, generationElements = true, set.Elem
+		case activeRouteGenerationSet:
+			foundRouteGeneration, routeGenerationElements = true, set.Elem
 		}
 	}
-	if !foundTUN || !foundGeneration {
+	if !foundTUN || !foundDirectInterfaces || !foundDirectContext || !foundDirectMarks || !foundGeneration || !foundRouteGeneration {
 		return PathState{}, errors.New("active path sets are missing")
 	}
-	if len(tunElements) == 0 && len(generationElements) == 0 {
+	if len(tunElements) == 0 && len(directInterfaceElements) == 0 && len(directContextElements) == 0 && len(directMarkElements) == 0 && len(generationElements) == 0 && len(routeGenerationElements) == 0 {
 		return PathState{}, nil
 	}
-	if len(tunElements) != 1 || len(generationElements) != 1 || stringElement(tunElements[0]) != tunName {
-		return PathState{}, errors.New("active path set cardinality or TUN is invalid")
+	if len(generationElements) != 1 {
+		return PathState{}, errors.New("active path generation cardinality is invalid")
 	}
 	generation, ok := uint32Element(generationElements[0])
 	if !ok || generation == 0 {
 		return PathState{}, errors.New("active path generation is invalid")
 	}
-	return PathState{Active: true, Generation: generation}, nil
+	if len(tunElements) == 1 && stringElement(tunElements[0]) == tunName {
+		if len(directInterfaceElements) != 0 || len(directContextElements) != 0 || len(directMarkElements) != 0 || len(routeGenerationElements) != 0 {
+			return PathState{}, errors.New("TUN and direct path gates are active together")
+		}
+		return PathState{Active: true, Mode: PathModeTUN, Generation: generation}, nil
+	}
+	if len(tunElements) != 0 || len(directInterfaceElements) != 1 || len(directContextElements) != 1 || len(directMarkElements) != 1 || len(routeGenerationElements) != 1 {
+		return PathState{}, errors.New("active direct path set cardinality is invalid")
+	}
+	interfaceName := stringElement(directInterfaceElements[0])
+	contextInterface, mark, ok := directContextElement(directContextElements[0])
+	if !ok || !validInterfaceName(interfaceName) || contextInterface != interfaceName || mark == 0 {
+		return PathState{}, errors.New("active direct path context is invalid")
+	}
+	mapInterface, mapMark, ok := directMapElement(directMarkElements[0])
+	if !ok || mapInterface != lanName || mapMark != mark {
+		return PathState{}, errors.New("active direct mark map is invalid")
+	}
+	routeGeneration, ok := uint32Element(routeGenerationElements[0])
+	if !ok || routeGeneration == 0 {
+		return PathState{}, errors.New("active direct route generation is invalid")
+	}
+	return PathState{Active: true, Mode: PathModeDirect, Generation: generation, DirectInterface: interfaceName, DirectMark: mark, RouteGeneration: routeGeneration}, nil
 }
 
 func stringElement(value any) string {
@@ -203,11 +374,66 @@ func uint32Element(value any) (uint32, bool) {
 	if object, ok := value.(map[string]any); ok {
 		value = object["val"]
 	}
+	if text, ok := value.(string); ok {
+		number, err := strconv.ParseUint(text, 0, 32)
+		return uint32(number), err == nil && number > 0
+	}
 	number, ok := value.(float64)
 	if !ok || number < 1 || number > math.MaxUint32 || math.Trunc(number) != number {
 		return 0, false
 	}
 	return uint32(number), true
+}
+
+func directMapElement(value any) (string, uint32, bool) {
+	if object, ok := value.(map[string]any); ok {
+		for _, wrapper := range []string{"elem", "map"} {
+			if nested, exists := object[wrapper]; exists {
+				if interfaceName, mark, valid := directMapElement(nested); valid {
+					return interfaceName, mark, true
+				}
+			}
+		}
+		key, keyExists := object["val"]
+		if !keyExists {
+			key, keyExists = object["key"]
+		}
+		data, dataExists := object["data"]
+		if keyExists && dataExists {
+			interfaceName := stringElement(key)
+			mark, valid := uint32Element(data)
+			return interfaceName, mark, valid && interfaceName != ""
+		}
+	}
+	if values, ok := value.([]any); ok && len(values) == 2 {
+		interfaceName := stringElement(values[0])
+		mark, valid := uint32Element(values[1])
+		return interfaceName, mark, valid && interfaceName != ""
+	}
+	return "", 0, false
+}
+
+func directContextElement(value any) (string, uint32, bool) {
+	if object, ok := value.(map[string]any); ok {
+		for _, key := range []string{"val", "elem"} {
+			if nested, exists := object[key]; exists {
+				if interfaceName, mark, valid := directContextElement(nested); valid {
+					return interfaceName, mark, true
+				}
+			}
+		}
+		if concat, ok := object["concat"].([]any); ok && len(concat) == 2 {
+			interfaceName := stringElement(concat[0])
+			mark, valid := uint32Element(concat[1])
+			return interfaceName, mark, valid && interfaceName != ""
+		}
+	}
+	if values, ok := value.([]any); ok && len(values) == 2 {
+		interfaceName := stringElement(values[0])
+		mark, valid := uint32Element(values[1])
+		return interfaceName, mark, valid && interfaceName != ""
+	}
+	return "", 0, false
 }
 
 func bounded(value string) string {

@@ -12,6 +12,7 @@ import (
 
 const (
 	NodeBypassQualified = "BYPASS_QUALIFIED"
+	NodeBypassLimited   = "BYPASS_LIMITED"
 	NodeBypassFailed    = "BYPASS_FAILED"
 )
 
@@ -40,6 +41,9 @@ type QualificationSnapshot struct {
 	SelectedNodeID           string
 	RequiredTargetsPassed    int64
 	RequiredTargetsTotal     int64
+	OptionalTargetsPassed    int64
+	OptionalTargetsTotal     int64
+	FunctionalScore          int64
 	LatencyMS                int64
 	CheckedAt                time.Time
 	ExpiresAt                time.Time
@@ -108,7 +112,7 @@ WHERE n.id=? AND v.id=? AND v.subscription_id=?`, node.NodeID, activeVersionID, 
 	expiresAt := snapshot.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	for _, node := range snapshot.Nodes {
 		lastSuccess, lastFailure := any(nil), any(nil)
-		if node.State == NodeBypassQualified {
+		if node.State == NodeBypassQualified || node.State == NodeBypassLimited {
 			lastSuccess = checkedAt
 		} else {
 			lastFailure = checkedAt
@@ -139,12 +143,21 @@ INSERT INTO path_node_target_results (
 			qualified++
 		}
 	}
+	qualityClass, functionalScore := "FAILED", int64(0)
+	if snapshot.State == StateQualified {
+		qualityClass = "FULL"
+		functionalScore = snapshot.RequiredTargetsPassed*1000 + snapshot.OptionalTargetsPassed
+	} else if snapshot.State == StateDegraded {
+		qualityClass = "LIMITED"
+		functionalScore = snapshot.FunctionalScore
+	}
 	result, err := transaction.ExecContext(ctx, `
 UPDATE subscription_modem_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
-    latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
-WHERE id=? AND policy_generation=? AND route_generation=?`, snapshot.State, snapshot.TransportState, nullIfEmpty(snapshot.SelectedNodeID), len(snapshot.Nodes), qualified, snapshot.RequiredTargetsPassed, snapshot.RequiredTargetsTotal, nullIfZero(snapshot.LatencyMS), checkedAt, expiresAt, repository.now().UTC().Format(time.RFC3339Nano), snapshot.PathID, snapshot.ExpectedPolicyGeneration, snapshot.ExpectedRouteGeneration)
+    optional_targets_passed=?, optional_targets_total=?,
+    quality_class=?, functional_score=?, latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
+WHERE id=? AND policy_generation=? AND route_generation=?`, snapshot.State, snapshot.TransportState, nullIfEmpty(snapshot.SelectedNodeID), len(snapshot.Nodes), qualified, snapshot.RequiredTargetsPassed, snapshot.RequiredTargetsTotal, snapshot.OptionalTargetsPassed, snapshot.OptionalTargetsTotal, qualityClass, functionalScore, nullIfZero(snapshot.LatencyMS), checkedAt, expiresAt, repository.now().UTC().Format(time.RFC3339Nano), snapshot.PathID, snapshot.ExpectedPolicyGeneration, snapshot.ExpectedRouteGeneration)
 	if err != nil {
 		return fmt.Errorf("update aggregate qualification path: %w", err)
 	}
@@ -311,14 +324,19 @@ WHERE pn.path_id=? AND pn.qualification_generation=? AND pn.route_generation=?
 		latency = selectedLatency.Int64
 		aggregateCheckedAt, aggregateExpiry = selectedCheckedAt.String, selectedExpiry.String
 	}
+	qualityClass, functionalScore := "FAILED", int64(0)
+	if pathState == StateQualified {
+		qualityClass = "FULL"
+		functionalScore = requiredPassed * 1000
+	}
 	result, err := transaction.ExecContext(ctx, `
 UPDATE subscription_modem_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
-    latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
+    quality_class=?, functional_score=?, latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
 WHERE id=? AND policy_generation=? AND route_generation=?`, pathState, transportState,
 		nullIfEmpty(selectedNodeID.String), snapshot.CandidateNodes, qualifiedNodes,
-		requiredPassed, requiredTargets, nullIfZero(latency), aggregateCheckedAt,
+		requiredPassed, requiredTargets, qualityClass, functionalScore, nullIfZero(latency), aggregateCheckedAt,
 		aggregateExpiry, repository.now().UTC().Format(time.RFC3339Nano), snapshot.PathID,
 		snapshot.ExpectedPolicyGeneration, snapshot.ExpectedRouteGeneration)
 	if err != nil {
@@ -393,7 +411,7 @@ func validateQualificationSnapshot(snapshot QualificationSnapshot) error {
 	}
 	seenNodes := make(map[string]struct{}, len(snapshot.Nodes))
 	for _, node := range snapshot.Nodes {
-		if node.NodeID == "" || (node.State != NodeBypassQualified && node.State != NodeBypassFailed) || node.LatencyMS < 0 {
+		if node.NodeID == "" || (node.State != NodeBypassQualified && node.State != NodeBypassLimited && node.State != NodeBypassFailed) || node.LatencyMS < 0 {
 			return errors.New("invalid node qualification evidence")
 		}
 		if _, exists := seenNodes[node.NodeID]; exists {
@@ -423,6 +441,19 @@ func validateQualificationSnapshot(snapshot QualificationSnapshot) error {
 		}
 		if !selectedQualified {
 			return errors.New("selected node is not qualified in this snapshot")
+		}
+	} else if snapshot.State == StateDegraded {
+		if snapshot.TransportState != "PASSED" || snapshot.SelectedNodeID == "" || snapshot.FunctionalScore <= 0 || snapshot.RequiredTargetsPassed >= snapshot.RequiredTargetsTotal {
+			return errors.New("degraded snapshot requires passed transport, selected node, and partial target access")
+		}
+		selectedLimited := false
+		for _, node := range snapshot.Nodes {
+			if node.NodeID == snapshot.SelectedNodeID && node.State == NodeBypassLimited {
+				selectedLimited = true
+			}
+		}
+		if !selectedLimited {
+			return errors.New("selected node is not limited in this snapshot")
 		}
 	}
 	return nil

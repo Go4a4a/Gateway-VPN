@@ -79,9 +79,13 @@ func runNetworkBroker(args []string) int {
 	}
 	defer listener.Close()
 	executor := platformexec.OSExecutor{}
-	firewallBackend := dataplane.FirewallBackend{Executor: executor, NFT: "/usr/sbin/nft", TUNName: configuration.Mihomo.TunName}
+	modemRepository := modem.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart)
+	firewallBackend := &dataplane.FirewallBackend{
+		Database: database, Modems: modemRepository, Executor: executor, NFT: "/usr/sbin/nft",
+		TUNName: configuration.Mihomo.TunName, LANName: configuration.Network.LANInterface,
+	}
 	routingBackend := dataplane.RoutingBackend{
-		Modems:            modem.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart),
+		Modems:            modemRepository,
 		Executor:          executor,
 		IP:                "/usr/sbin/ip",
 		LANPrefix:         configuration.Network.LANAddress,
@@ -91,6 +95,7 @@ func runNetworkBroker(args []string) int {
 		FwmarkStart:       configuration.Modems.FwmarkStart,
 		Gate:              firewallBackend,
 	}
+	firewallBackend.Routing = &routingBackend
 	serviceBackend := dataplane.ServiceFirewallBackend{
 		Routing:       routingBackend,
 		Modems:        routingBackend.Modems,

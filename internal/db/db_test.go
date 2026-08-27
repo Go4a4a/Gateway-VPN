@@ -116,7 +116,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 14 {
+	if err != nil || version != 15 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -140,7 +140,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 14 {
+	if err != nil || latest != 15 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -209,8 +209,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 14 {
-		t.Fatalf("SchemaVersion() = %d, want 14", version)
+	if version != 15 {
+		t.Fatalf("SchemaVersion() = %d, want 15", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -254,8 +254,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 14 {
-		t.Fatalf("migration count = %d, want 14", count)
+	if count != 15 {
+		t.Fatalf("migration count = %d, want 15", count)
 	}
 }
 

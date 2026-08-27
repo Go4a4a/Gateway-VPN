@@ -543,6 +543,9 @@ func (server *Server) gatewayStatus(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"gateway_state": snapshot.GatewayState, "path_state": snapshot.PathState,
 		"active_modem_id": snapshot.ActiveModemID, "active_path_id": snapshot.ActivePathID,
+		"active_direct_path_id": snapshot.ActiveDirectPathID,
+		"active_method_id":      snapshot.ActiveMethodID, "active_method_kind": snapshot.ActiveMethodKind,
+		"active_quality_class":   snapshot.ActiveQualityClass,
 		"management_modem_id":    snapshot.ManagementModemID,
 		"active_subscription_id": snapshot.ActiveSubscriptionID, "active_node_id": snapshot.ActiveNodeID,
 		"config_generation":            snapshot.ConfigGeneration,
