@@ -26,6 +26,14 @@ func TestCleanerAppliesTimeAndVersionRetentionAndPrunesPayloads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for index, finished := range []time.Time{now.AddDate(0, 0, -31), now.AddDate(0, 0, -30)} {
+		stamp := finished.Format(time.RFC3339Nano)
+		if _, err := database.ExecContext(ctx, `
+INSERT INTO operations(id,kind,scope_type,status,requested_by,summary_code,created_at,started_at,finished_at,updated_at)
+VALUES(?, 'SUBSCRIPTION_REFRESH', 'SUBSCRIPTION', 'SUCCEEDED', 'SYSTEM', 'DONE', ?, ?, ?, ?)`, "operation-"+string(rune('a'+index)), stamp, stamp, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, date := range []string{now.AddDate(0, -25, 0).Format("2006-01-02"), now.AddDate(0, -24, 0).Format("2006-01-02")} {
 		if _, err := database.ExecContext(ctx, "INSERT INTO traffic_daily_totals(date,checkpointed_at) VALUES(?, ?)", date, now.Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
@@ -85,12 +93,13 @@ VALUES(?, 'sub-a', ?, 1, ?, NULL, ?, ?)`, item.id, hash64(item.id), item.state, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.HealthSamplesDeleted != 1 || result.EventsDeleted != 1 || result.TrafficDaysDeleted != 1 || result.SubscriptionVersionsDeleted != 4 || result.PayloadDirectoriesDeleted != 5 || result.HasMore {
+	if result.HealthSamplesDeleted != 1 || result.EventsDeleted != 1 || result.OperationsDeleted != 1 || result.TrafficDaysDeleted != 1 || result.SubscriptionVersionsDeleted != 4 || result.PayloadDirectoriesDeleted != 5 || result.HasMore {
 		t.Fatalf("CleanBatch() = %+v", result)
 	}
 	assertCount(t, database, "SELECT COUNT(*) FROM health_samples", 1)
 	// One current repository audit event plus the exact-cutoff test event stay.
 	assertCount(t, database, "SELECT COUNT(*) FROM events WHERE type='RETENTION_TEST'", 1)
+	assertCount(t, database, "SELECT COUNT(*) FROM operations", 1)
 	assertCount(t, database, "SELECT COUNT(*) FROM traffic_daily_totals", 1)
 	rows, err := database.QueryContext(ctx, "SELECT id FROM subscription_versions WHERE subscription_id='sub-a' ORDER BY id")
 	if err != nil {

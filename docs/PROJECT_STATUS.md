@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-27
-**Общее состояние:** `UNIFIED_SELECTOR_SCHEMA_V3_LOCAL_PASS / REMOTE_LINUX_GATE_PENDING / HARDWARE_VALIDATION_PENDING`
-**Текущий этап:** modem-bound direct qualification опубликован в `8f55d36`. В локальном worktree завершён следующий сквозной блок: firewall schema v3 атомарно и взаимоисключающе открывает ровно один TUN либо один modem-bound direct `interface + fwmark`; migration v15 хранит direct runtime отдельным FK; production reconciler выбирает `FULL → best LIMITED → priorities`, применяет hysteresis и умеет работать через direct при падении Mihomo. Resilient subscription refresh ladder, startup gate OFF и новые access-method/API/WebUI/operation interfaces ещё не завершены, поэтому successor пока не является новым install-ready release candidate.
+**Общее состояние:** `RESILIENT_REFRESH_LADDER_LOCAL_PASS / REMOTE_CI_PENDING / HARDWARE_VALIDATION_PENDING`
+**Текущий этап:** unified selector/firewall schema v3 опубликован в `5f2e521`, GitHub Actions run `33101289685` завершён `success`, включая Linux nftables/netns gate. В локальном worktree завершён resilient subscription refresh ladder: service-only попытки идут через active/other allowed VPN nodes и direct ready-модемы, не меняют user data path, имеют bounded time/attempt/operation budgets, durable redacted DNS/TLS/HTTP stages и учитывают `Retry-After`. Startup gate OFF и новые access-method/API/OpenAPI/WebUI interfaces ещё не завершены, поэтому successor пока не является новым install-ready release candidate.
 
-**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `68%`: готовы schema/domain/persistence, direct qualification, schema-v3 actuator, единый selector, FULL/LIMITED VPN evidence и recovery-safe runtime identity; впереди resilient refresh ladder, startup gate OFF, API/OpenAPI/WebUI и operation panel. Общая production-готовность оценивается примерно в `87–89%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
+**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `74%`: готовы schema/domain/persistence, direct qualification, schema-v3 actuator, единый selector, FULL/LIMITED VPN evidence, recovery-safe runtime identity и resilient refresh ladder с backend operation history; впереди startup gate OFF, API/OpenAPI/WebUI управления и полный operation panel. Общая production-готовность оценивается примерно в `88–90%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -34,16 +34,16 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_8F55D36 / UNIFIED_SELECTOR_LOCAL` | Modem-bound direct probe опубликован в `Go4a4a/Gateway-VPN`; schema-v3 selector block ещё не commit/push. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_5F2E521 / RESILIENT_REFRESH_LOCAL` | Unified selector/schema-v3 опубликован в `Go4a4a/Gateway-VPN`; refresh ladder прошёл локальный аудит, но ещё не commit/push. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
-| Firewall / routing | `SCHEMA_V3_DIRECT_TUN_LOCAL_PASS / REMOTE_KERNEL_PENDING` | Schema `3` сохраняет counters и добавляет atomic mutually-exclusive TUN/direct gates, exact LAN→fwmark map и path/route generations. Production renderer/decoder и netns script покрывают TUN→DIRECT→BLOCKED→TUN; реальный Ubuntu kernel gate ожидает CI после push |
+| Firewall / routing | `SCHEMA_V3_DIRECT_TUN_REMOTE_PASS / HARDWARE_PENDING` | Schema `3` сохраняет counters и добавляет atomic mutually-exclusive TUN/direct gates, exact LAN→fwmark map и path/route generations. GitHub Actions run `33101289685` подтвердил production renderer/decoder и Linux netns TUN→DIRECT→BLOCKED→TUN |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
-| Subscription Manager | `UNIFIED_FOUNDATION_PUBLISHED / LINUX_NOT_RUN` | Disabled user-routing subscription продолжает auto-refresh; durable `AUTO/INCLUDE/EXCLUDE` и preferred rank переносятся по fingerprint между versions. Resilient route ladder ещё не подключён |
+| Subscription Manager | `RESILIENT_REFRESH_LADDER_LOCAL_PASS / LINUX_NOT_RUN` | Active target node → other allowed target nodes → allowed nodes других subscriptions → policy-enabled direct ready-модемы подключены через отдельный Mihomo probe listener; EXCLUDE повторно проверяется под operation lock. Disabled user method обновляет service-only LKG без публикации user path; `Retry-After`, lease, redacted stages и bounded retention покрыты tests |
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
-| Unified access methods | `SELECTOR_ACTUATOR_LOCAL_PASS / API_UI_PENDING` | Migration v15 добавляет отдельный `active_direct_path_id`; selector выбирает direct/VPN по quality и priorities, сохраняет method/quality, восстанавливает незавершённую activation и не требует Mihomo для direct. Resilient refresh, startup OFF и интерфейсы управления остаются следующими блоками |
+| Unified access methods | `SELECTOR_ACTUATOR_REMOTE_PASS / REFRESH_LOCAL_PASS / API_UI_PENDING` | Migration v15, unified selector и exact direct/TUN gate подтверждены remote kernel CI; service refresh не меняет runtime tuple и сохраняет disabled subscriptions только в qualification-only probe groups. Startup OFF и интерфейсы управления остаются следующими блоками |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
 | SQLite | `V15_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_8F55D36_PENDING_TERMINAL / UNIFIED_FULL_LOCAL_PASS` | Опубликован run `33095054506` для `8f55d36`, terminal result ещё не получен локально. Текущий schema-v3/selector worktree прошёл полный `go test ./... -count=1`, `go vet ./...`, `git diff --check` и CGO-free Linux/amd64 `go build ./...`; Linux nft/netns gate ожидает exact CI после push |
+| Автоматические тесты | `REMOTE_CI_5F2E521_PASS / REFRESH_FULL_LOCAL_PASS` | Run `33101289685` для `5f2e521` завершён `success`, обе jobs зелёные. Текущий refresh-ladder worktree прошёл полный `go test ./... -count=1`, `go vet ./...`, `git diff --check` и CGO-free Linux/amd64 `go build ./...`; exact remote CI ожидается после push |
 
 ## Матрица доказательств Definition of Done
 
@@ -90,7 +90,7 @@
 | 24 | `NOT_RUN_EXTERNAL` | Exact endurance harness и smoke готовы, но обязательные непрерывные 24- и 72-часовые runs не запускались |
 | 25 | `IN_PROGRESS_LOCAL` | Immutable direct method автоматически создаётся, enable/reorder и независимый service-refresh flag сохраняются; API/runtime ещё не подключены |
 | 26 | `IN_PROGRESS_LOCAL` | Durable overrides/preferred rank переживают version refresh по fingerprint, EXCLUDE фильтруется candidate query; полный refresh/UI/sticky runtime gate ещё следует |
-| 27 | `IN_PROGRESS_LOCAL` | Bounded persistent operations и refresh disabled user method готовы; route ladder, single-flight operation binding и UI panel ещё не реализованы |
+| 27 | `IN_PROGRESS_LOCAL` | Durable lease, bounded `Retry-After`, exact VPN→direct route ladder, disabled-method service LKG и redacted operation stages проходят integration tests без изменения user runtime. Manual API ещё не возвращает operation ID, GET/DELETE operations и WebUI panel не подключены |
 | 28 | `IN_PROGRESS_LOCAL` | Startup/hysteresis и boot-scoped direct-only transitions покрыты domain tests; reboot/netns/firewall integration ещё не реализована |
 
 **Итог аудита:** `10 PASS_LOCAL`, `8 IN_PROGRESS_LOCAL`, `8 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут: сначала требуется завершить unified-access successor, затем production publish, H1/H2/VPS и 24/72h evidence.
@@ -278,8 +278,40 @@
 | DEV-156 | 2026-08-27 | Node policy хранится по stable fingerprint как `AUTO/INCLUDE/EXCLUDE` и optional preferred rank; missing nodes сохраняются исторически и восстанавливают решение после возвращения. Обновление disabled user method продолжается независимо от routing enable | Refresh меняет version/node IDs и имена, но не должен терять ручной выбор, неожиданно включать EXCLUDE или лишать выключенную подписку возможности снова стать пригодной |
 | DEV-157 | 2026-08-27 | Startup block становится явной ON/OFF policy, но OFF не отключает nftables: до полной qualification разрешается только минимально проверенный LKG/direct generation. Boot-scoped direct-only override сбрасывается после reboot; служебный direct refresh регулируется отдельно | Пользователь может выбрать более быстрый старт без неконтролируемого forwarding, а диагностический direct-only режим не должен незаметно стать постоянной политикой или отключить обновление подписок |
 | DEV-158 | 2026-08-27 | Active direct path хранить отдельным `runtime_state.active_direct_path_id` с FK на `direct_modem_paths`; VPN сохраняет `active_path_id`. Firewall schema v3 открывает TUN и direct только взаимоисключающе, а LIMITED VPN перед открытием gate повторно проверяет все ранее прошедшие fresh targets | Полиморфный FK либо modem-only direct identity не позволяют доказать точный путь при recovery. LIMITED нельзя считать безопасно активированным только по aggregate score без node/target evidence и post-selection recheck |
+| DEV-159 | 2026-08-27 | Subscription refresh использует отдельный service-only Mihomo probe selector и последовательность `active target node → другие allowed target nodes → allowed nodes других subscriptions → direct ready-modems`, не изменяя `gateway-vpn-active`/runtime/firewall user gate. Disabled user method сохраняет LKG как qualification-only provider; EXCLUDE повторно проверяется после получения общего operation lock. Одна operation ограничена 5 минутами, 20 секундами на route, 1024 VPN attempts и 32768 redacted steps | Общий selector без сериализации смешивает маршруты конкурентных probes; выключение user method не должно лишать auto-refresh или случайно разрешать user path. Явные bounds не позволяют большой/враждебной подписке бесконечно удерживать worker и раздувать SQLite, а limit фиксируется в operation status до direct fallback |
 
 ## Журнал разработки
+
+### Сессия 075 — resilient subscription refresh ladder — 2026-08-27
+
+**Цель:** сделать scheduled/manual update подписок максимально устойчивым к блокировке provider domain на отдельном VPN-сервере или операторе, не переключая и не ослабляя текущий пользовательский маршрут.
+
+**Реализовано локально:**
+
+- production fetcher теперь перебирает exact service routes в порядке: текущий active node целевой подписки, остальные allowed nodes этой подписки, allowed nodes других подписок, затем direct через ready-модемы по priority, только если `direct_service_refresh_enabled=true`;
+- VPN DNS и HTTPS идут через SOCKS5 на существующий numeric loopback-only mixed listener `gateway-vpn-probe-in`; selection `probe-path → gateway-vpn-probe` и весь DNS/TLS/HTTP fetch выполняются под общим Mihomo operation lock, поэтому параллельный probe/reload не может подменить route внутри одной попытки;
+- перед select под уже захваченным lock повторно проверяются active version, modem READY, stable node identity и `AUTO/INCLUDE` policy. Node, ставшая `EXCLUDE` либо исчезнувшая после построения inventory, получает `VPN_ROUTE_STALE` и не используется;
+- disabled user-routing subscription больше не удаляется из Mihomo целиком: её LKG остаётся только в qualification-only probe groups, не входит в `gateway-vpn-active`; refresh новой disabled LKG квалифицирует candidate, но не публикует `QUALIFIED` user path;
+- direct adapter по-прежнему использует `SO_BINDTODEVICE + SO_MARK`, а root backend дополнительно перечитывает `direct_service_refresh_enabled` перед transient endpoint authorization. Выключенный direct user method не мешает service refresh; выключенная отдельная service policy запрещает root authorization;
+- каждая route attempt записывает redacted durable стадии `ROUTE_SELECTED → DNS → TLS → HTTP`; URL, query token, response body и backend text в operation не попадают. Refresh добавляет `SOURCE → IMPORT → VALIDATE → QUALIFY → ACTIVATE → COMPLETE/FAILED`;
+- HTTP `Retry-After` переносится как typed bounded delay через все fallbacks и увеличивает durable exponential backoff не более configured 6 часов; response headers/body details не раскрываются;
+- один route ограничен 20 секундами, вся ladder — 5 минутами, одна operation — 1024 VPN attempts и 32768 steps; применение route limit явно появляется в журнале, после чего direct fallback всё равно выполняется;
+- завершённые operations автоматически удаляются малыми batches через 30 дней; retention/diagnostic/endurance snapshots отражают operation policy и counts.
+
+**Проверено:**
+
+- route repository test подтверждает точный active-first order, target-subscription before others, service use routing-disabled subscription и отсутствие EXCLUDE; отдельная revalidation отвергает node, исключённую после inventory;
+- integration test подтверждает, что общий operation lock удерживается через selector и HTTPS dial, первый route может отказать, следующий succeeds, а `runtime_state` user tuple остаётся byte-equivalent;
+- SOCKS/direct route attempts, root direct policy gate, disabled-subscription LKG promotion без user evidence, durable stage order, URL redaction, bounded `Retry-After`, operation hard bound и 30-day cleanup покрыты tests;
+- полный `go test ./... -count=1` — PASS;
+- полный `go vet ./...` — PASS;
+- `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...` — PASS;
+- `git diff --check` — PASS;
+- предыдущий exact GitHub Actions run `33101289685` для `5f2e521` завершён `success`; jobs `Go, packaging and syntax gates` и `Linux nftables fail-closed gate` — PASS.
+
+**Ограничения:** реальный Mihomo mixed/SOCKS DNS+TLS fetch, provider redirects через разные nodes/operators, Linux marked direct sockets и mobile traffic budget ещё не проверены на hardware. Manual API пока выполняет refresh синхронно и не возвращает operation ID; GET/DELETE operations API, OpenAPI и WebUI panel остаются отдельным следующим interface block.
+
+**Следующий шаг:** commit/push exact refresh-ladder block и получить terminal remote CI; затем подключить startup gate OFF с минимально проверенным LKG/direct recovery и boot-ID lifecycle временного direct-only режима.
 
 ### Сессия 074 — firewall schema v3 и unified runtime selector — 2026-08-27
 

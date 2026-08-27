@@ -10,6 +10,7 @@ import (
 	"math"
 	"time"
 
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/store"
 )
 
@@ -22,6 +23,7 @@ const (
 	RefreshActivateFailed   = "LKG_ACTIVATE_FAILED"
 	RefreshRuntimeCommit    = "RUNTIME_COMMIT_FAILED"
 	RefreshRollbackFailed   = "RUNTIME_ROLLBACK_FAILED"
+	RefreshOperationFailed  = "OPERATION_STATUS_FAILED"
 )
 
 type SubscriptionFetcher interface {
@@ -62,6 +64,7 @@ type RefreshCoordinator struct {
 	Fetcher        SubscriptionFetcher
 	Sources        SourceURLReader
 	Runtime        CandidateRuntime
+	Operations     *operations.Repository
 	PayloadRoot    string
 	LeaseDuration  time.Duration
 	BackoffInitial time.Duration
@@ -132,14 +135,42 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 		return RefreshResult{}, err
 	}
 	failureCode := RefreshFetchFailed
+	requestedRetry := time.Duration(0)
 	finished := false
+	operationCreated := false
+	operationFinished := false
 	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
 		if !finished {
-			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-			defer cancel()
-			_ = coordinator.finishFailure(cleanup, lease, failureCode)
+			_ = coordinator.finishFailure(cleanup, lease, failureCode, requestedRetry)
+		}
+		if operationCreated && !operationFinished {
+			_, _ = coordinator.Operations.Finish(cleanup, owner, operations.StatusFailed, failureCode, operations.StepInput{
+				Severity: "ERROR", Stage: "FAILED", Code: failureCode,
+				Message: "Обновление подписки завершилось неуспешно.",
+				Details: map[string]any{"subscription_id": subscriptionID},
+			})
 		}
 	}()
+	operationKind := "SUBSCRIPTION_REFRESH"
+	firstStage, firstCode, firstMessage := "SOURCE", "SOURCE_READ_STARTED", "Начато чтение источника подписки."
+	if reclassify {
+		operationKind = "SUBSCRIPTION_RECLASSIFY"
+		firstStage, firstCode, firstMessage = "VALIDATE", "RECLASSIFY_STARTED", "Начата повторная классификация сохранённой подписки."
+	}
+	if _, err := coordinator.Operations.Create(ctx, operations.CreateInput{ID: owner, Kind: operationKind, ScopeType: "SUBSCRIPTION", ScopeID: subscriptionID, RequestedBy: "SYSTEM"}); err != nil {
+		failureCode = RefreshOperationFailed
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
+	operationCreated = true
+	if _, err := coordinator.Operations.Start(ctx, owner, operations.StepInput{
+		Severity: "INFO", Stage: firstStage, Code: firstCode, Message: firstMessage,
+		Details: map[string]any{"subscription_id": subscriptionID},
+	}); err != nil {
+		failureCode = RefreshOperationFailed
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
 
 	var fetched FetchResult
 	var active Version
@@ -159,7 +190,7 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 			failureCode = RefreshSourceReadFailed
 			return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
 		}
-		options := FetchOptions{ETag: lease.ETag, LastModified: lease.LastModified}
+		options := FetchOptions{ETag: lease.ETag, LastModified: lease.LastModified, OperationID: owner}
 		if scoped, ok := coordinator.Fetcher.(ScopedSubscriptionFetcher); ok {
 			fetched, err = scoped.FetchForSubscription(ctx, subscriptionID, secretURL, options)
 		} else {
@@ -171,8 +202,17 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 			failureCode = RefreshPayloadFailed
 		} else {
 			failureCode = RefreshFetchFailed
+			if delay, ok := FetchRetryAfter(err); ok {
+				requestedRetry = delay
+			}
 		}
 		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
+	if !reclassify {
+		if err := coordinator.appendOperationStep(ctx, owner, "HTTP", "FETCH_SUCCEEDED", "Источник подписки получен и передан на проверку."); err != nil {
+			failureCode = RefreshOperationFailed
+			return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+		}
 	}
 	next := coordinator.successNextAttempt(lease.Subscription)
 	if fetched.NotModified {
@@ -184,6 +224,10 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 			return RefreshResult{}, fmt.Errorf("finish unchanged subscription refresh: %w", err)
 		}
 		finished = true
+		if err := coordinator.finishOperation(ctx, owner, "NOT_MODIFIED", operations.StepInput{Severity: "INFO", Stage: "COMPLETE", Code: "NOT_MODIFIED", Message: "Источник подписки не изменился.", Details: map[string]any{"subscription_id": subscriptionID}}); err != nil {
+			return RefreshResult{}, errors.New("finish unchanged subscription operation failed")
+		}
+		operationFinished = true
 		return RefreshResult{SubscriptionID: subscriptionID, NotModified: true, NextAttemptAt: next}, nil
 	}
 	digest := sha256.Sum256(fetched.Payload)
@@ -195,6 +239,10 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 			return RefreshResult{}, fmt.Errorf("finish identical subscription refresh: %w", err)
 		}
 		finished = true
+		if err := coordinator.finishOperation(ctx, owner, "CONTENT_IDENTICAL", operations.StepInput{Severity: "INFO", Stage: "COMPLETE", Code: "CONTENT_IDENTICAL", Message: "Полученное содержимое совпадает с активной версией.", Details: map[string]any{"subscription_id": subscriptionID, "version_id": active.ID}}); err != nil {
+			return RefreshResult{}, errors.New("finish identical subscription operation failed")
+		}
+		operationFinished = true
 		return RefreshResult{SubscriptionID: subscriptionID, VersionID: active.ID, NotModified: true, NextAttemptAt: next}, nil
 	}
 	if activeErr != nil && !errors.Is(activeErr, store.ErrNotFound) {
@@ -202,6 +250,10 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
 	}
 
+	if err := coordinator.appendOperationStep(ctx, owner, "IMPORT", "IMPORT_STARTED", "Начат безопасный импорт подписки."); err != nil {
+		failureCode = RefreshOperationFailed
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
 	matchers, err := coordinator.Matchers.List(ctx)
 	if err != nil {
 		failureCode = RefreshImportFailed
@@ -225,9 +277,23 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 	markFailed := func(cleanup context.Context, code string) {
 		_ = coordinator.Versions.MarkFailed(cleanup, versionID, errors.New(code))
 	}
+	if err := coordinator.appendOperationStep(ctx, owner, "VALIDATE", "CANDIDATE_VALIDATED", "Импортированная версия прошла структурную проверку."); err != nil {
+		failureCode = RefreshOperationFailed
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		markFailed(cleanup, failureCode)
+		cancel()
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
 	payloadPath, err := WriteNormalizedPayload(coordinator.PayloadRoot, subscriptionID, versionID, staged.Import)
 	if err != nil {
 		failureCode = RefreshPayloadFailed
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		markFailed(cleanup, failureCode)
+		cancel()
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
+	if err := coordinator.appendOperationStep(ctx, owner, "QUALIFY", "QUALIFICATION_STARTED", "Начата проверка новой версии через доступные модемы."); err != nil {
+		failureCode = RefreshOperationFailed
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		markFailed(cleanup, failureCode)
 		cancel()
@@ -237,6 +303,14 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 	if err != nil || promotion == nil {
 		failureCode = RefreshRuntimeRejected
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		markFailed(cleanup, failureCode)
+		cancel()
+		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
+	}
+	if err := coordinator.appendOperationStep(ctx, owner, "ACTIVATE", "ACTIVATION_STARTED", "Проверенная версия готовится к атомарной активации."); err != nil {
+		failureCode = RefreshOperationFailed
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		_ = promotion.Rollback(cleanup)
 		markFailed(cleanup, failureCode)
 		cancel()
 		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
@@ -267,11 +341,15 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 		return RefreshResult{}, fmt.Errorf("finish successful subscription refresh: %w", err)
 	}
 	finished = true
+	if err := coordinator.finishOperation(ctx, owner, "REFRESH_COMPLETE", operations.StepInput{Severity: "INFO", Stage: "COMPLETE", Code: "REFRESH_COMPLETE", Message: "Новая версия подписки проверена и активирована.", Details: map[string]any{"subscription_id": subscriptionID, "version_id": versionID}}); err != nil {
+		return RefreshResult{}, errors.New("finish successful subscription operation failed")
+	}
+	operationFinished = true
 	return RefreshResult{SubscriptionID: subscriptionID, VersionID: versionID, NextAttemptAt: next}, nil
 }
 
 func (coordinator *RefreshCoordinator) validate() error {
-	if coordinator == nil || coordinator.Subscriptions == nil || coordinator.Versions == nil || coordinator.Matchers == nil || coordinator.Refresh == nil || coordinator.Fetcher == nil || coordinator.Sources == nil || coordinator.Runtime == nil || coordinator.PayloadRoot == "" || coordinator.now == nil || coordinator.random == nil || coordinator.newID == nil {
+	if coordinator == nil || coordinator.Subscriptions == nil || coordinator.Versions == nil || coordinator.Matchers == nil || coordinator.Refresh == nil || coordinator.Fetcher == nil || coordinator.Sources == nil || coordinator.Runtime == nil || coordinator.Operations == nil || coordinator.PayloadRoot == "" || coordinator.now == nil || coordinator.random == nil || coordinator.newID == nil {
 		return errors.New("subscription refresh coordinator dependencies are incomplete")
 	}
 	if coordinator.LeaseDuration < time.Second || coordinator.LeaseDuration > time.Hour || coordinator.BackoffInitial < time.Second || coordinator.BackoffMaximum < coordinator.BackoffInitial || coordinator.JitterPercent < 0 || coordinator.JitterPercent > 50 {
@@ -280,7 +358,23 @@ func (coordinator *RefreshCoordinator) validate() error {
 	return nil
 }
 
-func (coordinator *RefreshCoordinator) finishFailure(ctx context.Context, lease RefreshLease, code string) error {
+func (coordinator *RefreshCoordinator) appendOperationStep(ctx context.Context, operationID, stage, code, message string) error {
+	progress, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := coordinator.Operations.AppendStep(progress, operationID, operations.StepInput{
+		Severity: "INFO", Stage: stage, Code: code, Message: message,
+	})
+	return err
+}
+
+func (coordinator *RefreshCoordinator) finishOperation(ctx context.Context, operationID, summaryCode string, step operations.StepInput) error {
+	progress, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := coordinator.Operations.Finish(progress, operationID, operations.StatusSucceeded, summaryCode, step)
+	return err
+}
+
+func (coordinator *RefreshCoordinator) finishFailure(ctx context.Context, lease RefreshLease, code string, requestedRetry time.Duration) error {
 	delay := coordinator.BackoffInitial
 	for index := 0; index < lease.ConsecutiveFailures && delay < coordinator.BackoffMaximum; index++ {
 		if delay > coordinator.BackoffMaximum/2 {
@@ -288,6 +382,12 @@ func (coordinator *RefreshCoordinator) finishFailure(ctx context.Context, lease 
 			break
 		}
 		delay *= 2
+	}
+	if delay > coordinator.BackoffMaximum {
+		delay = coordinator.BackoffMaximum
+	}
+	if requestedRetry > delay {
+		delay = requestedRetry
 	}
 	if delay > coordinator.BackoffMaximum {
 		delay = coordinator.BackoffMaximum

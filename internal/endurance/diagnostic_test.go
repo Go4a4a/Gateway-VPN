@@ -62,7 +62,7 @@ func TestRetentionPolicyFindingsDetectExpiredRowsAndExcessVersions(t *testing.T)
 func validRetentionSnapshot() RetentionSnapshot {
 	return RetentionSnapshot{
 		SchemaVersion: 1, CollectedAt: "2026-08-26T12:00:00Z",
-		Policy:               RetentionPolicySnapshot{HealthDays: 7, EventDays: 30, TrafficMonths: 24, PreviousSuccessfulVersions: 2, FailedVersions: 2, RowBatch: 500, VersionBatch: 20},
+		Policy:               RetentionPolicySnapshot{HealthDays: 7, EventDays: 30, OperationDays: 30, TrafficMonths: 24, PreviousSuccessfulVersions: 2, FailedVersions: 2, RowBatch: 500, VersionBatch: 20},
 		HealthSamples:        RetentionTemporalStats{Rows: 10, Oldest: "2026-08-26T11:00:00Z", MostRecent: "2026-08-26T12:00:00Z"},
 		Events:               RetentionTemporalStats{Rows: 10, Oldest: "2026-08-26T11:00:00Z", MostRecent: "2026-08-26T12:00:00Z"},
 		TrafficDailyTotals:   RetentionTemporalStats{Rows: 1, Oldest: "2026-08-26", MostRecent: "2026-08-26"},

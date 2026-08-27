@@ -17,11 +17,12 @@ import (
 )
 
 const (
-	StatusQueued    = "QUEUED"
-	StatusRunning   = "RUNNING"
-	StatusSucceeded = "SUCCEEDED"
-	StatusFailed    = "FAILED"
-	StatusCancelled = "CANCELLED"
+	StatusQueued             = "QUEUED"
+	StatusRunning            = "RUNNING"
+	StatusSucceeded          = "SUCCEEDED"
+	StatusFailed             = "FAILED"
+	StatusCancelled          = "CANCELLED"
+	MaximumStepsPerOperation = 32768
 )
 
 type Repository struct {
@@ -292,6 +293,9 @@ func appendStepTxResult(ctx context.Context, transaction *sql.Tx, operationID, o
 	var sequence int64
 	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_steps WHERE operation_id=?", operationID).Scan(&sequence); err != nil {
 		return Step{}, fmt.Errorf("allocate operation step sequence: %w", err)
+	}
+	if sequence > MaximumStepsPerOperation {
+		return Step{}, errors.New("operation step limit reached")
 	}
 	result, err := transaction.ExecContext(ctx, `
 INSERT INTO operation_steps (

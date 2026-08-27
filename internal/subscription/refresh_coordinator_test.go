@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gateway-vpn/internal/operations"
 )
 
 type queuedFetcher struct {
@@ -115,6 +117,29 @@ func TestRefreshCoordinatorPromotesQualifiedCandidateAndUsesConditionalCache(t *
 	if err != nil || state.ETag != `"v1"` || state.ConsecutiveFailures != 0 || state.LeaseOwner != "" {
 		t.Fatalf("refresh state = %+v, %v", state, err)
 	}
+	operation, err := coordinator.Operations.Get(ctx, "refresh-1", true)
+	if err != nil || operation.Status != operations.StatusSucceeded || operation.SummaryCode != "REFRESH_COMPLETE" {
+		t.Fatalf("durable refresh operation = %+v, %v", operation, err)
+	}
+	wantStages := []string{"SOURCE", "HTTP", "IMPORT", "VALIDATE", "QUALIFY", "ACTIVATE", "COMPLETE"}
+	if len(operation.Steps) != len(wantStages) {
+		t.Fatalf("refresh operation steps = %+v", operation.Steps)
+	}
+	for index, stage := range wantStages {
+		if operation.Steps[index].Stage != stage {
+			t.Fatalf("refresh operation stage %d = %s, want %s", index, operation.Steps[index].Stage, stage)
+		}
+	}
+	if fetcher.options[0].OperationID != "refresh-1" {
+		t.Fatalf("fetch operation correlation = %q", fetcher.options[0].OperationID)
+	}
+	serializedOperation := ""
+	for _, step := range operation.Steps {
+		serializedOperation += step.Message + step.DetailsJSON
+	}
+	if strings.Contains(serializedOperation, "token=secret") || strings.Contains(serializedOperation, "provider.example") {
+		t.Fatalf("refresh operation leaked source URL: %s", serializedOperation)
+	}
 
 	result, err = coordinator.RefreshOne(ctx, "sub-a", true)
 	if err != nil || !result.NotModified || result.VersionID != "" || len(runtime.candidates) != 1 {
@@ -171,6 +196,31 @@ func TestRefreshCoordinatorRuntimeFailurePreservesPreviousLKG(t *testing.T) {
 	state, err := NewRefreshRepository(database).Get(ctx, "sub-a")
 	if err != nil || state.ConsecutiveFailures != 1 || state.LastErrorCode != RefreshRuntimeRejected || state.ETag != `"v1"` {
 		t.Fatalf("refresh failure state = %+v, %v", state, err)
+	}
+}
+
+func TestRefreshCoordinatorHonorsBoundedServerRetryAfter(t *testing.T) {
+	ctx, database := migratedDatabase(t)
+	createRefreshableSubscription(t, ctx, database, "sub-a", "url")
+	fetcher := &queuedFetcher{
+		results: []FetchResult{{}},
+		errors:  []error{WithRetryAfter(errors.New("safe fetch failure"), 4*time.Hour)},
+	}
+	coordinator := testRefreshCoordinator(t, database, fetcher, &recordingRuntime{})
+	if _, err := coordinator.RefreshOne(ctx, "sub-a", true); err == nil || !strings.Contains(err.Error(), RefreshFetchFailed) {
+		t.Fatalf("RefreshOne(retry-after) error = %v", err)
+	}
+	state, err := coordinator.Refresh.Get(ctx, "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := coordinator.now().UTC().Add(4 * time.Hour).Format(time.RFC3339Nano)
+	if state.NextAttemptAt != want || state.LastErrorCode != RefreshFetchFailed {
+		t.Fatalf("retry-after state = %+v, want next %s", state, want)
+	}
+	operation, err := coordinator.Operations.Get(ctx, "refresh-1", true)
+	if err != nil || operation.Status != operations.StatusFailed || operation.SummaryCode != RefreshFetchFailed {
+		t.Fatalf("failed refresh operation = %+v, %v", operation, err)
 	}
 }
 
@@ -264,6 +314,7 @@ func testRefreshCoordinator(t *testing.T, database *sql.DB, fetcher Subscription
 		runtime,
 		filepath.Join(t.TempDir(), "subscriptions"),
 	)
+	coordinator.Operations = operations.NewRepository(database)
 	fixed := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	coordinator.now = func() time.Time { return fixed }
 	coordinator.Refresh.now = coordinator.now

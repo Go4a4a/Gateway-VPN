@@ -350,9 +350,6 @@ func (current *Runtime) loadCandidate(ctx context.Context, candidate subscriptio
 	if err != nil {
 		return candidateMaterial{}, fmt.Errorf("read candidate subscription: %w", err)
 	}
-	if !freshSubscription.Enabled {
-		return candidateMaterial{}, errors.New("disabled subscription cannot be promoted")
-	}
 	expectedPath := filepath.Join(current.PayloadRoot, candidate.Subscription.ID, candidate.Version.Version.ID, "payload.yaml")
 	if !samePath(candidate.PayloadPath, expectedPath) {
 		return candidateMaterial{}, errors.New("candidate payload path is outside its immutable version directory")
@@ -465,7 +462,7 @@ func (current *Runtime) buildBundle(ctx context.Context, modems []mihomo.Modem, 
 	}
 	generated := make([]mihomo.Subscription, 0, len(storedSubscriptions)+1)
 	for _, item := range storedSubscriptions {
-		if !item.Enabled || item.ActiveVersionID == "" {
+		if item.ActiveVersionID == "" {
 			continue
 		}
 		imported, err := subscription.LoadNormalizedPayload(current.PayloadRoot, item.ID, item.ActiveVersionID)
@@ -495,7 +492,10 @@ func (current *Runtime) buildBundle(ctx context.Context, modems []mihomo.Modem, 
 				return mihomo.Bundle{}, fmt.Errorf("preserve active grace node for subscription %s: %w", item.ID, err)
 			}
 		}
-		generated = append(generated, mihomo.Subscription{ID: item.ID, Priority: item.Priority, Enabled: true, Nodes: filtered})
+		// access-method enablement controls the user routing group only. Every
+		// active LKG remains present behind its isolated probe group so disabled
+		// subscriptions can refresh through their own/other allowed nodes.
+		generated = append(generated, mihomo.Subscription{ID: item.ID, Priority: item.Priority, Enabled: true, QualificationOnly: !item.Enabled, Nodes: filtered})
 	}
 	if shadow != nil {
 		generated = append(generated, mihomo.Subscription{
@@ -619,6 +619,11 @@ func (current *promotion) Commit(ctx context.Context) error {
 	if active.ID != current.candidate.VersionID || active.State != subscription.VersionLKG {
 		return errors.New("candidate must be the SQLite LKG before runtime commit")
 	}
+	freshSubscription, err := current.runtime.Subscriptions.Get(ctx, current.candidate.Subscription.ID)
+	if err != nil {
+		return fmt.Errorf("read candidate subscription routing state before runtime commit: %w", err)
+	}
+	currentEnabled := freshSubscription.Enabled
 	modems, err := current.runtime.readyModems(ctx)
 	if err != nil {
 		return err
@@ -637,9 +642,13 @@ func (current *promotion) Commit(ctx context.Context) error {
 	if _, err := current.runtime.Controller.Apply(ctx, generationID("active", current.candidate.VersionID), finalBundle); err != nil {
 		return fmt.Errorf("apply final candidate generation: %w", err)
 	}
+	verifiedSubscription, err := current.runtime.Subscriptions.Get(ctx, current.candidate.Subscription.ID)
+	if err != nil || verifiedSubscription.Enabled != currentEnabled || verifiedSubscription.ActiveVersionID != current.candidate.VersionID {
+		return errors.New("candidate subscription routing state changed during runtime commit")
+	}
 	finalPaths := make(map[string]mihomo.Path)
 	for _, item := range finalBundle.Paths {
-		if item.SubscriptionID == current.candidate.Subscription.ID && !item.QualificationOnly {
+		if item.SubscriptionID == current.candidate.Subscription.ID && (!item.QualificationOnly || !currentEnabled) {
 			finalPaths[item.ModemID] = item
 		}
 	}
@@ -655,9 +664,21 @@ func (current *promotion) Commit(ctx context.Context) error {
 		if !exists {
 			return fmt.Errorf("qualified node %s is absent from candidate identity map", item.Result.SelectedNodeID)
 		}
-		if err := current.runtime.Selector.Select(ctx, generatedPath.GroupName, generatedPath.NodePrefix+identity.ExternalName); err != nil {
+		selectorGroup := generatedPath.GroupName
+		if !currentEnabled {
+			selectorGroup = generatedPath.ProbeGroupName
+		}
+		if err := current.runtime.Selector.Select(ctx, selectorGroup, generatedPath.NodePrefix+identity.ExternalName); err != nil {
 			return fmt.Errorf("select qualified candidate node for modem %s: %w", item.Result.ModemID, err)
 		}
+	}
+	if !currentEnabled {
+		// Qualification proves the refreshed LKG is usable, but a disabled user
+		// access method must retain SUBSCRIPTION_DISABLED aggregate state and
+		// must not become eligible for the unified user selector.
+		current.committed = true
+		current.releaseRuntime()
+		return nil
 	}
 	checkedAt := current.runtime.now().UTC()
 	expiresAt := checkedAt.Add(current.runtime.evidenceTTL())
@@ -717,7 +738,9 @@ func (current *Runtime) endpointVersionIDs(ctx context.Context, shadow *candidat
 	}
 	result := make([]string, 0, len(stored)+1)
 	for _, item := range stored {
-		if item.Enabled && item.ActiveVersionID != "" {
+		// Disabled access methods still retain service-only probe providers for
+		// their LKG, so their exact proxy endpoints must remain authorized too.
+		if item.ActiveVersionID != "" {
 			result = append(result, item.ActiveVersionID)
 		}
 	}

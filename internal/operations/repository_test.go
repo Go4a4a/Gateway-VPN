@@ -74,3 +74,28 @@ func TestOperationInputAndTerminalTransitionsAreBounded(t *testing.T) {
 		t.Fatal("invalid terminal status accepted")
 	}
 }
+
+func TestOperationRejectsStepsBeyondHardBound(t *testing.T) {
+	ctx := context.Background()
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	repository := NewRepository(database)
+	if _, err := repository.Create(ctx, CreateInput{ID: "bounded", Kind: "PROBE", ScopeType: "MODEM"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Start(ctx, "bounded", StepInput{Severity: "INFO", Stage: "QUEUED", Code: "STARTED", Message: "started"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE operation_steps SET sequence=? WHERE operation_id='bounded'", MaximumStepsPerOperation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.AppendStep(ctx, "bounded", StepInput{Severity: "INFO", Stage: "HTTP", Code: "TOO_MANY", Message: "overflow"}); err == nil {
+		t.Fatal("operation accepted a step beyond its hard bound")
+	}
+}

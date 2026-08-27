@@ -16,6 +16,7 @@ import (
 type Policy struct {
 	HealthDays                 int
 	EventDays                  int
+	OperationDays              int
 	TrafficMonths              int
 	PreviousSuccessfulVersions int
 	FailedVersions             int
@@ -25,14 +26,14 @@ type Policy struct {
 
 func DefaultPolicy() Policy {
 	return Policy{
-		HealthDays: 7, EventDays: 30, TrafficMonths: 24,
+		HealthDays: 7, EventDays: 30, OperationDays: 30, TrafficMonths: 24,
 		PreviousSuccessfulVersions: 2, FailedVersions: 2,
 		RowBatch: 500, VersionBatch: 20,
 	}
 }
 
 func (policy Policy) Validate() error {
-	if policy.HealthDays < 1 || policy.HealthDays > 365 || policy.EventDays < 1 || policy.EventDays > 3650 || policy.TrafficMonths < 0 || policy.TrafficMonths > 120 {
+	if policy.HealthDays < 1 || policy.HealthDays > 365 || policy.EventDays < 1 || policy.EventDays > 3650 || policy.OperationDays < 1 || policy.OperationDays > 3650 || policy.TrafficMonths < 0 || policy.TrafficMonths > 120 {
 		return errors.New("retention time policy is outside supported bounds")
 	}
 	if policy.PreviousSuccessfulVersions < 0 || policy.PreviousSuccessfulVersions > 20 || policy.FailedVersions < 0 || policy.FailedVersions > 20 {
@@ -47,6 +48,7 @@ func (policy Policy) Validate() error {
 type Result struct {
 	HealthSamplesDeleted        int64
 	EventsDeleted               int64
+	OperationsDeleted           int64
 	TrafficDaysDeleted          int64
 	SubscriptionVersionsDeleted int64
 	PayloadDirectoriesDeleted   int64
@@ -54,7 +56,7 @@ type Result struct {
 }
 
 func (result Result) TotalDeleted() int64 {
-	return result.HealthSamplesDeleted + result.EventsDeleted + result.TrafficDaysDeleted + result.SubscriptionVersionsDeleted + result.PayloadDirectoriesDeleted
+	return result.HealthSamplesDeleted + result.EventsDeleted + result.OperationsDeleted + result.TrafficDaysDeleted + result.SubscriptionVersionsDeleted + result.PayloadDirectoriesDeleted
 }
 
 type Cleaner struct {
@@ -90,6 +92,13 @@ func (cleaner *Cleaner) CleanBatch(ctx context.Context) (Result, error) {
 	}
 	deleted, err = deleteEventBatch(ctx, cleaner.Database, now.AddDate(0, 0, -policy.EventDays).Format(time.RFC3339Nano), policy.RowBatch)
 	result.EventsDeleted = deleted
+	if err != nil {
+		failures = append(failures, err)
+	} else if deleted == int64(policy.RowBatch) {
+		result.HasMore = true
+	}
+	deleted, err = deleteOperationBatch(ctx, cleaner.Database, now.AddDate(0, 0, -policy.OperationDays).Format(time.RFC3339Nano), policy.RowBatch)
+	result.OperationsDeleted = deleted
 	if err != nil {
 		failures = append(failures, err)
 	} else if deleted == int64(policy.RowBatch) {
@@ -140,6 +149,16 @@ func deleteEventBatch(ctx context.Context, database *sql.DB, cutoff string, limi
 	return deleteRows(ctx, database, `
 DELETE FROM events
 WHERE id IN (SELECT id FROM events WHERE occurred_at < ? ORDER BY occurred_at, id LIMIT ?)`, cutoff, limit, "events")
+}
+
+func deleteOperationBatch(ctx context.Context, database *sql.DB, cutoff string, limit int) (int64, error) {
+	return deleteRows(ctx, database, `
+DELETE FROM operations
+WHERE id IN (
+    SELECT id FROM operations
+    WHERE status IN ('SUCCEEDED', 'FAILED', 'CANCELLED') AND finished_at < ?
+    ORDER BY finished_at, id LIMIT ?
+)`, cutoff, limit, "completed operations")
 }
 
 func deleteTrafficBatch(ctx context.Context, database *sql.DB, cutoff string, limit int) (int64, error) {

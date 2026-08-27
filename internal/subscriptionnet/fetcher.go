@@ -10,6 +10,7 @@ import (
 
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/netbind"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/subscription"
 )
 
@@ -31,6 +32,7 @@ type ModemBoundFetcher struct {
 	BootstrapDNS    []string
 	DialerFactory   ModemDialerFactory
 	ResolverFactory ModemResolverFactory
+	Operations      *operations.Repository
 }
 
 func NewModemBoundFetcher(base *subscription.Fetcher, modems *modem.Repository, broker BootstrapBroker, bootstrapDNS []string) (*ModemBoundFetcher, error) {
@@ -60,13 +62,32 @@ func (fetcher *ModemBoundFetcher) FetchForSubscription(ctx context.Context, subs
 		return subscription.FetchResult{}, errors.New("read modem candidates for subscription fetch failed")
 	}
 	ready := 0
+	attempt := 0
+	var requestedRetry time.Duration
 	for _, currentModem := range stored {
 		if !currentModem.Enabled || currentModem.State != modem.StateReady {
 			continue
 		}
 		ready++
+		attempt++
+		if err := appendOperationStep(ctx, fetcher.Operations, options.OperationID, operations.StepInput{
+			Severity: "INFO", Stage: "ROUTE_SELECTED", Code: "DIRECT_ROUTE_SELECTED",
+			Message: "Проверяется прямой маршрут для обновления подписки.",
+			Details: map[string]any{"attempt": attempt, "route_kind": "DIRECT", "modem_id": currentModem.ID},
+		}); err != nil {
+			return subscription.FetchResult{}, errors.New("record subscription direct route attempt failed")
+		}
+		attemptContext, cancelAttempt := context.WithTimeout(ctx, routeAttemptTimeout)
 		dial, err := fetcher.DialerFactory(currentModem.InterfaceName, currentModem.Fwmark)
 		if err != nil {
+			cancelAttempt()
+			if stepErr := appendOperationStep(ctx, fetcher.Operations, options.OperationID, operations.StepInput{
+				Severity: "WARNING", Stage: "ROUTE_SELECTED", Code: "DIRECT_ROUTE_BIND_FAILED",
+				Message: "Не удалось создать изолированный маршрут через модем; будет проверен следующий готовый модем.",
+				Details: map[string]any{"attempt": attempt, "route_kind": "DIRECT", "modem_id": currentModem.ID},
+			}); stepErr != nil {
+				return subscription.FetchResult{}, errors.New("record failed subscription direct binding failed")
+			}
 			continue
 		}
 		resolver := &ipv4OnlyResolver{inner: fetcher.ResolverFactory(dial, fetcher.BootstrapDNS)}
@@ -81,18 +102,39 @@ func (fetcher *ModemBoundFetcher) FetchForSubscription(ctx context.Context, subs
 			}
 			return fetcher.Broker.AuthorizeSubscriptionBootstrap(authorizeContext, currentModem.ID, subscriptionID, values, port)
 		}
-		result, err := fetcher.Base.FetchThrough(ctx, secretURL, options, resolver, dial, authorize)
+		attemptOptions := withRouteProgress(fetcher.Operations, options, map[string]any{"attempt": attempt, "route_kind": "DIRECT", "modem_id": currentModem.ID})
+		result, err := fetcher.Base.FetchThrough(attemptContext, secretURL, attemptOptions, resolver, dial, authorize)
+		cancelAttempt()
 		if err == nil {
+			if stepErr := appendOperationStep(ctx, fetcher.Operations, options.OperationID, operations.StepInput{
+				Severity: "INFO", Stage: "HTTP", Code: "DIRECT_HTTP_SUCCEEDED",
+				Message: "Подписка получена через прямой маршрут.",
+				Details: map[string]any{"attempt": attempt, "route_kind": "DIRECT", "modem_id": currentModem.ID},
+			}); stepErr != nil {
+				return subscription.FetchResult{}, errors.New("record successful subscription direct route failed")
+			}
 			return result, nil
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return subscription.FetchResult{}, err
+		requestedRetry = largerRetryAfter(requestedRetry, err)
+		failureCode := "DIRECT_HTTP_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			failureCode = "DIRECT_ATTEMPT_TIMEOUT"
+		}
+		if stepErr := appendOperationStep(ctx, fetcher.Operations, options.OperationID, operations.StepInput{
+			Severity: "WARNING", Stage: "HTTP", Code: failureCode,
+			Message: "Прямой маршрут не смог получить подписку; будет проверен следующий готовый модем.",
+			Details: map[string]any{"attempt": attempt, "route_kind": "DIRECT", "modem_id": currentModem.ID},
+		}); stepErr != nil {
+			return subscription.FetchResult{}, errors.New("record failed subscription direct route failed")
+		}
+		if ctx.Err() != nil {
+			return subscription.FetchResult{}, ctx.Err()
 		}
 	}
 	if ready == 0 {
 		return subscription.FetchResult{}, errors.New("subscription fetch requires at least one ready modem")
 	}
-	return subscription.FetchResult{}, errors.New("subscription HTTPS request failed through every ready modem")
+	return subscription.FetchResult{}, subscription.WithRetryAfter(errors.New("subscription HTTPS request failed through every ready modem"), requestedRetry)
 }
 
 func (fetcher *ModemBoundFetcher) validate() error {

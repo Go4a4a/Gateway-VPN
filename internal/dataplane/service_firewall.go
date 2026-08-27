@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/firewall"
 	"gateway-vpn/internal/modem"
@@ -69,6 +70,7 @@ type ServiceFirewallBackend struct {
 	BootstrapDNS  []string
 	Versions      *subscription.VersionRepository
 	PayloadRoot   string
+	AccessPolicy  *accesspolicy.Repository
 	mutex         sync.Mutex
 }
 
@@ -113,6 +115,10 @@ func (backend *ServiceFirewallBackend) AuthorizeBootstrap(ctx context.Context, a
 	currentSubscription, err := backend.Subscriptions.Get(ctx, authorization.SubscriptionID)
 	if err != nil || currentSubscription.SourceType != "url" {
 		return errors.New("bootstrap subscription is not a URL source")
+	}
+	policy, err := backend.AccessPolicy.GetPolicy(ctx)
+	if err != nil || !policy.DirectServiceRefresh {
+		return errors.New("direct subscription refresh is disabled by policy")
 	}
 	addresses, err := validatedPublicAddresses(authorization.Addresses)
 	if err != nil {
@@ -376,7 +382,7 @@ func (backend *ServiceFirewallBackend) AuthorizeMihomoEndpoints(ctx context.Cont
 }
 
 func (backend *ServiceFirewallBackend) validate() error {
-	if backend.Modems == nil || backend.Subscriptions == nil || backend.Executor == nil || backend.NFT != "/usr/sbin/nft" {
+	if backend.Modems == nil || backend.Subscriptions == nil || backend.AccessPolicy == nil || backend.Executor == nil || backend.NFT != "/usr/sbin/nft" {
 		return errors.New("fixed Ubuntu nft backend and authoritative repositories are required")
 	}
 	if backend.Routing.Modems != backend.Modems || backend.Routing.Executor == nil || len(backend.BootstrapDNS) == 0 {

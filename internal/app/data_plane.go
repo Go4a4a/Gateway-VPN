@@ -27,6 +27,7 @@ import (
 	"gateway-vpn/internal/mihomoruntime"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/pathruntime"
 	"gateway-vpn/internal/platformexec"
@@ -158,16 +159,32 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	if err != nil {
 		return dataPlaneComponents{}, err
 	}
+	operationRepository := operations.NewRepository(database)
+	ladderFetcher, err := subscriptionnet.NewRouteLadderFetcher(
+		fetcher,
+		subscriptionnet.NewRouteRepository(database),
+		accessPolicies,
+		modemFetcher,
+		client,
+		configuration.Mihomo.ProbeAddress,
+		configuration.Mihomo.BootstrapDNS,
+		operationLock,
+		operationRepository,
+	)
+	if err != nil {
+		return dataPlaneComponents{}, fmt.Errorf("initialize resilient subscription fetcher: %w", err)
+	}
 	refresh := subscription.NewRefreshCoordinator(
 		subscriptions,
 		versions,
 		matchers,
 		subscription.NewRefreshRepository(database),
-		modemFetcher,
+		ladderFetcher,
 		subscription.FileSourceURLReader{Root: filepath.Join(configuration.System.StateDir, "secrets", "subscriptions")},
 		candidateRuntime,
 		filepath.Join(configuration.System.StateDir, "subscriptions"),
 	)
+	refresh.Operations = operationRepository
 	worker := &subscription.RefreshWorker{Coordinator: refresh, Subscriptions: subscriptions}
 	identitySalt, err := bootstrap.EnsureModemIdentitySalt(configuration.System.StateDir)
 	if err != nil {

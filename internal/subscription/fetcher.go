@@ -9,10 +9,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +29,19 @@ type EndpointAuthorizer func(context.Context, []netip.Addr, uint16) error
 type FetchOptions struct {
 	ETag         string
 	LastModified string
+	// OperationID correlates route-attempt progress with the durable
+	// subscription refresh operation. The generic HTTPS fetcher deliberately
+	// ignores it; transport adapters may use it only as an opaque identifier.
+	OperationID string
+	Progress    func(context.Context, FetchProgress) error
+}
+
+type FetchProgress struct {
+	Severity string
+	Stage    string
+	Code     string
+	Message  string
+	Details  map[string]any
 }
 
 type FetchResult struct {
@@ -110,6 +125,9 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 			if err != nil {
 				return nil, errors.New("subscription endpoint address is invalid")
 			}
+			if err := reportFetchProgress(dialContext, options, FetchProgress{Severity: "INFO", Stage: "DNS", Code: "DNS_STARTED", Message: "Начато разрешение адреса источника подписки."}); err != nil {
+				return nil, err
+			}
 			addresses, err := resolver.LookupNetIP(dialContext, "ip", host)
 			if err != nil || len(addresses) == 0 || len(addresses) > 64 {
 				return nil, errors.New("subscription DNS resolution failed")
@@ -121,6 +139,9 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 					return nil, err
 				}
 				validated = append(validated, candidate)
+			}
+			if err := reportFetchProgress(dialContext, options, FetchProgress{Severity: "INFO", Stage: "DNS", Code: "DNS_SUCCEEDED", Message: "Адрес источника подписки разрешён безопасно.", Details: map[string]any{"address_count": len(validated)}}); err != nil {
+				return nil, err
 			}
 			portValue, err := strconv.ParseUint(port, 10, 16)
 			if err != nil || portValue == 0 {
@@ -173,6 +194,20 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 	if options.LastModified != "" && len(options.LastModified) <= 128 && !strings.ContainsAny(options.LastModified, "\r\n") {
 		request.Header.Set("If-Modified-Since", options.LastModified)
 	}
+	progressErrors := &fetchProgressErrors{}
+	trace := &httptrace.ClientTrace{
+		TLSHandshakeStart: func() {
+			progressErrors.Record(reportFetchProgress(ctx, options, FetchProgress{Severity: "INFO", Stage: "TLS", Code: "TLS_STARTED", Message: "Начата проверка защищённого соединения с источником подписки."}))
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, handshakeErr error) {
+			progress := FetchProgress{Severity: "INFO", Stage: "TLS", Code: "TLS_SUCCEEDED", Message: "TLS-соединение с источником подписки проверено."}
+			if handshakeErr != nil {
+				progress.Severity, progress.Code, progress.Message = "WARNING", "TLS_FAILED", "TLS-соединение с источником подписки не установлено."
+			}
+			progressErrors.Record(reportFetchProgress(ctx, options, progress))
+		},
+	}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 	response, err := client.Do(request)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -180,7 +215,14 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 		}
 		return FetchResult{}, errors.New("subscription HTTPS request failed")
 	}
+	if err := progressErrors.Err(); err != nil {
+		response.Body.Close()
+		return FetchResult{}, err
+	}
 	defer response.Body.Close()
+	if err := reportFetchProgress(ctx, options, FetchProgress{Severity: "INFO", Stage: "HTTP", Code: "HTTP_RESPONSE", Message: "Получен HTTP-ответ источника подписки.", Details: map[string]any{"http_status": response.StatusCode}}); err != nil {
+		return FetchResult{}, err
+	}
 	if response.StatusCode == http.StatusNotModified {
 		etag := cleanResponseHeader(response.Header.Get("ETag"), 1024)
 		if etag == "" {
@@ -193,7 +235,8 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 		return FetchResult{NotModified: true, ETag: etag, LastModified: lastModified}, nil
 	}
 	if response.StatusCode != http.StatusOK {
-		return FetchResult{}, fmt.Errorf("subscription server returned HTTP %d", response.StatusCode)
+		httpError := fmt.Errorf("subscription server returned HTTP %d", response.StatusCode)
+		return FetchResult{}, WithRetryAfter(httpError, parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC()))
 	}
 	content, err := io.ReadAll(io.LimitReader(response.Body, MaxPayloadBytes+1))
 	if err != nil {
@@ -206,6 +249,38 @@ func (fetcher *Fetcher) fetch(ctx context.Context, secretURL string, options Fet
 		return FetchResult{}, errors.New("subscription response is empty")
 	}
 	return FetchResult{Payload: content, ETag: cleanResponseHeader(response.Header.Get("ETag"), 1024), LastModified: cleanResponseHeader(response.Header.Get("Last-Modified"), 128)}, nil
+}
+
+func reportFetchProgress(ctx context.Context, options FetchOptions, progress FetchProgress) error {
+	if options.Progress == nil {
+		return nil
+	}
+	if err := options.Progress(ctx, progress); err != nil {
+		return errors.New("subscription fetch progress recording failed")
+	}
+	return nil
+}
+
+type fetchProgressErrors struct {
+	mutex sync.Mutex
+	err   error
+}
+
+func (current *fetchProgressErrors) Record(err error) {
+	if err == nil {
+		return
+	}
+	current.mutex.Lock()
+	defer current.mutex.Unlock()
+	if current.err == nil {
+		current.err = err
+	}
+}
+
+func (current *fetchProgressErrors) Err() error {
+	current.mutex.Lock()
+	defer current.mutex.Unlock()
+	return current.err
 }
 
 func (fetcher *Fetcher) validateURL(value string) (*url.URL, error) {

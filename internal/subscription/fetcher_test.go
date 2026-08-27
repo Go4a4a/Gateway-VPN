@@ -118,6 +118,25 @@ func TestFetcherAllowsExactlyConfiguredRedirectCount(t *testing.T) {
 	}
 }
 
+func TestFetcherCarriesBoundedRetryAfterWithoutResponseDetails(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Retry-After", "7200")
+		writer.Header().Set("X-Provider-Secret", "must-not-appear")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte("private backend detail"))
+	}))
+	defer server.Close()
+	fetcher := newLoopbackTLSFetcher(t, server)
+	_, err := fetcher.Fetch(context.Background(), server.URL+"/sub", FetchOptions{})
+	delay, ok := FetchRetryAfter(err)
+	if err == nil || !ok || delay != 2*time.Hour {
+		t.Fatalf("retry-after error/delay = %v/%v/%t", err, delay, ok)
+	}
+	if strings.Contains(err.Error(), "must-not-appear") || strings.Contains(err.Error(), "private backend detail") {
+		t.Fatalf("retry-after error leaked response detail: %v", err)
+	}
+}
+
 func newLoopbackTLSFetcher(t *testing.T, server *httptest.Server) *Fetcher {
 	t.Helper()
 	transport, ok := server.Client().Transport.(*http.Transport)

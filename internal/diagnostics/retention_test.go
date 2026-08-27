@@ -46,7 +46,7 @@ VALUES(?, 'sub-a', ?, 1, ?, ?, ?)`, item.id, strings.Repeat("a", 64), item.state
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.SchemaVersion != 1 || report.Policy.HealthDays != 7 || report.Policy.EventDays != 30 || report.Policy.TrafficMonths != 24 || report.Policy.PreviousSuccessfulVersions != 2 || report.Policy.FailedVersions != 2 {
+	if report.SchemaVersion != 1 || report.Policy.HealthDays != 7 || report.Policy.EventDays != 30 || report.Policy.OperationDays != 30 || report.Policy.TrafficMonths != 24 || report.Policy.PreviousSuccessfulVersions != 2 || report.Policy.FailedVersions != 2 {
 		t.Fatalf("policy report = %+v", report)
 	}
 	if report.HealthSamples.Rows != 2 || report.HealthSamples.Oldest != "2026-08-01T00:00:00Z" || report.HealthSamples.MostRecent != "2026-08-26T11:00:00Z" || report.TrafficDailyTotals.Rows != 1 {

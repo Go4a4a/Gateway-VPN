@@ -45,6 +45,7 @@ type databaseStorageStats struct {
 type retentionPolicySummary struct {
 	HealthDays                 int `json:"health_days"`
 	EventDays                  int `json:"event_days"`
+	OperationDays              int `json:"operation_days"`
 	TrafficMonths              int `json:"traffic_months"`
 	PreviousSuccessfulVersions int `json:"previous_successful_versions"`
 	FailedVersions             int `json:"failed_versions"`
@@ -58,6 +59,7 @@ type databaseRetentionReport struct {
 	Policy               retentionPolicySummary `json:"policy"`
 	HealthSamples        temporalRetentionStats `json:"health_samples"`
 	Events               temporalRetentionStats `json:"events"`
+	Operations           temporalRetentionStats `json:"operations"`
 	TrafficDailyTotals   temporalRetentionStats `json:"traffic_daily_totals"`
 	SubscriptionVersions versionRetentionStats  `json:"subscription_versions"`
 	Storage              databaseStorageStats   `json:"storage"`
@@ -72,7 +74,7 @@ func buildDatabaseRetentionReport(ctx context.Context, database *sql.DB, now tim
 		SchemaVersion: databaseRetentionSchemaVersion,
 		CollectedAt:   now.UTC().Format(time.RFC3339Nano),
 		Policy: retentionPolicySummary{
-			HealthDays: policy.HealthDays, EventDays: policy.EventDays, TrafficMonths: policy.TrafficMonths,
+			HealthDays: policy.HealthDays, EventDays: policy.EventDays, OperationDays: policy.OperationDays, TrafficMonths: policy.TrafficMonths,
 			PreviousSuccessfulVersions: policy.PreviousSuccessfulVersions, FailedVersions: policy.FailedVersions,
 			RowBatch: policy.RowBatch, VersionBatch: policy.VersionBatch,
 		},
@@ -82,6 +84,9 @@ func buildDatabaseRetentionReport(ctx context.Context, database *sql.DB, now tim
 		return databaseRetentionReport{}, err
 	}
 	if report.Events, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(occurred_at), ''), COALESCE(MAX(occurred_at), '') FROM events"); err != nil {
+		return databaseRetentionReport{}, err
+	}
+	if report.Operations, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(created_at), ''), COALESCE(MAX(created_at), '') FROM operations"); err != nil {
 		return databaseRetentionReport{}, err
 	}
 	if report.TrafficDailyTotals, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(date), ''), COALESCE(MAX(date), '') FROM traffic_daily_totals"); err != nil {

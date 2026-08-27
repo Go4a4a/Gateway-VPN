@@ -111,6 +111,63 @@ type runtimeFixture struct {
 	candidateRuntime *Runtime
 }
 
+func TestDisabledSubscriptionLKGRemainsServiceOnlyInMihomoBundle(t *testing.T) {
+	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true})
+	defer fixture.database.Close()
+	if err := fixture.subscriptions.SetEnabled(fixture.ctx, "sub-a", false); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := fixture.candidateRuntime.readyModems(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := fixture.candidateRuntime.buildBundle(fixture.ctx, ready, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Paths) != 2 {
+		t.Fatalf("service-only path count = %d", len(bundle.Paths))
+	}
+	for _, path := range bundle.Paths {
+		if !path.QualificationOnly || path.SubscriptionID != "sub-a" {
+			t.Fatalf("disabled subscription entered user routing bundle: %+v", path)
+		}
+	}
+	versions, err := fixture.candidateRuntime.endpointVersionIDs(fixture.ctx, nil)
+	if err != nil || len(versions) != 1 || versions[0] != fixture.oldVersionID {
+		t.Fatalf("service-only endpoint versions = %v, %v", versions, err)
+	}
+}
+
+func TestDisabledSubscriptionCanRefreshLKGWithoutPublishingUserPath(t *testing.T) {
+	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true})
+	defer fixture.database.Close()
+	if err := fixture.subscriptions.SetEnabled(fixture.ctx, "sub-a", false); err != nil {
+		t.Fatal(err)
+	}
+	fixture.candidate.Subscription.Enabled = false
+	promoted, err := fixture.candidateRuntime.Promote(fixture.ctx, fixture.candidate)
+	if err != nil {
+		t.Fatalf("Promote(disabled subscription) error = %v", err)
+	}
+	if err := fixture.versions.Activate(fixture.ctx, fixture.candidate.Version.Version.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := promoted.Commit(fixture.ctx); err != nil {
+		t.Fatalf("Commit(disabled subscription) error = %v", err)
+	}
+	cell, err := fixture.paths.Get(fixture.ctx, "modem-a", "sub-a")
+	if err != nil || cell.State != pathmatrix.StateSubscriptionDisabled || cell.SelectedNodeID != "" || cell.QualityClass != "UNKNOWN" {
+		t.Fatalf("disabled refreshed user path = %+v, %v", cell, err)
+	}
+	lastBundle := fixture.controller.applies[len(fixture.controller.applies)-1].Bundle
+	for _, path := range lastBundle.Paths {
+		if !path.QualificationOnly {
+			t.Fatalf("disabled refresh exposed user path: %+v", path)
+		}
+	}
+}
+
 func TestPromotionQualifiesCandidateThroughEveryReadyModemBeforePublishingEvidence(t *testing.T) {
 	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true, "modem-b": false})
 	defer fixture.database.Close()

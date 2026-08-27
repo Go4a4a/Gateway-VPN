@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/config"
@@ -106,6 +107,7 @@ func runNetworkBroker(args []string) int {
 		BootstrapDNS:  append([]string(nil), configuration.Mihomo.BootstrapDNS...),
 		Versions:      subscription.NewVersionRepository(database),
 		PayloadRoot:   filepath.Join(configuration.System.StateDir, "subscriptions"),
+		AccessPolicy:  accesspolicy.NewRepository(database),
 	}
 	wireGuardBackend := &dataplane.WireGuardBackend{
 		Modems: routingBackend.Modems, States: state.NewRepository(database),

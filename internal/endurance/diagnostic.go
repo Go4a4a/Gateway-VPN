@@ -57,6 +57,7 @@ type RetentionStorageStats struct {
 type RetentionPolicySnapshot struct {
 	HealthDays                 int `json:"health_days"`
 	EventDays                  int `json:"event_days"`
+	OperationDays              int `json:"operation_days"`
 	TrafficMonths              int `json:"traffic_months"`
 	PreviousSuccessfulVersions int `json:"previous_successful_versions"`
 	FailedVersions             int `json:"failed_versions"`
@@ -70,6 +71,7 @@ type RetentionSnapshot struct {
 	Policy               RetentionPolicySnapshot `json:"policy"`
 	HealthSamples        RetentionTemporalStats  `json:"health_samples"`
 	Events               RetentionTemporalStats  `json:"events"`
+	Operations           RetentionTemporalStats  `json:"operations"`
 	TrafficDailyTotals   RetentionTemporalStats  `json:"traffic_daily_totals"`
 	SubscriptionVersions RetentionVersionStats   `json:"subscription_versions"`
 	Storage              RetentionStorageStats   `json:"storage"`
@@ -166,14 +168,14 @@ func InspectDiagnostic(content []byte, expectedSHA256 string) (DiagnosticSnapsho
 }
 
 func (snapshot RetentionSnapshot) Validate() error {
-	if snapshot.SchemaVersion != 1 || snapshot.Policy.HealthDays != 7 || snapshot.Policy.EventDays != 30 || snapshot.Policy.TrafficMonths != 24 || snapshot.Policy.PreviousSuccessfulVersions != 2 || snapshot.Policy.FailedVersions != 2 || snapshot.Policy.RowBatch != 500 || snapshot.Policy.VersionBatch != 20 {
+	if snapshot.SchemaVersion != 1 || snapshot.Policy.HealthDays != 7 || snapshot.Policy.EventDays != 30 || snapshot.Policy.OperationDays != 30 || snapshot.Policy.TrafficMonths != 24 || snapshot.Policy.PreviousSuccessfulVersions != 2 || snapshot.Policy.FailedVersions != 2 || snapshot.Policy.RowBatch != 500 || snapshot.Policy.VersionBatch != 20 {
 		return errors.New("diagnostic retention policy is unexpected")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, snapshot.CollectedAt); err != nil {
 		return errors.New("diagnostic retention timestamp is invalid")
 	}
 	for _, value := range []int64{
-		snapshot.HealthSamples.Rows, snapshot.Events.Rows, snapshot.TrafficDailyTotals.Rows,
+		snapshot.HealthSamples.Rows, snapshot.Events.Rows, snapshot.Operations.Rows, snapshot.TrafficDailyTotals.Rows,
 		snapshot.SubscriptionVersions.Total, snapshot.SubscriptionVersions.LKG, snapshot.SubscriptionVersions.Candidate,
 		snapshot.SubscriptionVersions.Retained, snapshot.SubscriptionVersions.Failed, snapshot.SubscriptionVersions.Other,
 		snapshot.SubscriptionVersions.ActiveLKG, snapshot.SubscriptionVersions.ActiveNonLKG,
