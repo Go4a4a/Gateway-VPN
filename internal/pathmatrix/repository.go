@@ -45,6 +45,10 @@ type Cell struct {
 	QualifiedNodes        int64
 	RequiredTargetsPassed int64
 	RequiredTargetsTotal  int64
+	OptionalTargetsPassed int64
+	OptionalTargetsTotal  int64
+	QualityClass          string
+	FunctionalScore       int64
 	LatencyMS             int64
 	PolicyGeneration      int64
 	RouteGeneration       int64
@@ -65,6 +69,10 @@ type ResultUpdate struct {
 	QualifiedNodes           int64
 	RequiredTargetsPassed    int64
 	RequiredTargetsTotal     int64
+	OptionalTargetsPassed    int64
+	OptionalTargetsTotal     int64
+	QualityClass             string
+	FunctionalScore          int64
 	LatencyMS                int64
 	LastCheckedAt            time.Time
 	ExpiresAt                time.Time
@@ -113,7 +121,7 @@ SELECT
     END,
     'UNKNOWN',
 	?,
-    0,
+    m.route_generation,
     ?,
     ?
 FROM modems AS m
@@ -147,6 +155,18 @@ SET state = CASE
     required_targets_passed = CASE
         WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
         ELSE p.required_targets_passed
+    END,
+    quality_class = CASE
+        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 'UNKNOWN'
+        ELSE p.quality_class
+    END,
+    functional_score = CASE
+        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+        ELSE p.functional_score
+    END,
+    optional_targets_passed = CASE
+        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+        ELSE p.optional_targets_passed
     END,
     expires_at = CASE
         WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN NULL
@@ -212,10 +232,13 @@ func (repository *Repository) UpdateResult(ctx context.Context, update ResultUpd
 	if err := validateResultUpdate(update); err != nil {
 		return err
 	}
+	qualityClass, functionalScore := resultQuality(update)
 	result, err := repository.database.ExecContext(ctx, `
 UPDATE subscription_modem_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
+    optional_targets_passed=?, optional_targets_total=?,
+    quality_class=?, functional_score=?,
     latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
 WHERE id=? AND policy_generation=? AND route_generation=?`,
 		update.State,
@@ -225,6 +248,10 @@ WHERE id=? AND policy_generation=? AND route_generation=?`,
 		update.QualifiedNodes,
 		update.RequiredTargetsPassed,
 		update.RequiredTargetsTotal,
+		update.OptionalTargetsPassed,
+		update.OptionalTargetsTotal,
+		qualityClass,
+		functionalScore,
 		nullIfZero(update.LatencyMS),
 		formatOptionalTime(update.LastCheckedAt),
 		formatOptionalTime(update.ExpiresAt),
@@ -247,24 +274,44 @@ WHERE id=? AND policy_generation=? AND route_generation=?`,
 }
 
 func (repository *Repository) BumpRouteGeneration(ctx context.Context, modemID string) error {
-	result, err := repository.database.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET route_generation=route_generation+1,
-    state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
-    qualified_nodes=0, required_targets_passed=0,
-    last_checked_at=NULL, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, repository.now().UTC().Format(time.RFC3339Nano), modemID)
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin modem route generation bump: %w", err)
+	}
+	defer transaction.Rollback()
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	modemResult, err := transaction.ExecContext(ctx, `
+UPDATE modems SET route_generation=route_generation+1, updated_at=? WHERE id=?`, now, modemID)
 	if err != nil {
 		return fmt.Errorf("bump modem route generation: %w", err)
 	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read route generation update count: %w", err)
-	}
-	if count == 0 {
+	if count, countErr := modemResult.RowsAffected(); countErr != nil || count != 1 {
 		return store.ErrNotFound
 	}
-	return nil
+	result, err := transaction.ExecContext(ctx, `
+UPDATE subscription_modem_paths
+SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+    state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0,
+    last_checked_at=NULL, expires_at=NULL, updated_at=?
+WHERE modem_id=?`, modemID, now, modemID)
+	if err != nil {
+		return fmt.Errorf("bump modem route generation: %w", err)
+	}
+	if _, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read route generation update count: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE direct_modem_paths
+SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+    state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    last_checked_at=NULL, expires_at=NULL, updated_at=?
+WHERE modem_id=?`, modemID, now, modemID); err != nil {
+		return fmt.Errorf("invalidate direct modem route generation: %w", err)
+	}
+	return transaction.Commit()
 }
 
 func (repository *Repository) BumpPolicyGeneration(ctx context.Context) (int64, error) {
@@ -288,7 +335,8 @@ func (repository *Repository) MarkModemOffline(ctx context.Context, modemID stri
 	result, err := repository.database.ExecContext(ctx, `
 UPDATE subscription_modem_paths
 SET state='MODEM_OFFLINE', transport_state='UNKNOWN', selected_node_id=NULL,
-    qualified_nodes=0, required_targets_passed=0, expires_at=NULL, updated_at=?
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
 WHERE modem_id=?`, repository.now().UTC().Format(time.RFC3339Nano), modemID)
 	if err != nil {
 		return fmt.Errorf("mark modem paths offline: %w", err)
@@ -319,7 +367,7 @@ func validateResultUpdate(update ResultUpdate) error {
 	if !validResultState(update.State) {
 		return fmt.Errorf("invalid path result state %q", update.State)
 	}
-	if update.CandidateNodes < 0 || update.QualifiedNodes < 0 || update.RequiredTargetsPassed < 0 || update.RequiredTargetsTotal < 0 || update.LatencyMS < 0 {
+	if update.CandidateNodes < 0 || update.QualifiedNodes < 0 || update.RequiredTargetsPassed < 0 || update.RequiredTargetsTotal < 0 || update.OptionalTargetsPassed < 0 || update.OptionalTargetsTotal < 0 || update.FunctionalScore < 0 || update.LatencyMS < 0 {
 		return errors.New("path result counters cannot be negative")
 	}
 	if update.QualifiedNodes > update.CandidateNodes {
@@ -327,6 +375,21 @@ func validateResultUpdate(update ResultUpdate) error {
 	}
 	if update.RequiredTargetsPassed > update.RequiredTargetsTotal {
 		return errors.New("passed target count cannot exceed total target count")
+	}
+	if update.OptionalTargetsPassed > update.OptionalTargetsTotal {
+		return errors.New("passed optional target count cannot exceed total target count")
+	}
+	if update.QualityClass != "" && update.QualityClass != "UNKNOWN" && update.QualityClass != "FULL" && update.QualityClass != "LIMITED" && update.QualityClass != "FAILED" {
+		return errors.New("path result quality class is invalid")
+	}
+	if update.QualityClass == "FULL" && update.State != StateQualified {
+		return errors.New("FULL path result requires QUALIFIED state")
+	}
+	if update.QualityClass == "LIMITED" && (update.State != StateDegraded || update.TransportState != "PASSED" || update.SelectedNodeID == "" || update.FunctionalScore <= 0 || update.RequiredTargetsPassed == update.RequiredTargetsTotal) {
+		return errors.New("LIMITED path result requires a selected degraded path with partial access and positive score")
+	}
+	if update.QualityClass == "FAILED" && update.State != StateFailed {
+		return errors.New("FAILED path result requires FAILED state")
 	}
 	if !update.ExpiresAt.IsZero() && !update.LastCheckedAt.IsZero() && !update.ExpiresAt.After(update.LastCheckedAt) {
 		return errors.New("path result expiry must be after check time")
@@ -337,6 +400,26 @@ func validateResultUpdate(update ResultUpdate) error {
 		}
 	}
 	return nil
+}
+
+func resultQuality(update ResultUpdate) (string, int64) {
+	if update.QualityClass != "" {
+		return update.QualityClass, update.FunctionalScore
+	}
+	switch update.State {
+	case StateQualified:
+		return "FULL", update.RequiredTargetsPassed*1000 + update.OptionalTargetsPassed
+	case StateDegraded:
+		score := update.RequiredTargetsPassed*1000 + update.OptionalTargetsPassed
+		if score == 0 && update.TransportState == "PASSED" {
+			score = 1
+		}
+		return "LIMITED", score
+	case StateFailed:
+		return "FAILED", 0
+	default:
+		return "UNKNOWN", 0
+	}
 }
 
 func nullIfEmpty(value string) any {
@@ -364,7 +447,9 @@ const cellSelect = `
 SELECT p.id, p.modem_id, m.display_number, m.name, m.priority,
        p.subscription_id, s.name, s.priority, p.state, p.transport_state,
        p.selected_node_id, p.candidate_nodes, p.qualified_nodes,
-       p.required_targets_passed, p.required_targets_total, p.latency_ms,
+       p.required_targets_passed, p.required_targets_total,
+       p.optional_targets_passed, p.optional_targets_total,
+       p.quality_class, p.functional_score, p.latency_ms,
        p.policy_generation, p.route_generation, p.last_checked_at,
        p.expires_at, p.created_at, p.updated_at
 FROM subscription_modem_paths AS p
@@ -395,6 +480,10 @@ func scanCell(row scanner) (Cell, error) {
 		&item.QualifiedNodes,
 		&item.RequiredTargetsPassed,
 		&item.RequiredTargetsTotal,
+		&item.OptionalTargetsPassed,
+		&item.OptionalTargetsTotal,
+		&item.QualityClass,
+		&item.FunctionalScore,
 		&latencyMS,
 		&item.PolicyGeneration,
 		&item.RouteGeneration,

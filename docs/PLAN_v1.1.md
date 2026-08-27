@@ -7,6 +7,7 @@
 **Целевая платформа VPS:** Ubuntu Server LTS 20.04 и выше, x86_64; Debian 12+ как отдельный support profile  
 **Проверяемые Ubuntu VPS profiles:** 20.04, 22.04, 24.04 и 26.04 LTS; 20.04 допускается только с активным Ubuntu Pro/ESM и актуальными security updates
 **Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
+**Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
 
 ---
 
@@ -43,11 +44,11 @@
 Gateway VPN — домашний IPv4-шлюз, который:
 
 - получает один или несколько uplink от HiLink-модемов, включая Huawei E3372h-325;
-- направляет пользовательский трафик через один процесс Mihomo в режиме TUN;
+- выбирает лучший подтверждённый метод доступа: прямой Интернет через конкретный модем либо подписку через один процесс Mihomo в режиме TUN;
 - загружает HAPP-совместимые VPN-подписки и хранит последнюю рабочую версию;
 - отбирает внутри подписок только узлы, пригодные для обхода заданных ресурсов;
-- автоматически выбирает подтверждённый путь `модем → подписка → bypass-узел` и переключает его при отказе;
-- исключает прямой выход пользовательского трафика через мобильного оператора;
+- автоматически выбирает подтверждённый путь `метод → модем → [VPN-узел]` и переключает его при отказе или появлении более функционального пути;
+- не допускает неуправляемый прямой выход: direct разрешается только как явно включённый и проверенный метод через выбранный модем;
 - предоставляет локальный Web UI и API;
 - сохраняет управление через независимый WireGuard-туннель Gateway → VPS;
 - собирает состояние, события и статистику трафика.
@@ -62,11 +63,12 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - один процесс Mihomo;
 - Mihomo TUN с прозрачной обработкой TCP, UDP и DNS;
 - несколько подписок с приоритетами;
+- единый список приоритетов, содержащий неудаляемый пункт `Прямой интернет` и подписки;
 - поиск bypass-кандидатов по настраиваемым признакам имени с fallback-проверкой всех узлов;
 - произвольное количество приоритетных probe targets, управляемых через Web UI;
 - last known good для подписок и конфигурации Mihomo;
 - автоматический failover и failback с hysteresis;
-- fail-closed nftables;
+- fail-safe nftables с атомарным открытием только выбранного direct- или TUN-пути;
 - DHCP и DNS на транзитной сети Gateway → Keenetic;
 - HTTPS Web UI, REST API и CLI;
 - удалённый доступ к самому Gateway через VPS WireGuard;
@@ -94,7 +96,7 @@ Gateway VPN — домашний IPv4-шлюз, который:
 
 ### 1.4 Основные принципы
 
-1. **Fail-closed:** LAN никогда не выходит напрямую через HiLink.
+1. **Проверяемый data path:** LAN проходит только через текущий выбранный метод. Direct разрешается исключительно как штатный пункт policy и только через квалифицированный modem path; при отсутствии допустимого пути используется quarantine.
 2. **Разделение плоскостей:** пользовательский трафик, управление Gateway и служебный bootstrap имеют разные правила.
 3. **Один владелец состояния:** приложение поддерживает желаемое состояние через reconciliation loop.
 4. **Last known good:** ошибочное обновление не разрушает работающий путь.
@@ -584,7 +586,12 @@ subscription:
 - conditional HTTP requests через ETag/Last-Modified;
 - exponential backoff;
 - ручной refresh не запускает второй параллельный refresh;
-- после появления активного VPN обновление может идти через него;
+- auto-refresh не зависит от разрешения подписки для пользовательского трафика: выключенная подписка продолжает обновляться при `auto_refresh=true`;
+- прямое служебное обновление разрешено по умолчанию и не зависит от включения `Прямого интернета` как пользовательского метода;
+- fetch выполняется последовательно через active node этой подписки, другие разрешённые nodes этой подписки, разрешённые nodes других подписок и direct через ready-модемы по priority;
+- служебная попытка fetch имеет отдельный routing context и никогда не переключает пользовательский data path;
+- global default interval может быть переопределён на подписке; retry учитывает bounded exponential backoff, jitter и HTTP `Retry-After`;
+- один URL/subscription refresh имеет single-flight lease; ручной запуск либо присоединяется к текущей operation, либо получает её ID, но не создаёт второй fetch;
 - истечение подписки и ошибка сети являются разными событиями.
 
 ### 7.5 Отбор bypass-кандидатов по имени
@@ -694,6 +701,20 @@ Subscription refresh
 
 `BYPASS_QUALIFIED` всегда имеет scope `(modem_id, subscription_id, node_id, policy_generation, route_generation)`. Успех node через Operator A ничего не говорит о доступности того же node через Operator B; смена DHCP gateway/interface того же модема также требует подтверждения нового routing context.
 
+### 7.8 Управление VPN-серверами и устойчивость обновления подписки
+
+Каждая подписка раскрывает полный inventory узлов активной LKG-версии. Для узла доступны три явные политики:
+
+- `AUTO` — использовать результат matchers и fallback policy;
+- `INCLUDE` / **Использовать** — включать в candidate pool независимо от имени;
+- `EXCLUDE` / **Не использовать** — никогда не использовать для probes, user traffic или subscription fetch fallback.
+
+Пользователь может назначить основной узел и упорядочить резервные узлы. При равном классе доступности этот порядок важнее latency. Активный узел sticky: небольшое улучшение latency другого узла не вызывает переключения. Переключение выполняется только при подтверждённом ухудшении, ручном выборе либо после stable interval, если появился более функциональный или более приоритетный путь.
+
+После refresh узлы новой immutable version получают новые version-scoped IDs, но решения переносятся по стабильному fingerprint. Для совпавшего fingerprint сохраняются `AUTO/INCLUDE/EXCLUDE`, preferred rank и пользовательская метка. Новый fingerprint получает `AUTO`; исчезнувший fingerprint сохраняется в bounded history, чтобы кратковременное исчезновение и возвращение узла не теряло решение. Неоднозначная identity не переносится автоматически и отображается как требующая подтверждения.
+
+Новая версия подписки проходит import, policy classification, Mihomo validation и qualification до LKG activation. Ошибка любого шага оставляет прежнюю LKG и её node policy рабочими. В UI доступны отдельные операции **Проверить сервер**, **Проверить через выбранный/каждый модем**, **Проверить подписку**, **Проверить источник**, **Обновить сейчас** и **Обновить все**.
+
 ---
 
 ## 8. Firewall и fail-closed
@@ -727,6 +748,7 @@ Installer применяет профиль до поднятия LAN services �
 |---|---|---|
 | LAN | DHCP/DNS Gateway | только `lan_keenetic` |
 | LAN | Mihomo TUN | только подтверждённый transparent path |
+| LAN | Direct modem path | только когда выбран квалифицированный метод `Прямой интернет`; один конкретный interface/table и SNAT generation |
 | LAN/WG | HTTPS API | только management CIDR/interface |
 | LAN | SSH Gateway | TCP/22 на owned `gateway-vpn-lan`; аутентификация штатного OpenSSH |
 | WG | SSH Gateway | опционально и только admin peers |
@@ -736,10 +758,10 @@ Installer применяет профиль до поднятия LAN services �
 | Gateway | subscription/bootstrap endpoints | выбранный modem context или active VPN path |
 | Gateway | NTP/bootstrap DNS | только настроенные endpoints и modem context |
 
-Явно запрещено:
+Явно запрещено вне активной direct generation:
 
 ```text
-lan_keenetic → uplink_hilink_* direct
+lan_keenetic → любой невыбранный uplink_hilink_* direct
 lan_keenetic → wg_management
 Internet/любой HiLink → Gateway input
 LAN → Mihomo controller port
@@ -757,6 +779,8 @@ LAN → arbitrary DNS through любой HiLink
 - `bootstrap_dns_v4`;
 - `bootstrap_http_v4`;
 - `admin_wg_v4`.
+- `active_direct_interfaces` и `active_direct_marks` с cardinality `0` либо `1`;
+- отдельную generation активного метода, исключающую одновременное открытие TUN и direct.
 
 Обновление sets не заменяет весь ruleset и не создаёт временное окно direct access.
 
@@ -771,23 +795,32 @@ PATH_VERIFYING
   Mihomo поднят; разрешён только внутренний probe.
 
 PATH_ACTIVE
-  LAN направляется в подтверждённый TUN path.
+  LAN направляется ровно в один подтверждённый TUN или direct path.
 
 PATH_DEGRADED
   Существующий путь работает частично; идёт проверка кандидата.
 ```
 
-Приложение не устанавливает `PATH_ACTIVE`, пока end-to-end probe через выбранный tuple `(modem, subscription, node)` не успешен.
+Приложение не устанавливает `PATH_ACTIVE`, пока end-to-end probe через выбранный tuple `(method, modem, optional subscription/node)` не успешен. `PATH_BLOCKED` — внутреннее quarantine-состояние, а UI показывает понятную причину: например, **«Интернет временно заблокирован: ни один проверенный способ доступа не работает»**.
+
+Настройка **«Блокировать интернет до завершения стартовой проверки»** управляет только стартовой стратегией:
+
+- `ON` — boot firewall остаётся в quarantine до fresh full qualification;
+- `OFF` — после минимальной проверки link/DHCP/route/NAT восстанавливается последний допустимый LKG-метод либо временный direct path, а полная qualification продолжается в фоне;
+- настройка не отключает firewall и не разрешает произвольный uplink;
+- повреждение state, отсутствие минимально безопасного route/NAT или отсутствие всех uplink всё равно оставляет quarantine независимо от настройки.
 
 ### 8.5 Инварианты
 
 - остановка `gateway-vpn` не удаляет firewall;
-- падение Mihomo прекращает новый пользовательский трафик;
+- падение Mihomo прекращает новый пользовательский трафик только для активного VPN-метода и запускает выбор другого qualified метода, включая direct;
 - reboot сначала загружает `PATH_BLOCKED`;
 - отсутствие SQLite или ошибочная миграция не открывает direct path;
 - management exception каждого modem не включает всю его подсеть без необходимости;
 - удаление/падение одного modem не меняет routes и marks остальных модемов;
-- forwarded LAN packet без выбранного TUN path никогда не попадает в main/default route любого modem.
+- forwarded LAN packet без выбранного TUN/direct generation никогда не попадает в main/default route любого modem;
+- TUN и direct user gates не могут быть активны одновременно;
+- direct SNAT привязан к выбранному modem interface и его generation, а не к wildcard uplink set.
 
 ### 8.6 Контроль целостности firewall
 
@@ -814,7 +847,8 @@ PATH_DEGRADED
 | Path node bypass | modem × subscription × node × required targets | `BYPASS_QUALIFIED` |
 | Modem/subscription cell | хотя бы один qualified path node | path matrix status |
 | Probe target | результат через независимые modems/subscriptions | target outage suppression |
-| Global VPN | required targets через active path | PATH_ACTIVE |
+| Direct modem path | required/optional targets напрямую через modem mark/table | FULL/LIMITED/FAILED |
+| Global access | required/optional targets через active method | PATH_ACTIVE/FULL/LIMITED |
 | Management | latest WireGuard handshake | alert only |
 
 ICMP ping не является основной проверкой proxy node. Совпадение имени с `обход`/`lte`/whitelist также не является health result: такой узел обязан пройти configured required targets.
@@ -825,8 +859,8 @@ ICMP ping не является основной проверкой proxy node. 
 - targets выполняются в пользовательском порядке priority;
 - ожидаемый HTTP status/body применяется, если настроен; иначе достаточно валидного HTTP response;
 - timeout и latency записываются отдельно;
-- probes выполняются строго через конкретный proxy и modem mark/table;
-- direct probe используется только для диагностики whitelist transport;
+- VPN probes выполняются строго через конкретный proxy и modem mark/table;
+- direct probes выполняются как полноценная qualification отдельно через каждый modem mark/table;
 - интервалы имеют jitter;
 - standby checks выполняются реже и с ограничением concurrency;
 - scheduler ограничивает concurrency, per-target rate и общий probe traffic budget;
@@ -905,13 +939,40 @@ DEFERRED_BUDGET
 - **Modems → Subscriptions:** для выбранного modem видны статусы каждой подписки;
 - **Path Matrix:** общая таблица, фильтры и принудительная перепроверка ячейки.
 
+Для `Прямого интернета` существует параллельная строка modem paths с теми же policy/route generation, freshness и target results, но без subscription/node. Поэтому статус direct также независим для каждого оператора: один модем может быть `FULL`, другой `LIMITED`, третий `FAILED`.
+
+### 9.3.1 Единый список методов и ranking
+
+`Прямой интернет` автоматически создаётся при первой установке, по умолчанию включён и имеет первый priority. Его можно выключить или переместить, но нельзя удалить. Каждая подписка является следующим элементом того же ordered access-method list. Отключение элемента запрещает только user routing через него и не отменяет разрешённые служебные refresh attempts.
+
+Каждый конкретный candidate получает quality:
+
+- `FULL` — все enabled required targets успешны;
+- `LIMITED` — transport работает и успешна только часть target policy; хранится объяснимый functional score;
+- `FAILED/STALE/UNTESTED` — для активации непригоден.
+
+Выбор выполняется детерминированно:
+
+```text
+FULL
+→ среди LIMITED максимальный functional score
+→ priority метода
+→ priority модема
+→ preferred rank VPN-сервера
+→ сохранить текущий путь при полном равенстве
+```
+
+Любой `FULL` предпочтительнее любого `LIMITED` независимо от места в priority list. Среди нескольких `FULL` побеждает priority. `LIMITED` используется, если `FULL` отсутствует; более функциональный LIMITED важнее priority, а при равном score применяется priority. Functional score строится из количества/веса доступных required и optional targets и versioned вместе с target policy; frontend его не вычисляет.
+
+Временная операция **«Только прямой интернет»** ограничивает user routing direct-кандидатами, показывает яркий banner и автоматически сбрасывается после reboot или вручную. Она не меняет постоянный ordered list и не останавливает обновления подписок.
+
 ### 9.4 Состояние Gateway
 
 ```text
 BOOTING
   → ALL_MODEMS_OFFLINE
   → NO_BYPASS_TARGETS
-  → NO_WORKING_SUBSCRIPTION
+  → NO_WORKING_ACCESS_METHOD
   → VERIFYING
   → ACTIVE
   → VERIFYING_POLICY
@@ -931,28 +992,29 @@ Desired state хранится в SQLite. Observed state восстанавли�
 - `MODEM_DOWN`: не переключать подписки внутри offline modem; восстанавливать только этот HiLink;
 - `ALL_MODEMS_OFFLINE`: PATH_BLOCKED, но desired state и priorities сохраняются;
 - `MIHOMO_DOWN`: перезапустить Mihomo с LKG;
+- `ACTIVE_DIRECT_DOWN`: выбрать другой FULL/LIMITED direct modem либо qualified VPN method;
 - `ACTIVE_NODE_DOWN`: выбрать другой qualified node той же modem/subscription cell;
 - `ACTIVE_CELL_DOWN`: выбрать следующую subscription на том же modem, затем следующий modem;
 - `ACTIVE_SUBSCRIPTION_DOWN`: агрегированный UI status; решение принимается по path cells, а не глобально;
 - `REQUIRED_TARGET_DOWN`: подтвердить через другие узлы; различить node failure и `TARGET_SUSPECT`;
 - `NO_BYPASS_TARGETS`: оставить PATH_BLOCKED и запросить настройку targets;
 - `GLOBAL_PROBE_DOWN` при здоровом node transport: пометить degraded и выполнить target matrix confirmation;
-- `NO_SUBSCRIPTIONS`: оставить PATH_BLOCKED, сохранить WireGuard и показать причину.
+- `NO_SUBSCRIPTIONS`: продолжить direct qualification; блокировать только если direct также недоступен/выключен;
+- `NO_WORKING_ACCESS_METHOD`: quarantine, сохранить management и продолжать background discovery/qualification.
 
 ### 9.6 Failover sequence
 
-1. подтвердить отказ несколькими последовательными probes;
-2. определить, исправен ли active modem;
-3. выбрать другой qualified node текущей modem/subscription cell;
-4. если его нет — выбрать следующую subscription по priority на текущем modem;
-5. если qualified cell на нём нет — выбрать следующий online modem по priority;
-6. перепроверить candidate tuple по required targets без открытия LAN path;
-7. атомарно выбрать path group и применить соответствующие mark/table;
-8. повторить end-to-end probe;
-9. разрешить новые LAN flows;
-10. записать event с modem/subscription/node before/after;
-11. при ошибке попробовать следующий tuple;
-12. если кандидатов нет — `PATH_BLOCKED`.
+1. подтвердить отказ несколькими последовательными probes; hard link/DHCP/route loss подтверждения не ждёт;
+2. построить snapshot всех fresh direct и VPN candidates;
+3. выбрать лучший quality class, затем применить method/modem/node priorities;
+4. для VPN сохранить текущий healthy node, если новый candidate не лучше по quality/priority после hysteresis;
+5. перепроверить candidate tuple без открытия пользовательского LAN path;
+6. атомарно закрыть прежнюю generation и применить TUN selection либо direct mark/interface/SNAT;
+7. повторить end-to-end probe через фактический активный метод;
+8. разрешить новые LAN flows только для этой generation;
+9. записать event с method/modem/subscription/node before/after и объяснением ranking;
+10. при ошибке исключить candidate на текущий retry cycle и попробовать следующий;
+11. если кандидатов нет — quarantine `PATH_BLOCKED`, не создавая неуправляемый direct route.
 
 30-секундный drain перед переключением не используется. TCP-соединения не мигрируют между VPN-нодами. Старые соединения либо завершаются естественно, либо удаляются по отдельной аварийной политике.
 
@@ -968,13 +1030,15 @@ health:
   jitter_percent: 20
 
 failover:
+  failure_hold_seconds: 30
   cooldown_seconds: 60
+  recovery_stable_seconds: 120
   failback_stable_seconds: 300
   failback_cooldown_seconds: 900
   modem_reconnect_stable_seconds: 180
 ```
 
-Failback разрешён только после непрерывной стабильности всей preferred path cell. Вернувшийся modem сначала проходит `modem_reconnect_stable_seconds` и приоритетную requalification; одно его появление в USB не вызывает переключение.
+Failback или переход на восстановившийся более качественный/приоритетный метод разрешён только после `recovery_stable_seconds`, непрерывной стабильности всей preferred path cell и cooldown. Вернувшийся modem сначала проходит `modem_reconnect_stable_seconds` и приоритетную requalification; одно его появление в USB не вызывает переключение. Потеря carrier/DHCP/default route и disappearance USB являются hard failures и используют быстрый путь без `failure_hold_seconds`.
 
 ### 9.8 Круглосуточный самоконтроль и bounded recovery
 
@@ -1423,6 +1487,22 @@ CREATE TABLE settings (
 
 `subscription_modem_paths` — единственный источник текущего состояния матрицы для API и всех UI-представлений. Приложение дополнительно валидирует, что `selected_node_id` относится к active version соответствующей subscription. Все foreign keys и индексы проверяются migration tests; удаление modem/subscription каскадно удаляет только производные path results, но операция Forget/Delete до commit создаёт audit event и требует подтверждения.
 
+### 12.2.1 Расширение для unified access policy
+
+Историческая базовая схема выше расширяется только последовательными migration, без переписывания применённых файлов:
+
+- `access_methods` — единый ordered list: immutable `DIRECT` и одна `SUBSCRIPTION`-строка на подписку; `enabled/priority` относятся к user routing, а не к auto-refresh;
+- `direct_modem_paths` — независимая qualification каждого direct modem path, quality class, functional score, policy/route generations и freshness;
+- `direct_path_target_results` — target evidence для direct без фиктивной subscription/node;
+- `subscription_node_preferences` — durable `AUTO/INCLUDE/EXCLUDE`, preferred rank и пользовательская метка по `(subscription_id, fingerprint)`, переживающие смену immutable version;
+- `access_policy` — singleton с startup gate, failure/recovery/cooldown intervals, ranking generation и разрешением service direct refresh;
+- `access_selection_runtime` — restart-safe hysteresis evidence, last switch и boot-scoped temporary direct-only mode;
+- `operations` и `operation_steps` — bounded redacted журнал ручных/автоматических refresh, probe, qualification и switch operations.
+
+`runtime_state` получает `active_method_id`, `active_method_kind` и `active_quality_class`. Для VPN прежние subscription/node fields заполнены; для direct они `NULL`. Compatibility code не трактует `NULL` subscription как разрешение direct: method kind, modem, route generation и firewall generation проверяются вместе.
+
+Functional score и selection explanation являются server-side данными одной policy generation. `FULL` не кодируется искусственным максимальным latency; quality class сравнивается до score. Старые direct/VPN результаты после target, route или ranking policy change становятся `STALE` и не используются для новой активации.
+
 ### 12.3 Retention
 
 - raw health samples: 7 дней по умолчанию;
@@ -1449,17 +1529,17 @@ CREATE TABLE settings (
 
 ### 13.1 Метрики
 
-- общий пользовательский RX/TX через VPN;
+- общий пользовательский RX/TX через активный VPN- или direct-метод;
 - текущая общая скорость;
 - daily/monthly aggregation общего трафика;
-- общий traffic за active session;
+- общий traffic за active session с раздельным dimension `VPN/DIRECT`, но без ложной per-subscription attribution;
 - служебный direct-трафик отдельно от пользовательского.
 
 **Зафиксированное решение MVP — Option A:** per-subscription и per-proxy traffic attribution не предоставляется. UI и API не показывают приблизительные значения по подпискам. Такая детализация может быть добавлена после MVP отдельным этапом без изменения data plane.
 
 ### 13.2 Источники
 
-- nftables counters в выбранной на этапе 0 точке LAN/TUN — authoritative общий пользовательский объём;
+- nftables counters после LAN policy gate — authoritative общий пользовательский объём и для TUN, и для выбранного direct path;
 - Mihomo API `/traffic` — текущая скорость, process-scoped `upTotal/downTotal` и cross-check;
 - WireGuard и HiLink management traffic не включаются в пользовательскую статистику.
 
@@ -1492,6 +1572,11 @@ GET    /api/v1/auth/session
 GET    /api/v1/gateway/status
 GET    /api/v1/gateway/diagnostics
 POST   /api/v1/gateway/reconcile
+GET    /api/v1/access-methods
+PUT    /api/v1/access-methods/priorities
+PATCH  /api/v1/access-methods/{id}
+POST   /api/v1/access-methods/direct-only
+DELETE /api/v1/access-methods/direct-only
 
 GET    /api/v1/modems
 GET    /api/v1/modems/discovered
@@ -1510,7 +1595,9 @@ GET    /api/v1/subscriptions/{id}
 PATCH  /api/v1/subscriptions/{id}
 DELETE /api/v1/subscriptions/{id}
 POST   /api/v1/subscriptions/{id}/refresh
+POST   /api/v1/subscriptions/refresh
 POST   /api/v1/subscriptions/{id}/probe
+POST   /api/v1/subscriptions/{id}/source/probe
 PUT    /api/v1/subscriptions/priorities
 
 GET    /api/v1/nodes
@@ -1544,6 +1631,9 @@ GET    /api/v1/health/history
 GET    /api/v1/health/supervisor
 POST   /api/v1/health/supervisor/recover
 GET    /api/v1/events
+GET    /api/v1/operations
+GET    /api/v1/operations/{id}
+DELETE /api/v1/operations/completed
 
 GET    /api/v1/traffic/current
 GET    /api/v1/traffic/daily
@@ -1565,7 +1655,7 @@ POST   /api/v1/system/restore
 POST   /api/v1/system/reboot
 ```
 
-`GET /paths/matrix` является каноническим read model для Dashboard, **Модемы**, **Подписки** и **Матрица путей**. Ответ содержит одну запись на пару `modem_id × subscription_id`, выбранную node, свежесть результата и объяснимый reason code. Frontend не вычисляет health самостоятельно.
+`GET /paths/matrix` является каноническим read model для Dashboard, **Модемы**, **Подписки** и **Матрица путей**. Ответ содержит direct modem paths и одну запись на пару `modem_id × subscription_id`, выбранную node, quality/functional score, свежесть результата и объяснимый reason code. Frontend не вычисляет health или ranking самостоятельно.
 
 Ручная активация path разрешена только при свежем `QUALIFIED` в текущих `policy_generation` и `route_generation`. Emergency override является отдельной привилегированной операцией с предупреждением, TTL, audit event и не разрешает direct path. Reorder modem/subscription priorities атомарен: сервер принимает полный упорядоченный список IDs и проверяет его на дубликаты/пропуски. Изменение порядка обновляет ranking generation, но не инвалидирует свежие probe results и не обрывает текущий path; новый порядок применяется при следующем failover, явной активации или штатном failback после hysteresis.
 
@@ -1573,18 +1663,21 @@ POST   /api/v1/system/reboot
 
 Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах:
 
-1. **Обзор:** Gateway state, active tuple `модем → подписка → node`, причина последнего переключения, WireGuard, traffic и основные предупреждения.
-2. **Модемы:** discovery/adoption, CRUD, enable, номер/priority, operator, hot-plug state, recovery и статусы всех подписок через выбранный модем.
-3. **Подписки:** CRUD, номер/priority, refresh/LKG, masked URL, candidate counts и статусы подписки через каждый модем.
-4. **Матрица путей:** полная таблица `модем × подписка`, фильтры, freshness, выбранная node, latency, reason code, manual probe/activate.
-5. **Серверы проверки доступа:** ordered bypass targets (domain/URL) с CRUD, enable/required, timeout, условием успеха и приоритетом.
-6. **Правила отбора серверов:** ordered node-name matchers, preview по подпискам, manual include/exclude и fallback policy.
-7. **VPN-серверы:** исходное имя, подписка, candidate source, matched rule и раскрываемая матрица результатов по модемам/targets.
-8. **Состояние и события:** modem/path/target health, timeline, target outages, probe budget и объяснение failover.
-9. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
-10. **Удалённый доступ:** VPS peer, выбранный management-модем, handshake и admin peers.
-11. **Сеть:** transit LAN, DHCP/DNS, обнаруженные интерфейсы, routing tables/marks read-only и safe apply.
-12. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
+1. **Обзор:** Gateway state, active tuple `метод → модем → [подписка → node]`, quality, причина последнего переключения, WireGuard, traffic и основные предупреждения.
+2. **Способы доступа:** единый ordered list `Прямой интернет + подписки`, enable/priority, текущий выбор, FULL/LIMITED explanation, startup gate и временный direct-only mode.
+3. **Модемы:** discovery/adoption, CRUD, enable, номер/priority, operator, hot-plug state, recovery, direct status и статусы всех подписок через выбранный модем.
+4. **Подписки:** CRUD, refresh/LKG, masked URL, candidate counts, раскрываемые server policies и статусы подписки через каждый модем.
+5. **Матрица путей:** direct и полная таблица `модем × подписка`, фильтры, freshness, выбранная node, quality, score, latency, reason code, manual probe/activate.
+6. **Серверы проверки доступа:** ordered targets с CRUD, required/optional, weight, timeout, условием успеха, interval и priority.
+7. **Правила отбора серверов:** ordered node-name matchers, preview по подпискам и fallback policy.
+8. **VPN-серверы:** исходное имя, подписка, `AUTO/INCLUDE/EXCLUDE`, preferred rank, candidate source, matched rule и раскрываемая матрица результатов по модемам/targets.
+9. **Состояние и операции:** persistent scrolling operation panel, modem/path/target health, stages, timeline, target outages, probe budget и объяснение failover; completed entries можно очистить.
+10. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
+11. **Удалённый доступ:** VPS peer, выбранный management-модем, handshake и admin peers.
+12. **Сеть:** transit LAN, DHCP/DNS, обнаруженные интерфейсы, routing tables/marks read-only и safe apply.
+13. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
+
+Operation panel показывает стадии `QUEUED → ROUTE_SELECTED → DNS → TLS → HTTP → IMPORT → VALIDATE → QUALIFY → ACTIVATE → COMPLETE/FAILED`, timestamps и безопасные reason codes. Backend error text, URL credentials и proxy secrets не отображаются. Ручная кнопка немедленно возвращает operation ID; обновление страницы не теряет статус.
 
 Вкладка **Модемы** использует такой же управляемый список, как **Подписки**: стабильный номер/имя, enabled и явный priority; priority не выводится из USB port или порядка обнаружения. Строка модема показывает configured/observed operator, interface, management subnet/gateway/DNS, routing table/fwmark, signal/registration, telemetry state, WireGuard endpoint reachability, `last_seen_at`, subnet conflict и компактные badges по всем subscriptions. Доступны Adopt, Disable/Enable, Probe, Recover, Replace identity и Forget; Forget разрешён только для offline-модема с подтверждением.
 
@@ -1924,7 +2017,10 @@ Zero-to-ready workflow обязан:
 - target outage suppression;
 - probe budget accounting, active reserve и `DEFERRED_BUDGET`;
 - state machine;
-- hysteresis/backoff;
+- unified ranking `FULL → best LIMITED score → method → modem → node rank → sticky tie`;
+- hysteresis/backoff и hard-failure fast path;
+- direct immutable access-method lifecycle и boot-scoped direct-only mode;
+- node preference transfer/history по stable fingerprint;
 - migrations;
 - log redaction;
 - API auth и permissions.
@@ -1948,13 +2044,18 @@ Linux network namespaces моделируют:
 
 - TCP и UDP через TUN;
 - DNS hijack и packet capture на HiLink, подтверждающий отсутствие пользовательского direct DNS;
-- отсутствие IPv4 direct path;
+- отсутствие неуправляемого IPv4 direct path при VPN/quarantine и наличие ровно одного modem-scoped SNAT path при выбранном direct;
 - IPv6 RA/DHCPv6 injection, `curl -6` и отсутствие global IPv6 route;
 - graceful stop, SIGTERM, `kill -9` и restart storm Mihomo;
 - reload/rollback Mihomo с восстановлением LKG;
 - atomic nft sets update;
 - удаление owned nftables table и случайный `nft flush ruleset` с quarantine/recovery;
 - failover/failback;
+- direct FULL выигрывает у VPN LIMITED, а VPN FULL выигрывает у direct LIMITED независимо от priority;
+- при двух одинаково функциональных candidates применяются method/modem/node priorities, затем sticky tie;
+- direct qualification выполняется независимо через каждый ready modem и не использует main-table default route;
+- temporary direct-only mode исключает VPN из user ranking, сохраняет service refresh и сбрасывается после нового boot ID;
+- startup gate ON начинает с quarantine, OFF открывает только минимально проверенный LKG/direct generation и продолжает qualification в фоне;
 - два модема одновременно получают DHCP lease, но ни один не устанавливает default route в main table;
 - одинаковая subscription/node комбинация проходит required targets через modem A и не проходит через modem B;
 - modem A отключается во время active path: новые direct flows не появляются, выбирается qualified path modem B;
@@ -1967,6 +2068,10 @@ Linux network namespaces моделируют:
 - подписка с `обход`/`LTE`/whitelist names: проверяются только совпавшие candidates;
 - подписка без совпадений: проверяются все enabled nodes;
 - named candidates существуют, но failed: остальные не используются при default policy;
+- `AUTO/INCLUDE/EXCLUDE` и preferred rank переживают refresh по fingerprint; новый node получает AUTO, исчезнувшая preference сохраняется bounded history;
+- disabled user-routing subscription с `auto_refresh=true` обновляется, а direct service fallback работает даже при выключенном direct user method;
+- refresh route ladder пробует current subscription nodes, other subscription nodes и direct modems без переключения user path;
+- parallel manual/automatic refresh одного source объединяется durable lease/single-flight operation;
 - required target matrix: node qualified только после всех required successes;
 - изменение priority/required/URL target инвалидирует старые results и запускает requalification;
 - новая policy generation сохраняет active path на grace period, проверяет active node первым и блокирует путь при истечении grace без кандидата;
@@ -2001,10 +2106,10 @@ Linux network namespaces моделируют:
 
 ### 18.4 Failure matrix
 
-| Сбой | Ожидаемое действие | Direct leak |
+| Сбой | Ожидаемое действие | Неуправляемый direct leak |
 |---|---|---:|
 | Падение gateway-vpn | firewall остаётся, data path зависит от LKG policy | нет |
-| Падение Mihomo | PATH_BLOCKED/нет нового LAN traffic | нет |
+| Падение Mihomo при active VPN | выбрать другой FULL/LIMITED метод, включая qualified direct; иначе quarantine | нет |
 | Ошибка новой подписки | продолжить LKG | нет |
 | Все ноды active path cell недоступны | следующая subscription на том же modem, затем следующий modem | нет |
 | Active node потерял required target | другой qualified node той же cell, затем subscription/modem по ranking | нет |
@@ -2016,7 +2121,12 @@ Linux network namespaces моделируют:
 | Probe soft budget исчерпан | standby probes DEFERRED_BUDGET, active/failover используют reserve | нет |
 | Policy generation изменена | active node работает только в grace, затем requalified/switch/blocked | нет |
 | Reboot во время VERIFYING_POLICY | старт с PATH_BLOCKED и проверка новой generation | нет |
-| Все modem/subscription cells недоступны | PATH_BLOCKED, management доступен | нет |
+| Все VPN cells недоступны, direct FULL/LIMITED доступен | выбрать direct по quality/priority | нет |
+| Direct недоступен, VPN FULL/LIMITED доступен | выбрать VPN по quality/priority | нет |
+| Все direct/VPN paths недоступны | PATH_BLOCKED, management доступен | нет |
+| Direct user method выключен | direct исключён из user ranking, service refresh fallback остаётся разрешён | нет |
+| Временный direct-only mode | user traffic только через qualified direct; после reboot обычный ranking | нет |
+| Startup blocking выключен | открыть только minimally verified LKG/direct generation; background qualification может безопасно переключить | нет |
 | Неактивный HiLink unplug | только его cells → MODEM_OFFLINE; active path не меняется | нет |
 | Активный HiLink unplug | немедленно закрыть его routes, failover на qualified cell другого modem | нет |
 | HiLink reconnect | восстановить identity/routes, requalify, delayed failback | нет |
@@ -2230,9 +2340,9 @@ Fixtures не содержат production credentials, настоящие subscr
 
 1. этап 0 воспроизводим минимум с двумя HiLink-модемами, включая Huawei E3372h-325, и целевым Keenetic;
 2. все тесты failure matrix проходят;
-3. подтверждено отсутствие direct IPv4, DNS и IPv6 leak;
+3. подтверждено отсутствие неразрешённого direct IPv4/DNS и IPv6 leak; когда активен direct, capture доказывает ровно выбранный modem/interface/table/SNAT generation;
 4. invalid subscription/config/update автоматически откатываются к LKG;
-5. после reboot Gateway стартует fail-closed и восстанавливает рабочий путь без ручного вмешательства;
+5. после reboot Gateway применяет настроенную startup policy, никогда не открывает произвольный uplink и восстанавливает рабочий FULL/LIMITED путь без ручного вмешательства;
 6. WireGuard management доступен независимо от состояния Mihomo и переключает modem uplink при disconnect;
 7. API не слушает HiLink uplink и требует аутентификацию;
 8. секреты отсутствуют в API responses, logs и diagnostic bundle;
@@ -2240,18 +2350,22 @@ Fixtures не содержат production credentials, настоящие subscr
 10. документация содержит topology, recovery runbook и список поддерживаемых subscription formats;
 11. версия и SHA-256 Mihomo закреплены, а API contract сохранён fixture;
 12. общий traffic counter является authoritative; per-subscription значения отсутствуют в MVP API и UI;
-13. активным становится только tuple `modem × subscription × node` с актуальным `BYPASS_QUALIFIED` для всех required targets через этот modem;
+13. активным становится только fresh tuple `method × modem × optional subscription/node`; FULL имеет все required targets, LIMITED имеет объяснимый score и используется только при отсутствии FULL;
 14. name matcher fallback и target priority/CRUD проходят fixtures и integration tests;
 15. общий outage одного target не вызывает бесконечное переключение nodes/subscriptions/modems;
 16. все adopted модемы сохраняют identity, номер, priority и history после unplug/replug и reboot;
-17. Web UI показывает одинаковое состояние каждой `modem × subscription` cell во вкладках Modems, Subscriptions и Path Matrix;
-18. потеря active modem не создаёт direct route, а переключение выполняется на qualified cell по порядку `node → subscription → modem`;
+17. Web UI показывает одинаковое состояние direct и каждой `modem × subscription` cell во вкладках Modems, Subscriptions и Path Matrix;
+18. потеря active modem не создаёт wildcard/main-table route, а переключение выполняется по quality, method/modem/node priority и hysteresis;
 19. вернувшийся preferred modem активируется только после stable requalification, без flap;
 20. DHCP, DNS bootstrap, proxy sockets и WireGuard endpoint routes каждого модема изолированы его fwmark/routing table.
 21. versioned signed artifacts из GitHub устанавливают чистые поддерживаемые Gateway и VPS воспроизводимо; одна SSH-orchestrated команда либо подтверждает полный `READY`, либо выдаёт проверяемый `INSTALLED_NOT_READY`/failure и безопасный rollback без ложного заявления о готовности.
 22. PID-alive hang, component crash и restart storm автоматически обнаруживаются; восстановление bounded, dependency-aware, fail-closed и полностью отражено в UI/events/diagnostics.
 23. длительная внешняя потеря Internet/modems/VPS не вызывает host reboot; optional reboot локального critical failure имеет durable budget и не выполняется во время install/update/restore/network transaction.
 24. 24- и 72-часовые endurance результаты содержат supervisor/recovery counters и не имеют скрытого restart/reboot loop.
+25. immutable direct access method создаётся автоматически, может быть выключен/переупорядочен, не удаляется и не управляет service refresh permission.
+26. `AUTO/INCLUDE/EXCLUDE`, preferred node order и sticky selection переживают subscription refresh по stable fingerprint; EXCLUDE никогда не используется.
+27. scheduled/manual refresh имеет durable operation status, single-flight, retry/backoff/Retry-After и route fallback до direct без изменения пользовательского active path.
+28. startup blocking ON/OFF и boot-scoped direct-only mode проходят reboot/netns tests; ни один вариант не отключает firewall или quarantine при повреждённом state.
 
 ---
 

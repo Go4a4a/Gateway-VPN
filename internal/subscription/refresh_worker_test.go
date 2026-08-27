@@ -50,3 +50,18 @@ func TestRefreshWorkerReportsRealFailureButIgnoresNotDue(t *testing.T) {
 		t.Fatalf("not-due refresh was reported, failures = %d", reported)
 	}
 }
+
+func TestRefreshWorkerKeepsDisabledUserRouteUpdated(t *testing.T) {
+	ctx, database := migratedDatabase(t)
+	createRefreshableSubscription(t, ctx, database, "sub-a", "url")
+	if err := NewRepository(database).SetEnabled(ctx, "sub-a", false); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &queuedFetcher{results: []FetchResult{{Payload: []byte("vless://11111111-1111-1111-1111-111111111111@one.example:443#LTE-one")}}}
+	coordinator := testRefreshCoordinator(t, database, fetcher, &recordingRuntime{})
+	worker := &RefreshWorker{Coordinator: coordinator, Subscriptions: NewRepository(database)}
+	worker.runOnce(ctx)
+	if len(fetcher.options) != 1 {
+		t.Fatalf("disabled user route scheduled fetch count = %d, want 1", len(fetcher.options))
+	}
+}

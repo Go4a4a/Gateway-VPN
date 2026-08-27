@@ -73,9 +73,26 @@ SET policy_generation=?,
         ELSE 'UNKNOWN'
     END,
     selected_node_id=NULL, qualified_nodes=0, required_targets_passed=0,
+    optional_targets_passed=0, quality_class='UNKNOWN', functional_score=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?`, generation, updatedAt)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate path policy results: %w", err)
+	}
+	_, err = transaction.ExecContext(ctx, `
+UPDATE direct_modem_paths
+SET policy_generation=?, state=CASE
+        WHEN state IN ('MODEM_DISABLED', 'MODEM_OFFLINE') THEN state
+        ELSE 'STALE'
+    END,
+    transport_state=CASE
+        WHEN state IN ('MODEM_DISABLED', 'MODEM_OFFLINE') THEN transport_state
+        ELSE 'UNKNOWN'
+    END,
+    quality_class='UNKNOWN', functional_score=0,
+    required_targets_passed=0, optional_targets_passed=0,
+    last_checked_at=NULL, expires_at=NULL, updated_at=?`, generation, updatedAt)
+	if err != nil {
+		return 0, fmt.Errorf("invalidate direct path policy results: %w", err)
 	}
 	return generation, nil
 }

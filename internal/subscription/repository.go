@@ -95,6 +95,19 @@ INSERT INTO subscriptions (
 	if err != nil {
 		return Subscription{}, fmt.Errorf("insert subscription: %w", err)
 	}
+	var methodPriority int64
+	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM access_methods WHERE enabled=1").Scan(&methodPriority); err != nil {
+		return Subscription{}, fmt.Errorf("allocate subscription access method priority: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+INSERT INTO access_methods (
+    id, kind, subscription_id, enabled, priority, immutable, created_at, updated_at
+) VALUES (?, 'SUBSCRIPTION', ?, 1, ?, 0, ?, ?)`, "access:subscription:"+input.ID, input.ID, methodPriority, now, now); err != nil {
+		return Subscription{}, fmt.Errorf("insert subscription access method: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE access_policy SET ranking_generation=ranking_generation+1, updated_at=? WHERE singleton_id=1", now); err != nil {
+		return Subscription{}, fmt.Errorf("advance access ranking after subscription create: %w", err)
+	}
 	if err := appendSubscriptionEventTx(ctx, transaction, now, "SUBSCRIPTION_CREATED", input.ID, map[string]any{"display_number": displayNumber, "name": strings.TrimSpace(input.Name), "source_type": input.SourceType, "refresh_interval_seconds": int64(input.RefreshInterval / time.Second)}); err != nil {
 		return Subscription{}, err
 	}
@@ -160,6 +173,45 @@ func (repository *Repository) ReorderEnabled(ctx context.Context, orderedIDs []s
 		if err != nil || updated != 1 {
 			return store.ErrPrioritySetMismatch
 		}
+	}
+	methodPriorities := make([]int64, 0, len(orderedIDs))
+	rows, err := transaction.QueryContext(ctx, `
+SELECT priority FROM access_methods
+WHERE enabled=1 AND kind='SUBSCRIPTION'
+ORDER BY priority, id`)
+	if err != nil {
+		return fmt.Errorf("read subscription access method priority slots: %w", err)
+	}
+	for rows.Next() {
+		var priority int64
+		if err := rows.Scan(&priority); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan subscription access method priority slot: %w", err)
+		}
+		methodPriorities = append(methodPriorities, priority)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(methodPriorities) != len(orderedIDs) {
+		return store.ErrPrioritySetMismatch
+	}
+	var methodMaximum int64
+	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) FROM access_methods").Scan(&methodMaximum); err != nil {
+		return fmt.Errorf("read access method priority ceiling: %w", err)
+	}
+	for index, id := range orderedIDs {
+		if _, err := transaction.ExecContext(ctx, "UPDATE access_methods SET priority=? WHERE subscription_id=? AND enabled=1", methodMaximum+int64(index)+1, id); err != nil {
+			return fmt.Errorf("stage subscription access method priority: %w", err)
+		}
+	}
+	for index, id := range orderedIDs {
+		if _, err := transaction.ExecContext(ctx, "UPDATE access_methods SET priority=?, updated_at=? WHERE subscription_id=? AND enabled=1", methodPriorities[index], now, id); err != nil {
+			return fmt.Errorf("reorder subscription access method: %w", err)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE access_policy SET ranking_generation=ranking_generation+1, updated_at=? WHERE singleton_id=1", now); err != nil {
+		return fmt.Errorf("advance access ranking after subscription reorder: %w", err)
 	}
 	if err := appendSubscriptionEventTx(ctx, transaction, now, "SUBSCRIPTION_PRIORITY_REORDERED", "", map[string]any{"ordered_subscription_ids": orderedIDs}); err != nil {
 		return err
@@ -227,6 +279,23 @@ func (repository *Repository) SetEnabled(ctx context.Context, id string, enabled
 	}
 	if _, err := transaction.ExecContext(ctx, "UPDATE subscriptions SET enabled=?, priority=?, status=?, updated_at=? WHERE id=?", boolToInt(enabled), priority, status, now, id); err != nil {
 		return fmt.Errorf("update subscription enabled state: %w", err)
+	}
+	var methodPriority int64
+	if err := transaction.QueryRowContext(ctx, "SELECT priority FROM access_methods WHERE subscription_id=?", id).Scan(&methodPriority); errors.Is(err, sql.ErrNoRows) {
+		return errors.New("subscription access method is missing")
+	} else if err != nil {
+		return fmt.Errorf("read subscription access method: %w", err)
+	}
+	if enabled {
+		if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM access_methods WHERE enabled=1").Scan(&methodPriority); err != nil {
+			return fmt.Errorf("allocate enabled subscription access priority: %w", err)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE access_methods SET enabled=?, priority=?, updated_at=? WHERE subscription_id=?", boolToInt(enabled), methodPriority, now, id); err != nil {
+		return fmt.Errorf("synchronize subscription access method: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE access_policy SET ranking_generation=ranking_generation+1, updated_at=? WHERE singleton_id=1", now); err != nil {
+		return fmt.Errorf("advance access ranking after subscription state change: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
 UPDATE subscription_modem_paths

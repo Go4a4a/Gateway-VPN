@@ -116,7 +116,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 13 {
+	if err != nil || version != 14 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -140,7 +140,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 13 {
+	if err != nil || latest != 14 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -165,10 +165,17 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 
 	wantTables := []string{
 		"bypass_probe_targets",
+		"access_methods",
+		"access_policy",
+		"access_selection_runtime",
+		"direct_modem_paths",
+		"direct_path_target_results",
 		"events",
 		"health_samples",
 		"modems",
 		"node_matchers",
+		"operation_steps",
+		"operations",
 		"nodes",
 		"network_apply_transactions",
 		"path_node_target_results",
@@ -179,6 +186,7 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"sessions",
 		"settings",
 		"subscription_modem_paths",
+		"subscription_node_preferences",
 		"subscription_refresh_state",
 		"subscription_versions",
 		"subscriptions",
@@ -201,8 +209,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 13 {
-		t.Fatalf("SchemaVersion() = %d, want 13", version)
+	if version != 14 {
+		t.Fatalf("SchemaVersion() = %d, want 14", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -246,8 +254,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 13 {
-		t.Fatalf("migration count = %d, want 13", count)
+	if count != 14 {
+		t.Fatalf("migration count = %d, want 14", count)
 	}
 }
 

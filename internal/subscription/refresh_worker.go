@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// RefreshWorker periodically asks every enabled auto-refresh subscription to
-// refresh without force. Durable due times and leases in RefreshRepository are
-// authoritative, so restart and concurrent manual refresh remain safe.
+// RefreshWorker periodically asks every auto-refresh subscription to refresh
+// without force. User-routing enablement is intentionally independent: a
+// disabled route must still keep its LKG current when auto_refresh is enabled.
+// Durable due times and leases in RefreshRepository are authoritative, so
+// restart and concurrent manual refresh remain safe.
 type RefreshWorker struct {
 	Coordinator   *RefreshCoordinator
 	Subscriptions *Repository
@@ -47,7 +49,7 @@ func (worker *RefreshWorker) runOnce(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
-		if !item.Enabled || !item.AutoRefresh || item.SourceType != "url" {
+		if !item.AutoRefresh || item.SourceType != "url" {
 			continue
 		}
 		_, err := worker.Coordinator.RefreshOne(ctx, item.ID, false)

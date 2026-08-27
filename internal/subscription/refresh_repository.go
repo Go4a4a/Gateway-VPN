@@ -75,9 +75,6 @@ func (repository *RefreshRepository) Acquire(ctx context.Context, subscriptionID
 	if err != nil {
 		return RefreshLease{}, fmt.Errorf("read subscription for refresh: %w", err)
 	}
-	if !current.Enabled {
-		return RefreshLease{}, ErrSubscriptionDisabled
-	}
 	if current.SourceType != "url" {
 		return RefreshLease{}, ErrSourceIsNotRefreshable
 	}

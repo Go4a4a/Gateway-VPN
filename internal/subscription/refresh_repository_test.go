@@ -93,8 +93,9 @@ func TestRefreshRepositoryRejectsDisabledAndUploadSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := NewRefreshRepository(database)
-	if _, err := repository.Acquire(ctx, "disabled", "worker", time.Minute, true); !errors.Is(err, ErrSubscriptionDisabled) {
-		t.Fatalf("disabled Acquire() error = %v", err)
+	lease, err := repository.Acquire(ctx, "disabled", "worker", time.Minute, true)
+	if err != nil || lease.Subscription.ID != "disabled" || lease.Subscription.Enabled {
+		t.Fatalf("disabled user-route Acquire() = %+v, %v", lease, err)
 	}
 	if _, err := repository.Acquire(ctx, "upload", "worker", time.Minute, true); !errors.Is(err, ErrSourceIsNotRefreshable) {
 		t.Fatalf("upload Acquire() error = %v", err)

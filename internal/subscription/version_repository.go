@@ -173,6 +173,38 @@ func (repository *VersionRepository) Activate(ctx context.Context, versionID str
 		return fmt.Errorf("activate subscription version: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
+INSERT INTO subscription_node_preferences (
+    subscription_id, fingerprint, selection_override, last_seen_version_id,
+    created_at, updated_at
+)
+SELECT ?, fingerprint, selection_override, ?, ?, ?
+FROM nodes WHERE version_id=?
+ON CONFLICT(subscription_id, fingerprint) DO NOTHING`, subscriptionID, versionID, now, now, versionID); err != nil {
+		return fmt.Errorf("insert new subscription node preferences: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE subscription_node_preferences
+SET missing_since=COALESCE(missing_since, ?), updated_at=?
+WHERE subscription_id=?
+  AND NOT EXISTS (
+      SELECT 1 FROM nodes
+      WHERE nodes.version_id=?
+        AND nodes.fingerprint=subscription_node_preferences.fingerprint
+  )`, now, now, subscriptionID, versionID); err != nil {
+		return fmt.Errorf("mark missing subscription node preferences: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE subscription_node_preferences
+SET last_seen_version_id=?, missing_since=NULL, updated_at=?
+WHERE subscription_id=?
+  AND EXISTS (
+      SELECT 1 FROM nodes
+      WHERE nodes.version_id=?
+        AND nodes.fingerprint=subscription_node_preferences.fingerprint
+  )`, versionID, now, subscriptionID, versionID); err != nil {
+		return fmt.Errorf("refresh present subscription node preferences: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
 UPDATE subscriptions
 SET active_version_id=?, status='HEALTHY', last_refresh_at=?, last_success_at=?, updated_at=?
 WHERE id=?`, versionID, now, now, now, subscriptionID); err != nil {
@@ -275,15 +307,15 @@ FROM nodes WHERE version_id=?`
 	return result, nil
 }
 
-// ActiveOverrides transfers explicit node choices to a new immutable version
-// by stable fingerprint. Auto choices are returned as well so the caller gets
-// one authoritative map and ambiguous name matching is never used.
+// ActiveOverrides transfers durable node choices to a new immutable version
+// by stable fingerprint. Preferences survive temporary disappearance from the
+// active version, so a returning server does not silently lose an explicit
+// include/exclude decision.
 func (repository *VersionRepository) ActiveOverrides(ctx context.Context, subscriptionID string) (map[string]string, error) {
 	rows, err := repository.database.QueryContext(ctx, `
-SELECT n.fingerprint, n.selection_override
-FROM subscriptions AS s
-JOIN nodes AS n ON n.version_id=s.active_version_id
-WHERE s.id=?`, subscriptionID)
+SELECT fingerprint, selection_override
+FROM subscription_node_preferences
+WHERE subscription_id=?`, subscriptionID)
 	if err != nil {
 		return nil, fmt.Errorf("list active subscription node overrides: %w", err)
 	}

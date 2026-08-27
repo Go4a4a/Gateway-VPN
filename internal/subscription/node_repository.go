@@ -131,12 +131,12 @@ func (repository *NodeRepository) SetOverride(ctx context.Context, nodeID, overr
 		return "", fmt.Errorf("begin node override: %w", err)
 	}
 	defer transaction.Rollback()
-	var versionID, subscriptionID string
+	var versionID, subscriptionID, fingerprint string
 	err = transaction.QueryRowContext(ctx, `
-SELECT n.version_id, s.id
+SELECT n.version_id, s.id, n.fingerprint
 FROM nodes AS n
 JOIN subscriptions AS s ON s.active_version_id=n.version_id
-WHERE n.id=?`, strings.TrimSpace(nodeID)).Scan(&versionID, &subscriptionID)
+WHERE n.id=?`, strings.TrimSpace(nodeID)).Scan(&versionID, &subscriptionID, &fingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", store.ErrNotFound
 	}
@@ -151,6 +151,18 @@ WHERE n.id=?`, strings.TrimSpace(nodeID)).Scan(&versionID, &subscriptionID)
 		return "", err
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
+	if _, err := transaction.ExecContext(ctx, `
+INSERT INTO subscription_node_preferences (
+    subscription_id, fingerprint, selection_override, last_seen_version_id,
+    created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(subscription_id, fingerprint) DO UPDATE SET
+    selection_override=excluded.selection_override,
+    last_seen_version_id=excluded.last_seen_version_id,
+    missing_since=NULL,
+    updated_at=excluded.updated_at`, subscriptionID, fingerprint, override, versionID, now, now); err != nil {
+		return "", fmt.Errorf("persist subscription node preference: %w", err)
+	}
 	if _, err := store.InvalidatePathPolicy(ctx, transaction, now); err != nil {
 		return "", fmt.Errorf("invalidate paths after node override: %w", err)
 	}

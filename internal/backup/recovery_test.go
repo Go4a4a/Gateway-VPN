@@ -54,7 +54,7 @@ func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testi
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 13 {
+	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 14 {
 		t.Fatalf("recovery result = %+v", result)
 	}
 	preserved, err := os.ReadFile(filepath.Join(stateDirectory, "recovery", "quarantine", result.QuarantineID, "state.db"))
@@ -156,7 +156,7 @@ func TestOpenManagedCreatesFreshSchemaWithoutPretendingItWasRecovery(t *testing.
 		t.Fatalf("fresh managed recovery = %+v", managed.Recovery)
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 13 {
+	if err != nil || version != 14 {
 		t.Fatalf("managed schema = %d, %v", version, err)
 	}
 	if err := databasepkg.IntegrityCheck(ctx, managed.Database); err != nil {
@@ -181,25 +181,30 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		database.Close()
 		t.Fatal(err)
 	}
-	if _, err := transaction.ExecContext(ctx, "DELETE FROM settings WHERE key='watchdog'"); err != nil {
-		transaction.Rollback()
-		database.Close()
-		t.Fatal(err)
-	}
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE traffic_daily_totals DROP COLUMN service_upload_bytes"); err != nil {
-		transaction.Rollback()
-		database.Close()
-		t.Fatal(err)
-	}
-	if _, err := transaction.ExecContext(ctx, "ALTER TABLE traffic_daily_totals DROP COLUMN service_download_bytes"); err != nil {
-		transaction.Rollback()
-		database.Close()
-		t.Fatal(err)
-	}
-	if _, err := transaction.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version=13"); err != nil {
-		transaction.Rollback()
-		database.Close()
-		t.Fatal(err)
+	for _, statement := range []string{
+		"DROP TABLE operation_steps",
+		"DROP TABLE operations",
+		"DROP TABLE access_selection_runtime",
+		"DROP TABLE subscription_node_preferences",
+		"DROP TABLE direct_path_target_results",
+		"DROP TABLE direct_modem_paths",
+		"DROP TABLE access_policy",
+		"DROP TABLE access_methods",
+		"ALTER TABLE runtime_state DROP COLUMN active_quality_class",
+		"ALTER TABLE runtime_state DROP COLUMN active_method_kind",
+		"ALTER TABLE runtime_state DROP COLUMN active_method_id",
+		"ALTER TABLE subscription_modem_paths DROP COLUMN optional_targets_total",
+		"ALTER TABLE subscription_modem_paths DROP COLUMN optional_targets_passed",
+		"ALTER TABLE subscription_modem_paths DROP COLUMN functional_score",
+		"ALTER TABLE subscription_modem_paths DROP COLUMN quality_class",
+		"ALTER TABLE modems DROP COLUMN route_generation",
+		"DELETE FROM schema_migrations WHERE version=14",
+	} {
+		if _, err := transaction.ExecContext(ctx, statement); err != nil {
+			transaction.Rollback()
+			database.Close()
+			t.Fatal(err)
+		}
 	}
 	if err := transaction.Commit(); err != nil {
 		database.Close()
@@ -216,11 +221,11 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal("pre-migration snapshot id is empty")
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 13 {
+	if err != nil || version != 14 {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	items, err := managed.Backups.List(ctx, true)
-	if err != nil || len(items) != 1 || items[0].Manifest.Kind != KindPreMigration || items[0].Manifest.SchemaVersion != 12 {
+	if err != nil || len(items) != 1 || items[0].Manifest.Kind != KindPreMigration || items[0].Manifest.SchemaVersion != 13 {
 		t.Fatalf("pre-migration snapshots = %+v, %v", items, err)
 	}
 	var audit int
