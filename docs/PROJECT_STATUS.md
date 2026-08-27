@@ -1,8 +1,8 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-28
-**Общее состояние:** `UNIFIED_READ_MODEL_NODE_PREFERENCE_LOCAL_PASS / REMOTE_CI_PENDING / RELEASE_GATES_PENDING`
-**Текущий этап:** единый typed read model `modem × access method` реализован для direct и VPN и используется API/WebUI вкладок «Модемы», «Подписки» и «Матрица путей». Preferred order VPN-серверов подключён к API, раскрываемому UI по подпискам и runtime qualification: первый FULL preferred node выбирается последовательно, equal-function LIMITED учитывает rank до latency, а active transition остаётся sticky. Текущий блок прошёл полный обычный Go suite, vet, Linux cross-build, focused integration tests, JavaScript syntax и фактический loopback preview; commit/push и exact remote race/netns CI ещё не выполнены.
+**Общее состояние:** `UNIFIED_READ_MODEL_NODE_PREFERENCE_REMOTE_CI_PASS / RELEASE_GATES_PENDING`
+**Текущий этап:** единый typed read model `modem × access method` реализован для direct и VPN и используется API/WebUI вкладок «Модемы», «Подписки» и «Матрица путей». Preferred order VPN-серверов подключён к API, раскрываемому UI по подпискам и runtime qualification: первый FULL preferred node выбирается последовательно, equal-function LIMITED учитывает rank до latency, а active transition остаётся sticky. Exact commit `f5f4de9b5980d0324164b0ef9888e33bc4b68944` опубликован; GitHub Actions run `33117118977` подтвердил полный Go/race/packaging/syntax suite и Linux nftables/netns fail-closed gate.
 
 **Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `97%`: schema/domain, direct qualification, schema-v3 actuator, selector, resilient refresh, boot policy, management interface, единый direct/VPN read model и preferred-node runtime closure готовы локально. До нового install-ready candidate остаются публикация exact commit и повторные signed packaging, fresh Ubuntu systemd/netns install/update/rollback gates. Общая production-готовность оценивается примерно в `92–93%`; production publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance остаются отдельными несокращаемыми gates.
 
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_D01023D / REMOTE_CI_PASS` | Unified access journal опубликован в `Go4a4a/Gateway-VPN`; exact GitHub Actions run `33114677320` для `d01023d` завершён `success`. Новый read-model/preference block пока локальный. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_F5F4DE9 / REMOTE_CI_PASS` | Unified read-model/preference block опубликован в `Go4a4a/Gateway-VPN`; exact GitHub Actions run `33117118977` для `f5f4de9b5980d0324164b0ef9888e33bc4b68944` завершён `success`. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -43,7 +43,7 @@
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `RESILIENT_REFRESH_LADDER_LOCAL_PASS / LINUX_NOT_RUN` | Active target node → other allowed target nodes → allowed nodes других subscriptions → policy-enabled direct ready-модемы подключены через отдельный Mihomo probe listener; EXCLUDE повторно проверяется под operation lock. Disabled user method обновляет service-only LKG без публикации user path; `Retry-After`, lease, redacted stages и bounded retention покрыты tests |
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
-| Unified access methods | `READ_MODEL_PREFERENCES_LOCAL_PASS / REMOTE_PENDING` | Direct + subscriptions имеют один authenticated ordered list и один server-side read model. Каждый modem показывает direct и все VPN methods; каждая subscription — все modem paths; matrix содержит оба kind. Preferred node order, fingerprint transfer и sticky transition подключены к runtime без немедленного обрыва active path |
+| Unified access methods | `READ_MODEL_PREFERENCES_REMOTE_CI_PASS / RELEASE_GATES_PENDING` | Direct + subscriptions имеют один authenticated ordered list и один server-side read model. Каждый modem показывает direct и все VPN methods; каждая subscription — все modem paths; matrix содержит оба kind. Preferred node order, fingerprint transfer и sticky transition подключены к runtime без немедленного обрыва active path |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
 | SQLite | `V16_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15 → 16`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `FULL_LOCAL_NONRACE_PASS / REMOTE_CI_PENDING` | Новый блок прошёл полный `go test ./...`, vet, CGO-free Linux build, 98-route OpenAPI contract, JS syntax и preview API consistency. Локальный Windows race не стартует без CGO compiler; обязательный Linux race/netns результат будет получен exact remote CI после push |
+| Автоматические тесты | `REMOTE_CI_F5F4DE9_PASS` | Exact commit `f5f4de9b5980d0324164b0ef9888e33bc4b68944` прошёл GitHub Actions run `33117118977`: Go/race/packaging/syntax job — 2m25s, Linux nftables/netns job — 1m14s, весь run — 3m46s; обе обязательные jobs завершены `success` |
 
 ## Матрица доказательств Definition of Done
 
@@ -285,6 +285,21 @@
 | DEV-163 | 2026-08-28 | Preferred node API принимает active version node IDs, но durable порядок хранит по fingerprint. Runtime переводит fingerprint в новый version-scoped ID, последовательно проверяет preferred nodes до первого FULL, использует rank раньше latency при равном LIMITED score и ставит active transition node первым. Reorder не закрывает текущий путь и применяется при следующей qualification/failover | Пользователю нужны постоянный основной сервер и упорядоченный резерв без потери выбора после refresh. Одновременное переключение при редактировании порядка создало бы flap; хранение node ID не пережило бы immutable version update |
 
 ## Журнал разработки
+
+### Сессия 079 — публикация unified read model и remote CI — 2026-08-28
+
+**Сделано:**
+
+- функциональный блок direct/VPN read model и preferred nodes зафиксирован exact commit `f5f4de9b5980d0324164b0ef9888e33bc4b68944` и опубликован в `origin/main`;
+- public GitHub Actions run `33117118977` сопоставлен с полным SHA через REST API; tag и GitHub Release не создавались.
+
+**Проверено удалённо:**
+
+- `Go, packaging and syntax gates` — `success`, 2m25s;
+- `Linux nftables fail-closed gate` — `success`, 1m14s;
+- весь run — `success`, 3m46s.
+
+**Следующий шаг:** собрать новый disposable signed successor candidate и повторить exact fresh Ubuntu systemd/netns install, schema migration, update/rollback/finalize и reboot recovery gates без public tag/Release. До этого блока требуется подтверждённое переключение с High на xhigh по протоколу проекта.
 
 ### Сессия 078 — канонический direct/VPN read model и preferred nodes — 2026-08-28
 
