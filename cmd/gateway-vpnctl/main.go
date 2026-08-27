@@ -30,6 +30,18 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "release-key-backup" {
 		return runReleaseKeyBackup(args[1:])
 	}
+	if len(args) > 0 && args[0] == "release-keyfile-create" {
+		return runReleaseKeyfileCreate(args[1:])
+	}
+	if len(args) > 0 && args[0] == "release-keyfile-verify" {
+		return runReleaseKeyfileVerify(args[1:])
+	}
+	if len(args) > 0 && args[0] == "release-keyfile-backup" {
+		return runReleaseKeyfileBackup(args[1:])
+	}
+	if len(args) > 0 && args[0] == "release-keyfile-unlock" {
+		return runReleaseKeyfileUnlock(args[1:])
+	}
 	if len(args) > 0 && args[0] == "release-sign" {
 		return runReleaseSign(args[1:])
 	}
@@ -83,7 +95,7 @@ func run(args []string) int {
 		return 0
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|release-keygen|release-key-verify|release-key-backup|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
+	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|release-keygen|release-key-verify|release-key-backup|release-keyfile-create|release-keyfile-verify|release-keyfile-backup|release-keyfile-unlock|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
 	return 2
 }
 

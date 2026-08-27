@@ -22,6 +22,18 @@ func TestPrivateKeyCommandsRejectNonLinuxHost(t *testing.T) {
 		{"key backup", func() int {
 			return runReleaseKeyBackup([]string{"--private-key", "C:/secure/private.pem", "--public-key", "C:/secure/public.pem", "--backup-private-key", "D:/secure/private.pem", "--backup-public-key", "D:/secure/public.pem"})
 		}},
+		{"encrypted key create", func() int {
+			return runReleaseKeyfileCreate([]string{"--key-file", "C:/secure/production.gvkey", "--passphrase-file", "C:/secure/passphrase"})
+		}},
+		{"encrypted key verify", func() int {
+			return runReleaseKeyfileVerify([]string{"--key-file", "C:/secure/production.gvkey", "--passphrase-file", "C:/secure/passphrase"})
+		}},
+		{"encrypted key backup", func() int {
+			return runReleaseKeyfileBackup([]string{"--key-file", "C:/secure/production.gvkey", "--backup-key-file", "D:/secure/production.gvkey", "--passphrase-file", "C:/secure/passphrase"})
+		}},
+		{"encrypted key unlock", func() int {
+			return runReleaseKeyfileUnlock([]string{"--key-file", "C:/secure/production.gvkey", "--private-key", "C:/temporary/private.pem", "--public-key", "C:/temporary/public.pem", "--passphrase-file", "C:/secure/passphrase"})
+		}},
 		{"Gateway sign", func() int {
 			return runReleaseSign([]string{"--release-dir", "C:/release", "--private-key", "C:/secure/private.pem"})
 		}},

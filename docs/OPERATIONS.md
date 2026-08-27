@@ -8,25 +8,37 @@ Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS 
 
 ## Сборка release
 
-Release закрепляет конкретный Mihomo binary и его SHA-256. Ed25519 identity создаётся один раз на изолированном trusted builder; private key не помещается в репозиторий или GitHub Release:
+Release закрепляет конкретный Mihomo binary и его SHA-256. Ed25519 identity создаётся один раз на trusted Linux builder; private key не помещается в репозиторий, GitHub, Gateway или VPS.
 
-Операции signing identity намеренно работают только на Linux. Оба файла должны иметь абсолютные пути в одном заранее созданном real-каталоге без symlink-компонентов; каталог не может находиться внутри Git worktree и обязан быть закрыт от group/others (`0700`). Private key при каждом использовании снова требует secure absolute path и отсутствие group/other permissions. Существующие primary/backup файлы никогда не перезаписываются. После exclusive-create и fsync keypair перечитывается, public key повторно выводится из private key и сверяется с сохранённым public key/fingerprint. До генерации оператор отдельно выбирает primary encrypted/offline storage и независимый encrypted backup; CLI проверяет целостность копии, но не может доказать encryption либо физическую независимость носителей.
+Штатный production-вариант — один переносимый файл `gateway-vpn-production.gvkey`. Внутри него private/public Ed25519 и fingerprint целиком зашифрованы AES-256-GCM; ключ шифрования выводится Argon2id (`64 MiB`, 3 iteration, parallelism 2) из passphrase длиной 20–256 UTF-8 байт. Header аутентифицирован, неизвестный format/KDF/cipher отклоняется до использования заявленных файлом KDF-параметров. Файл создаётся exclusive, `fsync`-ится, тут же расшифровывается и cryptographically self-verifies; existing destination никогда не перезаписывается.
+
+Для постоянного хранения не требуется Linux-раздел или специальная флешка: `.gvkey` можно хранить как обычный файл вне Git worktree, в том числе на Windows. Нужна byte-identical verified backup-копия в независимом месте и отдельно сохранённая сильная passphrase. Потеря и primary, и backup лишит проект возможности выпускать доверенные обновления; потеря passphrase эквивалентна потере ключа. Passphrase нельзя помещать рядом с `.gvkey`, в shell history, argv, environment, GitHub Secrets этого репозитория или журнал.
+
+Создание primary и backup выполняется одной Linux-командой. Скрипт локально и без echo спрашивает passphrase дважды; временный passphrase-файл существует только в `/dev/shm` tmpfs:
 
 ```bash
-install -d -m 0700 /secure/primary /secure-backup/gateway-vpn
+./scripts/create-release-key-file.sh \
+  /publisher-primary/gateway-vpn-production.gvkey \
+  /publisher-backup/gateway-vpn-production.gvkey
+```
+
+При сборке encrypted wrapper спрашивает passphrase один раз, проверяет `.gvkey`, раскрывает пару только в отдельный `0700` каталог настоящего `/dev/shm`, вызывает обычный reproducible builder и удаляет временную pair через `trap` при success/error/signal:
+
+```bash
+./scripts/build-release-bundle-encrypted.sh \
+  0.1.0-rc.1 candidate v1.19.30 /opt/mihomo \
+  /publisher-primary/gateway-vpn-production.gvkey \
+  OWNER/REPOSITORY v0.1.0-rc.1 \
+  enp2s0 192.168.200.1/24 --enable-dhcp
+```
+
+Public key автоматически извлекается из `.gvkey` во временное хранилище и входит в подписанный release как `update-signing.pub`; для установки/обновления passphrase и private key не требуются. Low-level `release-keyfile-create`, `release-keyfile-verify`, `release-keyfile-backup` и `release-keyfile-unlock` принимают passphrase только из абсолютного private `0600` файла в закрытом каталоге или bounded stdin (`--passphrase-file -`). Постоянный plaintext PEM workflow ниже сохраняется только как низкоуровневый compatibility/test contract и требует зашифрованной файловой системы:
+
+```bash
+install -d -m 0700 /secure/primary
 ./bin/gateway-vpnctl release-keygen \
   --private-key /secure/primary/release-signing.pem \
   --public-key /secure/primary/update-signing.pub
-
-./bin/gateway-vpnctl release-key-verify \
-  --private-key /secure/primary/release-signing.pem \
-  --public-key /secure/primary/update-signing.pub
-
-./bin/gateway-vpnctl release-key-backup \
-  --private-key /secure/primary/release-signing.pem \
-  --public-key /secure/primary/update-signing.pub \
-  --backup-private-key /secure-backup/gateway-vpn/release-signing.pem \
-  --backup-public-key /secure-backup/gateway-vpn/update-signing.pub
 
 ./scripts/build-release.sh \
   0.1.0 vX.Y.Z /path/to/mihomo <64-hex-sha256> \

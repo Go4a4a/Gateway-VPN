@@ -313,6 +313,42 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 			t.Errorf("release key custody contract missing %q", required)
 		}
 	}
+	encryptedKeyContract := read(t, filepath.Join(root, "internal", "update", "keyfile.go"))
+	for _, required := range []string{
+		"GATEWAY-VPN-KEY1", "AES-256-GCM", "argon2id", "64 * 1024", ".gvkey",
+		"encrypted release key files must not be stored inside a Git worktree",
+		"encrypted release key backup must use a different destination directory",
+		"writeVerifiedKeyPair", "VerifyEncryptedKeyFile", "syncDirectory",
+	} {
+		if !strings.Contains(encryptedKeyContract, required) {
+			t.Errorf("encrypted release key contract missing %q", required)
+		}
+	}
+	createEncrypted := read(t, filepath.Join(root, "scripts", "create-release-key-file.sh"))
+	for _, required := range []string{
+		"stat -f -c %T /dev/shm", "== tmpfs", "set +x", "release-keyfile-create", "release-keyfile-backup", "release-keyfile-verify", "trap cleanup EXIT",
+		`PASSPHRASE_FILE="$SECRET_ROOT/passphrase"`, `CONTROL="$BUILD_ROOT/gateway-vpnctl"`, "/tmp/gateway-vpn-key-helper.",
+	} {
+		if !strings.Contains(createEncrypted, required) {
+			t.Errorf("encrypted release key creator missing %q", required)
+		}
+	}
+	buildEncrypted := read(t, filepath.Join(root, "scripts", "build-release-bundle-encrypted.sh"))
+	for _, required := range []string{
+		"stat -f -c %T /dev/shm", "== tmpfs", "set +x", "release-keyfile-unlock", "build-release-bundle.sh", "trap cleanup EXIT", "--passphrase-file",
+		`PASSPHRASE_FILE="$SECRET_ROOT/passphrase"`, `UNLOCKED="$SECRET_ROOT/unlocked"`, `CONTROL="$BUILD_ROOT/gateway-vpnctl"`, "/tmp/gateway-vpn-key-helper.",
+	} {
+		if !strings.Contains(buildEncrypted, required) {
+			t.Errorf("encrypted release bundle wrapper missing %q", required)
+		}
+	}
+	for name, content := range map[string]string{"creator": createEncrypted, "builder": buildEncrypted} {
+		for _, forbidden := range []string{"--passphrase \"$PASSPHRASE\"", "PASSPHRASE=\"$PASSPHRASE\"", "export PASSPHRASE", `CONTROL="$SECRET_ROOT`} {
+			if strings.Contains(content, forbidden) {
+				t.Errorf("encrypted key %s exposes passphrase through forbidden pattern %q", name, forbidden)
+			}
+		}
+	}
 }
 
 func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
