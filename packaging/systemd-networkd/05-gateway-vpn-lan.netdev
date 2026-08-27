@@ -1,0 +1,7 @@
+[NetDev]
+Name=gateway-vpn-lan
+Kind=bridge
+
+[Bridge]
+STP=yes
+ForwardDelaySec=4s

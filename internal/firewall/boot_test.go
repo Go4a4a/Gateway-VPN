@@ -45,6 +45,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"hook output priority filter; policy drop",
 		"gateway-vpn PATH_BLOCKED",
 		"iifname \"enp2s0\" tcp dport 8443 accept",
+		"iifname \"enp2s0\" tcp dport 22 accept",
 		"iifname \"wg-mgmt\" tcp dport 8443 accept",
 		"meta nfproto ipv4 iifname \"enp2s0\" oifname @active_tun_interfaces",
 		"meta nfproto ipv4 iifname @active_tun_interfaces oifname \"enp2s0\"",

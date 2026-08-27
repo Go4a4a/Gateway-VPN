@@ -20,9 +20,9 @@ flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction
 [[ -f "$MARKER" && ! -L "$MARKER" && $(stat -c '%u:%g:%a' "$MARKER") == "0:0:600" ]] || { echo "Gateway recovery marker ownership or mode is invalid" >&2; exit 1; }
 MARKER_BYTES=$(stat -c '%s' "$MARKER")
 [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 1024 ]] || { echo "Gateway recovery marker size is invalid" >&2; exit 1; }
-[[ $(wc -l <"$MARKER") == 10 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
-[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_address|preserve_lan_address|lan_was_up)=' "$MARKER") == 10 ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
-for marker_key in version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_address preserve_lan_address lan_was_up; do
+[[ $(wc -l <"$MARKER") == 14 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
+[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active)=' "$MARKER") == 14 ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
+for marker_key in version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active; do
   [[ $(grep -c "^${marker_key}=" "$MARKER") == 1 ]] || { echo "Gateway recovery marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
 done
 VERSION=$(sed -n 's/^version=//p' "$MARKER")
@@ -32,10 +32,24 @@ OLD_IPV6_DEFAULT_DISABLE=$(sed -n 's/^old_ipv6_default_disable=//p' "$MARKER")
 OLD_IPV6_ALL_FORWARDING=$(sed -n 's/^old_ipv6_all_forwarding=//p' "$MARKER")
 PRESERVE_STATE_ROOT=$(sed -n 's/^preserve_state_root=//p' "$MARKER")
 LAN_INTERFACE=$(sed -n 's/^lan_interface=//p' "$MARKER")
+LAN_MEMBERS=$(sed -n 's/^lan_members=//p' "$MARKER")
+LAN_MEMBER_WAS_UP=$(sed -n 's/^lan_member_was_up=//p' "$MARKER")
 LAN_ADDRESS=$(sed -n 's/^lan_address=//p' "$MARKER")
 PRESERVE_LAN_ADDRESS=$(sed -n 's/^preserve_lan_address=//p' "$MARKER")
 LAN_WAS_UP=$(sed -n 's/^lan_was_up=//p' "$MARKER")
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|30)$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ ]] || { echo "Gateway recovery marker values are invalid" >&2; exit 1; }
+SSH_WAS_ENABLED=$(sed -n 's/^ssh_was_enabled=//p' "$MARKER")
+SSH_WAS_ACTIVE=$(sed -n 's/^ssh_was_active=//p' "$MARKER")
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|30)$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ && "$SSH_WAS_ENABLED" =~ ^[01]$ && "$SSH_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "Gateway recovery marker values are invalid" >&2; exit 1; }
+if [[ -n "$LAN_MEMBERS" ]]; then
+  [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ && "$LAN_MEMBER_WAS_UP" =~ ^[01](,[01]){0,15}$ ]] || { echo "Gateway recovery LAN bridge marker values are invalid" >&2; exit 1; }
+  IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
+  IFS=, read -r -a LAN_MEMBER_WAS_UP_VALUES <<<"$LAN_MEMBER_WAS_UP"
+  ((${#LAN_MEMBER_NAMES[@]} == ${#LAN_MEMBER_WAS_UP_VALUES[@]})) || { echo "Gateway recovery LAN bridge marker lengths differ" >&2; exit 1; }
+else
+  [[ -z "$LAN_MEMBER_WAS_UP" ]] || { echo "Gateway recovery has member state without members" >&2; exit 1; }
+  LAN_MEMBER_NAMES=()
+  LAN_MEMBER_WAS_UP_VALUES=()
+fi
 
 FAILED=0
 record_failure() {
@@ -71,6 +85,24 @@ if ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
     ip link set dev "$LAN_INTERFACE" down || record_failure "restore LAN administrative state"
   fi
 fi
+for index in "${!LAN_MEMBER_NAMES[@]}"; do
+  member=${LAN_MEMBER_NAMES[$index]}
+  if ip link show dev "$member" >/dev/null 2>&1; then
+    ip link set dev "$member" nomaster || record_failure "detach LAN bridge member $member"
+    if ((${LAN_MEMBER_WAS_UP_VALUES[$index]} == 0)); then
+      ip link set dev "$member" down || record_failure "restore LAN bridge member state $member"
+    fi
+  fi
+done
+if ((${#LAN_MEMBER_NAMES[@]})) && ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
+  ip link delete dev "$LAN_INTERFACE" type bridge || record_failure "delete owned LAN bridge"
+fi
+if ((SSH_WAS_ACTIVE == 0)); then
+  systemctl stop ssh.service >/dev/null 2>&1 || record_failure "restore inactive OpenSSH state"
+fi
+if ((SSH_WAS_ENABLED == 0)); then
+  systemctl disable ssh.service >/dev/null 2>&1 || record_failure "restore disabled OpenSSH state"
+fi
 sysctl -q -w "net.ipv6.conf.all.disable_ipv6=$OLD_IPV6_ALL_DISABLE" || record_failure "restore IPv6 all disable state"
 sysctl -q -w "net.ipv6.conf.default.disable_ipv6=$OLD_IPV6_DEFAULT_DISABLE" || record_failure "restore IPv6 default disable state"
 sysctl -q -w "net.ipv6.conf.all.forwarding=$OLD_IPV6_ALL_FORWARDING" || record_failure "restore IPv6 forwarding state"
@@ -80,7 +112,7 @@ sysctl -q -w "net.ipv4.ip_forward=$OLD_IPV4_FORWARD" || record_failure "restore 
 [[ $(cat /proc/sys/net/ipv6/conf/all/forwarding) == "$OLD_IPV6_ALL_FORWARDING" ]] || record_failure "verify IPv6 forwarding state"
 [[ $(cat /proc/sys/net/ipv4/ip_forward) == "$OLD_IPV4_FORWARD" ]] || record_failure "verify IPv4 forwarding state"
 
-rm -f /etc/systemd/network/70-gateway-vpn-lan.network /etc/systemd/network/80-gateway-vpn-hilink.network || record_failure "remove owned networkd policy"
+rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network || record_failure "remove owned networkd policy"
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf || record_failure "remove owned journald policy"
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf || record_failure "remove owned host policy"
 rm -rf /etc/gateway-vpn || record_failure "remove owned Gateway config"

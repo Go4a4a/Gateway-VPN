@@ -26,6 +26,7 @@ type GatewayInstallCommandOptions struct {
 	ReleaseTag              string
 	ManifestSHA256          string
 	SignerKeySHA256         string
+	Interactive             bool
 	LANInterface            string
 	LANAddress              string
 	InstallDependencies     bool
@@ -82,8 +83,15 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	if !digestPattern.MatchString(options.ManifestSHA256) || !digestPattern.MatchString(options.SignerKeySHA256) || options.SignerKeySHA256 != manifest.SignerKeySHA256 {
 		return "", errors.New("exact channel manifest and signer fingerprints are required")
 	}
-	if !validRepository(options.Repository) || !tagPattern.MatchString(options.ReleaseTag) || !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) {
-		return "", errors.New("safe GitHub release and Gateway LAN inputs are required")
+	if !validRepository(options.Repository) || !tagPattern.MatchString(options.ReleaseTag) {
+		return "", errors.New("safe GitHub release inputs are required")
+	}
+	if options.Interactive {
+		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
+			return "", errors.New("interactive Gateway command must defer all host policy choices and confirmation to the target terminal")
+		}
+	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) {
+		return "", errors.New("safe explicit Gateway LAN inputs are required for automation mode")
 	}
 	bootstrap, err := SelectArtifact(manifest, RoleBootstrap, "linux", "amd64")
 	if err != nil {
@@ -96,19 +104,27 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	manifestName := "channel-" + manifest.Channel + ".json"
 	signatureName := "channel-" + manifest.Channel + ".sig"
 	parts := bootstrapCommandPrefix(baseURL+bootstrap.Filename, bootstrap.SHA256, options.NonInteractiveRoot)
-	parts = append(parts,
-		"run_as_root \"$tmp\" install-gateway"+
-			" --channel "+manifest.Channel+
-			" --release-version "+manifest.ReleaseVersion+
-			" --source-commit "+manifest.SourceCommit+
-			" --manifest-url "+baseURL+manifestName+
-			" --manifest-sha256 "+options.ManifestSHA256+
-			" --signature-url "+baseURL+signatureName+
-			" --public-key-url "+baseURL+"update-signing.pub"+
-			" --signer-key-sha256 "+options.SignerKeySHA256+
-			" --artifact-base-url "+baseURL+
-			" --lan-interface "+options.LANInterface+
-			" --lan-address "+options.LANAddress)
+	if options.Interactive {
+		// Capture the SSH client before sudo can filter SSH_CONNECTION. The
+		// bootstrap parses this only as a typed IP and protects its route.
+		parts = append(parts, "management_connection=${SSH_CONNECTION:-}", "management_peer=${management_connection%% *}")
+	}
+	installCommand := "run_as_root \"$tmp\" install-gateway" +
+		" --channel " + manifest.Channel +
+		" --release-version " + manifest.ReleaseVersion +
+		" --source-commit " + manifest.SourceCommit +
+		" --manifest-url " + baseURL + manifestName +
+		" --manifest-sha256 " + options.ManifestSHA256 +
+		" --signature-url " + baseURL + signatureName +
+		" --public-key-url " + baseURL + "update-signing.pub" +
+		" --signer-key-sha256 " + options.SignerKeySHA256 +
+		" --artifact-base-url " + baseURL
+	if options.Interactive {
+		installCommand += " --interactive --management-peer \"$management_peer\""
+	} else {
+		installCommand += " --lan-interface " + options.LANInterface + " --lan-address " + options.LANAddress
+	}
+	parts = append(parts, installCommand)
 	if options.EnableDHCP {
 		parts[len(parts)-1] += " --enable-dhcp"
 	}

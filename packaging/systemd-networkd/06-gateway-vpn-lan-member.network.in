@@ -1,0 +1,11 @@
+[Match]
+Name=__LAN_MEMBER__
+
+[Network]
+Bridge=gateway-vpn-lan
+DHCP=no
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+
+[Link]
+RequiredForOnline=no

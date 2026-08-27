@@ -164,13 +164,28 @@ func runChannelInstallCommand(args []string) int {
 	manifestPath, signaturePath, publicKeyPath, channel, version, commit, maximumAge, _ := channelVerificationFlags(flags)
 	repository := flags.String("github-repository", "", "GitHub OWNER/REPOSITORY")
 	releaseTag := flags.String("release-tag", "", "immutable GitHub Release tag; defaults to vVERSION")
-	lanInterface := flags.String("lan-interface", "", "Ethernet interface connected to Keenetic WAN")
-	lanAddress := flags.String("lan-address", "192.168.200.1/24", "Gateway transit LAN IPv4 CIDR")
+	interactive := flags.Bool("interactive", false, "generate a universal target-side interactive Gateway command")
+	lanInterface := flags.String("lan-interface", "", "explicit Ethernet interface connected to Keenetic WAN for automation")
+	lanAddress := flags.String("lan-address", "", "explicit Gateway transit LAN IPv4 CIDR for automation")
 	enableDHCP := flags.Bool("enable-dhcp", false, "include opt-in transit DHCP")
 	installDependencies := flags.Bool("install-dependencies", false, "install missing managed Gateway packages after dependency-plan validation")
 	apply := flags.Bool("apply", false, "include installation after read-only preflight")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" || *repository == "" || *lanInterface == "" {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" || *repository == "" {
 		return 2
+	}
+	if *interactive {
+		if *lanInterface != "" || *lanAddress != "" || *enableDHCP || *installDependencies || *apply {
+			fmt.Fprintln(os.Stderr, "--interactive cannot be combined with target-specific LAN, dependency, DHCP, or apply flags")
+			return 2
+		}
+	} else {
+		if *lanInterface == "" {
+			fmt.Fprintln(os.Stderr, "automation mode requires --lan-interface; use --interactive for target-side selection")
+			return 2
+		}
+		if *lanAddress == "" {
+			*lanAddress = "192.168.200.1/24"
+		}
 	}
 	manifest, content, fingerprint, err := verifyChannelFiles(*manifestPath, *signaturePath, *publicKeyPath, *channel, *version, *commit, *maximumAge)
 	if err != nil {
@@ -184,7 +199,7 @@ func runChannelInstallCommand(args []string) int {
 	digest, _ := distribution.ManifestSHA256(content)
 	command, err := distribution.GatewayInstallCommand(manifest, distribution.GatewayInstallCommandOptions{
 		Repository: *repository, ReleaseTag: tag, ManifestSHA256: digest,
-		SignerKeySHA256: fingerprint, LANInterface: *lanInterface, LANAddress: *lanAddress,
+		SignerKeySHA256: fingerprint, Interactive: *interactive, LANInterface: *lanInterface, LANAddress: *lanAddress,
 		InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP, Apply: *apply,
 	})
 	if err != nil {

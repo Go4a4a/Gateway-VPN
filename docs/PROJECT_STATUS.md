@@ -2,9 +2,9 @@
 
 **Последнее обновление:** 2026-08-27
 **Общее состояние:** `LOCAL_INSTALL_READY / HARDWARE_VALIDATION_PENDING`
-**Текущий этап:** permanent production `.gvkey` и byte-identical verified backup созданы владельцем через hidden prompt; пароль известен только пользователю и не передавался Codex/Git/Docker argv/environment. Оба encrypted files имеют ожидаемый format/size и одинаковый SHA-256; create workflow сам выполнил decrypt/private→public/fingerprint verification. Portable workflow опубликован в `main`, exact journal successor `eece377` прошёл remote CI. Предыдущий docs-complete validation successor `0.1.0-validation.47297a7` и hardware handoff evidence остаются неизменными; следующий release step — новая immutable production-signed RC после фиксации реального LAN interface и отдельного разрешения на tag/draft Release.
+**Текущий этап:** в локальном worktree завершён universal multi-port Gateway installer. Signed bootstrap показывает интерфейсы и позволяет выбрать один или несколько безопасных Ethernet-портов; они объединяются в owned bridge `gateway-vpn-lan` с одним transit IPv4, поэтому WebUI, DHCP/DNS и SSH доступны через любой выбранный порт. Huawei HiLink, uplink/default-route, configured и active SSH management interfaces исключаются. OpenSSH активируется только после durable marker и `PATH_BLOCKED`, а rollback/uninstall восстанавливают прежние link и SSH states. Полные локальные Go tests/vet, shell syntax и четыре Linux cross-build прошли; commit/push/exact remote CI и новый disposable signed bundle ещё следуют.
 
-**Оценка прогресса:** `100%` локальной программно-релизной готовности к первой установке на железо и около `90%` полной production-готовности. Push и exact remote CI завершены. Оставшиеся проценты относятся не к недописанному локальному коду, а к внешним и несокращаемым gates: production signing/publish, реальный Ubuntu Gateway и VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance. Docker/systemd, netns и test-only ускорение stability deadline эти проверки не заменяют.
+**Оценка прогресса:** `100%` локальной программно-релизной готовности к первой установке на железо и около `90%` полной production-готовности. Предыдущий опубликованный блок и его exact remote CI завершены; текущий multi-port/SSH successor ещё ожидает commit/push и новый exact CI. Оставшиеся production-проценты относятся к внешним и несокращаемым gates: production signing/publish, реальный Ubuntu Gateway и VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance. Docker/systemd, netns и test-only ускорение stability deadline эти проверки не заменяют.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED` | Зафиксирован `PLAN_v1.1.md`; явная пользовательская поправка 2026-08-26 добавила §9.8 про круглосуточный самоконтроль, не переписывая остальные решения |
-| Репозиторий | `PUBLIC_MAIN_EECE377 / REMOTE_CI_PASS` | Пользователь явно разрешил push; encrypted key workflow, 10-character policy и журнал опубликованы в `Go4a4a/Gateway-VPN`. Exact GitHub Actions runs `33052162474`, `33053389413` и `33053762746` завершились `completed/success`; tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_83A17E8 / MULTIPORT_SSH_LOCAL_PENDING_PUSH` | Пользователь явно разрешил push; permanent key journal опубликован в `Go4a4a/Gateway-VPN`. Universal bridge/SSH installer пока находится в проверенном локальном worktree; tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -51,7 +51,7 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, host snapshot, audit/rate limit и WebUI download покрыты tests; fixed `database/retention.json` дополнительно даёт path-free policy, table ranges/counts, version excess и DB/WAL/page/freelist sizes. Реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `FORMAT2_UPDATE_ROLLBACK_FINALIZE_REBOOT_PASS` | Exact schema `1 → 2` миграция, controlled health-failure rollback `2 → 1`, повторный update, successful finalization и finalized reboot прошли с правильными firewall/current/recovery/DB. `FINALIZED`/`ROLLED_BACK` timer ticks имеют code `0`, failed units отсутствуют, host contract baseline/candidate совпадает |
-| Packaging | `PRODUCTION_GVKEY_READY / PUBLIC_RELEASE_PENDING` | Permanent primary и byte-identical backup созданы hidden-password workflow; внешний read-only audit подтвердил два 574-byte `GATEWAY-VPN-KEY1` files и совпадающий SHA-256. Exact disposable `08b7c5c` ранее доказал полный encrypted-key Gateway/VPS/bootstrap/deploy/channel build и отсутствие private PEM в `dist`. Public tags/releases отсутствуют; новая RC version, LAN interface, draft assets и GitHub installation остаются отдельными рубежами |
+| Packaging | `PRODUCTION_GVKEY_READY / GENERIC_COMMAND_LOCAL_PASS / PUBLIC_RELEASE_PENDING` | Permanent primary и byte-identical backup созданы hidden-password workflow. Release/channel builders больше не кодируют NIC/CIDR; unit/packaging/shell/cross-build gates проходят. Новый exact disposable full-bundle gate ещё требуется; public tags/releases отсутствуют |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
@@ -92,7 +92,7 @@
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент — production/hardware-test signing identity и новая immutable publish version из актуального clean commit. Это отдельное security-решение: место резервного хранения private key и полномочие на key generation/tag/draft Release должны быть явно подтверждены. Затем — установка одной командой на физический Ubuntu 24.04 Gateway и реальный VPS, фиксация фактического LAN interface, HiLink/Keenetic/WireGuard packet captures и исправление только реально найденных отклонений. Versions `0.1.0-traffic.3c13b09` и `0.1.0-validation.47297a7` другими signed artifacts не заменяются.
+Следующий инкремент — commit/push universal installer, exact remote CI и clean disposable-signed full-bundle проверка generic command. После этого production-signed `0.1.0-rc.1` можно готовить без знания NIC будущего Gateway; tag/draft Release всё равно требуют отдельного явного разрешения. Фактические interface/CIDR выбираются мастером уже на физическом Ubuntu 24.04 Gateway, после чего выполняются H1/H2, real VPS/provider и 24/72h gates. Versions `0.1.0-traffic.3c13b09` и `0.1.0-validation.47297a7` другими signed artifacts не заменяются.
 
 ## Критический путь до release
 
@@ -267,8 +267,52 @@
 | DEV-150 | 2026-08-27 | Passphrase `.gvkey` принимает минимум 10 Unicode-символов и максимум 256 UTF-8 байт; ведущие/концевые пробелы, CR/LF/NUL и invalid UTF-8 запрещены, 14+ символов остаются рекомендацией | Пользователь явно выбрал минимум 10 символов; rune count не позволяет короткому кириллическому паролю пройти только из-за многобайтового UTF-8 представления |
 | DEV-151 | 2026-08-27 | Plaintext PEM и временный интерактивный passphrase-файл существуют только в проверенном `0700` `/dev/shm`; несекретный helper собирается отдельно в `/tmp`, поскольку `/dev/shm` допустимо и желательно монтировать `noexec`; оба каталога удаляются trap при success/error/signal | Production workflow не должен требовать executable secret tmpfs и не должен оставлять private material после неуспешной сборки; реальный `noexec /dev/shm` smoke доказал разделение |
 | DEV-152 | 2026-08-27 | Созданный пользователем permanent `.gvkey` считать production signing identity; не раскрывать/копировать его в repo, Gateway, VPS, logs или release assets. До отдельного разрешения не создавать tag/Release и не подписывать публичную RC | Hidden workflow завершил create+backup+verify, внешний audit подтвердил format/byte identity; полномочие создать key не является полномочием публиковать release |
+| DEV-153 | 2026-08-27 | Generated Gateway release command является universal interactive command и не содержит build-time NIC/CIDR/DHCP policy. Target-side wizard показывает все links, разрешает только unused Ethernet без IPv4/default/active SSH route, проверяет выбранный private CIDR и требует post-preflight token `INSTALL`; explicit mode остаётся для CI/SSH automation | Release не должен пересобираться под конкретный компьютер. Молчаливый выбор среди нескольких NIC, использование modem/management uplink или subnet overlap может оборвать управление либо создать неверный LAN path; до финального подтверждения persistent host mutation запрещена |
+| DEV-154 | 2026-08-27 | Один или несколько подтверждённых safe Ethernet ports объединяются в owned bridge `gateway-vpn-lan`; единственный transit IPv4, WebUI, DHCP/DNS и OpenSSH относятся к bridge. nftables разрешает новый TCP/22 только через bridge, не через HiLink/uplink. Первый install с включением всех свободных ports выполняется с локальной консоли, потому что несущий активную SSH-сессию интерфейс fail-closed исключается | Одна IPv4-подсеть не должна назначаться нескольким независимым L3 interfaces. Bridge даёт один стабильный адрес независимо от физического порта, а исключение uplink/HiLink не превращает удобство SSH в внешнюю management exposure или риск обрыва installer |
 
 ## Журнал разработки
+
+### Сессия 071 — multi-port LAN bridge и SSH с любого выбранного Ethernet — 2026-08-27
+
+**Причина:** пользователь уточнил, что Gateway может иметь несколько Ethernet-интерфейсов и SSH должен быть доступен независимо от того, в какой LAN-порт подключён кабель.
+
+**Реализовано локально:**
+
+- wizard принимает несколько уникальных номеров через запятую, по умолчанию выбирает все safe Ethernet ports и передаёт их installer как bounded typed `LANMembers`;
+- Huawei USB network links дополнительно распознаются по fixed `udevadm` metadata `ID_BUS=usb` + `ID_VENDOR_ID=12d1`, поэтому даже ещё не получивший IPv4 HiLink не может случайно стать LAN member;
+- выбранные ports объединяются в owned bridge `gateway-vpn-lan`; systemd-networkd получает persistent `.netdev`, отдельный exact member policy и один address на bridge, STP включён; ранние owned `05-/06-` filenames имеют приоритет над Ubuntu `10-netplan-*` после reboot;
+- OpenSSH добавлен в managed dependency plan: отсутствующий package скачивается до firewall mutation без запуска daemon, но устанавливается и запускается только после durable recovery marker и `PATH_BLOCKED`;
+- installer требует active `ssh.service` и IPv4 wildcard listener TCP/22; boot nftables разрешает новые SSH connections только с `gateway-vpn-lan`, а не с HiLink/uplink;
+- install marker расширен до 14 strict fields. Recovery/uninstall отсоединяют members, удаляют только owned bridge/networkd files, возвращают прежние administrative link states и прежние enabled/active states OpenSSH;
+- install report фиксирует physical `lan_members` и `lan_ssh_enabled`; PLAN, OPERATIONS и README объясняют один адрес для всех выбранных ports, DHCP/static-client requirement и local-console boundary.
+
+**Проверено:** `gofmt`; focused tests; полный `go test ./... -count=1`; `go vet ./...`; deterministic regeneration и hash-check nftables fixtures; `bash -n scripts/*.sh`; CGO-free Linux/amd64 builds `gateway-vpn`, `gateway-vpnctl`, `gateway-vpn-bootstrap`, `gateway-vpn-deploy`; `git diff --check` — PASS. Первый full suite правильно обнаружил stale `boot-blocked.nft`; fixture и его canonical SHA-256 регенерированы, повторный full suite прошёл. В CI добавлен root netns gate с двумя bridge members, единственным bridge IPv4, STP forwarding, двумя успешными TCP/22 probes и запрещённым TCP/22 через отдельный uplink; его фактический Linux result ещё ожидает push.
+
+**Не проверено пока:** реальное создание bridge/member links, nft input semantics на bridge, доступ TCP/22 через каждый member, networkd reboot persistence и rollback на Linux kernel. Docker Desktop/Engine в текущей Windows session не запущен, поэтому эти пункты не объявляются PASS до exact remote Linux CI и disposable signed systemd/netns rehearsal.
+
+**Следующий шаг:** commit/push текущего successor, дождаться terminal exact GitHub CI, затем выполнить clean disposable-signed full-bundle Linux rehearsal; production tag/Release остаются отдельным разрешением.
+
+### Сессия 070 — universal interactive Gateway installer — 2026-08-27
+
+**Причина:** пользователь отклонил требование заранее сообщить `enp2s0`: установка должна запускаться одной и той же GitHub-командой на любом поддерживаемом PC, сама показывать несколько Ethernet-интерфейсов и позволять выбрать непересекающуюся подсеть WAN Keenetic.
+
+**Реализовано локально:**
+
+- новый target-side `installwizard` делает только bounded `ip -json` observations и показывает numbered inventory: link type, state/carrier, IPv4 и safety reason;
+- loopback, non-Ethernet, любой link с IPv4, current default-route и доступный из `SSH_CONNECTION` active management link заблокированы; HiLink с выданным management IPv4 поэтому нельзя случайно выбрать как LAN;
+- пользователь явно выбирает unused Ethernet, DHCP policy и разрешение на безопасную установку отсутствующих managed packages;
+- wizard ищет первый свободный CIDR из безопасного набора, принимает custom canonical RFC1918 host CIDR `/16../30`, требует `/24` для DHCP и использует существующий typed overlap preflight против всех addresses/routes и `10.80.0.0/24`;
+- после проверки exact signed Gateway artifact выполняется отдельный read-only installer preflight; apply начинается только после exact token `INSTALL`; cancel/EOF/нет TTY/preflight failure не запрашивают persistent changes;
+- `GatewayInstallCommand` и `channel-install-command` получили mutually-exclusive interactive/explicit modes; build-channel и оба bundle builders теперь всегда выпускают generic interactive Gateway command без hardware inputs;
+- automation/CI/deploy contract с явными `--lan-interface/--lan-address` сохранён без изменения.
+
+**Проверено:** focused wizard/distribution/bootstrap/channel/packaging tests PASS; полный Windows `go test ./... -count=1` и `go vet ./...` PASS; Git Bash `bash -n scripts/*.sh` PASS; CGO-free Linux/amd64 bootstrap cross-build PASS; `git diff --check` PASS. Tests покрывают multiple NIC, default-route и configured/HiLink rejection, active SSH route, conflict-free default selection, invalid/custom CIDR, DHCP `/24`, cancel/EOF, exact final token, отсутствие mutating commands в selection и regression explicit automation.
+
+**Не проверено пока:** реальный target TTY/iproute2 inventory на Ubuntu, clean disposable signed full bundle с новым builder CLI, exact remote CI и физический install. Docker API из текущей restricted Windows session недоступен; это не заменяется локальным unit PASS.
+
+**Изменение прежнего handoff:** реальный LAN interface больше не является входом release build/publish и не нужен для подготовки RC. Он выбирается и повторно проверяется непосредственно на целевом Gateway. Исторические записи с прежним требованием сохраняются как ход разработки, но DEV-153 их отменяет.
+
+**Следующий шаг:** commit/push, дождаться exact GitHub CI, затем выполнить clean disposable-signed full-bundle/Linux interactive rehearsal до production RC.
 
 ### Сессия 069 — permanent encrypted production key — 2026-08-27
 

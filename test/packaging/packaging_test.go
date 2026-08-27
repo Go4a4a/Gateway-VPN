@@ -107,7 +107,7 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
-	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "preserve_state_root=%s", "90-gateway-vpn-ipv4-forwarding.conf", "70-gateway-vpn-lan.network", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
+	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "openssh-server", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "preserve_state_root=%s", "lan_members=%s", "ssh_was_enabled=%s", "ssh_was_active=%s", "90-gateway-vpn-ipv4-forwarding.conf", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer missing %q", required)
 		}
@@ -232,11 +232,16 @@ func TestChannelBuilderPinsBootstrapBeforeSudoAndProducesExactCommand(t *testing
 	for _, required := range []string{
 		"channel-sign", "channel-verify", "channel-install-command",
 		"channel-$CHANNEL.json", "channel-$CHANNEL.sig", "update-signing.pub",
-		"--github-repository", "--release-tag", "--source-commit", "--apply",
+		"--github-repository", "--release-tag", "--source-commit", "--interactive",
 		"install-gateway-$VERSION.command.txt", "clean committed worktree",
 	} {
 		if !strings.Contains(builder, required) {
 			t.Errorf("channel builder missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"LAN_INTERFACE=", "LAN_ADDRESS=", "--lan-interface", "--lan-address", "--enable-dhcp", "--apply"} {
+		if strings.Contains(builder, forbidden) {
+			t.Errorf("generic channel builder contains target-specific policy %q", forbidden)
 		}
 	}
 }
@@ -563,10 +568,22 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 			t.Errorf("HiLink networkd policy missing %q", required)
 		}
 	}
-	lanNetwork := read(t, filepath.Join(root, "packaging", "systemd-networkd", "70-gateway-vpn-lan.network.in"))
+	lanNetwork := read(t, filepath.Join(root, "packaging", "systemd-networkd", "05-gateway-vpn-lan.network.in"))
 	for _, required := range []string{"Name=__LAN_INTERFACE__", "Address=__LAN_ADDRESS__", "DHCP=no", "IPv6AcceptRA=no", "LinkLocalAddressing=no"} {
 		if !strings.Contains(lanNetwork, required) {
 			t.Errorf("persistent LAN networkd policy missing %q", required)
+		}
+	}
+	lanNetDev := read(t, filepath.Join(root, "packaging", "systemd-networkd", "05-gateway-vpn-lan.netdev"))
+	for _, required := range []string{"Name=gateway-vpn-lan", "Kind=bridge", "STP=yes"} {
+		if !strings.Contains(lanNetDev, required) {
+			t.Errorf("persistent LAN bridge netdev policy missing %q", required)
+		}
+	}
+	lanMember := read(t, filepath.Join(root, "packaging", "systemd-networkd", "06-gateway-vpn-lan-member.network.in"))
+	for _, required := range []string{"Name=__LAN_MEMBER__", "Bridge=gateway-vpn-lan", "DHCP=no", "IPv6AcceptRA=no", "RequiredForOnline=no"} {
+		if !strings.Contains(lanMember, required) {
+			t.Errorf("persistent LAN bridge member policy missing %q", required)
 		}
 	}
 }
@@ -580,7 +597,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("Gateway recovery missing %q", required)
 		}
@@ -595,7 +612,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", "70-gateway-vpn-lan.network", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
 		if !strings.Contains(uninstaller, required) {
 			t.Errorf("Gateway uninstall missing %q", required)
 		}
@@ -645,6 +662,25 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 	}
 	if strings.Contains(harness, "| grep -q") {
 		t.Fatal("firewall netns harness uses grep -q under pipefail and can fail on upstream SIGPIPE")
+	}
+}
+
+func TestLANBridgeSSHHarnessCoversTwoMembersAndUplinkIsolation(t *testing.T) {
+	root := repositoryRoot(t)
+	harness := read(t, filepath.Join(root, "test", "netns", "lan_bridge_ssh.sh"))
+	for _, required := range []string{
+		"type bridge stp_state 1 forward_delay 4",
+		"link set lanp1 master gateway-vpn-lan",
+		"link set lanp2 master gateway-vpn-lan",
+		"address add 192.168.200.1/24 dev gateway-vpn-lan",
+		`iifname "gateway-vpn-lan" tcp dport 22 accept`,
+		"/dev/tcp/192.168.200.1/22",
+		"/dev/tcp/192.168.8.2/22",
+		"TCP/22 was exposed through the non-LAN uplink",
+	} {
+		if !strings.Contains(harness, required) {
+			t.Errorf("LAN bridge SSH netns harness missing %q", required)
+		}
 	}
 }
 

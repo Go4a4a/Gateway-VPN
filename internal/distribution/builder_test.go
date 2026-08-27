@@ -91,6 +91,22 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	if !strings.HasPrefix(command, "bash --norc -ceu ") || strings.HasPrefix(command, "bash -ceu ") {
 		t.Fatal("Gateway command is vulnerable to SSH remote bashrc/nounset failures")
 	}
+	interactiveCommand, err := GatewayInstallCommand(manifest, GatewayInstallCommandOptions{
+		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
+		SignerKeySHA256: fingerprint, Interactive: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(interactiveCommand, "--interactive") || !strings.Contains(interactiveCommand, "--management-peer") || !strings.Contains(interactiveCommand, "SSH_CONNECTION") || strings.Contains(interactiveCommand, "--lan-interface") || strings.Contains(interactiveCommand, "--lan-address") || strings.Contains(interactiveCommand, "sudo -n") {
+		t.Fatalf("universal interactive command contains target-specific or non-interactive policy: %s", interactiveCommand)
+	}
+	if _, err := GatewayInstallCommand(manifest, GatewayInstallCommandOptions{
+		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
+		SignerKeySHA256: fingerprint, Interactive: true, LANInterface: "enp2s0",
+	}); err == nil {
+		t.Fatal("interactive Gateway command accepted a build-time hardware interface")
+	}
 	if _, err := GatewayInstallCommand(manifest, GatewayInstallCommandOptions{
 		Repository: "../bad/repo", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
 		SignerKeySHA256: fingerprint, LANInterface: "enp2s0", LANAddress: "192.168.200.1/24",

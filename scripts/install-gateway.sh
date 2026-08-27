@@ -13,10 +13,11 @@ RELEASE_DIR=""
 TRUSTED_UPDATE_KEY=""
 RELEASE_VERSION=""
 LAN_INTERFACE=""
+LAN_MEMBERS=""
 LAN_ADDRESS="192.168.200.1/24"
 
 usage() {
-  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply]"
+  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply]"
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
@@ -46,6 +47,7 @@ while (($#)); do
     --trusted-update-key) TRUSTED_UPDATE_KEY=${2:?}; shift 2 ;;
     --version) RELEASE_VERSION=${2:?}; shift 2 ;;
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
+    --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
     --dependency-preflight-only) DEPENDENCY_PREFLIGHT_ONLY=1; shift ;;
@@ -61,6 +63,17 @@ done
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
 [[ "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "Invalid LAN interface" >&2; exit 2; }
+LAN_MEMBER_NAMES=()
+LAN_MEMBER_WAS_UP_VALUES=()
+if [[ -n "$LAN_MEMBERS" ]]; then
+  [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ ]] || { echo "LAN members require gateway-vpn-lan and one to sixteen canonical interface names" >&2; exit 2; }
+  IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
+  declare -A SEEN_LAN_MEMBERS=()
+  for member in "${LAN_MEMBER_NAMES[@]}"; do
+    [[ "$member" != "$LAN_INTERFACE" && -z ${SEEN_LAN_MEMBERS[$member]:-} ]] || { echo "Duplicate or recursive LAN bridge member" >&2; exit 2; }
+    SEEN_LAN_MEMBERS[$member]=1
+  done
+fi
 [[ "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || { echo "Invalid LAN CIDR" >&2; exit 2; }
 LAN_IP=${LAN_ADDRESS%/*}
 LAN_PREFIX=${LAN_ADDRESS#*/}
@@ -115,6 +128,7 @@ if ! getent ahostsv4 github.com >/dev/null; then
         -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] &&
      grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
@@ -159,11 +173,20 @@ if ((APPLY && ORPHAN_MARKER_TEMP)); then
   echo "Removed harmless pre-transaction Gateway marker artifact"
 fi
 
-REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq-base)
+REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq-base openssh-server)
 MISSING_PACKAGES=()
+MISSING_EARLY_PACKAGES=()
+MISSING_LATE_PACKAGES=()
 for package in "${REQUIRED_PACKAGES[@]}"; do
   status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
-  [[ "$status" == "ii " ]] || MISSING_PACKAGES+=("$package")
+  if [[ "$status" != "ii " ]]; then
+    MISSING_PACKAGES+=("$package")
+    if [[ "$package" == openssh-server ]]; then
+      MISSING_LATE_PACKAGES+=("$package")
+    else
+      MISSING_EARLY_PACKAGES+=("$package")
+    fi
+  fi
 done
 
 APT_PLAN_FILE=""
@@ -221,11 +244,17 @@ if ((${#MISSING_PACKAGES[@]})); then
   echo "Refreshing configured APT indexes before installing exact missing Gateway packages"
   apt-get update
   simulate_dependency_install || { echo "APT Gateway dependency simulation failed after index refresh" >&2; exit 1; }
-  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install --yes --no-install-recommends --no-remove --no-upgrade "${MISSING_PACKAGES[@]}"
-  for package in "${MISSING_PACKAGES[@]}"; do
-    status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
-    [[ "$status" == "ii " ]] || { echo "Gateway dependency package was not fully installed: $package" >&2; exit 1; }
-  done
+  if ((${#MISSING_EARLY_PACKAGES[@]})); then
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install --yes --no-install-recommends --no-remove --no-upgrade "${MISSING_EARLY_PACKAGES[@]}"
+    for package in "${MISSING_EARLY_PACKAGES[@]}"; do
+      status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+      [[ "$status" == "ii " ]] || { echo "Gateway dependency package was not fully installed: $package" >&2; exit 1; }
+    done
+  fi
+  if ((${#MISSING_LATE_PACKAGES[@]})); then
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install --download-only --yes --no-install-recommends --no-remove --no-upgrade "${MISSING_LATE_PACKAGES[@]}"
+    echo "Downloaded late OpenSSH dependency without starting a network service before PATH_BLOCKED"
+  fi
   apt-get check >/dev/null
   echo "Managed Gateway dependency packages installed and verified"
 fi
@@ -237,8 +266,26 @@ done
 systemctl is-active --quiet systemd-networkd.service || { echo "Gateway VPN requires active systemd-networkd" >&2; exit 1; }
 [[ -c /dev/net/tun ]] || { echo "/dev/net/tun is unavailable" >&2; exit 1; }
 [[ -w /proc/sys/net/ipv4/ip_forward && -w /proc/sys/net/ipv6/conf/all/disable_ipv6 && -w /proc/sys/net/ipv6/conf/default/disable_ipv6 && -w /proc/sys/net/ipv6/conf/all/forwarding ]] || { echo "Required Gateway IPv4/IPv6 sysctls are unavailable" >&2; exit 1; }
-ip link show dev "$LAN_INTERFACE" >/dev/null || { echo "LAN interface not found: $LAN_INTERFACE" >&2; exit 1; }
-mapfile -t LAN_IPV4_ADDRESSES < <(ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}')
+if ((${#LAN_MEMBER_NAMES[@]})); then
+  for member in "${LAN_MEMBER_NAMES[@]}"; do
+    ip link show dev "$member" >/dev/null || { echo "LAN bridge member not found: $member" >&2; exit 1; }
+    mapfile -t MEMBER_IPV4_ADDRESSES < <(ip -o -4 address show dev "$member" scope global | awk '{print $4}')
+    ((${#MEMBER_IPV4_ADDRESSES[@]} == 0)) || { echo "LAN bridge member already has IPv4 configuration: $member" >&2; exit 1; }
+    ! ip -4 route show default dev "$member" | grep -q . || { echo "LAN bridge member owns a default route: $member" >&2; exit 1; }
+    member_was_up=0
+    ip -o link show dev "$member" | grep -Eq '<[^>]*UP[,>]' && member_was_up=1
+    LAN_MEMBER_WAS_UP_VALUES+=("$member_was_up")
+  done
+  if ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
+    ip -d -o link show dev "$LAN_INTERFACE" | grep -Eq ' bridge ' || { echo "Existing logical LAN interface is not a bridge" >&2; exit 1; }
+    mapfile -t LAN_IPV4_ADDRESSES < <(ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}')
+  else
+    LAN_IPV4_ADDRESSES=()
+  fi
+else
+  ip link show dev "$LAN_INTERFACE" >/dev/null || { echo "LAN interface not found: $LAN_INTERFACE" >&2; exit 1; }
+  mapfile -t LAN_IPV4_ADDRESSES < <(ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}')
+fi
 PRESERVE_LAN_ADDRESS=0
 if ((${#LAN_IPV4_ADDRESSES[@]} == 1)) && [[ "${LAN_IPV4_ADDRESSES[0]}" == "$LAN_ADDRESS" ]]; then
   PRESERVE_LAN_ADDRESS=1
@@ -247,7 +294,9 @@ elif ((${#LAN_IPV4_ADDRESSES[@]} != 0)); then
   exit 1
 fi
 LAN_WAS_UP=0
-ip -o link show dev "$LAN_INTERFACE" | grep -Eq '<[^>]*UP[,>]' && LAN_WAS_UP=1
+if ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
+  ip -o link show dev "$LAN_INTERFACE" | grep -Eq '<[^>]*UP[,>]' && LAN_WAS_UP=1
+fi
 if ip -4 route show default dev "$LAN_INTERFACE" | grep -q .; then
   echo "LAN interface must not own a default route" >&2
   exit 1
@@ -262,22 +311,34 @@ DEST="/opt/gateway-vpn/releases/v$RELEASE_VERSION"
 EXISTING=0
 if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery || -e /etc/gateway-vpn || -e /var/lib/gateway-vpn/install-report.json ]]; then
   [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" && -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] || { echo "Partial or conflicting Gateway VPN installation exists" >&2; exit 1; }
-  for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/70-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
+  for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/05-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ -f "$installed_asset" && ! -L "$installed_asset" ]] || { echo "Installed Gateway asset is missing or unsafe: $installed_asset" >&2; exit 1; }
   done
   [[ $(cat /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf) == $(cat "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf") ]] || { echo "Installed Gateway IPv4 forwarding policy differs from the signed release" >&2; exit 1; }
   [[ $(cat /etc/sysctl.d/90-gateway-vpn-ipv6.conf) == $(cat "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv6.conf") ]] || { echo "Installed Gateway IPv6 policy differs from the signed release" >&2; exit 1; }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] || { echo "Gateway IPv4 forwarding is not active" >&2; exit 1; }
   [[ -x /usr/libexec/gateway-vpn-install-recovery ]] || { echo "Installed Gateway recovery helper is not executable" >&2; exit 1; }
-  EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/70-gateway-vpn-lan.network.in")
-  [[ $(stat -c '%u:%g:%a' /etc/systemd/network/70-gateway-vpn-lan.network) == "0:0:644" ]] || { echo "Persistent Gateway LAN policy ownership or mode is invalid" >&2; exit 1; }
-  [[ $(cat /etc/systemd/network/70-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Existing persistent Gateway LAN policy differs from the requested interface/CIDR" >&2; exit 1; }
+  EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
+  [[ $(stat -c '%u:%g:%a' /etc/systemd/network/05-gateway-vpn-lan.network) == "0:0:644" ]] || { echo "Persistent Gateway LAN policy ownership or mode is invalid" >&2; exit 1; }
+  [[ $(cat /etc/systemd/network/05-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Existing persistent Gateway LAN policy differs from the requested interface/CIDR" >&2; exit 1; }
+  if ((${#LAN_MEMBER_NAMES[@]})); then
+    [[ -f /etc/systemd/network/05-gateway-vpn-lan.netdev && ! -L /etc/systemd/network/05-gateway-vpn-lan.netdev && $(cat /etc/systemd/network/05-gateway-vpn-lan.netdev) == $(cat "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.netdev") ]] || { echo "Existing Gateway LAN bridge definition differs" >&2; exit 1; }
+    mapfile -t INSTALLED_MEMBER_FILES < <(find /etc/systemd/network -maxdepth 1 -type f -name '06-gateway-vpn-lan-*.network' -print | sort)
+    ((${#INSTALLED_MEMBER_FILES[@]} == ${#LAN_MEMBER_NAMES[@]})) || { echo "Existing Gateway LAN bridge member count differs" >&2; exit 1; }
+    for member in "${LAN_MEMBER_NAMES[@]}"; do
+      member_file="/etc/systemd/network/06-gateway-vpn-lan-$member.network"
+      EXPECTED_MEMBER_NETWORK=$(sed "s|__LAN_MEMBER__|$member|g" "$ROOT_DIR/packaging/systemd-networkd/06-gateway-vpn-lan-member.network.in")
+      [[ -f "$member_file" && ! -L "$member_file" && $(stat -c '%u:%g:%a' "$member_file") == "0:0:644" && $(cat "$member_file") == "$EXPECTED_MEMBER_NETWORK" ]] || { echo "Existing Gateway LAN bridge member policy differs: $member" >&2; exit 1; }
+      ip -o link show dev "$member" | grep -Fq "master $LAN_INTERFACE" || { echo "Existing Gateway LAN bridge member is detached: $member" >&2; exit 1; }
+    done
+  fi
   [[ $(sha256sum /etc/gateway-vpn/update-signing.pub | awk '{print $1}') == $(sha256sum "$TRUSTED_UPDATE_KEY" | awk '{print $1}') ]] || { echo "Existing Gateway trusted update key differs from the requested key" >&2; exit 1; }
   "$DEST/bin/gateway-vpnctl" release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn/update-signing.pub --current-version 0.0.0 --current-schema 1
   "$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml
   grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml || { echo "Existing Gateway runtime LAN interface differs; explicit reconfiguration is required" >&2; exit 1; }
   nft --check --file /etc/gateway-vpn/nftables/boot.nft
   grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN interface differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN member set differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
   if ((ENABLE_DHCP)); then
@@ -311,7 +372,7 @@ else
   fi
   for conflict in \
     /opt/gateway-vpn/current /opt/gateway-vpn/recovery /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf \
-    /etc/systemd/network/70-gateway-vpn-lan.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
+    /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /var/lib/gateway-vpn-dnsmasq \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
@@ -319,6 +380,10 @@ else
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict" >&2; exit 1; }
   done
+  if find /etc/systemd/network -maxdepth 1 -name '06-gateway-vpn-lan-*.network' -print -quit | grep -q .; then
+    echo "Conflicting Gateway LAN bridge member policy exists" >&2
+    exit 1
+  fi
   if ip link show dev wg-mgmt >/dev/null 2>&1; then
     echo "Unmanaged wg-mgmt interface already exists" >&2
     exit 1
@@ -331,6 +396,7 @@ fi
 echo "Validated Ubuntu 24.04 release $RELEASE_VERSION"
 echo "Release destination: $DEST"
 echo "LAN: $LAN_INTERFACE / $LAN_ADDRESS"
+echo "LAN physical members: ${LAN_MEMBERS:-direct-interface mode}"
 echo "DHCP enable requested: $ENABLE_DHCP"
 if ((EXISTING)); then
   if systemctl is-enabled --quiet gateway-vpn-install-recovery.service; then
@@ -352,6 +418,8 @@ if ((EXISTING)); then
   fi
   nft list table inet gateway_vpn >/dev/null
   ss -H -ltn "sport = :8443" | awk '{print $4}' | grep -Fxq "$LAN_IP:8443"
+  systemctl is-active --quiet ssh.service
+  ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$'
   echo "Gateway VPN $RELEASE_VERSION is already installed with the requested immutable release and LAN policy."
   exit 0
 fi
@@ -366,13 +434,18 @@ OLD_IPV6_ALL_DISABLE=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)
 OLD_IPV6_DEFAULT_DISABLE=$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6)
 OLD_IPV6_ALL_FORWARDING=$(cat /proc/sys/net/ipv6/conf/all/forwarding)
 OLD_IPV4_FORWARD=$(cat /proc/sys/net/ipv4/ip_forward)
+SSH_WAS_ENABLED=0
+systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_WAS_ENABLED=1
+SSH_WAS_ACTIVE=0
+systemctl is-active --quiet ssh.service 2>/dev/null && SSH_WAS_ACTIVE=1
 install -d -m 0700 /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-privileged/install-transactions
 install -D -m 0700 "$ROOT_DIR/scripts/recover-gateway-install.sh" /usr/libexec/gateway-vpn-install-recovery
 install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-install-recovery.service" /etc/systemd/system/gateway-vpn-install-recovery.service
 systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" >"$MARKER_TMP"
+LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -411,12 +484,40 @@ chmod 0640 /etc/gateway-vpn/nftables/boot.nft
 nft --check --file /etc/gateway-vpn/nftables/boot.nft
 nft --file /etc/gateway-vpn/nftables/boot.nft
 nft list table inet gateway_vpn >/dev/null
-sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/70-gateway-vpn-lan.network.in" >/etc/systemd/network/70-gateway-vpn-lan.network
-chmod 0644 /etc/systemd/network/70-gateway-vpn-lan.network
+if ((${#MISSING_LATE_PACKAGES[@]})); then
+  simulate_dependency_install || { echo "Late Gateway dependency simulation failed after PATH_BLOCKED firewall activation" >&2; exit 1; }
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install --no-download --yes --no-install-recommends --no-remove --no-upgrade "${MISSING_LATE_PACKAGES[@]}"
+  for package in "${MISSING_LATE_PACKAGES[@]}"; do
+    status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
+    [[ "$status" == "ii " ]] || { echo "Late Gateway dependency package was not fully installed: $package" >&2; exit 1; }
+  done
+  apt-get check >/dev/null
+fi
+systemctl enable --now ssh.service
+systemctl is-active --quiet ssh.service || { echo "OpenSSH service did not become active" >&2; exit 1; }
+ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "OpenSSH must listen on IPv4 wildcard TCP/22 for all selected LAN ports" >&2; exit 1; }
+sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in" >/etc/systemd/network/05-gateway-vpn-lan.network
+chmod 0644 /etc/systemd/network/05-gateway-vpn-lan.network
+if ((${#LAN_MEMBER_NAMES[@]})); then
+  install -D -m 0644 "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.netdev" /etc/systemd/network/05-gateway-vpn-lan.netdev
+  for member in "${LAN_MEMBER_NAMES[@]}"; do
+    sed "s|__LAN_MEMBER__|$member|g" "$ROOT_DIR/packaging/systemd-networkd/06-gateway-vpn-lan-member.network.in" >"/etc/systemd/network/06-gateway-vpn-lan-$member.network"
+    chmod 0644 "/etc/systemd/network/06-gateway-vpn-lan-$member.network"
+  done
+fi
 install -D -m 0644 "$ROOT_DIR/packaging/systemd-networkd/80-gateway-vpn-hilink.network" /etc/systemd/network/80-gateway-vpn-hilink.network
 install -D -m 0644 "$ROOT_DIR/packaging/journald/gateway-vpn.conf" /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 install -D -m 0644 "$TRUSTED_UPDATE_KEY" /etc/gateway-vpn/update-signing.pub
 networkctl reload
+if ((${#LAN_MEMBER_NAMES[@]})); then
+  if ! ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
+    ip link add name "$LAN_INTERFACE" type bridge stp_state 1 forward_delay 4
+  fi
+  for member in "${LAN_MEMBER_NAMES[@]}"; do
+    ip link set dev "$member" up
+    ip link set dev "$member" master "$LAN_INTERFACE"
+  done
+fi
 ip link set dev "$LAN_INTERFACE" up
 ip -4 address replace "$LAN_ADDRESS" dev "$LAN_INTERFACE"
 if [[ ! -e /var/lib/gateway-vpn/secrets/mihomo-api-secret ]]; then
@@ -511,10 +612,18 @@ if ((ENABLE_DHCP)); then
   systemctl is-active --quiet gateway-vpn-dnsmasq.service || { echo "Installed Gateway DHCP service is not active" >&2; exit 1; }
   [[ -d /var/lib/gateway-vpn-dnsmasq && ! -L /var/lib/gateway-vpn-dnsmasq && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq) == "gateway-vpn-dns:gateway-vpn:700" ]] || { echo "Installed Gateway dnsmasq state root ownership or mode is invalid" >&2; exit 1; }
 fi
-EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/70-gateway-vpn-lan.network.in")
-[[ $(cat /etc/systemd/network/70-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }
+EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
+[[ $(cat /etc/systemd/network/05-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }
+if ((${#LAN_MEMBER_NAMES[@]})); then
+  ip -d -o link show dev "$LAN_INTERFACE" | grep -Eq ' bridge ' || { echo "Installed Gateway logical LAN bridge is unavailable" >&2; exit 1; }
+  for member in "${LAN_MEMBER_NAMES[@]}"; do
+    ip -o link show dev "$member" | grep -Fq "master $LAN_INTERFACE" || { echo "Installed Gateway LAN member is not attached: $member" >&2; exit 1; }
+  done
+fi
+systemctl is-active --quiet ssh.service || { echo "Installed Gateway SSH management service is not active" >&2; exit 1; }
+ss -H -ltn "sport = :22" | grep -q . || { echo "Installed Gateway SSH management service is not listening" >&2; exit 1; }
 [[ -d /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || false
-printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" >/var/lib/gateway-vpn/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": true,\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" >/var/lib/gateway-vpn/install-report.json
 chmod 0600 /var/lib/gateway-vpn/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)

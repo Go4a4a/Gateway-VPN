@@ -81,6 +81,7 @@ table inet gateway_vpn {
         iifname "enp2s0" udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname "enp2s0" tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
         iifname "enp2s0" tcp dport 8443 accept comment "gateway-vpn LAN API"
+        iifname "enp2s0" tcp dport 22 accept comment "gateway-vpn LAN SSH"
         iifname "wg-mgmt" tcp dport 8443 accept comment "gateway-vpn WireGuard API"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }

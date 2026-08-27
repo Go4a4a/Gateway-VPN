@@ -2,7 +2,7 @@
   "format_version": 1,
   "generated_by": "go run ./test/fixtures/generate",
   "sha256": {
-    "boot-blocked.nft": "d75ac86412cc4aa6509798b6d79447d6c0ea8c6ce6248822c95a0ff71ae97b0c",
+    "boot-blocked.nft": "5fbd488a03f2dae7081342420cb2ba8f04bd4f3307dde7f2dfecf2b1845659fc",
     "path-active-modem-a.nft": "09dd196f0ed369d3c76fed3be1fea0c4aabe2332e92b8249cbc03d488e8c2337",
     "path-active-modem-b.nft": "f11e6b00771d6facb054d71c92e9a70a640c3631357c2664447a0a958e85882f",
     "two-modems-policy-routing.nft": "9123a0d3de9b418de4ab0094ee5dc76d879a233fed216e2c6e2beff1f112a421"

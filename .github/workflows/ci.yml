@@ -85,6 +85,8 @@ jobs:
         run: go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns
+      - name: Prove multi-port LAN bridge SSH and uplink isolation
+        run: sudo ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04
         shell: bash
         run: |

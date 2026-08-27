@@ -42,7 +42,7 @@ func DefaultUbuntuPaths() UbuntuPaths {
 		ConfigFile:     "/etc/gateway-vpn/config.yaml",
 		DNSMasqFile:    "/etc/gateway-vpn/dnsmasq.conf",
 		BootNFTFile:    "/etc/gateway-vpn/nftables/boot.nft",
-		LANNetworkFile: "/etc/systemd/network/70-gateway-vpn-lan.network",
+		LANNetworkFile: "/etc/systemd/network/05-gateway-vpn-lan.network",
 		IP:             "/usr/sbin/ip", NFT: "/usr/sbin/nft", DNSMasq: "/usr/sbin/dnsmasq",
 		Systemctl: "/usr/bin/systemctl", Networkctl: "/usr/bin/networkctl", ConfigGID: -1,
 	}

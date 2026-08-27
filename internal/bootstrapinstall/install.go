@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"gateway-vpn/internal/distribution"
 	"gateway-vpn/internal/netutil"
@@ -70,6 +71,7 @@ type Installer struct {
 
 type GatewayOptions struct {
 	LANInterface            string
+	LANMembers              []string
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
@@ -104,7 +106,7 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	if prepared.Artifact.Role != distribution.RoleGateway || prepared.VerifiedRelease.Release.GatewayVersion == "" || prepared.Manifest.ReleaseVersion != prepared.VerifiedRelease.Release.GatewayVersion || prepared.InstallerPath != filepath.Join(prepared.ReleaseRoot, "scripts", "install-gateway.sh") {
 		return InstallResult{}, errors.New("prepared artifact is not an independently verified Gateway release")
 	}
-	if !interfacePattern.MatchString(options.LANInterface) || !validIPv4CIDR(options.LANAddress) {
+	if !interfacePattern.MatchString(options.LANInterface) || !validIPv4CIDR(options.LANAddress) || !validLANMembers(options.LANInterface, options.LANMembers) {
 		return InstallResult{}, errors.New("explicit valid Gateway LAN interface and CIDR are required")
 	}
 	if options.DependencyPreflightOnly && (options.Apply || !options.InstallDependencies) {
@@ -117,6 +119,9 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		"--version", prepared.VerifiedRelease.Release.GatewayVersion,
 		"--lan-interface", options.LANInterface,
 		"--lan-address", options.LANAddress,
+	}
+	if len(options.LANMembers) > 0 {
+		arguments = append(arguments, "--lan-members", strings.Join(options.LANMembers, ","))
 	}
 	if options.EnableDHCP {
 		arguments = append(arguments, "--enable-dhcp")
@@ -235,6 +240,23 @@ func validIPv4CIDR(value string) bool {
 		return false
 	}
 	return netutil.ValidGatewayLAN(value)
+}
+
+func validLANMembers(lanInterface string, members []string) bool {
+	if len(members) == 0 {
+		return true
+	}
+	if lanInterface != "gateway-vpn-lan" || len(members) > 16 {
+		return false
+	}
+	seen := make(map[string]bool, len(members))
+	for _, member := range members {
+		if !interfacePattern.MatchString(member) || member == lanInterface || seen[member] {
+			return false
+		}
+		seen[member] = true
+	}
+	return true
 }
 
 func validWireGuardPublicKey(value string) bool {

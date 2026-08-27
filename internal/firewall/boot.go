@@ -123,6 +123,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         iifname %s udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
         iifname %s tcp dport %d accept comment "gateway-vpn LAN API"
+        iifname %s tcp dport 22 accept comment "gateway-vpn LAN SSH"
         iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
@@ -164,6 +165,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		config.APIPort,
+		nftString(config.LANInterface),
 		nftString(config.WireGuardInterface),
 		config.APIPort,
 		nftString(config.LANInterface),

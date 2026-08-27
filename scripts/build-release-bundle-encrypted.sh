@@ -10,23 +10,15 @@ MIHOMO_BINARY=${4:-}
 ENCRYPTED_KEY_FILE=${5:-}
 GITHUB_REPOSITORY=${6:-}
 RELEASE_TAG=${7:-}
-LAN_INTERFACE=${8:-}
-LAN_ADDRESS=${9:-}
 [[ -n "$VERSION" && -n "$CHANNEL" && -n "$MIHOMO_VERSION" && -n "$MIHOMO_BINARY" && -n "$ENCRYPTED_KEY_FILE" &&
-  -n "$GITHUB_REPOSITORY" && -n "$RELEASE_TAG" && -n "$LAN_INTERFACE" && -n "$LAN_ADDRESS" ]] || {
-  echo "Usage: build-release-bundle-encrypted.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY KEY.gvkey OWNER/REPO vVERSION LAN_INTERFACE LAN_CIDR [--enable-dhcp] [--passphrase-file /secure/tmp/passphrase]" >&2
+  -n "$GITHUB_REPOSITORY" && -n "$RELEASE_TAG" ]] || {
+  echo "Usage: build-release-bundle-encrypted.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY KEY.gvkey OWNER/REPO vVERSION [--passphrase-file /secure/tmp/passphrase]" >&2
   exit 2
 }
-shift 9
-ENABLE_DHCP=0
+shift 7
 PASSPHRASE_FILE=
 while (($# > 0)); do
   case "$1" in
-    --enable-dhcp)
-      ((ENABLE_DHCP == 0)) || { echo "Duplicate --enable-dhcp" >&2; exit 2; }
-      ENABLE_DHCP=1
-      shift
-      ;;
     --passphrase-file)
       [[ -z "$PASSPHRASE_FILE" && -n ${2:-} ]] || { echo "Invalid --passphrase-file" >&2; exit 2; }
       PASSPHRASE_FILE=$2
@@ -87,10 +79,7 @@ install -d -m 0700 "$UNLOCKED"
 BUNDLE_ARGS=(
   "$VERSION" "$CHANNEL" "$MIHOMO_VERSION" "$MIHOMO_BINARY"
   "$UNLOCKED/release-signing.pem" "$UNLOCKED/update-signing.pub"
-  "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$LAN_INTERFACE" "$LAN_ADDRESS"
+  "$GITHUB_REPOSITORY" "$RELEASE_TAG"
 )
-if ((ENABLE_DHCP)); then
-  BUNDLE_ARGS+=(--enable-dhcp)
-fi
 "$ROOT/scripts/build-release-bundle.sh" "${BUNDLE_ARGS[@]}"
 echo "Encrypted key file remained at rest; temporary plaintext signing identity was removed from tmpfs"

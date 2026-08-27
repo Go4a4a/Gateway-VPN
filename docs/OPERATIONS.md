@@ -28,8 +28,7 @@ Release закрепляет конкретный Mihomo binary и его SHA-25
 ./scripts/build-release-bundle-encrypted.sh \
   0.1.0-rc.1 candidate v1.19.30 /opt/mihomo \
   /publisher-primary/gateway-vpn-production.gvkey \
-  OWNER/REPOSITORY v0.1.0-rc.1 \
-  enp2s0 192.168.200.1/24 --enable-dhcp
+  OWNER/REPOSITORY v0.1.0-rc.1
 ```
 
 Public key автоматически извлекается из `.gvkey` во временное хранилище и входит в подписанный release как `update-signing.pub`; для установки/обновления passphrase и private key не требуются. Low-level `release-keyfile-create`, `release-keyfile-verify`, `release-keyfile-backup` и `release-keyfile-unlock` принимают passphrase только из абсолютного private `0600` файла в закрытом каталоге или bounded stdin (`--passphrase-file -`). Постоянный plaintext PEM workflow ниже сохраняется только как низкоуровневый compatibility/test contract и требует зашифрованной файловой системы:
@@ -66,8 +65,7 @@ Builder требует clean committed Git tree и создаёт:
 ./scripts/build-release-bundle.sh \
   0.1.0 test vX.Y.Z /secure/build-input/mihomo \
   /secure/primary/release-signing.pem /secure/primary/update-signing.pub \
-  OWNER/REPOSITORY v0.1.0 \
-  enp2s0 192.168.200.1/24 --enable-dhcp
+  OWNER/REPOSITORY v0.1.0
 ```
 
 Fetcher принимает только официальный compatible `mihomo-linux-amd64-v1-vX.Y.Z.gz` с GitHub MetaCubeX, ограничивает download/decompression, сначала проверяет опубликованный archive SHA-256 и только затем запускает bounded version probe. Bundle builder вычисляет и закрепляет SHA-256 распакованного binary, а build/channel timestamp канонически берётся из commit time. Поэтому повторная сборка exact commit с теми же Go/Mihomo inputs не зависит от времени запуска.
@@ -83,7 +81,6 @@ Fetcher принимает только официальный compatible `mihom
   0.1.0 stable \
   /secure/primary/release-signing.pem /secure/primary/update-signing.pub \
   OWNER/REPOSITORY v0.1.0 \
-  enp2s0 192.168.200.1/24 \
   bootstrap=dist/gateway-vpn-bootstrap-0.1.0-linux-amd64 \
   deploy=dist/gateway-vpn-deploy-0.1.0-linux-amd64 \
   gateway=dist/gateway-vpn-gateway-0.1.0-linux-amd64.tar.gz \
@@ -105,7 +102,29 @@ Builder тем же trusted key создаёт и тут же перепрове
 
 Publisher сверяет clean HEAD, local/remote exact tag, отсутствие существующего release и полный фиксированный список assets, затем вызывает только `gh release create --draft --verify-tag`. Он никогда не публикует draft автоматически. До ручной публикации в GitHub repository settings обязательно включается [**Enable release immutability**](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes): настройка действует только для будущих публикаций. Сначала к draft прикрепляются все assets, затем draft просматривается и публикуется вручную; после публикации tag и assets должны отображаться как immutable.
 
-Содержимое `install-gateway-0.1.0.command.txt` является одной точной командой для выбранных при build LAN interface/CIDR. Она скачивает bootstrap только по HTTPS (`curl`, fallback на GNU `wget`), сверяет закреплённый SHA-256, затем запускает его напрямую из root-shell либо через `sudo`. Bootstrap отдельно закрепляет channel/version/commit/raw-manifest hash/signer fingerprint, допускает GitHub signed query string только на проверенном asset redirect и до installer проверяет archive hash/size, Ed25519 release signature и точный полный tree. Если нужен другой LAN interface, команда генерируется заново из того же уже проверенного channel manifest:
+Содержимое `install-gateway-0.1.0.command.txt` является одной универсальной точной командой и не содержит имени интерфейса, CIDR или DHCP-политики конкретного компьютера. Она скачивает bootstrap только по HTTPS (`curl`, fallback на GNU `wget`), сверяет закреплённый SHA-256, затем запускает его напрямую из root-shell либо через `sudo`. Bootstrap отдельно закрепляет channel/version/commit/raw-manifest hash/signer fingerprint, допускает GitHub signed query string только на проверенном asset redirect и до installer проверяет archive hash/size, Ed25519 release signature и точный полный tree.
+
+После проверки bootstrap интерактивный мастер на самом Gateway:
+
+1. требует настоящий terminal и выполняет только read-only `iproute2` inventory;
+2. показывает все найденные интерфейсы с номером, типом, состоянием carrier/link, IPv4, udev Huawei/USB risk и default-route status;
+3. предлагает включить все безопасные Ethernet-порты либо позволяет ввести несколько номеров через запятую; пользователь явно подтверждает набор;
+4. объединяет выбранные порты в owned bridge `gateway-vpn-lan` с одним transit address, поэтому WebUI и SSH доступны через любой из этих портов, а Keenetic WAN можно подключить к любому из них;
+5. запрещает loopback, non-Ethernet, Huawei USB/HiLink, интерфейс с уже настроенным IPv4, интерфейс текущего default route и обнаруженный интерфейс активной SSH management-сессии;
+6. спрашивает, нужен ли DHCP для WAN Keenetic/прямых management clients и можно ли установить отсутствующие managed dependencies;
+7. предлагает первый свободный `/24` из безопасного набора либо принимает другой private host CIDR `/16../30`; при DHCP разрешён только `/24`;
+8. проверяет CIDR против всех IPv4 addresses/non-default routes хоста и фиксированной WireGuard management subnet;
+9. запускает signed read-only preflight, показывает итоговую сводку и применяет изменения только после точного ввода `INSTALL`.
+
+OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. Installer требует IPv4 wildcard listener TCP/22, а nftables принимает новые SSH connections только с `gateway-vpn-lan`. На HiLink/uplink TCP/22 не открывается. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
+
+Owned LAN networkd policies используют точные ранние имена `05-gateway-vpn-lan.*` и `06-gateway-vpn-lan-<port>.network`, чтобы выбранные interfaces не были перехвачены более поздними generated `10-netplan-*` matches после reboot. Installer не удаляет и не переписывает netplan; только явно выбранные dedicated ports получают более точную owned policy.
+
+Чтобы включить **все** физические Ethernet-порты, первый interactive install следует запускать с локальной консоли. Порт текущей SSH-сессии намеренно исключается: удалённое преобразование несущего session link в bridge с другим IP может оборвать installer до rollback. При локальном запуске все свободные ports предлагаются по умолчанию. STP включён, но не следует одновременно подключать несколько bridge ports к одному switch без осознанной топологии.
+
+EOF, отмена, отсутствие TTY, конфликт подсети или неуспешный preflight завершаются без persistent Gateway VPN changes. Если для preflight не хватает managed packages, до подтверждения проверяется безопасный APT plan; после `INSTALL` ставятся только подтверждённые отсутствующие packages, затем полный host preflight повторяется до создания Gateway-owned state.
+
+Такая же universal command может быть сгенерирована вручную из уже проверенного channel manifest:
 
 ```bash
 ./dist/gateway-vpn-gateway-0.1.0-linux-amd64/bin/gateway-vpnctl \
@@ -115,12 +134,14 @@ Publisher сверяет clean HEAD, local/remote exact tag, отсутстви�
   --public-key dist/update-signing.pub \
   --channel stable --release-version 0.1.0 --source-commit <exact-commit> \
   --github-repository OWNER/REPOSITORY --release-tag v0.1.0 \
-  --lan-interface enp2s0 --lan-address 192.168.200.1/24 --apply
+  --interactive
 ```
+
+Для CI, заранее подготовленного provisioning и `gateway-vpn-deploy` сохраняется неинтерактивный automation mode: там `--lan-interface`, `--lan-address`, dependency/DHCP policy и `--apply` задаются явно. Он намеренно не угадывает hardware inputs.
 
 Факт наличия generated command ещё не является Linux installation PASS: первый production release должен пройти реальную загрузку GitHub redirect, dry-run/apply, forced recovery и reboot на Ubuntu 24.04.
 
-Gateway command может включать `--install-dependencies`. До mutation installer проверяет signed release, Ubuntu 24.04/x86_64, NTP/DNS/RAM/disk и целостность APT/dpkg, затем симулирует только отсутствующие `iproute2`, `nftables`, `wireguard-tools`, `kmod`, `procps`, `dnsmasq-base` с `--no-install-recommends --no-remove --no-upgrade`. Используется именно binary-only `dnsmasq-base`, чтобы installer не запускал конкурирующий общий DNS daemon; при `--enable-dhcp` существующий wildcard либо LAN listener TCP/UDP 53 блокирует apply до mutation. Managed dnsmasq запускается сразу как `gateway-vpn-dns:gateway-vpn`, а lease хранит в отдельном systemd-owned `/var/lib/gateway-vpn-dnsmasq` mode `0700`; общий `/var/lib/gateway-vpn` он не может перечислять или изменять. После `apt-get update` simulation повторяется; OS packages при application rollback/uninstall не удаляются.
+Gateway command может включать `--install-dependencies`. До mutation installer проверяет signed release, Ubuntu 24.04/x86_64, NTP/DNS/RAM/disk и целостность APT/dpkg, затем симулирует только отсутствующие `iproute2`, `nftables`, `wireguard-tools`, `kmod`, `procps`, `dnsmasq-base`, `openssh-server` с `--no-install-recommends --no-remove --no-upgrade`. Используется именно binary-only `dnsmasq-base`, чтобы installer не запускал конкурирующий общий DNS daemon; при `--enable-dhcp` существующий wildcard либо LAN listener TCP/UDP 53 блокирует apply до mutation. Managed dnsmasq запускается сразу как `gateway-vpn-dns:gateway-vpn`, а lease хранит в отдельном systemd-owned `/var/lib/gateway-vpn-dnsmasq` mode `0700`; общий `/var/lib/gateway-vpn` он не может перечислять или изменять. После `apt-get update` simulation повторяется; OS packages при application rollback/uninstall не удаляются.
 
 После появления required commands выполняется полный read-only Gateway preflight: TUN/kernel sysctls/systemd-networkd, выбранный LAN interface, отсутствие default route на нём, UFW/firewalld и конфликтующих owned paths. Transit CIDR обязан быть usable RFC1918 host address с `/16../30`, не network/broadcast, не пересекать `10.80.0.0/24`, другие host interface networks или non-default routes; автоматический DHCP дополнительно требует `/24`. Проверка route/address выполняется `gateway-vpnctl gateway-install-preflight` по bounded JSON `ip` output.
 
@@ -421,7 +442,7 @@ Traffic spike выполняется known-size transfer до/после Mihomo 
 
 1. control plane проверяет конфликт нового CIDR с WireGuard и сохранёнными modem networks;
 2. root broker повторно сверяет CIDR со всеми фактически назначенными IPv4 networks host;
-3. старые config, dnsmasq, persistent `70-gateway-vpn-lan.network` и runtime firewall сохраняются в root-owned `/var/lib/gateway-vpn-privileged/network-transactions/<apply-id>/`;
+3. старые config, dnsmasq, persistent `05-gateway-vpn-lan.network` и runtime firewall сохраняются в root-owned `/var/lib/gateway-vpn-privileged/network-transactions/<apply-id>/`;
 4. `gateway-vpn-network-rollback@<apply-id>.timer` вооружается на 60 секунд до изменения адреса;
 5. старый адрес остаётся secondary, а API возвращает одноразовую ссылку на `new_url`; token находится только во fragment `#network-confirm=...` и не отправляется HTTP-серверу при открытии страницы;
 6. на новом адресе нужно снова войти и нажать **Подтвердить сетевые настройки**; подтверждение через старый destination отклоняется. Альтернатива — API через `wg-mgmt`;

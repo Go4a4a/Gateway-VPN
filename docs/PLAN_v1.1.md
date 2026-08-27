@@ -254,7 +254,7 @@ Management plane имеет отдельное исключение в firewall 
 | Роль | Пример | Определение |
 |---|---|---|
 | `uplink_hilink_<id>` | `enx001e...` | stable modem ID + USB parent + DHCP gateway |
-| `lan_keenetic` | `enp2s0` | явная настройка установщика |
+| `lan_keenetic` | `gateway-vpn-lan` | owned Linux bridge; один или несколько явно подтверждённых физических Ethernet members |
 | `tun_mihomo` | `gateway-vpn-tun` | фиксированное имя в Mihomo |
 | `wg_management` | `wg-mgmt` | фиксированное имя |
 
@@ -286,6 +286,8 @@ Default ranking путей лексикографический: сначала 
 ### 4.4 Keenetic
 
 - WAN Keenetic подключён к `lan_keenetic` Gateway;
+- при нескольких Ethernet-портах все выбранные dedicated LAN/management ports входят в один bridge `gateway-vpn-lan` с единственным transit IPv4; поэтому Keenetic WAN, локальный WebUI и SSH доступны через любой выбранный порт без дублирования одной подсети на независимых L3 interfaces;
+- Huawei/USB-HiLink, current default-route, active SSH management route, non-Ethernet и интерфейсы с существующим IPv4 не включаются в bridge; STP включён для защиты от случайной L2-петли, но два LAN-порта не следует намеренно соединять с одним внешним switch без необходимости;
 - WAN mode: DHCP client;
 - WAN IP желательно закрепить по MAC;
 - gateway и DNS: `192.168.200.1`;
@@ -726,6 +728,7 @@ Installer применяет профиль до поднятия LAN services �
 | LAN | DHCP/DNS Gateway | только `lan_keenetic` |
 | LAN | Mihomo TUN | только подтверждённый transparent path |
 | LAN/WG | HTTPS API | только management CIDR/interface |
+| LAN | SSH Gateway | TCP/22 на owned `gateway-vpn-lan`; аутентификация штатного OpenSSH |
 | WG | SSH Gateway | опционально и только admin peers |
 | Gateway | HiLink Web/API | только management address конкретного modem/interface |
 | Mihomo | proxy endpoints | modem-specific interface + fwmark + route table |
@@ -1809,7 +1812,15 @@ gateway-vpn/
 - устанавливает boot-time blocked ruleset;
 - генерирует secrets и показывает bootstrap password один раз;
 - проверяет подписанные artifacts;
-- до включения DHCP требует явного выбора LAN interface;
+- release-команда не содержит имя интерфейса или подсеть конкретного компьютера;
+- в интерактивном режиме на целевом Gateway показывает все обнаруженные интерфейсы с номером, типом, link/carrier state, IPv4-адресами и признаком default route, после чего требует явного подтверждения одного или нескольких физических LAN/management Ethernet ports;
+- выбранные порты объединяются в owned bridge `gateway-vpn-lan`; один адрес, DHCP/DNS, WebUI, SSH и routed LAN policy назначаются bridge, а не повторяются на каждом порту;
+- loopback, non-Ethernet, Huawei USB/HiLink по udev metadata, интерфейс с уже настроенным IPv4 (management/uplink/modem risk), интерфейс текущего default route и доступный из `SSH_CONNECTION` интерфейс активной management-сессии не могут быть выбраны; мастер предлагает все оставшиеся safe Ethernet ports, но пользователь подтверждает или меняет набор; повторная установка использует verified update/idempotent automation path, а не clean-host wizard;
+- `openssh-server` проверяется как managed dependency; если его нет, package загружается до firewall mutation, но устанавливается/запускается только после durable marker и `PATH_BLOCKED`; installer проверяет IPv4 wildcard TCP/22, а rollback/uninstall восстанавливает прежние enabled/active states (установленный OS package, как и прочие dependencies, не удаляется);
+- предлагает первый свободный private transit CIDR, разрешает ввести другой `/16../30` и до установки проверяет его против всех host addresses/routes, HiLink management networks и `10.80.0.0/24`;
+- отдельно спрашивает про DHCP и установку отсутствующих зависимостей; DHCP требует `/24`;
+- после read-only preflight показывает итоговую сводку и требует отдельного точного подтверждения до первой разрешённой host mutation;
+- при отсутствии настоящего TTY интерактивный режим завершается fail-closed; для CI/deploy сохраняется отдельный automation mode с обязательными явными `LAN interface/CIDR` и policy flags;
 - сохраняет pre-install network/firewall snapshot;
 - умеет dry-run;
 - при ошибке выполняет rollback.
@@ -1869,7 +1880,7 @@ Down-migration новой БД старым binary не используется
 - на Gateway — явно выбранный Ethernet `lan_keenetic`, непересекающаяся transit subnet, USB/networkd support и отсутствие опасного default-route takeover;
 - на VPS — публичный IPv4 либо явно заданный достижимый endpoint, свободный UDP `51821`, IP forwarding и возможность установить owned firewall rules;
 - SSH/sudo prerequisites orchestration-режима, доступность immutable GitHub artifacts и валидность всех signatures/hashes;
-- все обязательные пользовательские входы: LAN interface/CIDR, VPS endpoint, SSH destinations и политика включения DHCP. Неоднозначный интерфейс не выбирается автоматически.
+- все обязательные пользовательские входы: LAN interface/CIDR, VPS endpoint, SSH destinations и политика включения DHCP. Обычная Gateway release-команда собирает LAN/DHCP/dependency choices интерактивно уже на целевом компьютере и потому остаётся одинаковой для всех поддерживаемых Gateway; SSH-orchestrated automation принимает те же значения явно. Неоднозначный интерфейс не выбирается автоматически.
 
 Если любой обязательный preflight не пройден, обе машины остаются неизменёнными. После начала установки каждая роль использует собственный pre-install snapshot и rollback; ошибка второй роли откатывает только изменения текущей transaction и оставляет первую роль в безопасном диагностируемом состоянии. Повторный запуск идемпотентен и умеет продолжить либо согласованно откатить незавершённую deployment transaction.
 

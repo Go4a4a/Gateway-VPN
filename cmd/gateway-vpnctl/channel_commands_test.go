@@ -76,6 +76,16 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 	if strings.Index(command, "test ") < 0 || strings.Index(command, "sudo ") < 0 || strings.Index(command, "test ") > strings.Index(command, "sudo ") {
 		t.Fatal("generated command elevates before verifying the bootstrap hash")
 	}
+	interactiveCommand, code := captureStdout(t, func() int {
+		return runChannelInstallCommand([]string{
+			"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
+			"--channel", "stable", "--release-version", version, "--source-commit", commit,
+			"--github-repository", "owner/gateway-vpn", "--release-tag", "v1.2.0", "--interactive",
+		})
+	})
+	if code != 0 || !strings.Contains(interactiveCommand, "--interactive") || strings.Contains(interactiveCommand, "--lan-interface") || strings.Contains(interactiveCommand, "--lan-address") || strings.Contains(interactiveCommand, "--apply") {
+		t.Fatalf("universal command code=%d output=%q", code, interactiveCommand)
+	}
 	gatewayKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	adminKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
 	vpsCommand, code := captureStdout(t, func() int {

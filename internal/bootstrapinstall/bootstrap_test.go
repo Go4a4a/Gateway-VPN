@@ -215,6 +215,17 @@ func TestGatewayInstallerRunsReadOnlyPreflightBeforeApplyWithTypedArguments(t *t
 	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", Apply: true}); err == nil || len(runner.requests) != 1 {
 		t.Fatalf("failed preflight did not stop apply: requests=%d err=%v", len(runner.requests), err)
 	}
+	runner = &recordingRunner{}
+	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
+		LANInterface: "gateway-vpn-lan", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24",
+	}); err != nil || len(runner.requests) != 1 || !contains(runner.requests[0].Arguments, "--lan-members") || !contains(runner.requests[0].Arguments, "enp2s0,enp3s0") {
+		t.Fatalf("multi-port Gateway arguments = %+v, %v", runner.requests, err)
+	}
+	if _, err := (Installer{Runner: &recordingRunner{}, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
+		LANInterface: "enp2s0", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24",
+	}); err == nil {
+		t.Fatal("LAN bridge members were accepted with a physical LAN interface")
+	}
 	if _, err := (Installer{Runner: &recordingRunner{}, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "../../bad", LANAddress: "192.168.200.1/24"}); err == nil {
 		t.Fatal("unsafe LAN interface was accepted")
 	}

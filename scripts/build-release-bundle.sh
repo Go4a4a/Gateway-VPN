@@ -10,22 +10,15 @@ SIGNING_PRIVATE_KEY=${5:-}
 SIGNING_PUBLIC_KEY=${6:-}
 GITHUB_REPOSITORY=${7:-}
 RELEASE_TAG=${8:-}
-LAN_INTERFACE=${9:-}
-LAN_ADDRESS=${10:-}
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ &&
   "$CHANNEL" =~ ^[a-z][a-z0-9-]{0,31}$ &&
   "$MIHOMO_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ &&
   "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ &&
-  "$RELEASE_TAG" == "v$VERSION" && -n "$LAN_INTERFACE" && -n "$LAN_ADDRESS" ]] || {
-  echo "Usage: build-release-bundle.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY PRIVATE_KEY PUBLIC_KEY OWNER/REPO vVERSION LAN_INTERFACE LAN_CIDR [--enable-dhcp]" >&2
+  "$RELEASE_TAG" == "v$VERSION" ]] || {
+  echo "Usage: build-release-bundle.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY PRIVATE_KEY PUBLIC_KEY OWNER/REPO vVERSION" >&2
   exit 2
 }
-shift 10
-ENABLE_DHCP=0
-if [[ ${1:-} == --enable-dhcp ]]; then
-  ENABLE_DHCP=1
-  shift
-fi
+shift 8
 (($# == 0)) || { echo "Unexpected release bundle argument" >&2; exit 2; }
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -60,11 +53,8 @@ MIHOMO_SHA256=$(sha256sum --binary "$MIHOMO_BINARY" | awk '{print $1}')
 
 CHANNEL_ARGS=(
   "$VERSION" "$CHANNEL" "$SIGNING_PRIVATE_KEY" "$SIGNING_PUBLIC_KEY"
-  "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$LAN_INTERFACE" "$LAN_ADDRESS"
+  "$GITHUB_REPOSITORY" "$RELEASE_TAG"
 )
-if ((ENABLE_DHCP)); then
-  CHANNEL_ARGS+=(--enable-dhcp)
-fi
 CHANNEL_ARGS+=(
   "bootstrap=$ROOT/dist/gateway-vpn-bootstrap-$VERSION-linux-amd64"
   "deploy=$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64"

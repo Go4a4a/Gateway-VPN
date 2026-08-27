@@ -8,18 +8,11 @@ SIGNING_PRIVATE_KEY=${3:-}
 SIGNING_PUBLIC_KEY=${4:-}
 GITHUB_REPOSITORY=${5:-}
 RELEASE_TAG=${6:-}
-LAN_INTERFACE=${7:-}
-LAN_ADDRESS=${8:-}
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$CHANNEL" =~ ^[a-z][a-z0-9-]{0,31}$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$ && -n "$LAN_INTERFACE" && -n "$LAN_ADDRESS" ]] || {
-  echo "Usage: build-channel.sh VERSION CHANNEL PRIVATE_KEY PUBLIC_KEY OWNER/REPO RELEASE_TAG LAN_INTERFACE LAN_CIDR [--enable-dhcp] ROLE=ARTIFACT [...]" >&2
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$CHANNEL" =~ ^[a-z][a-z0-9-]{0,31}$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$ ]] || {
+  echo "Usage: build-channel.sh VERSION CHANNEL PRIVATE_KEY PUBLIC_KEY OWNER/REPO RELEASE_TAG ROLE=ARTIFACT [...]" >&2
   exit 2
 }
-shift 8
-ENABLE_DHCP=0
-if [[ ${1:-} == --enable-dhcp ]]; then
-  ENABLE_DHCP=1
-  shift
-fi
+shift 6
 (($# >= 2)) || { echo "At least Gateway and bootstrap ROLE=ARTIFACT inputs are required" >&2; exit 2; }
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -85,14 +78,8 @@ COMMAND_ARGS=(
   --source-commit "$SOURCE_COMMIT"
   --github-repository "$GITHUB_REPOSITORY"
   --release-tag "$RELEASE_TAG"
-  --lan-interface "$LAN_INTERFACE"
-  --lan-address "$LAN_ADDRESS"
-  --install-dependencies
-  --apply
+  --interactive
 )
-if ((ENABLE_DHCP)); then
-  COMMAND_ARGS+=(--enable-dhcp)
-fi
 "$CONTROL" "${COMMAND_ARGS[@]}" >"$TEMP_COMMAND"
 chmod 0644 "$TEMP_COMMAND"
 mv -T "$TEMP_COMMAND" "$COMMAND_FILE"
