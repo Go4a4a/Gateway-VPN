@@ -31,7 +31,7 @@ const (
 	encryptedKeyKDFMemoryKiB   = 64 * 1024
 	encryptedKeyKDFIterations  = 3
 	encryptedKeyKDFParallelism = 2
-	minimumKeyPassphraseBytes  = 20
+	minimumKeyPassphraseRunes  = 10
 	maximumKeyPassphraseBytes  = 256
 	encryptedKeySaltBytes      = 16
 	encryptedKeyNonceBytes     = 12
@@ -73,10 +73,10 @@ type decryptedEncryptedKey struct {
 }
 
 func ValidateEncryptedKeyPassphrase(passphrase []byte) error {
-	if !utf8.Valid(passphrase) || len(passphrase) < minimumKeyPassphraseBytes || len(passphrase) > maximumKeyPassphraseBytes ||
+	if !utf8.Valid(passphrase) || utf8.RuneCount(passphrase) < minimumKeyPassphraseRunes || len(passphrase) > maximumKeyPassphraseBytes ||
 		bytes.IndexByte(passphrase, 0) >= 0 || bytes.IndexByte(passphrase, '\n') >= 0 || bytes.IndexByte(passphrase, '\r') >= 0 ||
 		len(bytes.TrimSpace(passphrase)) != len(passphrase) {
-		return fmt.Errorf("encrypted release key passphrase must contain %d..%d UTF-8 bytes without leading/trailing whitespace or line breaks", minimumKeyPassphraseBytes, maximumKeyPassphraseBytes)
+		return fmt.Errorf("encrypted release key passphrase must contain at least %d UTF-8 characters and at most %d bytes without leading/trailing whitespace or line breaks", minimumKeyPassphraseRunes, maximumKeyPassphraseBytes)
 	}
 	return nil
 }

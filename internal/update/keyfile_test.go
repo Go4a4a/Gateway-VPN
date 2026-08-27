@@ -175,6 +175,8 @@ func TestValidateEncryptedKeyPassphrase(t *testing.T) {
 	for _, invalid := range [][]byte{
 		nil,
 		[]byte("too short"),
+		[]byte("123456789"),
+		[]byte("пароль123"),
 		[]byte(" leading whitespace passphrase"),
 		[]byte("trailing whitespace passphrase "),
 		[]byte("valid length but\nline break"),
@@ -188,6 +190,12 @@ func TestValidateEncryptedKeyPassphrase(t *testing.T) {
 	}
 	if err := ValidateEncryptedKeyPassphrase([]byte("correct horse battery staple")); err != nil {
 		t.Fatalf("valid passphrase rejected: %v", err)
+	}
+	if err := ValidateEncryptedKeyPassphrase([]byte("1234567890")); err != nil {
+		t.Fatalf("ten-character passphrase rejected: %v", err)
+	}
+	if err := ValidateEncryptedKeyPassphrase([]byte("пароль1234")); err != nil {
+		t.Fatalf("ten-character Unicode passphrase rejected: %v", err)
 	}
 }
 
