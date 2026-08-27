@@ -14,13 +14,15 @@ import (
 )
 
 const (
-	controlUnit  = "gateway-vpn.service"
-	brokerUnit   = "gateway-vpn-network-broker.socket"
-	mihomoUnit   = "gateway-vpn-mihomo.service"
-	dnsmasqUnit  = "gateway-vpn-dnsmasq.service"
-	firewallUnit = "gateway-vpn-firewall.service"
-	guardUnit    = "gateway-vpn-firewall-guard.service"
-	watchdogUnit = "gateway-vpn-watchdog.service"
+	controlUnit         = "gateway-vpn.service"
+	brokerUnit          = "gateway-vpn-network-broker.socket"
+	brokerServiceUnit   = "gateway-vpn-network-broker.service"
+	mihomoUnit          = "gateway-vpn-mihomo.service"
+	dnsmasqUnit         = "gateway-vpn-dnsmasq.service"
+	firewallUnit        = "gateway-vpn-firewall.service"
+	guardUnit           = "gateway-vpn-firewall-guard.service"
+	watchdogUnit        = "gateway-vpn-watchdog.service"
+	networkRecoveryUnit = "gateway-vpn-network-recovery.service"
 
 	watchdogStatusPath   = "/run/gateway-vpn-watchdog/status.json"
 	controlHeartbeatPath = "/run/gateway-vpn-watchdog/control.json"
@@ -109,6 +111,9 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, expectedVersion
 	}
 	if err := runtime.synchronizeFailClosedFirewall(ctx); err != nil {
 		return fmt.Errorf("activate selected release firewall schema: %w", err)
+	}
+	if err := runtime.resetManagedStartLimits(ctx); err != nil {
+		return err
 	}
 	if runtime.RecoveryOnly {
 		return runtime.checkVersionAndState(ctx, expectedVersion, databasePath)
@@ -202,6 +207,29 @@ func (runtime SystemRuntime) synchronizeFailClosedFirewall(ctx context.Context) 
 	})
 	if err != nil {
 		return fmt.Errorf("restart selected firewall and integrity guard: %w", err)
+	}
+	return nil
+}
+
+func (runtime SystemRuntime) resetManagedStartLimits(ctx context.Context) error {
+	if err := runtime.validate(); err != nil {
+		return err
+	}
+	// network-recovery is a short oneshot dependency of watchdog, control and
+	// dnsmasq. Candidate health, rollback health and OnFailure/boot recovery can
+	// legitimately invoke it several times inside systemd's default rate-limit
+	// window. Clear only Gateway VPN-owned runtime counters after PATH_BLOCKED
+	// is established; every unit is still started and health-checked normally.
+	_, err := runtime.Executor.Run(ctx, platformexec.Request{
+		Executable: runtime.Systemctl,
+		Arguments: []string{
+			"reset-failed", networkRecoveryUnit, watchdogUnit, brokerUnit,
+			brokerServiceUnit, controlUnit, mihomoUnit, dnsmasqUnit,
+		},
+		MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		return fmt.Errorf("reset managed Gateway runtime start limits: %w", err)
 	}
 	return nil
 }

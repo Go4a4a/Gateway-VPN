@@ -14,15 +14,22 @@ import (
 )
 
 type systemRuntimeExecutor struct {
-	requests  []platformexec.Request
-	failReset bool
-	failSync  bool
+	requests         []platformexec.Request
+	failReset        bool
+	failManagedReset bool
+	failSync         bool
 }
 
 func (executor *systemRuntimeExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
 	executor.requests = append(executor.requests, request)
 	if reflect.DeepEqual(request.Arguments, []string{"reset-failed", firewallUnit, guardUnit}) {
 		if executor.failReset {
+			return platformexec.Result{Stderr: "private systemd detail"}, os.ErrPermission
+		}
+		return platformexec.Result{}, nil
+	}
+	if reflect.DeepEqual(request.Arguments, []string{"reset-failed", networkRecoveryUnit, watchdogUnit, brokerUnit, brokerServiceUnit, controlUnit, mihomoUnit, dnsmasqUnit}) {
+		if executor.failManagedReset {
 			return platformexec.Result{Stderr: "private systemd detail"}, os.ErrPermission
 		}
 		return platformexec.Result{}, nil
@@ -68,9 +75,10 @@ func TestUpdateRecoverySynchronizesSelectedFirewallBeforeAcceptingRelease(t *tes
 	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.requests) != 4 ||
+	if len(executor.requests) != 5 ||
 		!reflect.DeepEqual(executor.requests[0].Arguments, []string{"reset-failed", firewallUnit, guardUnit}) ||
-		!reflect.DeepEqual(executor.requests[1].Arguments, []string{"restart", firewallUnit, guardUnit}) {
+		!reflect.DeepEqual(executor.requests[1].Arguments, []string{"restart", firewallUnit, guardUnit}) ||
+		!reflect.DeepEqual(executor.requests[2].Arguments, []string{"reset-failed", networkRecoveryUnit, watchdogUnit, brokerUnit, brokerServiceUnit, controlUnit, mihomoUnit, dnsmasqUnit}) {
 		t.Fatalf("recovery requests = %+v", executor.requests)
 	}
 	executor = &systemRuntimeExecutor{failSync: true}
@@ -82,6 +90,11 @@ func TestUpdateRecoverySynchronizesSelectedFirewallBeforeAcceptingRelease(t *tes
 	runtime.Executor = executor
 	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 1 {
 		t.Fatalf("failed start-limit reset was not fatal: requests=%+v error=%v", executor.requests, err)
+	}
+	executor = &systemRuntimeExecutor{failManagedReset: true}
+	runtime.Executor = executor
+	if err := runtime.StartAndHealth(context.Background(), "1.2.3", databasePath, ManagedRuntimeState{}); err == nil || len(executor.requests) != 3 {
+		t.Fatalf("failed managed start-limit reset was not fatal: requests=%+v error=%v", executor.requests, err)
 	}
 }
 
