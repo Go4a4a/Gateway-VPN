@@ -32,13 +32,13 @@ type Method struct {
 }
 
 type Policy struct {
-	StartupBlockUntilQualified bool
-	DirectServiceRefresh       bool
-	FailureHoldSeconds         int64
-	RecoveryStableSeconds      int64
-	SwitchCooldownSeconds      int64
-	RankingGeneration          int64
-	UpdatedAt                  string
+	StartupBlockUntilQualified bool   `json:"startup_block_until_qualified"`
+	DirectServiceRefresh       bool   `json:"direct_service_refresh_enabled"`
+	FailureHoldSeconds         int64  `json:"failure_hold_seconds"`
+	RecoveryStableSeconds      int64  `json:"recovery_stable_seconds"`
+	SwitchCooldownSeconds      int64  `json:"switch_cooldown_seconds"`
+	RankingGeneration          int64  `json:"ranking_generation"`
+	UpdatedAt                  string `json:"updated_at"`
 }
 
 type PolicyUpdate struct {

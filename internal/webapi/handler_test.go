@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/bypass"
@@ -32,6 +33,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
@@ -1418,10 +1420,74 @@ func TestSafeNetworkApplyReturnsTokenBeforeAsyncApplyAndUsesSocketDestination(t 
 	}
 }
 
+func TestAccessMethodsPolicyDirectOnlyAndOperationsAPI(t *testing.T) {
+	server, ctx := testServer(t)
+	server.dependencies.BootIDReader = func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }
+	server.dependencies.Reconcile = func(context.Context) (any, error) { return "COMPLETE", nil }
+	cookie, csrf := login(t, server)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+
+	response := call(http.MethodGet, "/api/v1/access-methods", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), accesspolicy.DirectMethodID) || !strings.Contains(response.Body.String(), "access:subscription:sub-a") {
+		t.Fatalf("access method list = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/access-methods/priorities", `{"ids":["access:subscription:sub-a","access:direct"]}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("access reorder = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPatch, "/api/v1/access-methods/access:direct", `{"enabled":false}`)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("disable direct method = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/settings/access-policy", `{"startup_block_until_qualified":false,"direct_service_refresh_enabled":true,"failure_hold_seconds":10,"recovery_stable_seconds":60,"switch_cooldown_seconds":30}`)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"startup_block_until_qualified":false`) {
+		t.Fatalf("access policy update = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPost, "/api/v1/access-methods/direct-only", "")
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"resets_after_reboot":true`) {
+		t.Fatalf("enable direct-only = %d %s", response.Code, response.Body.String())
+	}
+	runtime, err := server.dependencies.AccessPolicy.GetSelectionRuntime(ctx)
+	if err != nil || !runtime.TemporaryDirectOnly {
+		t.Fatalf("temporary direct-only runtime = %+v, %v", runtime, err)
+	}
+	response = call(http.MethodDelete, "/api/v1/access-methods/direct-only", "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("disable direct-only = %d %s", response.Code, response.Body.String())
+	}
+
+	repository := server.dependencies.Operations
+	if _, err := repository.Create(ctx, operations.CreateInput{ID: "operation-api", Kind: "SUBSCRIPTION_REFRESH", ScopeType: "SUBSCRIPTION", ScopeID: "sub-a", RequestedBy: "USER:admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Start(ctx, "operation-api", operations.StepInput{Severity: "INFO", Stage: "HTTP", Code: "FETCH_STARTED", Message: "Источник проверяется"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Finish(ctx, "operation-api", operations.StatusSucceeded, "REFRESH_COMPLETE", operations.StepInput{Severity: "INFO", Stage: "COMPLETE", Code: "REFRESH_COMPLETE", Message: "Готово"}); err != nil {
+		t.Fatal(err)
+	}
+	response = call(http.MethodGet, "/api/v1/operations/operation-api", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"steps"`) || !strings.Contains(response.Body.String(), "FETCH_STARTED") {
+		t.Fatalf("operation detail = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodDelete, "/api/v1/operations/completed?limit=10", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"deleted":1`) {
+		t.Fatalf("clear operations = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestManualSubscriptionRefreshRequiresCSRFAndUsesProductionContract(t *testing.T) {
 	server, _ := testServer(t)
-	refresher := &fakeSubscriptionRefresher{result: subscription.RefreshResult{SubscriptionID: "sub-a", VersionID: "version-2"}}
-	server.dependencies.SubscriptionRefresh = refresher
+	dispatcher := &fakeSubscriptionDispatcher{result: subscription.DispatchResult{OperationID: "refresh-operation", SubscriptionID: "sub-a"}}
+	server.dependencies.SubscriptionDispatch = dispatcher
 	cookie, csrf := login(t, server)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/sub-a/refresh", nil)
 	request.AddCookie(cookie)
@@ -1435,16 +1501,16 @@ func TestManualSubscriptionRefreshRequiresCSRFAndUsesProductionContract(t *testi
 	request.Header.Set("X-CSRF-Token", csrf)
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "version-2") || len(refresher.ids) != 1 || refresher.ids[0] != "sub-a" {
-		t.Fatalf("manual refresh response/calls = %d %s / %v", response.Code, response.Body.String(), refresher.ids)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), "refresh-operation") || len(dispatcher.ids) != 1 || dispatcher.ids[0] != "sub-a" || dispatcher.requestedBy[0] != "USER:admin" {
+		t.Fatalf("manual refresh response/calls = %d %s / %v", response.Code, response.Body.String(), dispatcher.ids)
 	}
-	refresher.err = subscription.ErrRefreshInProgress
+	dispatcher.result.Joined = true
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/subscriptions/sub-a/refresh", nil)
 	request.AddCookie(cookie)
 	request.Header.Set("X-CSRF-Token", csrf)
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, request)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "REFRESH_IN_PROGRESS") {
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"joined":true`) || len(dispatcher.ids) != 2 {
 		t.Fatalf("duplicate refresh response = %d %s", response.Code, response.Body.String())
 	}
 }
@@ -2267,6 +2333,21 @@ type fakeSubscriptionRefresher struct {
 	reclassifyIDs []string
 	result        subscription.RefreshResult
 	err           error
+}
+
+type fakeSubscriptionDispatcher struct {
+	ids         []string
+	requestedBy []string
+	result      subscription.DispatchResult
+	err         error
+}
+
+func (dispatcher *fakeSubscriptionDispatcher) Enqueue(_ context.Context, id, requestedBy string) (subscription.DispatchResult, error) {
+	dispatcher.ids = append(dispatcher.ids, id)
+	dispatcher.requestedBy = append(dispatcher.requestedBy, requestedBy)
+	result := dispatcher.result
+	result.SubscriptionID = id
+	return result, dispatcher.err
 }
 
 func (refresher *fakeSubscriptionRefresher) RefreshOne(_ context.Context, id string, force bool) (subscription.RefreshResult, error) {

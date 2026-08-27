@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-27
-**Общее состояние:** `BOOT_SCOPED_STARTUP_REMOTE_CI_PASS / HARDWARE_VALIDATION_PENDING`
-**Текущий этап:** boot-scoped startup contract опубликован в `de5f7ed`. GitHub Actions run `33109704378` завершён `success`: `Go, packaging and syntax gates` и `Linux nftables fail-closed gate` зелёные. Настоящий Linux boot ID отличает reboot от process restart, временный direct-only сбрасывается только после reboot, startup gate ON атомарно инвалидирует старое evidence, а OFF разрешает ровно одно bounded восстановление только прежнего точного LKG/direct tuple с немедленной полной фоновой qualification. API/OpenAPI/WebUI управления access methods и operation panel остаются следующим блоком.
+**Общее состояние:** `UNIFIED_ACCESS_API_UI_LOCAL_PASS / REMOTE_CI_PENDING / HARDWARE_VALIDATION_PENDING`
+**Текущий этап:** единый API/OpenAPI/WebUI способов доступа и durable operation panel реализованы локально. Direct и subscriptions управляются одним ordered list; startup gate, service-refresh permission, hysteresis и boot-scoped direct-only имеют authenticated API. Manual refresh немедленно возвращает operation ID, параллельный запрос присоединяется к тому же durable lease, bounded workers не используют request context после ответа, а незавершённая previous-process operation получает terminal `PROCESS_RESTART`. Полный race/vet/Linux build и syntax gates зелёные; commit/push и remote CI этого блока ещё не выполнены.
 
-**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `82%`: готовы schema/domain/persistence, direct qualification, schema-v3 actuator, единый selector, FULL/LIMITED VPN evidence, recovery-safe runtime identity, resilient refresh ladder и boot-scoped ON/OFF startup behavior; впереди API/OpenAPI/WebUI управления и полный operation panel. Общая production-готовность оценивается примерно в `89–91%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
+**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `92%`: завершены schema/domain, direct qualification, schema-v3 actuator, selector, resilient refresh, boot policy и основной API/WebUI/operations interface. До install-ready successor остаются единый direct-per-modem read model во всех трёх вкладках, preferred-node order UI/runtime closure и повторные exact packaging/systemd/netns release gates. Общая production-готовность оценивается примерно в `91–92%`; production publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance остаются отдельными несокращаемыми gates.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -20,7 +20,7 @@
 ## Режим работы Codex
 
 - штатный уровень мышления для разработки — `High / Высокий`;
-- текущий явно подтверждённый пользователем уровень — `xhigh / Очень высокий`; он сохраняется до другого явно подтверждённого переключения;
+- текущий явно подтверждённый пользователем уровень — `High / Высокий`; он сохраняется до другого явно подтверждённого переключения;
 - обязательный протокол повышения и возврата уровня хранится в корневом `AGENTS.md`;
 - сообщение Codex о рекомендуемом уровне не является переключением;
 - перед любым повышением или понижением Codex обязан остановить проектную работу, сообщить уровень и причину и дождаться явного подтверждения переключения;
@@ -43,11 +43,11 @@
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `RESILIENT_REFRESH_LADDER_LOCAL_PASS / LINUX_NOT_RUN` | Active target node → other allowed target nodes → allowed nodes других subscriptions → policy-enabled direct ready-модемы подключены через отдельный Mihomo probe listener; EXCLUDE повторно проверяется под operation lock. Disabled user method обновляет service-only LKG без публикации user path; `Retry-After`, lease, redacted stages и bounded retention покрыты tests |
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
-| Unified access methods | `SELECTOR_ACTUATOR_STARTUP_REMOTE_PASS / API_UI_PENDING` | Migration v16 хранит last observed boot ID; single-use startup recovery сохраняет только прежний exact tuple, обычное переключение по-прежнему требует полного evidence. Gate ON инвалидирует boot-stale qualification; OFF не отключает firewall/quarantine. Интерфейсы управления остаются следующим блоком |
+| Unified access methods | `API_UI_OPERATIONS_LOCAL_PASS / REMOTE_PENDING` | Direct + subscriptions имеют один authenticated ordered list, enable/reorder, startup/service/hysteresis policy и boot-scoped direct-only control. Selector/actuator и exact boot recovery не ослаблены; direct-per-modem status ещё нужно включить в общий UI read model |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
 | SQLite | `V16_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15 → 16`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
-| API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 85 `/api/v1` routes покрыты OpenAPI, включая watchdog settings/status; signed Ubuntu install ранее реально слушал `192.168.200.1:8443`, возвращал HTTP 200 и CSP/Permissions-Policy/no-sniff. Watchdog-карточка прошла JS syntax/API tests; actual signed browser smoke и реальная LAN-карта ещё не проверены |
+| API / Web UI | `97_ROUTE_CONTRACT_LOCAL_PASS / HOST_NOT_RUN` | OpenAPI покрывает все 97 зарегистрированных method routes. Добавлены «Способы доступа», единый priority, понятный startup gate/direct-only, async refresh и persistent scrolling operation timeline с redacted details. Local API/JS tests проходят; actual signed browser smoke и реальная LAN-карта ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, host snapshot, audit/rate limit и WebUI download покрыты tests; fixed `database/retention.json` дополнительно даёт path-free policy, table ranges/counts, version excess и DB/WAL/page/freelist sizes. Реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_DE5F7ED_PASS` | Run `33109704378` завершён `success`: Go/race/packaging/syntax job — 2m27s, Linux nftables/netns job — 1m03s, весь run — 3m37s. Локальные pinned Ubuntu systemd и оба privileged netns сценария также прошли |
+| Автоматические тесты | `FULL_LOCAL_GATE_PASS / REMOTE_CI_PENDING` | Текущий блок прошёл `go test -race ./... -count=1`, `go vet ./...`, CGO-free Linux build, OpenAPI contract, JS и shell syntax. Последний опубликованный run `33110138560` для прежнего journal commit был `success`; exact remote run новых изменений ожидается после push |
 
 ## Матрица доказательств Definition of Done
 
@@ -88,20 +88,20 @@
 | 22 | `PASS_LOCAL` | Exact signed systemd watchdog обнаруживает hang/crash/restart storm, имеет bounded dependency-aware recovery и публикует UI/events/diagnostics evidence |
 | 23 | `PASS_LOCAL` | External outage отделён от local failure; default host reboot выключен, optional action имеет durable budget и transaction suppression |
 | 24 | `NOT_RUN_EXTERNAL` | Exact endurance harness и smoke готовы, но обязательные непрерывные 24- и 72-часовые runs не запускались |
-| 25 | `IN_PROGRESS_LOCAL` | Immutable direct method автоматически создаётся, enable/reorder и независимый service-refresh flag сохраняются; API/runtime ещё не подключены |
+| 25 | `PASS_LOCAL` | Immutable direct method автоматически создаётся, не удаляется, enable/reorder работает через единый API/UI, а independent service-refresh permission изменяется отдельно |
 | 26 | `IN_PROGRESS_LOCAL` | Durable overrides/preferred rank переживают version refresh по fingerprint, EXCLUDE фильтруется candidate query; полный refresh/UI/sticky runtime gate ещё следует |
-| 27 | `IN_PROGRESS_LOCAL` | Durable lease, bounded `Retry-After`, exact VPN→direct route ladder, disabled-method service LKG и redacted operation stages проходят integration tests без изменения user runtime. Manual API ещё не возвращает operation ID, GET/DELETE operations и WebUI panel не подключены |
+| 27 | `PASS_LOCAL` | Scheduled/manual refresh имеет durable lease/status, bounded retry/route ladder и single-flight. Manual API сразу возвращает существующий/новый operation ID; GET/list/clear API и persistent redacted WebUI timeline покрыты tests |
 | 28 | `IN_PROGRESS_LOCAL` | Startup/hysteresis и boot-scoped direct-only transitions покрыты domain tests; reboot/netns/firewall integration ещё не реализована |
 
-**Итог аудита:** `10 PASS_LOCAL`, `8 IN_PROGRESS_LOCAL`, `8 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут: сначала требуется завершить unified-access successor, затем production publish, H1/H2/VPS и 24/72h evidence.
+**Итог аудита:** `12 PASS_LOCAL`, `6 IN_PROGRESS_LOCAL`, `8 PARTIAL_EXTERNAL`, `2 NOT_RUN_EXTERNAL`. Полный Definition of Done не достигнут: сначала требуется закрыть оставшиеся successor read-model/preference/release gates, затем production publish, H1/H2/VPS и 24/72h evidence.
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент — modem-bound direct prober: DNS и HTTPS probes используют один authoritative interface/fwmark, сохраняют required/optional evidence и вычисляют объяснимый functional score. Затем единый runtime selector и root broker включат атомарно ровно один TUN либо direct firewall generation. Resilient refresh ladder, API/OpenAPI/WebUI и operation panel следуют после безопасного data-plane boundary.
+Следующий инкремент — завершить unified read model: добавить direct-path status каждого модема в канонические API/UI представления Modems, Subscriptions и Path Matrix, затем закрыть preferred-node order/sticky selection UI и интеграционные tests. После этого повторить exact signed packaging, fresh Ubuntu systemd/netns install/update/rollback gate для нового successor candidate.
 
 ## Критический путь до release
 
-Опубликованный baseline локально готов к первой установке по прежней модели, но пользователь выбрал сначала завершить более функциональный unified-access successor. До нового install-ready candidate остаются direct probing, атомарный direct/TUN actuator и root boundary, resilient refresh, API/WebUI и повторные release gates. Production key готов, однако version/tag/draft Release не создаются до завершения successor и отдельного разрешения пользователя.
+Опубликованный baseline локально готов к первой установке по прежней модели, но пользователь выбрал сначала завершить более функциональный unified-access successor. Data-plane, refresh и основной management interface successor готовы локально; до нового install-ready candidate остаются direct-per-modem read model, preferred-node UI/runtime closure и повторные exact release gates. Production key готов, однако version/tag/draft Release не создаются до завершения successor и отдельного разрешения пользователя.
 
 После установки отдельный путь до production release включает реальные Gateway/VPS/HiLink/Keenetic проверки, найденные исправления, 24-часовой developer и несокращаемый 72-часовой release endurance. Если целевые Linux Gateway, VPS и модемы доступны без пауз, ориентир до проверенного production release остаётся `4–8 дней`. Без фактического доступа к Linux/VPS/оборудованию можно передать install-ready candidate, но нельзя честно поставить production status `DONE`.
 
@@ -280,8 +280,34 @@
 | DEV-158 | 2026-08-27 | Active direct path хранить отдельным `runtime_state.active_direct_path_id` с FK на `direct_modem_paths`; VPN сохраняет `active_path_id`. Firewall schema v3 открывает TUN и direct только взаимоисключающе, а LIMITED VPN перед открытием gate повторно проверяет все ранее прошедшие fresh targets | Полиморфный FK либо modem-only direct identity не позволяют доказать точный путь при recovery. LIMITED нельзя считать безопасно активированным только по aggregate score без node/target evidence и post-selection recheck |
 | DEV-159 | 2026-08-27 | Subscription refresh использует отдельный service-only Mihomo probe selector и последовательность `active target node → другие allowed target nodes → allowed nodes других subscriptions → direct ready-modems`, не изменяя `gateway-vpn-active`/runtime/firewall user gate. Disabled user method сохраняет LKG как qualification-only provider; EXCLUDE повторно проверяется после получения общего operation lock. Одна operation ограничена 5 минутами, 20 секундами на route, 1024 VPN attempts и 32768 redacted steps | Общий selector без сериализации смешивает маршруты конкурентных probes; выключение user method не должно лишать auto-refresh или случайно разрешать user path. Явные bounds не позволяют большой/враждебной подписке бесконечно удерживать worker и раздувать SQLite, а limit фиксируется в operation status до direct fallback |
 | DEV-160 | 2026-08-27 | Linux boot ID хранится отдельно от process lifetime. Gate ON на каждом новом boot атомарно инвалидирует qualification evidence; gate OFF разрешает ровно одно восстановление только прежнего exact enabled LKG/direct tuple, после bounded transport/routing checks, и немедленно планирует полную qualification. Firewall/quarantine не отключаются. Same-boot restart сохраняет tuple; temporary direct-only сбрасывается только при новом boot | Настройка быстрого старта не должна превращаться в общий bypass либо считать process restart перезагрузкой. Exact boot identity, одноразовое разрешение и generation checks ограничивают окно восстановления прежним известным путём, а stale/corrupt state остаётся fail-closed |
+| DEV-161 | 2026-08-27 | Manual subscription refresh сначала атомарно получает durable lease и создаёт `QUEUED` operation, затем передаётся в bounded dispatcher `2 workers / 64 capacity`; HTTP request context после ответа не используется. Повторный manual/scheduled request возвращает owner ID действующего lease. На process restart старые leases освобождаются, а QUEUED/RUNNING operations терминализируются `PROCESS_RESTART` | UI должен немедленно получить стабильный ID без второго fetch, goroutine/queue не могут расти без границ, а crash не должен оставлять ложное вечное RUNNING или блокировать refresh до 30-минутного lease timeout |
 
 ## Журнал разработки
+
+### Сессия 077 — unified access API/WebUI и асинхронный operation panel — 2026-08-27
+
+**Сделано локально:**
+
+- добавлены authenticated API для единого списка `Прямой интернет + подписки`, полного reorder, enable/disable, startup block, direct service refresh, failure/recovery/cooldown hysteresis и boot-scoped temporary direct-only;
+- отключение активного method и включение direct-only сначала закрывают data path через root boundary и очищают authoritative active tuple; произвольный boot ID из WebUI не принимается — backend читает Linux boot identity самостоятельно;
+- manual refresh переведён на bounded runtime dispatcher: API немедленно возвращает operation ID, повторный запрос присоединяется к тому же durable owner, а worker живёт от process context, не от завершившегося HTTP request;
+- startup recovery dispatcher освобождает leases предыдущего процесса и переводит незавершённые refresh/reclassify operations в terminal `FAILED / PROCESS_RESTART`; queue shutdown оставляет явный `CANCELLED`, а не вечный `QUEUED`;
+- добавлены bulk refresh, list/detail/clear completed operations API; detail декодирует только уже bounded/redacted structured steps, completed cleanup не затрагивает RUNNING/QUEUED;
+- OpenAPI расширен для access methods, access policy, direct-only, bulk refresh и operations; contract покрывает 97 зарегистрированных method routes;
+- WebUI получил отдельную вкладку «Способы доступа»: единый priority, active method/quality, понятные startup/direct-only формулировки, service refresh и hysteresis settings;
+- вкладка «Подписки» больше не содержит отдельный конфликтующий reorder: enable идёт через unified method repository, manual/bulk refresh показывает ID и открывает persistent scrolling timeline; обновление подписки разрешено независимо от участия в user ranking;
+- disposable WebUI preview получил синтетический operation dispatcher, поэтому диалог стадий можно проверять без сетевых mutation.
+
+**Проверено:**
+
+- `go test -race ./... -count=1` — PASS для всех packages, включая parallel single-flight, один source fetch, durable requester identity и restart recovery;
+- `go vet ./...` и CGO-free `GOOS=linux GOARCH=amd64 go build ./...` — PASS;
+- OpenAPI route contract, API auth/CSRF/access-policy/direct-only/operations tests, `node --check`, Linux `bash -n` и `git diff --check` — PASS;
+- loopback preview на Windows вернул HTTP 200 и production security headers.
+
+**Не получилось / не проверено:** встроенный браузер работает в изолированной network-среде и не достиг host loopback preview; подключённого Chrome browser surface не было. Поэтому новый экран не объявляется visual browser-smoke PASS: остаются API/DOM-independent tests и JS syntax. Реальный signed Ubuntu browser, physical boot, HiLink/Keenetic capture и USB failover не выполнялись.
+
+**Следующий шаг:** опубликовать текущий block и дождаться exact remote CI; затем включить direct-per-modem health в общий read model трёх вкладок и завершить preferred-node order/sticky UI.
 
 ### Сессия 076 — boot-scoped startup policy и retention CI fix — 2026-08-27
 

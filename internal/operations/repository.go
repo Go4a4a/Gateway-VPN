@@ -262,6 +262,46 @@ WHERE id IN (
 	return result.RowsAffected()
 }
 
+// FailInterrupted terminalizes non-terminal operations from a previous
+// process. Callers scope this to fixed operation kinds during startup.
+func (repository *Repository) FailInterrupted(ctx context.Context, kinds []string, summaryCode string) (int64, error) {
+	if repository == nil || repository.database == nil || len(kinds) == 0 || len(kinds) > 16 || !boundedToken(summaryCode, 128) {
+		return 0, errors.New("operation repository, bounded kinds, and summary code are required")
+	}
+	for _, kind := range kinds {
+		if !boundedToken(kind, 64) {
+			return 0, errors.New("operation kind is invalid")
+		}
+	}
+	transaction, err := repository.begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer transaction.Rollback()
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	arguments := make([]any, 0, len(kinds)+3)
+	arguments = append(arguments, summaryCode, now, now)
+	for _, kind := range kinds {
+		arguments = append(arguments, kind)
+	}
+	query := `UPDATE operations
+SET status='FAILED', summary_code=?, finished_at=?, updated_at=?
+WHERE status IN ('QUEUED', 'RUNNING') AND kind IN (` + placeholders + `)`
+	result, err := transaction.ExecContext(ctx, query, arguments...)
+	if err != nil {
+		return 0, fmt.Errorf("fail interrupted operations: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return 0, fmt.Errorf("commit interrupted operation recovery: %w", err)
+	}
+	return count, nil
+}
+
 func (repository *Repository) begin(ctx context.Context) (*sql.Tx, error) {
 	if repository == nil || repository.database == nil {
 		return nil, errors.New("operation database is required")

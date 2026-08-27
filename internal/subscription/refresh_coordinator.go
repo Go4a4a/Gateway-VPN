@@ -82,6 +82,13 @@ type RefreshResult struct {
 	NextAttemptAt  time.Time
 }
 
+type PreparedRefresh struct {
+	OperationID    string
+	SubscriptionID string
+	Lease          RefreshLease
+	Reclassify     bool
+}
+
 func NewRefreshCoordinator(subscriptions *Repository, versions *VersionRepository, matchers *MatcherRepository, refresh *RefreshRepository, fetcher SubscriptionFetcher, sources SourceURLReader, runtime CandidateRuntime, payloadRoot string) *RefreshCoordinator {
 	return &RefreshCoordinator{
 		Subscriptions:  subscriptions,
@@ -115,29 +122,90 @@ func NewRefreshCoordinator(subscriptions *Repository, versions *VersionRepositor
 // RefreshOne runs a complete refresh transaction. force bypasses only the due
 // time; it never bypasses the durable single-refresh lease.
 func (coordinator *RefreshCoordinator) RefreshOne(ctx context.Context, subscriptionID string, force bool) (RefreshResult, error) {
-	return coordinator.refreshOne(ctx, subscriptionID, force, false)
+	prepared, joined, err := coordinator.PrepareRefresh(ctx, subscriptionID, force, false, "SYSTEM")
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	if joined {
+		return RefreshResult{}, ErrRefreshInProgress
+	}
+	return coordinator.ExecutePrepared(ctx, prepared)
 }
 
 func (coordinator *RefreshCoordinator) ReclassifyOne(ctx context.Context, subscriptionID string) (RefreshResult, error) {
-	return coordinator.refreshOne(ctx, subscriptionID, true, true)
+	prepared, joined, err := coordinator.PrepareRefresh(ctx, subscriptionID, true, true, "SYSTEM")
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	if joined {
+		return RefreshResult{}, ErrRefreshInProgress
+	}
+	return coordinator.ExecutePrepared(ctx, prepared)
 }
 
-func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscriptionID string, force, reclassify bool) (RefreshResult, error) {
+// PrepareRefresh acquires the durable single-flight lease and creates a QUEUED
+// operation before an asynchronous API response is sent. A parallel request
+// joins the existing operation instead of starting a second source fetch.
+func (coordinator *RefreshCoordinator) PrepareRefresh(ctx context.Context, subscriptionID string, force, reclassify bool, requestedBy string) (PreparedRefresh, bool, error) {
 	if err := coordinator.validate(); err != nil {
-		return RefreshResult{}, err
+		return PreparedRefresh{}, false, err
 	}
 	owner, err := coordinator.newID("refresh")
 	if err != nil {
-		return RefreshResult{}, errors.New("allocate subscription refresh owner failed")
+		return PreparedRefresh{}, false, errors.New("allocate subscription refresh owner failed")
 	}
 	lease, err := coordinator.Refresh.Acquire(ctx, subscriptionID, owner, coordinator.LeaseDuration, force)
+	if errors.Is(err, ErrRefreshInProgress) {
+		current, stateErr := coordinator.Refresh.Get(ctx, subscriptionID)
+		if stateErr != nil || current.LeaseOwner == "" {
+			return PreparedRefresh{}, false, ErrRefreshInProgress
+		}
+		return PreparedRefresh{OperationID: current.LeaseOwner, SubscriptionID: subscriptionID}, true, nil
+	}
 	if err != nil {
+		return PreparedRefresh{}, false, err
+	}
+	operationKind := "SUBSCRIPTION_REFRESH"
+	if reclassify {
+		operationKind = "SUBSCRIPTION_RECLASSIFY"
+	}
+	if _, err := coordinator.Operations.Create(ctx, operations.CreateInput{ID: owner, Kind: operationKind, ScopeType: "SUBSCRIPTION", ScopeID: subscriptionID, RequestedBy: requestedBy}); err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_ = coordinator.Refresh.Release(cleanup, lease)
+		cancel()
+		return PreparedRefresh{}, false, errors.New("create subscription refresh operation failed")
+	}
+	return PreparedRefresh{OperationID: owner, SubscriptionID: subscriptionID, Lease: lease, Reclassify: reclassify}, false, nil
+}
+
+// CancelPrepared releases a queued job that cannot run and leaves a durable,
+// explicit terminal status for the operation panel.
+func (coordinator *RefreshCoordinator) CancelPrepared(ctx context.Context, prepared PreparedRefresh, code string) error {
+	if prepared.OperationID == "" || prepared.Lease.Owner != prepared.OperationID || code == "" {
+		return errors.New("prepared refresh and cancellation code are required")
+	}
+	_, finishErr := coordinator.Operations.Finish(ctx, prepared.OperationID, operations.StatusCancelled, code, operations.StepInput{
+		Severity: "WARNING", Stage: "CANCELLED", Code: code, Message: "Обновление подписки отменено до запуска.",
+		Details: map[string]any{"subscription_id": prepared.SubscriptionID},
+	})
+	releaseErr := coordinator.Refresh.Release(ctx, prepared.Lease)
+	return errors.Join(finishErr, releaseErr)
+}
+
+// ExecutePrepared performs the network and LKG transaction for an already
+// durable QUEUED operation.
+func (coordinator *RefreshCoordinator) ExecutePrepared(ctx context.Context, prepared PreparedRefresh) (RefreshResult, error) {
+	if err := coordinator.validate(); err != nil {
 		return RefreshResult{}, err
+	}
+	owner, subscriptionID, lease, reclassify := prepared.OperationID, prepared.SubscriptionID, prepared.Lease, prepared.Reclassify
+	if owner == "" || subscriptionID == "" || lease.Owner != owner || lease.Subscription.ID != subscriptionID {
+		return RefreshResult{}, errors.New("prepared subscription refresh is invalid")
 	}
 	failureCode := RefreshFetchFailed
 	requestedRetry := time.Duration(0)
 	finished := false
-	operationCreated := false
+	operationCreated := true
 	operationFinished := false
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
@@ -153,17 +221,10 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 			})
 		}
 	}()
-	operationKind := "SUBSCRIPTION_REFRESH"
 	firstStage, firstCode, firstMessage := "SOURCE", "SOURCE_READ_STARTED", "Начато чтение источника подписки."
 	if reclassify {
-		operationKind = "SUBSCRIPTION_RECLASSIFY"
 		firstStage, firstCode, firstMessage = "VALIDATE", "RECLASSIFY_STARTED", "Начата повторная классификация сохранённой подписки."
 	}
-	if _, err := coordinator.Operations.Create(ctx, operations.CreateInput{ID: owner, Kind: operationKind, ScopeType: "SUBSCRIPTION", ScopeID: subscriptionID, RequestedBy: "SYSTEM"}); err != nil {
-		failureCode = RefreshOperationFailed
-		return RefreshResult{}, refreshFailure(subscriptionID, failureCode)
-	}
-	operationCreated = true
 	if _, err := coordinator.Operations.Start(ctx, owner, operations.StepInput{
 		Severity: "INFO", Stage: firstStage, Code: firstCode, Message: firstMessage,
 		Details: map[string]any{"subscription_id": subscriptionID},
@@ -175,6 +236,7 @@ func (coordinator *RefreshCoordinator) refreshOne(ctx context.Context, subscript
 	var fetched FetchResult
 	var active Version
 	var activeErr error
+	var err error
 	if reclassify {
 		active, activeErr = coordinator.Versions.Active(ctx, subscriptionID)
 		if activeErr != nil {

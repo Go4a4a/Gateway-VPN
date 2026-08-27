@@ -36,6 +36,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
@@ -55,6 +56,29 @@ func (previewRefresher) RefreshOne(_ context.Context, subscriptionID string, _ b
 
 func (previewRefresher) ReclassifyOne(_ context.Context, subscriptionID string) (subscription.RefreshResult, error) {
 	return subscription.RefreshResult{SubscriptionID: subscriptionID, VersionID: "preview-version"}, nil
+}
+
+type previewDispatcher struct {
+	mutex      sync.Mutex
+	sequence   int
+	operations *operations.Repository
+}
+
+func (dispatcher *previewDispatcher) Enqueue(ctx context.Context, subscriptionID, requestedBy string) (subscription.DispatchResult, error) {
+	dispatcher.mutex.Lock()
+	defer dispatcher.mutex.Unlock()
+	dispatcher.sequence++
+	id := fmt.Sprintf("preview-refresh-%d", dispatcher.sequence)
+	if _, err := dispatcher.operations.Create(ctx, operations.CreateInput{ID: id, Kind: "SUBSCRIPTION_REFRESH", ScopeType: "SUBSCRIPTION", ScopeID: subscriptionID, RequestedBy: requestedBy}); err != nil {
+		return subscription.DispatchResult{}, err
+	}
+	if _, err := dispatcher.operations.Start(ctx, id, operations.StepInput{Severity: "INFO", Stage: "HTTP", Code: "FETCH_STARTED", Message: "Preview: источник подписки проверяется."}); err != nil {
+		return subscription.DispatchResult{}, err
+	}
+	if _, err := dispatcher.operations.Finish(ctx, id, operations.StatusSucceeded, "REFRESH_COMPLETE", operations.StepInput{Severity: "INFO", Stage: "COMPLETE", Code: "REFRESH_COMPLETE", Message: "Preview: подписка проверена и активирована."}); err != nil {
+		return subscription.DispatchResult{}, err
+	}
+	return subscription.DispatchResult{OperationID: id, SubscriptionID: subscriptionID}, nil
 }
 
 type previewRuntime struct{}
@@ -412,10 +436,12 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		updates.pending = true
 		updates.operation = previewUpdateOperation(previewNow, 42<<20)
 	}
+	operationRepository := operations.NewRepository(database)
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
-		SubscriptionRefresh: previewRefresher{}, SubscriptionSecretRoot: secretRoot,
+		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,
+		BootIDReader: func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }, SubscriptionSecretRoot: secretRoot,
 		SubscriptionPayloadRoot: payloadRoot, ModemRuntime: previewRuntime{},
 		PathOperations: previewPathOperations{}, PathActivator: previewPathActivator{},
 		PeriodicHealth: periodicHealth, PeriodicHealthConfig: candidateruntime.DefaultPeriodicConfig(), ProbeBudget: probeScheduler,

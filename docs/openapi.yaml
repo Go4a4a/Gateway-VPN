@@ -14,6 +14,7 @@ servers:
 tags:
   - name: Auth
   - name: Gateway
+  - name: Access
   - name: Modems
   - name: Subscriptions
   - name: Nodes
@@ -21,6 +22,7 @@ tags:
   - name: Targets
   - name: Matchers
   - name: Health
+  - name: Operations
   - name: Logging
   - name: System
   - name: Traffic
@@ -147,6 +149,55 @@ paths:
       operationId: describeDiagnostics
       summary: Описать возможности диагностического архива
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/access-methods:
+    get:
+      tags: [Access]
+      operationId: listAccessMethods
+      summary: Единый ordered list прямого доступа и подписок с активным методом
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/access-methods/priorities:
+    put:
+      tags: [Access]
+      operationId: reorderAccessMethods
+      summary: Атомарно изменить полный порядок включённых способов доступа
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/OrderedIDs'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/access-methods/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [Access]
+      operationId: updateAccessMethod
+      summary: Включить или отключить direct/subscription method
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/access-methods/direct-only:
+    post:
+      tags: [Access]
+      operationId: enableTemporaryDirectOnly
+      summary: До reboot исключить VPN из пользовательского ranking
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Access]
+      operationId: disableTemporaryDirectOnly
+      summary: Отменить boot-scoped direct-only mode
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/access-policy:
+    get:
+      tags: [Access]
+      operationId: getAccessPolicy
+      summary: Получить startup gate, service refresh и hysteresis policy
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [Access]
+      operationId: updateAccessPolicy
+      summary: Обновить startup gate, service refresh и hysteresis policy
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/system/runtime-metrics:
     get:
       tags: [System]
@@ -339,6 +390,13 @@ paths:
       summary: Выполнить принудительный LKG refresh
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/subscriptions/refresh:
+    post:
+      tags: [Subscriptions]
+      operationId: refreshAllSubscriptions
+      summary: Поставить все URL-подписки в bounded single-flight очередь
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '503': {$ref: '#/components/responses/Error'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/nodes:
     get:
@@ -511,6 +569,27 @@ paths:
       operationId: listEvents
       summary: Перечислить redacted audit и state events
       parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/operations:
+    get:
+      tags: [Operations]
+      operationId: listOperations
+      summary: Получить bounded persistent список асинхронных операций
+      parameters: [{$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/operations/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      summary: Получить redacted timeline одной операции
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/operations/completed:
+    delete:
+      tags: [Operations]
+      operationId: clearCompletedOperations
+      summary: Удалить bounded batch только терминальных операций
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/Limit'}]
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/health/periodic:
     get:

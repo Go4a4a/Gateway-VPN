@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/bypass"
@@ -35,9 +36,11 @@ import (
 	"gateway-vpn/internal/diagnostics"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
+	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
@@ -75,6 +78,10 @@ type Dependencies struct {
 	Targets                 *bypass.Repository
 	Matchers                *subscription.MatcherRepository
 	SubscriptionRefresh     SubscriptionRefresher
+	SubscriptionDispatch    SubscriptionRefreshDispatcher
+	AccessPolicy            *accesspolicy.Repository
+	Operations              *operations.Repository
+	BootIDReader            func() (string, error)
 	SubscriptionSecretRoot  string
 	SubscriptionPayloadRoot string
 	NetworkBroker           NetworkBroker
@@ -166,6 +173,10 @@ type SubscriptionRefresher interface {
 	ReclassifyOne(context.Context, string) (subscription.RefreshResult, error)
 }
 
+type SubscriptionRefreshDispatcher interface {
+	Enqueue(context.Context, string, string) (subscription.DispatchResult, error)
+}
+
 type WireGuardSynchronizer interface {
 	SyncWireGuard(context.Context) error
 }
@@ -211,6 +222,15 @@ func New(dependencies Dependencies) (*Server, error) {
 	if dependencies.Database == nil || dependencies.Auth.Database == nil || dependencies.State == nil || dependencies.Modems == nil || dependencies.Subscriptions == nil || dependencies.Nodes == nil || dependencies.Paths == nil || dependencies.Targets == nil || dependencies.Matchers == nil {
 		return nil, errors.New("complete Web API dependencies are required")
 	}
+	if dependencies.AccessPolicy == nil {
+		dependencies.AccessPolicy = accesspolicy.NewRepository(dependencies.Database)
+	}
+	if dependencies.Operations == nil {
+		dependencies.Operations = operations.NewRepository(dependencies.Database)
+	}
+	if dependencies.BootIDReader == nil {
+		dependencies.BootIDReader = func() (string, error) { return hostboot.Read("") }
+	}
 	previewSecret := make([]byte, 32)
 	if _, err := rand.Read(previewSecret); err != nil {
 		return nil, errors.New("initialize matcher preview protection failed")
@@ -239,6 +259,13 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
 	mux.Handle("POST /api/v1/gateway/reconcile", server.protected(http.HandlerFunc(server.reconcile)))
+	mux.Handle("GET /api/v1/access-methods", server.protected(http.HandlerFunc(server.accessMethods)))
+	mux.Handle("PUT /api/v1/access-methods/priorities", server.protected(http.HandlerFunc(server.reorderAccessMethods)))
+	mux.Handle("PATCH /api/v1/access-methods/{id}", server.protected(http.HandlerFunc(server.updateAccessMethod)))
+	mux.Handle("POST /api/v1/access-methods/direct-only", server.protected(http.HandlerFunc(server.enableTemporaryDirectOnly)))
+	mux.Handle("DELETE /api/v1/access-methods/direct-only", server.protected(http.HandlerFunc(server.disableTemporaryDirectOnly)))
+	mux.Handle("GET /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.accessPolicySettings)))
+	mux.Handle("PUT /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.updateAccessPolicySettings)))
 	mux.Handle("GET /api/v1/modems", server.protected(http.HandlerFunc(server.modems)))
 	mux.Handle("PUT /api/v1/modems/priorities", server.protected(http.HandlerFunc(server.reorderModems)))
 	mux.Handle("PATCH /api/v1/modems/{id}", server.protected(http.HandlerFunc(server.updateModem)))
@@ -258,6 +285,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/subscriptions/{id}/disable", server.protected(http.HandlerFunc(server.disableSubscription)))
 	mux.Handle("DELETE /api/v1/subscriptions/{id}", server.protected(http.HandlerFunc(server.deleteSubscription)))
 	mux.Handle("POST /api/v1/subscriptions/{id}/refresh", server.protected(http.HandlerFunc(server.refreshSubscription)))
+	mux.Handle("POST /api/v1/subscriptions/refresh", server.protected(http.HandlerFunc(server.refreshSubscriptions)))
 	mux.Handle("GET /api/v1/nodes", server.protected(http.HandlerFunc(server.nodes)))
 	mux.Handle("PATCH /api/v1/nodes/{id}", server.protected(http.HandlerFunc(server.updateNode)))
 	mux.Handle("GET /api/v1/paths/matrix", server.protected(http.HandlerFunc(server.matrix)))
@@ -280,6 +308,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("DELETE /api/v1/node-matchers/{id}", server.protected(http.HandlerFunc(server.deleteMatcher)))
 	mux.Handle("POST /api/v1/node-matchers/preview", server.protected(http.HandlerFunc(server.previewMatcher)))
 	mux.Handle("GET /api/v1/events", server.protected(http.HandlerFunc(server.events)))
+	mux.Handle("GET /api/v1/operations", server.protected(http.HandlerFunc(server.operations)))
+	mux.Handle("GET /api/v1/operations/{id}", server.protected(http.HandlerFunc(server.operation)))
+	mux.Handle("DELETE /api/v1/operations/completed", server.protected(http.HandlerFunc(server.clearCompletedOperations)))
 	mux.Handle("GET /api/v1/health/periodic", server.protected(http.HandlerFunc(server.periodicHealth)))
 	mux.Handle("GET /api/v1/settings/logging", server.protected(http.HandlerFunc(server.loggingSettings)))
 	mux.Handle("PUT /api/v1/settings/logging", server.protected(http.HandlerFunc(server.updateLoggingSettings)))
@@ -738,6 +769,196 @@ func (server *Server) reconcile(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (server *Server) accessMethods(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.AccessPolicy.ListMethods(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	snapshot, err := server.dependencies.State.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	runtime, err := server.dependencies.AccessPolicy.GetSelectionRuntime(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"id": item.ID, "kind": item.Kind, "subscription_id": item.SubscriptionID,
+			"name": item.Name, "enabled": item.Enabled, "priority": item.Priority,
+			"immutable": item.Immutable, "active": snapshot.PathState == state.PathActive && snapshot.ActiveMethodID == item.ID,
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": result, "active_method_id": snapshot.ActiveMethodID,
+		"path_state": snapshot.PathState, "quality_class": snapshot.ActiveQualityClass,
+		"temporary_direct_only": runtime.TemporaryDirectOnly,
+	})
+}
+
+func (server *Server) reorderAccessMethods(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if err := server.dependencies.AccessPolicy.ReorderEnabled(request.Context(), input.IDs); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"convergence": server.convergeAccessPolicy(request.Context())})
+}
+
+func (server *Server) updateAccessMethod(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Enabled == nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Поле enabled обязательно")
+		return
+	}
+	id := request.PathValue("id")
+	methods, err := server.dependencies.AccessPolicy.ListMethods(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	var current *accesspolicy.Method
+	for index := range methods {
+		if methods[index].ID == id {
+			current = &methods[index]
+			break
+		}
+	}
+	if current == nil {
+		writeDomainError(writer, store.ErrNotFound)
+		return
+	}
+	if !*input.Enabled && current.Enabled {
+		if err := server.blockActiveAccessMethod(request.Context(), id, "ACTIVE_ACCESS_METHOD_DISABLED"); err != nil {
+			writeError(writer, http.StatusBadGateway, "PATH_BLOCK_FAILED", "Не удалось безопасно закрыть активный способ доступа")
+			return
+		}
+	}
+	if err := server.dependencies.AccessPolicy.SetMethodEnabled(request.Context(), id, *input.Enabled); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	qualification := "NOT_REQUIRED"
+	if *input.Enabled && current.Kind == accesspolicy.MethodSubscription {
+		qualification = server.requalifyReadyModems(request.Context())
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"enabled": *input.Enabled, "qualification": qualification, "convergence": server.convergeAccessPolicy(request.Context())})
+}
+
+func (server *Server) accessPolicySettings(writer http.ResponseWriter, request *http.Request) {
+	policy, err := server.dependencies.AccessPolicy.GetPolicy(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"policy": policy,
+		"limits": map[string]any{
+			"failure_hold_seconds_max":    300,
+			"recovery_stable_seconds_max": 3600,
+			"switch_cooldown_seconds_max": 3600,
+		},
+	})
+}
+
+func (server *Server) updateAccessPolicySettings(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		StartupBlockUntilQualified bool  `json:"startup_block_until_qualified"`
+		DirectServiceRefresh       bool  `json:"direct_service_refresh_enabled"`
+		FailureHoldSeconds         int64 `json:"failure_hold_seconds"`
+		RecoveryStableSeconds      int64 `json:"recovery_stable_seconds"`
+		SwitchCooldownSeconds      int64 `json:"switch_cooldown_seconds"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	policy, err := server.dependencies.AccessPolicy.UpdatePolicy(request.Context(), accesspolicy.PolicyUpdate{
+		StartupBlockUntilQualified: input.StartupBlockUntilQualified,
+		DirectServiceRefresh:       input.DirectServiceRefresh,
+		FailureHoldSeconds:         input.FailureHoldSeconds,
+		RecoveryStableSeconds:      input.RecoveryStableSeconds,
+		SwitchCooldownSeconds:      input.SwitchCooldownSeconds,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"policy": policy, "convergence": server.convergeAccessPolicy(request.Context())})
+}
+
+func (server *Server) enableTemporaryDirectOnly(writer http.ResponseWriter, request *http.Request) {
+	bootID, err := server.dependencies.BootIDReader()
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "BOOT_ID_UNAVAILABLE", "Не удалось безопасно определить текущую загрузку системы")
+		return
+	}
+	snapshot, err := server.dependencies.State.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if snapshot.PathState == state.PathActive && snapshot.ActiveMethodKind == accesspolicy.MethodSubscription {
+		if err := server.blockActiveAccessMethod(request.Context(), snapshot.ActiveMethodID, "TEMPORARY_DIRECT_ONLY_ENABLED"); err != nil {
+			writeError(writer, http.StatusBadGateway, "PATH_BLOCK_FAILED", "Не удалось закрыть VPN-путь перед временным прямым режимом")
+			return
+		}
+	}
+	if err := server.dependencies.AccessPolicy.SetTemporaryDirectOnly(request.Context(), true, bootID); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"temporary_direct_only": true, "resets_after_reboot": true, "convergence": server.convergeAccessPolicy(request.Context())})
+}
+
+func (server *Server) disableTemporaryDirectOnly(writer http.ResponseWriter, request *http.Request) {
+	if err := server.dependencies.AccessPolicy.SetTemporaryDirectOnly(request.Context(), false, ""); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"temporary_direct_only": false, "convergence": server.convergeAccessPolicy(request.Context())})
+}
+
+func (server *Server) blockActiveAccessMethod(ctx context.Context, methodID, reason string) error {
+	snapshot, err := server.dependencies.State.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if snapshot.PathState != state.PathActive || snapshot.ActiveMethodID != methodID {
+		return nil
+	}
+	if server.dependencies.ModemRuntime == nil {
+		return errors.New("data-plane blocker is unavailable")
+	}
+	if err := server.dependencies.ModemRuntime.BlockPath(ctx); err != nil {
+		return err
+	}
+	_, _, err = server.dependencies.State.Block(ctx, state.GatewayBlocked, reason)
+	return err
+}
+
+func (server *Server) convergeAccessPolicy(ctx context.Context) string {
+	if server.dependencies.Reconcile == nil {
+		return "RETRY_PENDING"
+	}
+	if _, err := server.dependencies.Reconcile(ctx); err != nil {
+		return "RETRY_PENDING"
+	}
+	return "COMPLETE"
 }
 
 func (server *Server) modems(writer http.ResponseWriter, request *http.Request) {
@@ -1339,6 +1560,16 @@ func (server *Server) updateNode(writer http.ResponseWriter, request *http.Reque
 }
 
 func (server *Server) refreshSubscription(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.SubscriptionDispatch != nil {
+		principal := request.Context().Value(principalKey).(auth.Principal)
+		result, err := server.dependencies.SubscriptionDispatch.Enqueue(request.Context(), request.PathValue("id"), "USER:"+principal.Username)
+		if err != nil {
+			server.writeRefreshDispatchError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, map[string]any{"operation_id": result.OperationID, "subscription_id": result.SubscriptionID, "joined": result.Joined})
+		return
+	}
 	if server.dependencies.SubscriptionRefresh == nil {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Обновление подписок не подключено")
 		return
@@ -1358,6 +1589,57 @@ func (server *Server) refreshSubscription(writer http.ResponseWriter, request *h
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (server *Server) refreshSubscriptions(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.SubscriptionDispatch == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Асинхронное обновление подписок не подключено")
+		return
+	}
+	items, err := server.dependencies.Subscriptions.List(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	accepted := make([]map[string]any, 0, len(items))
+	rejected := make([]map[string]any, 0)
+	for _, item := range items {
+		if item.SourceType != "url" {
+			continue
+		}
+		result, enqueueErr := server.dependencies.SubscriptionDispatch.Enqueue(request.Context(), item.ID, "USER:"+principal.Username)
+		if enqueueErr != nil {
+			code := "REFRESH_REJECTED"
+			if errors.Is(enqueueErr, subscription.ErrRefreshDispatcherBusy) {
+				code = "DISPATCHER_BUSY"
+			}
+			rejected = append(rejected, map[string]any{"subscription_id": item.ID, "code": code})
+			continue
+		}
+		accepted = append(accepted, map[string]any{"subscription_id": item.ID, "operation_id": result.OperationID, "joined": result.Joined})
+	}
+	status := http.StatusAccepted
+	if len(accepted) == 0 && len(rejected) > 0 {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(writer, status, map[string]any{"accepted": accepted, "rejected": rejected})
+}
+
+func (server *Server) writeRefreshDispatchError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, subscription.ErrRefreshDispatcherBusy):
+		writer.Header().Set("Retry-After", "2")
+		writeError(writer, http.StatusServiceUnavailable, "REFRESH_QUEUE_BUSY", "Очередь обновлений занята; повторите запрос")
+	case errors.Is(err, subscription.ErrSubscriptionDisabled):
+		writeError(writer, http.StatusConflict, "SUBSCRIPTION_DISABLED", "Подписка отключена")
+	case errors.Is(err, subscription.ErrSourceIsNotRefreshable):
+		writeError(writer, http.StatusConflict, "SOURCE_NOT_REFRESHABLE", "Источник подписки нельзя обновить по URL")
+	case errors.Is(err, store.ErrNotFound):
+		writeDomainError(writer, err)
+	default:
+		writeError(writer, http.StatusServiceUnavailable, "REFRESH_DISPATCH_FAILED", "Не удалось поставить обновление в безопасную очередь")
+	}
 }
 
 func (server *Server) matrix(writer http.ResponseWriter, request *http.Request) {
@@ -1897,6 +2179,74 @@ func (server *Server) events(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) operations(writer http.ResponseWriter, request *http.Request) {
+	limit, err := parsePageLimit(request, 50)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_PAGINATION", "Некорректный размер списка операций")
+		return
+	}
+	items, err := server.dependencies.Operations.List(request.Context(), limit)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, operationResponse(item, false))
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func (server *Server) operation(writer http.ResponseWriter, request *http.Request) {
+	item, err := server.dependencies.Operations.Get(request.Context(), request.PathValue("id"), true)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, operationResponse(item, true))
+}
+
+func (server *Server) clearCompletedOperations(writer http.ResponseWriter, request *http.Request) {
+	limit, err := parsePageLimit(request, 200)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_PAGINATION", "Некорректный лимит очистки операций")
+		return
+	}
+	deleted, err := server.dependencies.Operations.ClearCompleted(request.Context(), limit)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"deleted": deleted})
+}
+
+func operationResponse(item operations.Operation, includeSteps bool) map[string]any {
+	result := map[string]any{
+		"id": item.ID, "kind": item.Kind, "scope_type": item.ScopeType,
+		"scope_id": item.ScopeID, "status": item.Status,
+		"requested_by": item.RequestedBy, "summary_code": item.SummaryCode,
+		"created_at": item.CreatedAt, "started_at": item.StartedAt,
+		"finished_at": item.FinishedAt, "updated_at": item.UpdatedAt,
+	}
+	if !includeSteps {
+		return result
+	}
+	steps := make([]map[string]any, 0, len(item.Steps))
+	for _, step := range item.Steps {
+		var details any = map[string]any{}
+		if err := json.Unmarshal([]byte(step.DetailsJSON), &details); err != nil {
+			details = map[string]any{}
+		}
+		steps = append(steps, map[string]any{
+			"sequence": step.Sequence, "occurred_at": step.OccurredAt,
+			"severity": step.Severity, "stage": step.Stage,
+			"code": step.Code, "message": step.Message, "details": details,
+		})
+	}
+	result["steps"] = steps
+	return result
 }
 
 func (server *Server) periodicHealth(writer http.ResponseWriter, request *http.Request) {

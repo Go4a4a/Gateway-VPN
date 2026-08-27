@@ -32,6 +32,7 @@ import (
 	"gateway-vpn/internal/mihomo"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
+	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/reconcile"
 	retentionpkg "gateway-vpn/internal/retention"
@@ -54,6 +55,7 @@ type Runtime struct {
 	TLS                   tlsbootstrap.Result
 	Refresh               *subscription.RefreshCoordinator
 	RefreshWorker         *subscription.RefreshWorker
+	RefreshDispatch       *subscription.RefreshDispatcher
 	Mihomo                *mihomo.TransactionController
 	Reconciler            *reconcile.Reconciler
 	Routing               interface{ SyncRouting(context.Context) error }
@@ -251,10 +253,16 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		ModemReconcile: func(ctx context.Context) (hilink.CycleResult, error) {
 			return dataPlane.ModemRunner.Manager.Reconcile(ctx)
 		},
-		ModemPathProbe:          dataPlane.PathProbe,
-		PathOperations:          dataPlane.PathProbe,
-		PathActivator:           dataPlane.Reconciler,
-		SubscriptionRefresh:     dataPlane.Refresh,
+		ModemPathProbe:       dataPlane.PathProbe,
+		PathOperations:       dataPlane.PathProbe,
+		PathActivator:        dataPlane.Reconciler,
+		SubscriptionRefresh:  dataPlane.Refresh,
+		SubscriptionDispatch: dataPlane.RefreshDispatch,
+		AccessPolicy:         accesspolicy.NewRepository(database),
+		Operations:           operations.NewRepository(database),
+		BootIDReader: func() (string, error) {
+			return hostboot.Read("")
+		},
 		SubscriptionSecretRoot:  filepath.Join(configuration.System.StateDir, "secrets", "subscriptions"),
 		SubscriptionPayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"),
 		Reconcile: func(ctx context.Context) (any, error) {
@@ -282,7 +290,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
 }
 
 func initializeStartupPolicy(ctx context.Context, database *sql.DB, states *state.Repository, bootID string) (bool, error) {
@@ -368,6 +376,13 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.RefreshWorker != nil {
 		startWorker("subscription-refresh", application.RefreshWorker.Run)
+	}
+	if application.RefreshDispatch != nil {
+		startWorker("manual-subscription-refresh", application.RefreshDispatch.Run)
+		if err := application.RefreshDispatch.WaitReady(workerContext); err != nil {
+			stopWorker()
+			return fmt.Errorf("start manual subscription refresh dispatcher: %w", err)
+		}
 	}
 	if application.Reconciler != nil {
 		startWorker("data-plane-reconcile", application.runReconcileLoop)

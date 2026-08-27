@@ -186,6 +186,47 @@ func (repository *RefreshRepository) Get(ctx context.Context, subscriptionID str
 	return state, nil
 }
 
+// Release abandons only the caller's durable lease without changing refresh
+// backoff or success evidence. It is used when a prepared asynchronous job
+// cannot be admitted to the bounded runtime queue.
+func (repository *RefreshRepository) Release(ctx context.Context, lease RefreshLease) error {
+	if repository == nil || repository.database == nil || !validLease(lease) {
+		return errors.New("valid subscription refresh repository and lease are required")
+	}
+	result, err := repository.database.ExecContext(ctx, `
+UPDATE subscription_refresh_state
+SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+WHERE subscription_id=? AND lease_owner=?`, repository.now().UTC().Format(time.RFC3339Nano), lease.Subscription.ID, lease.Owner)
+	if err != nil {
+		return fmt.Errorf("release subscription refresh lease: %w", err)
+	}
+	if count, countErr := result.RowsAffected(); countErr != nil || count != 1 {
+		return ErrRefreshLeaseLost
+	}
+	return nil
+}
+
+// ReleaseInterrupted clears leases owned by operations left QUEUED/RUNNING by
+// a previous process. Gateway VPN is single-instance, so this is safe only at
+// dispatcher startup before new refresh work is admitted.
+func (repository *RefreshRepository) ReleaseInterrupted(ctx context.Context) (int64, error) {
+	if repository == nil || repository.database == nil {
+		return 0, errors.New("subscription refresh repository is not configured")
+	}
+	result, err := repository.database.ExecContext(ctx, `
+UPDATE subscription_refresh_state
+SET lease_owner=NULL, lease_expires_at=NULL, updated_at=?
+WHERE lease_owner IN (
+    SELECT id FROM operations
+    WHERE kind IN ('SUBSCRIPTION_REFRESH', 'SUBSCRIPTION_RECLASSIFY')
+      AND status IN ('QUEUED', 'RUNNING')
+)`, repository.now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("release interrupted subscription refresh leases: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 const refreshStateSelect = `
 SELECT subscription_id, etag, last_modified, consecutive_failures,
        next_attempt_at, lease_owner, lease_expires_at, last_error_code, updated_at

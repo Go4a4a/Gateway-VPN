@@ -39,19 +39,20 @@ import (
 )
 
 type dataPlaneComponents struct {
-	Refresh        *subscription.RefreshCoordinator
-	RefreshWorker  *subscription.RefreshWorker
-	Transactions   *mihomo.TransactionController
-	Reconciler     *reconcile.Reconciler
-	Routing        candidateruntime.RoutingSynchronizer
-	WireGuard      interface{ SyncWireGuard(context.Context) error }
-	PathProbe      *candidateruntime.Runtime
-	HealthRunner   *candidateruntime.PeriodicRunner
-	DirectRunner   *directprobe.Runner
-	ProbeScheduler *scheduler.Scheduler
-	ModemRunner    *hilink.Runner
-	Discoveries    *hilink.DiscoveryRegistry
-	MihomoClient   *mihomo.Client
+	Refresh         *subscription.RefreshCoordinator
+	RefreshWorker   *subscription.RefreshWorker
+	RefreshDispatch *subscription.RefreshDispatcher
+	Transactions    *mihomo.TransactionController
+	Reconciler      *reconcile.Reconciler
+	Routing         candidateruntime.RoutingSynchronizer
+	WireGuard       interface{ SyncWireGuard(context.Context) error }
+	PathProbe       *candidateruntime.Runtime
+	HealthRunner    *candidateruntime.PeriodicRunner
+	DirectRunner    *directprobe.Runner
+	ProbeScheduler  *scheduler.Scheduler
+	ModemRunner     *hilink.Runner
+	Discoveries     *hilink.DiscoveryRegistry
+	MihomoClient    *mihomo.Client
 }
 
 func initializeDataPlane(ctx context.Context, database *sql.DB, configuration config.Config, subscriptions *subscription.Repository, modems *modem.Repository, paths *pathmatrix.Repository, targets *bypass.Repository, matchers *subscription.MatcherRepository, states *state.Repository, broker *networkapply.BrokerClient) (dataPlaneComponents, error) {
@@ -185,6 +186,10 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		filepath.Join(configuration.System.StateDir, "subscriptions"),
 	)
 	refresh.Operations = operationRepository
+	refreshDispatch, err := subscription.NewRefreshDispatcher(refresh, 2, 64)
+	if err != nil {
+		return dataPlaneComponents{}, fmt.Errorf("initialize manual refresh dispatcher: %w", err)
+	}
 	worker := &subscription.RefreshWorker{Coordinator: refresh, Subscriptions: subscriptions}
 	identitySalt, err := bootstrap.EnsureModemIdentitySalt(configuration.System.StateDir)
 	if err != nil {
@@ -222,7 +227,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		},
 		Config: candidateruntime.DefaultPeriodicConfig(),
 	}
-	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client}, nil
+	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, RefreshDispatch: refreshDispatch, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client}, nil
 }
 
 func readBoundedSecret(filename string, maximum int64) (string, error) {
