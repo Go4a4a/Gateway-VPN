@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/bypass"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/firewall"
 	"gateway-vpn/internal/modem"
@@ -120,12 +121,16 @@ func TestServiceFirewallAuthorizesExactWireGuardEndpointTuple(t *testing.T) {
 }
 
 func TestServiceFirewallSynchronizesModemTuplesAndAuthorizesBoundHTTPS(t *testing.T) {
-	_, modems, subscriptions, closeDatabase := serviceRepositories(t)
+	database, modems, subscriptions, closeDatabase := serviceRepositories(t)
 	defer closeDatabase()
+	targets := bypass.NewRepository(database)
+	if _, err := targets.Create(context.Background(), bypass.CreateInput{ID: "target-a", Name: "Target A", Kind: bypass.KindDomain, Value: "example.com", Required: true, Timeout: 5 * time.Second, SuccessMode: bypass.SuccessAnyHTTPResponse}); err != nil {
+		t.Fatal(err)
+	}
 	executor := &serviceExecutor{}
 	gate := &routingGate{}
 	routingBackend := testRoutingBackend(modems, executor, gate)
-	backend := ServiceFirewallBackend{Routing: routingBackend, Modems: modems, Subscriptions: subscriptions, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}}
+	backend := ServiceFirewallBackend{Routing: routingBackend, Modems: modems, Subscriptions: subscriptions, Targets: targets, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}}
 	if err := backend.SyncRouting(context.Background()); err != nil {
 		t.Fatalf("SyncRouting() error = %v", err)
 	}
@@ -162,6 +167,30 @@ func TestServiceFirewallSynchronizesModemTuplesAndAuthorizesBoundHTTPS(t *testin
 	if gate.blocks != 0 {
 		t.Fatalf("unchanged valid routes unexpectedly closed path gate %d times", gate.blocks)
 	}
+	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 443}); err != nil {
+		t.Fatalf("AuthorizeDirectProbe() error = %v", err)
+	}
+	if len(executor.payloads) != 3 || !strings.Contains(executor.payloads[2], `bootstrap_http_v4 { "enx0001" . 0x1101 . 203.0.113.11 . 443 timeout 2m }`) {
+		t.Fatalf("direct authorization payloads = %#v", executor.payloads)
+	}
+	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 444}); err == nil {
+		t.Fatal("direct probe authorization accepted a port outside target policy")
+	}
+	target, err := targets.Get(context.Background(), "target-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := targets.Update(context.Background(), target.ID, bypass.UpdateInput{
+		Name: target.Name, Kind: target.Kind, Value: target.Value, Enabled: false,
+		Required: target.Required, Timeout: time.Duration(target.TimeoutSeconds) * time.Second,
+		SuccessMode: target.SuccessMode, ExpectedStatus: target.ExpectedStatus,
+		ExpectedBodySubstring: target.ExpectedBodySubstring, AllowNoRequired: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 443}); err == nil {
+		t.Fatal("direct probe authorization accepted a target disabled during policy change")
+	}
 }
 
 func TestServiceFirewallRejectsPrivateOrNonHTTPSBootstrap(t *testing.T) {
@@ -176,6 +205,26 @@ func TestServiceFirewallRejectsPrivateOrNonHTTPSBootstrap(t *testing.T) {
 		if err := backend.AuthorizeBootstrap(context.Background(), input); err == nil {
 			t.Fatalf("invalid authorization accepted: %+v", input)
 		}
+	}
+}
+
+func TestServiceFirewallAllowsRefreshForRoutingDisabledURLSubscription(t *testing.T) {
+	_, modems, subscriptions, closeDatabase := serviceRepositories(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	if err := subscriptions.SetEnabled(ctx, "sub-a", false); err != nil {
+		t.Fatalf("disable subscription: %v", err)
+	}
+	executor := &serviceExecutor{}
+	backend := ServiceFirewallBackend{
+		Routing: testRoutingBackend(modems, executor, &routingGate{}), Modems: modems,
+		Subscriptions: subscriptions, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"},
+	}
+	if err := backend.AuthorizeBootstrap(ctx, BootstrapAuthorization{ModemID: "modem-a", SubscriptionID: "sub-a", Addresses: []string{"203.0.113.12"}, Port: 443}); err != nil {
+		t.Fatalf("AuthorizeBootstrap() for routing-disabled URL subscription error = %v", err)
+	}
+	if len(executor.payloads) != 2 || !strings.Contains(executor.payloads[1], `bootstrap_http_v4 { "enx0001" . 0x1101 . 203.0.113.12 . 443 timeout 2m }`) {
+		t.Fatalf("disabled subscription authorization payloads = %#v", executor.payloads)
 	}
 }
 

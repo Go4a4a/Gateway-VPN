@@ -24,6 +24,7 @@ import (
 	"gateway-vpn/internal/config"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/diagnostics"
+	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/hilink"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/mihomo"
@@ -56,6 +57,7 @@ type Runtime struct {
 	WireGuard             interface{ SyncWireGuard(context.Context) error }
 	ModemRunner           *hilink.Runner
 	HealthRunner          *candidateruntime.PeriodicRunner
+	DirectRunner          *directprobe.Runner
 	Logging               *loggingpkg.Controller
 	LoggingSync           webapi.LoggingSynchronizer
 	Backups               *backup.Manager
@@ -175,6 +177,14 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	dataPlane.HealthRunner.OnError = func(err error) {
 		healthLogger.Warn("periodic path health cycle failed", "error", err)
 	}
+	dataPlane.DirectRunner.OnCycle = func(result directprobe.CycleResult) {
+		if result.Probed != 0 || result.Deferred != 0 || result.Published != 0 || len(result.Errors) != 0 {
+			healthLogger.Info("periodic direct Internet health cycle completed", "due", result.Due, "probed", result.Probed, "deferred", result.Deferred, "published", result.Published, "errors", len(result.Errors))
+		}
+	}
+	dataPlane.DirectRunner.OnError = func(err error) {
+		healthLogger.Warn("periodic direct Internet health cycle failed", "error", err)
+	}
 	trafficSessionID, err := traffic.NewSessionID()
 	if err != nil {
 		return fail(err)
@@ -267,7 +277,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
 }
 
 // RequestReconcile coalesces fixed SIGHUP requests from the privileged
@@ -295,7 +305,7 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	application.logger.Info("management TLS ready", "certificate_sha256", application.TLS.Fingerprint)
 	workerContext, stopWorker := context.WithCancel(ctx)
 	defer stopWorker()
-	workerDone := make(chan runtimeWorkerExit, 10)
+	workerDone := make(chan runtimeWorkerExit, 12)
 	workers := 0
 	startWorker := func(name string, run func(context.Context) error) {
 		workers++
@@ -312,6 +322,9 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.HealthRunner != nil {
 		startWorker("path-health", application.HealthRunner.Run)
+	}
+	if application.DirectRunner != nil {
+		startWorker("direct-health", application.DirectRunner.Run)
 	}
 	if application.Logging != nil {
 		startWorker("logging", application.Logging.Run)

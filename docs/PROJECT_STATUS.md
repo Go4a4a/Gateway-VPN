@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-27
-**Общее состояние:** `UNIFIED_ACCESS_POLICY_LOCAL_IN_PROGRESS / HARDWARE_VALIDATION_PENDING`
-**Текущий этап:** universal multi-port installer опубликован в `5892f7d`, exact GitHub Actions run `33062528338` завершён успешно. После этого пользователь расширил рабочую модель: прямой Интернет и подписки образуют единый priority list, выбор учитывает `FULL/LIMITED`, modem и preferred node, а refresh и ручные проверки получают durable operation status. В локальном worktree уже готовы migration v14, единое ранжирование, server preferences, startup/hysteresis transitions, direct modem paths и operation journal. Новый direct probing, runtime/root/firewall activation, resilient refresh ladder и WebUI/API ещё не подключены, поэтому этот successor пока не является новым install-ready release candidate.
+**Общее состояние:** `DIRECT_MODEM_PROBE_LOCAL_PASS / UNIFIED_ACTUATION_PENDING / HARDWARE_VALIDATION_PENDING`
+**Текущий этап:** unified access foundation опубликован в `b261b1e`. В локальном worktree дополнительно завершён modem-bound direct qualification: DNS и HTTPS идут через один authoritative `interface + fwmark`, root выдаёт только краткоживущие target-bound HTTPS tuples, результаты `FULL/LIMITED/FAILED` записываются с policy/route generation protection, а periodic runner справедливо обходит `1..N` модемов. Unified runtime selector, mutually-exclusive direct/TUN firewall activation, resilient refresh ladder и новые API/WebUI ещё не подключены, поэтому successor пока не является новым install-ready release candidate.
 
-**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Реализация нового согласованного unified-access successor выполнена примерно на `30%`: завершены schema/domain/persistence и детерминированный selection foundation, впереди сетевой probe/actuation и интерфейсы управления. С учётом добавленного объёма общая production-готовность оценивается примерно в `82–85%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
+**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Реализация нового согласованного unified-access successor выполнена примерно на `42%`: завершены schema/domain/persistence, ranking/transition foundation и реальный modem-bound direct qualification; впереди сетевой actuator, refresh ladder и интерфейсы управления. С учётом добавленного объёма общая production-готовность оценивается примерно в `84–86%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -34,16 +34,16 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_5892F7D / UNIFIED_ACCESS_LOCAL` | Universal bridge/SSH installer опубликован в `Go4a4a/Gateway-VPN`; локальный unified-access successor ещё не commit/push. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_B261B1E / DIRECT_PROBE_LOCAL` | Unified access foundation опубликован в `Go4a4a/Gateway-VPN`; modem-bound direct probe block ещё не commit/push. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
 | Firewall / routing | `3C13B09_SCHEMA_V2_UPDATE_ROLLBACK_FINALIZE_PASS / HOST_NOT_RUN` | Schema `2` с раздельными user/service counters прошла kernel/netns, fresh exact install, signed `1 → 2 → 1 → 2`, finalization и finalized reboot; guard сохранял `PATH_BLOCKED` без direct route. Реальный host packet capture не выполнен |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
-| Subscription Manager | `UNIFIED_FOUNDATION_LOCAL / LINUX_NOT_RUN` | Disabled user-routing subscription продолжает auto-refresh; durable `AUTO/INCLUDE/EXCLUDE` и preferred rank переносятся по fingerprint между versions. Resilient route ladder ещё не подключён |
-| Qualification / scheduler | `UNIFIED_RANKING_LOCAL / LINUX_NOT_RUN` | Реализованы `FULL → best LIMITED score → method → modem → node → sticky` и restart-safe transition foundation; direct sockets/prober и общий runtime selector ещё не подключены |
-| Unified access methods | `SCHEMA_DOMAIN_TEST_PASS / RUNTIME_PENDING` | Migration v14 создаёт immutable direct method, per-modem direct evidence, policy/runtime state и bounded operations. Direct/VPN candidates отвергают stale policy/route generation; firewall activation ещё отсутствует |
+| Subscription Manager | `UNIFIED_FOUNDATION_PUBLISHED / LINUX_NOT_RUN` | Disabled user-routing subscription продолжает auto-refresh; durable `AUTO/INCLUDE/EXCLUDE` и preferred rank переносятся по fingerprint между versions. Resilient route ladder ещё не подключён |
+| Qualification / scheduler | `DIRECT_PROBE_LOCAL_PASS / LINUX_NOT_RUN` | Реализованы `FULL → best LIMITED score → method → modem → node → sticky`, restart-safe transitions и periodic direct DNS/HTTPS через exact modem tuple. Общий runtime selector ещё не подключён |
+| Unified access methods | `SCHEMA_DOMAIN_PUBLISHED / ACTUATION_PENDING` | Migration v14 создаёт immutable direct method, per-modem direct evidence, policy/runtime state и bounded operations. Direct/VPN candidates отвергают stale policy/route generation; direct/TUN firewall activation ещё отсутствует |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
 | SQLite | `V14_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration v14 и recovery fixture `13 → 14` проходят локальные тесты; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_5892F7D_PASS / UNIFIED_FULL_LOCAL_PASS` | Exact GitHub Actions run `33062528338` для published multi-port HEAD — PASS. Новый локальный unified-access блок прошёл полный `go test ./... -count=1`, `go vet ./...` и четыре CGO-free Linux/amd64 cross-build |
+| Автоматические тесты | `REMOTE_CI_5892F7D_PASS / DIRECT_PROBE_FULL_LOCAL_PASS` | Последний подтверждённый remote run `33062528338` относится к `5892f7d`; exact CI для `b261b1e` ещё нужно получить. Текущий direct-probe worktree прошёл полный `go test ./... -count=1`, `go vet ./...` и четыре CGO-free Linux/amd64 cross-build |
 
 ## Матрица доказательств Definition of Done
 
@@ -279,6 +279,32 @@
 | DEV-157 | 2026-08-27 | Startup block становится явной ON/OFF policy, но OFF не отключает nftables: до полной qualification разрешается только минимально проверенный LKG/direct generation. Boot-scoped direct-only override сбрасывается после reboot; служебный direct refresh регулируется отдельно | Пользователь может выбрать более быстрый старт без неконтролируемого forwarding, а диагностический direct-only режим не должен незаметно стать постоянной политикой или отключить обновление подписок |
 
 ## Журнал разработки
+
+### Сессия 073 — modem-bound direct Internet qualification — 2026-08-27
+
+**Цель:** превратить persistent direct modem paths из migration v14 в фактические проверки полноценности Интернета через каждый отдельный HiLink/uplink без fallback в host main/default route и без открытия пользовательского forwarding.
+
+**Реализовано локально:**
+
+- новый `internal/directprobe` для каждого due direct path повторно синхронизирует owned policy routing, сверяет authoritative modem `route_generation` и создаёт DNS/HTTPS sockets с одним `SO_BINDTODEVICE + SO_MARK` контекстом;
+- DNS последовательно использует настроенный bounded bootstrap list, принимает только `1..16` IPv4 global-unicast ответов без private/IPv6 примеси; HTTPS подключается только к полученному pinned IP, сохраняет исходный hostname для TLS/SNI, не следует redirect, ограничивает headers/body и поддерживает `any_http_response`, `expected_status`, `expected_body`;
+- root broker получил typed `POST /v1/direct-probe/authorize`: caller передаёт только modem ID, target ID, до 16 public IPv4 и HTTPS port; root перечитывает modem interface/fwmark и текущую enabled target policy из SQLite, проверяет port и добавляет exact tuple в существующий service set с timeout 2 минуты;
+- общий scheduler применяет concurrency/rate/mobile-byte budget. Budget deferral не стирает прежнее evidence; `FULL` требует прохождения всех обязательных целей, optional-only success даёт `LIMITED`, пустая policy явно публикует `FAILED/NO_ACTIVE_TARGETS`;
+- periodic runner подключён как критический `direct-health` worker и только записывает qualification evidence. Он не активирует direct NAT/TUN и не может открыть пользовательский трафик;
+- runner получил round-robin cursor: постоянная ошибка первых priority-модемов больше не лишает проверки последующие модемы при `DueLimit < modem count`;
+- disabled для user routing URL-подписка по-прежнему допускается root bootstrap authorization для background/manual refresh; upload source и неизвестная подписка не допускаются.
+
+**Safety review и найденные проблемы:**
+
+- добавлена проверка смены modem route generation именно во время root routing sync: stale context не создаёт socket, firewall tuple или новое evidence;
+- policy mutation защищена двумя уровнями: root отвергает уже disabled target/изменённый port, а publication transaction отвергает старую global policy generation и неполный target set;
+- caller cancellation теперь всегда прекращает весь cycle без перезаписи предыдущего результата; локальный timeout отдельной цели остаётся нормальным `TIMEOUT` evidence и не останавливает проверку остальных целей;
+- private literal, смешанный public+private DNS answer и IPv6 answer отвергаются; redirect и dial к hostname/IP вне pinned origin невозможны;
+- подтверждено, что `direct-health` только вызывает repository publication и transient service allowlist, а существующий user gate остаётся неизменным.
+
+**Проверено:** focused directprobe/dataplane/networkapply/accesspolicy/app tests; полный `go test ./... -count=1`; `go vet ./...`; четыре `linux/amd64 CGO_ENABLED=0` cross-build (`gateway-vpn`, `gateway-vpnctl`, `gateway-vpn-bootstrap`, `gateway-vpn-deploy`); `git diff --check` — PASS. Linux capabilities, реальный marked DNS/HTTPS, nft timeout и packet capture ещё не запускались.
+
+**Следующий шаг:** реализовать unified runtime selector и direct actuator с root endpoint только `modem_id + route_generation`, firewall schema v3, взаимным исключением direct NAT и TUN gate, atomic rollback/quarantine; затем resilient subscription refresh ladder и API/WebUI.
 
 ### Сессия 072 — unified direct/VPN access policy foundation — 2026-08-27
 

@@ -48,7 +48,7 @@ func TestInitializeDataPlaneWiresRefreshWorkerCandidateRuntimeAndTransactions(t 
 	if err != nil {
 		t.Fatalf("initializeDataPlane() error = %v", err)
 	}
-	if components.Refresh == nil || components.RefreshWorker == nil || components.Transactions == nil || components.Reconciler == nil || components.Routing == nil || components.WireGuard == nil || components.PathProbe == nil || components.HealthRunner == nil || components.ProbeScheduler == nil || components.ModemRunner == nil || components.Discoveries == nil || components.RefreshWorker.Coordinator != components.Refresh || components.HealthRunner.Runtime != components.PathProbe || components.HealthRunner.Paths != paths {
+	if components.Refresh == nil || components.RefreshWorker == nil || components.Transactions == nil || components.Reconciler == nil || components.Routing == nil || components.WireGuard == nil || components.PathProbe == nil || components.HealthRunner == nil || components.DirectRunner == nil || components.ProbeScheduler == nil || components.ModemRunner == nil || components.Discoveries == nil || components.RefreshWorker.Coordinator != components.Refresh || components.HealthRunner.Runtime != components.PathProbe || components.HealthRunner.Paths != paths {
 		t.Fatalf("data-plane components = %+v", components)
 	}
 }

@@ -58,6 +58,7 @@ type RoutingAdmin interface {
 
 type BootstrapAdmin interface {
 	AuthorizeBootstrap(context.Context, dataplane.BootstrapAuthorization) error
+	AuthorizeDirectProbe(context.Context, dataplane.DirectProbeAuthorization) error
 	AuthorizeMihomoEndpoints(context.Context, dataplane.MihomoEndpointAuthorization) error
 }
 
@@ -197,6 +198,7 @@ func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin,
 	}
 	if bootstrapAdmin != nil {
 		mux.HandleFunc("POST /v1/bootstrap/authorize", server.authorizeBootstrap)
+		mux.HandleFunc("POST /v1/direct-probe/authorize", server.authorizeDirectProbe)
 		mux.HandleFunc("POST /v1/mihomo/endpoints/authorize", server.authorizeMihomoEndpoints)
 	}
 	if wireGuardAdmin != nil {
@@ -371,6 +373,19 @@ func (server *BrokerServer) authorizeBootstrap(writer http.ResponseWriter, reque
 	}
 	if err := server.Bootstrap.AuthorizeBootstrap(request.Context(), input); err != nil {
 		writeBrokerError(writer, http.StatusBadRequest, "BOOTSTRAP_AUTHORIZATION_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *BrokerServer) authorizeDirectProbe(writer http.ResponseWriter, request *http.Request) {
+	var input dataplane.DirectProbeAuthorization
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if err := server.Bootstrap.AuthorizeDirectProbe(request.Context(), input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "DIRECT_PROBE_AUTHORIZATION_FAILED")
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
@@ -624,6 +639,10 @@ func (client *BrokerClient) AuthorizeBootstrap(ctx context.Context, authorizatio
 
 func (client *BrokerClient) AuthorizeSubscriptionBootstrap(ctx context.Context, modemID, subscriptionID string, addresses []string, port uint16) error {
 	return client.AuthorizeBootstrap(ctx, dataplane.BootstrapAuthorization{ModemID: modemID, SubscriptionID: subscriptionID, Addresses: append([]string(nil), addresses...), Port: port})
+}
+
+func (client *BrokerClient) AuthorizeDirectProbe(ctx context.Context, modemID, targetID string, addresses []string, port uint16) error {
+	return client.call(ctx, "/v1/direct-probe/authorize", dataplane.DirectProbeAuthorization{ModemID: modemID, TargetID: targetID, Addresses: append([]string(nil), addresses...), Port: port}, http.StatusNoContent, nil)
 }
 
 func (client *BrokerClient) AuthorizeMihomoVersions(ctx context.Context, versionIDs []string) error {

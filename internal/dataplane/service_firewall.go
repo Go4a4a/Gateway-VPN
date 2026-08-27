@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/firewall"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/netbind"
@@ -48,12 +50,20 @@ type MihomoEndpointAuthorization struct {
 	VersionIDs []string `json:"version_ids"`
 }
 
+type DirectProbeAuthorization struct {
+	ModemID   string   `json:"modem_id"`
+	TargetID  string   `json:"target_id"`
+	Addresses []string `json:"addresses"`
+	Port      uint16   `json:"port"`
+}
+
 // ServiceFirewallBackend combines route reconciliation with the exact direct
 // service allowlists that those marked routes may use.
 type ServiceFirewallBackend struct {
 	Routing       RoutingBackend
 	Modems        *modem.Repository
 	Subscriptions *subscription.Repository
+	Targets       *bypass.Repository
 	Executor      platformexec.Executor
 	NFT           string
 	BootstrapDNS  []string
@@ -101,21 +111,86 @@ func (backend *ServiceFirewallBackend) AuthorizeBootstrap(ctx context.Context, a
 		return errors.New("bootstrap modem is not ready")
 	}
 	currentSubscription, err := backend.Subscriptions.Get(ctx, authorization.SubscriptionID)
-	if err != nil || !currentSubscription.Enabled || currentSubscription.SourceType != "url" {
-		return errors.New("bootstrap subscription is not an enabled URL source")
+	if err != nil || currentSubscription.SourceType != "url" {
+		return errors.New("bootstrap subscription is not a URL source")
 	}
-	addresses := make([]string, 0, len(authorization.Addresses))
-	seen := make(map[string]struct{}, len(authorization.Addresses))
-	for _, raw := range authorization.Addresses {
+	addresses, err := validatedPublicAddresses(authorization.Addresses)
+	if err != nil {
+		return err
+	}
+	if err := backend.authorizeTransientHTTPS(ctx, currentModem, addresses, authorization.Port); err != nil {
+		return fmt.Errorf("authorize modem-bound subscription endpoint: %w", err)
+	}
+	return nil
+}
+
+func (backend *ServiceFirewallBackend) AuthorizeDirectProbe(ctx context.Context, authorization DirectProbeAuthorization) error {
+	if backend == nil {
+		return errors.New("service firewall backend is nil")
+	}
+	backend.mutex.Lock()
+	defer backend.mutex.Unlock()
+	if err := backend.syncRoutingLocked(ctx); err != nil {
+		return err
+	}
+	if backend.Targets == nil || strings.TrimSpace(authorization.ModemID) == "" || strings.TrimSpace(authorization.TargetID) == "" || authorization.Port == 0 {
+		return errors.New("bounded direct probe authorization is required")
+	}
+	currentModem, err := backend.Modems.Get(ctx, authorization.ModemID)
+	if err != nil || !currentModem.Enabled || currentModem.State != modem.StateReady {
+		return errors.New("direct probe modem is not ready")
+	}
+	target, err := backend.Targets.Get(ctx, authorization.TargetID)
+	if err != nil || !target.Enabled {
+		return errors.New("direct probe target is not enabled")
+	}
+	parsed, err := url.Parse(target.NormalizedURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return errors.New("stored direct probe target is invalid")
+	}
+	expectedPort := uint16(443)
+	if parsed.Port() != "" {
+		value, parseErr := strconv.ParseUint(parsed.Port(), 10, 16)
+		if parseErr != nil || value == 0 {
+			return errors.New("stored direct probe target port is invalid")
+		}
+		expectedPort = uint16(value)
+	}
+	if authorization.Port != expectedPort {
+		return errors.New("direct probe authorization port does not match target policy")
+	}
+	addresses, err := validatedPublicAddresses(authorization.Addresses)
+	if err != nil {
+		return err
+	}
+	if err := backend.authorizeTransientHTTPS(ctx, currentModem, addresses, authorization.Port); err != nil {
+		return fmt.Errorf("authorize modem-bound direct probe endpoint: %w", err)
+	}
+	return nil
+}
+
+func (backend *ServiceFirewallBackend) authorizeTransientHTTPS(ctx context.Context, currentModem modem.Modem, addresses []string, port uint16) error {
+	var commands strings.Builder
+	for _, address := range addresses {
+		element := serviceTuple(currentModem.InterfaceName, currentModem.Fwmark, address, port)
+		fmt.Fprintf(&commands, "destroy element inet %s %s { %s }\n", firewall.TableName, bootstrapHTTPSet, element)
+		fmt.Fprintf(&commands, "add element inet %s %s { %s timeout %s }\n", firewall.TableName, bootstrapHTTPSet, element, bootstrapHTTPTimeout)
+	}
+	return backend.applyTransaction(ctx, commands.String())
+}
+
+func validatedPublicAddresses(rawAddresses []string) ([]string, error) {
+	if len(rawAddresses) == 0 || len(rawAddresses) > 16 {
+		return nil, errors.New("bounded public IPv4 endpoint set is required")
+	}
+	addresses := make([]string, 0, len(rawAddresses))
+	seen := make(map[string]struct{}, len(rawAddresses))
+	for _, raw := range rawAddresses {
 		address, err := netip.ParseAddr(raw)
-		if err != nil {
-			return errors.New("bootstrap endpoint contains an invalid IP address")
+		if err != nil || !publicIPv4(address.Unmap()) {
+			return nil, errors.New("endpoint must contain only public IPv4 addresses")
 		}
-		address = address.Unmap()
-		if !publicIPv4(address) {
-			return errors.New("bootstrap endpoint must contain only public IPv4 addresses")
-		}
-		value := address.String()
+		value := address.Unmap().String()
 		if _, exists := seen[value]; exists {
 			continue
 		}
@@ -124,33 +199,9 @@ func (backend *ServiceFirewallBackend) AuthorizeBootstrap(ctx context.Context, a
 	}
 	sort.Strings(addresses)
 	if len(addresses) == 0 {
-		return errors.New("bootstrap endpoint address set is empty")
+		return nil, errors.New("endpoint address set is empty")
 	}
-
-	var commands strings.Builder
-	for _, address := range addresses {
-		element := serviceTuple(currentModem.InterfaceName, currentModem.Fwmark, address, authorization.Port)
-		commands.WriteString("destroy element inet ")
-		commands.WriteString(firewall.TableName)
-		commands.WriteByte(' ')
-		commands.WriteString(bootstrapHTTPSet)
-		commands.WriteString(" { ")
-		commands.WriteString(element)
-		commands.WriteString(" }\n")
-		commands.WriteString("add element inet ")
-		commands.WriteString(firewall.TableName)
-		commands.WriteByte(' ')
-		commands.WriteString(bootstrapHTTPSet)
-		commands.WriteString(" { ")
-		commands.WriteString(element)
-		commands.WriteString(" timeout ")
-		commands.WriteString(bootstrapHTTPTimeout)
-		commands.WriteString(" }\n")
-	}
-	if err := backend.applyTransaction(ctx, commands.String()); err != nil {
-		return fmt.Errorf("authorize modem-bound subscription endpoint: %w", err)
-	}
-	return nil
+	return addresses, nil
 }
 
 func (backend *ServiceFirewallBackend) AuthorizeWireGuardEndpoint(ctx context.Context, currentModem modem.Modem, address string) error {

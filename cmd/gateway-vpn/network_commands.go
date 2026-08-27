@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/backup"
+	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/config"
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
@@ -94,6 +95,7 @@ func runNetworkBroker(args []string) int {
 		Routing:       routingBackend,
 		Modems:        routingBackend.Modems,
 		Subscriptions: subscription.NewRepository(database),
+		Targets:       bypass.NewRepository(database),
 		Executor:      executor,
 		NFT:           "/usr/sbin/nft",
 		BootstrapDNS:  append([]string(nil), configuration.Mihomo.BootstrapDNS...),

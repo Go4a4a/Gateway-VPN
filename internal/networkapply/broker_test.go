@@ -115,6 +115,7 @@ func (admin *fakeWireGuardAdmin) SyncWireGuard(context.Context) error {
 
 type fakeBootstrapAdmin struct {
 	requests []dataplane.BootstrapAuthorization
+	direct   []dataplane.DirectProbeAuthorization
 	mihomo   []dataplane.MihomoEndpointAuthorization
 	err      error
 }
@@ -126,6 +127,11 @@ func (admin *fakeBootstrapAdmin) AuthorizeMihomoEndpoints(_ context.Context, inp
 
 func (admin *fakeBootstrapAdmin) AuthorizeBootstrap(_ context.Context, input dataplane.BootstrapAuthorization) error {
 	admin.requests = append(admin.requests, input)
+	return admin.err
+}
+
+func (admin *fakeBootstrapAdmin) AuthorizeDirectProbe(_ context.Context, input dataplane.DirectProbeAuthorization) error {
+	admin.direct = append(admin.direct, input)
 	return admin.err
 }
 
@@ -335,6 +341,13 @@ func TestBrokerBootstrapAuthorizationUsesTypedBoundedRequest(t *testing.T) {
 	}
 	if len(admin.requests) != 1 || admin.requests[0].ModemID != "modem-a" || admin.requests[0].Port != 443 {
 		t.Fatalf("bootstrap admin requests = %+v", admin.requests)
+	}
+	direct := dataplane.DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 443}
+	if err := client.AuthorizeDirectProbe(ctx, direct.ModemID, direct.TargetID, direct.Addresses, direct.Port); err != nil {
+		t.Fatalf("AuthorizeDirectProbe() error = %v", err)
+	}
+	if len(admin.direct) != 1 || admin.direct[0].TargetID != "target-a" || admin.direct[0].ModemID != "modem-a" {
+		t.Fatalf("direct probe admin requests = %+v", admin.direct)
 	}
 	admin.err = errors.New("private nft set detail")
 	if err := client.AuthorizeBootstrap(ctx, input); err == nil || strings.Contains(err.Error(), "nft set detail") {

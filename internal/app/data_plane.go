@@ -14,11 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bootstrap"
 	"gateway-vpn/internal/buildinfo"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/candidateruntime"
 	"gateway-vpn/internal/config"
+	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/mihomo"
@@ -44,6 +46,7 @@ type dataPlaneComponents struct {
 	WireGuard      interface{ SyncWireGuard(context.Context) error }
 	PathProbe      *candidateruntime.Runtime
 	HealthRunner   *candidateruntime.PeriodicRunner
+	DirectRunner   *directprobe.Runner
 	ProbeScheduler *scheduler.Scheduler
 	ModemRunner    *hilink.Runner
 	Discoveries    *hilink.DiscoveryRegistry
@@ -87,6 +90,15 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	probeScheduler, err := scheduler.New(scheduler.DefaultConfig())
 	if err != nil {
 		return dataPlaneComponents{}, err
+	}
+	directPaths := accesspolicy.NewDirectPathRepository(database)
+	directProber, err := directprobe.New(modems, directPaths, targets, broker, probeScheduler, configuration.Mihomo.BootstrapDNS)
+	if err != nil {
+		return dataPlaneComponents{}, fmt.Errorf("initialize direct Internet prober: %w", err)
+	}
+	directRunner, err := directprobe.NewRunner(directProber, directprobe.DefaultRunnerConfig())
+	if err != nil {
+		return dataPlaneComponents{}, fmt.Errorf("initialize direct Internet probe runner: %w", err)
 	}
 	baseProber := health.MihomoProber{
 		Client:            client,
@@ -182,7 +194,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		},
 		Config: candidateruntime.DefaultPeriodicConfig(),
 	}
-	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client}, nil
+	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client}, nil
 }
 
 func readBoundedSecret(filename string, maximum int64) (string, error) {

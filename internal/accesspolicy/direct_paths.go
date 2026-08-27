@@ -157,6 +157,20 @@ func (repository *DirectPathRepository) List(ctx context.Context) ([]DirectPath,
 	return result, rows.Err()
 }
 
+func (repository *DirectPathRepository) Get(ctx context.Context, pathID string) (DirectPath, error) {
+	if repository == nil || repository.database == nil || strings.TrimSpace(pathID) == "" {
+		return DirectPath{}, errors.New("direct path database and id are required")
+	}
+	item, err := scanDirectPath(repository.database.QueryRowContext(ctx, directPathSelect+" WHERE p.id=?", pathID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DirectPath{}, store.ErrNotFound
+	}
+	if err != nil {
+		return DirectPath{}, fmt.Errorf("get direct modem path: %w", err)
+	}
+	return item, nil
+}
+
 func (repository *DirectPathRepository) Publish(ctx context.Context, update DirectResultUpdate) error {
 	if err := validateDirectResult(update); err != nil {
 		return err
@@ -359,7 +373,7 @@ func validateDirectResult(update DirectResultUpdate) error {
 	if update.QualityClass == QualityFull && (update.TransportState != "PASSED" || update.RequiredTargetsTotal == 0 || update.RequiredTargetsPassed != update.RequiredTargetsTotal) {
 		return errors.New("FULL direct result requires passed transport and every required target")
 	}
-	if update.QualityClass == QualityLimited && (update.TransportState != "PASSED" || update.FunctionalScore <= 0 || update.RequiredTargetsPassed == update.RequiredTargetsTotal) {
+	if update.QualityClass == QualityLimited && (update.TransportState != "PASSED" || update.FunctionalScore <= 0 || update.RequiredTargetsTotal > 0 && update.RequiredTargetsPassed == update.RequiredTargetsTotal) {
 		return errors.New("LIMITED direct result requires partial target access and positive score")
 	}
 	for _, target := range update.Targets {
