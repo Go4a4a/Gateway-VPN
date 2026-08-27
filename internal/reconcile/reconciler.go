@@ -42,6 +42,7 @@ type Candidate struct {
 	PolicyGeneration int64
 	RouteGeneration  int64
 	ConfigGeneration int64
+	StartupRecovery  bool
 }
 
 type Inventory interface {
@@ -66,6 +67,10 @@ type Reconciler struct {
 	AccessPaths  *accesspolicy.DirectPathRepository
 	AccessPolicy *accesspolicy.Repository
 	Now          func() time.Time
+	// StartupRecovery permits exactly one same-tuple lightweight activation
+	// prepared by the boot policy. Any block, replacement, or failed attempt
+	// consumes it and returns to ordinary full activation semantics.
+	StartupRecovery bool
 
 	mutex sync.Mutex
 }
@@ -170,6 +175,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) (Result, error) {
 
 func (reconciler *Reconciler) reconcileUnified(ctx context.Context, observed Observed, desired state.Snapshot, hasTargets bool) (Result, error) {
 	if desired.PolicyTransitionActive() {
+		reconciler.StartupRecovery = false
 		return reconciler.reconcileUnifiedPolicyTransition(ctx, observed, desired, hasTargets)
 	}
 	if !hasTargets {
@@ -188,6 +194,10 @@ func (reconciler *Reconciler) reconcileUnified(ctx context.Context, observed Obs
 		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_CANDIDATE_INVENTORY_FAILED", err)
 	}
 	currentKey := activeCandidateKey(desired)
+	startupRecovery := reconciler.StartupRecovery && desired.PathState == state.PathVerifying && currentKey != ""
+	if reconciler.StartupRecovery && !startupRecovery {
+		reconciler.StartupRecovery = false
+	}
 	currentHealthy := false
 	hardFailure := false
 	filtered := make([]accesspolicy.Candidate, 0, len(items))
@@ -206,10 +216,15 @@ func (reconciler *Reconciler) reconcileUnified(ctx context.Context, observed Obs
 	}
 	decision, err := accesspolicy.Rank(filtered, currentKey)
 	if errors.Is(err, accesspolicy.ErrNoCandidate) {
+		reconciler.StartupRecovery = false
 		return reconciler.block(ctx, state.GatewayNoWorkingSubscription, "NO_FRESH_ACCESS_METHOD", nil)
 	}
 	if err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_RANKING_FAILED", err)
+	}
+	if startupRecovery && decision.Candidate.Key != currentKey {
+		startupRecovery = false
+		reconciler.StartupRecovery = false
 	}
 	transition, err := accesspolicy.EvaluateTransition(accesspolicy.TransitionInput{
 		CurrentKey: currentKey, ProposedKey: decision.Candidate.Key,
@@ -236,14 +251,26 @@ func (reconciler *Reconciler) reconcileUnified(ctx context.Context, observed Obs
 	if !transition.Allow {
 		return Result{Action: transition.Reason, Candidate: candidateFromAccess(decision.Candidate)}, nil
 	}
-	result, err := reconciler.activate(ctx, candidateFromAccess(decision.Candidate))
+	activationCandidate := candidateFromAccess(decision.Candidate)
+	activationCandidate.StartupRecovery = startupRecovery
+	result, err := reconciler.activate(ctx, activationCandidate)
 	if err != nil {
+		reconciler.StartupRecovery = false
 		return result, err
 	}
-	if err := reconciler.AccessPolicy.MarkSwitched(ctx, transition.Reason); err != nil {
+	switchReason := transition.Reason
+	if startupRecovery {
+		switchReason = "STARTUP_MINIMAL_RECOVERY"
+	}
+	if err := reconciler.AccessPolicy.MarkSwitched(ctx, switchReason); err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "ACCESS_SWITCH_RECORD_FAILED", err)
 	}
-	result.Action = "ACCESS_METHOD_ACTIVATED"
+	reconciler.StartupRecovery = false
+	if startupRecovery {
+		result.Action = "STARTUP_MINIMAL_PATH_RESTORED"
+	} else {
+		result.Action = "ACCESS_METHOD_ACTIVATED"
+	}
 	return result, nil
 }
 
@@ -475,6 +502,7 @@ func (reconciler *Reconciler) activate(ctx context.Context, candidate Candidate)
 }
 
 func (reconciler *Reconciler) block(ctx context.Context, gatewayState, reason string, cause error) (Result, error) {
+	reconciler.StartupRecovery = false
 	actuatorErr := reconciler.Actuator.Block(ctx, reason)
 	_, _, stateErr := reconciler.State.Block(ctx, gatewayState, reason)
 	if cause != nil || actuatorErr != nil || stateErr != nil {

@@ -142,9 +142,45 @@ INSERT INTO bypass_probe_targets (
 	if err != nil || !changed || active.PathState != PathActive || active.ActiveDirectPathID != path.ID || active.ActiveQualityClass != accesspolicy.QualityFull {
 		t.Fatalf("FinishDirectActivation() = %+v/%v/%v", active, changed, err)
 	}
+	prepared, changed, err := repository.PrepareStartupRecovery(ctx)
+	if err != nil || !changed || prepared.PathState != PathVerifying || prepared.ActiveDirectPathID != path.ID || prepared.ConfigGeneration != 2 {
+		t.Fatalf("PrepareStartupRecovery(direct) = %+v/%v/%v", prepared, changed, err)
+	}
+	shortened, err := accesspolicy.NewDirectPathRepository(database).Get(ctx, path.ID)
+	shortExpiry, parseErr := time.Parse(time.RFC3339Nano, shortened.ExpiresAt)
+	if err != nil || parseErr != nil || shortExpiry.After(time.Now().UTC().Add(31*time.Second)) {
+		t.Fatalf("startup direct refresh deadline = %q, %v/%v", shortened.ExpiresAt, err, parseErr)
+	}
+	active, changed, err = repository.FinishDirectActivation(ctx, path.ID, path.PolicyGeneration, path.RouteGeneration)
+	if err != nil || !changed || active.PathState != PathActive || active.ConfigGeneration != 2 {
+		t.Fatalf("FinishDirectActivation(startup) = %+v/%v/%v", active, changed, err)
+	}
 	blocked, changed, err := repository.Block(ctx, GatewayBlocked, "direct-test")
-	if err != nil || !changed || blocked.ActiveDirectPathID != "" || blocked.ActiveMethodKind != "" || blocked.ActiveModemID != "" || blocked.ConfigGeneration != 2 {
+	if err != nil || !changed || blocked.ActiveDirectPathID != "" || blocked.ActiveMethodKind != "" || blocked.ActiveModemID != "" || blocked.ConfigGeneration != 3 {
 		t.Fatalf("Block(direct) = %+v/%v/%v", blocked, changed, err)
+	}
+}
+
+func TestPrepareStartupRecoveryPreservesExactVPNLKGAndSchedulesFullProbe(t *testing.T) {
+	ctx, database := stateDatabase(t)
+	repository, _, cell, _ := seedActivePolicyState(t, ctx, database)
+	before, err := repository.Get(ctx)
+	if err != nil || before.PathState != PathActive {
+		t.Fatalf("active runtime before startup = %+v, %v", before, err)
+	}
+	prepared, changed, err := repository.PrepareStartupRecovery(ctx)
+	if err != nil || !changed || prepared.PathState != PathVerifying || prepared.GatewayState != GatewayVerifying || prepared.ActivePathID != before.ActivePathID || prepared.ActiveNodeID != before.ActiveNodeID || prepared.ConfigGeneration != before.ConfigGeneration+1 {
+		t.Fatalf("PrepareStartupRecovery(VPN) = %+v/%v/%v", prepared, changed, err)
+	}
+	var probeClass, nextProbe, lastResult string
+	if err := database.QueryRowContext(ctx, "SELECT probe_class,next_probe_at,last_result FROM path_health_runtime WHERE path_id=?", cell.ID).Scan(&probeClass, &nextProbe, &lastResult); err != nil {
+		t.Fatal(err)
+	}
+	if probeClass != "ACTIVE" || lastResult != "UNKNOWN" {
+		t.Fatalf("startup probe schedule = %s/%s/%s", probeClass, nextProbe, lastResult)
+	}
+	if _, _, err := repository.PrepareStartupRecovery(ctx); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("second startup preparation error = %v", err)
 	}
 }
 

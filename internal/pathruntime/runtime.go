@@ -1,7 +1,8 @@
 // Package pathruntime binds the reconciler to the selected Mihomo path and the
 // privileged nftables TUN gate. Selection and end-to-end verification happen
-// while LAN forwarding is blocked; the gate opens only after every enabled
-// required target succeeds through gateway-vpn-active.
+// while LAN forwarding is blocked. Ordinary activation opens the gate only
+// after every enabled required target succeeds. A boot-policy-approved exact
+// recovery may use one bounded transport check before full background checks.
 package pathruntime
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"sync"
 	"time"
 
@@ -47,13 +49,16 @@ type TargetProber interface {
 }
 
 type Actuator struct {
-	Database      *sql.DB
-	Targets       *bypass.Repository
-	Broker        Broker
-	Mihomo        MihomoControl
-	BodyProber    TargetProber
-	Now           func() time.Time
-	OperationLock sync.Locker
+	Database             *sql.DB
+	Targets              *bypass.Repository
+	Broker               Broker
+	Mihomo               MihomoControl
+	BodyProber           TargetProber
+	StartupProbeURL      string
+	StartupProbeTimeout  time.Duration
+	StartupProbeExpected string
+	Now                  func() time.Time
+	OperationLock        sync.Locker
 
 	mutex sync.Mutex
 }
@@ -124,34 +129,43 @@ func (actuator *Actuator) Activate(ctx context.Context, candidate reconcile.Cand
 	if activeState.Now != selection.Names.GroupName {
 		return actuator.activationFailure(ctx, fmt.Errorf("active Mihomo path is %q, expected %q", activeState.Now, selection.Names.GroupName))
 	}
-	targets, err := actuator.activationTargets(ctx, candidate)
-	if err != nil {
-		return actuator.activationFailure(ctx, err)
-	}
-	for _, target := range targets {
-		expected := ""
-		switch target.SuccessMode {
-		case bypass.SuccessAnyHTTPResponse:
-		case bypass.SuccessExpectedStatus:
-			expected = target.ExpectedStatus
-		case bypass.SuccessExpectedBody:
-			if actuator.BodyProber == nil {
-				return actuator.activationFailure(ctx, fmt.Errorf("required target %s needs an unavailable body verifier", target.ID))
-			}
-			result := actuator.BodyProber.ProbeTarget(ctx,
-				health.Path{ID: selection.PathID, ModemID: selection.ModemID, SubscriptionID: selection.SubscriptionID, ProviderName: selection.Names.ProviderName, ProbeGroupName: selection.Names.ProbeGroupName},
-				health.Candidate{NodeID: selection.NodeID, ProviderNodeName: selection.Names.NodePrefix + selection.ExternalName},
-				health.Target{ID: target.ID, URL: target.NormalizedURL, Timeout: time.Duration(target.TimeoutSeconds) * time.Second, ExpectedStatus: target.ExpectedStatus, ExpectedBodySubstring: target.ExpectedBodySubstring},
-			)
-			if result.State != health.ProbePassed {
-				return actuator.activationFailure(ctx, fmt.Errorf("reverify required target %s body through selected path: %s", target.ID, result.ErrorCode))
-			}
-			continue
-		default:
-			return actuator.activationFailure(ctx, fmt.Errorf("required target %s has invalid success mode", target.ID))
+	if candidate.StartupRecovery {
+		if err := actuator.validateStartupProbe(); err != nil {
+			return actuator.activationFailure(ctx, err)
 		}
-		if _, err := actuator.Mihomo.ProxyDelay(ctx, mihomo.ActiveGroupName, target.NormalizedURL, time.Duration(target.TimeoutSeconds)*time.Second, expected); err != nil {
-			return actuator.activationFailure(ctx, fmt.Errorf("reverify required target %s through active path: %w", target.ID, err))
+		if _, err := actuator.Mihomo.ProxyDelay(ctx, mihomo.ActiveGroupName, actuator.StartupProbeURL, actuator.StartupProbeTimeout, actuator.StartupProbeExpected); err != nil {
+			return actuator.activationFailure(ctx, fmt.Errorf("minimal startup transport verification failed: %w", err))
+		}
+	} else {
+		targets, err := actuator.activationTargets(ctx, candidate)
+		if err != nil {
+			return actuator.activationFailure(ctx, err)
+		}
+		for _, target := range targets {
+			expected := ""
+			switch target.SuccessMode {
+			case bypass.SuccessAnyHTTPResponse:
+			case bypass.SuccessExpectedStatus:
+				expected = target.ExpectedStatus
+			case bypass.SuccessExpectedBody:
+				if actuator.BodyProber == nil {
+					return actuator.activationFailure(ctx, fmt.Errorf("required target %s needs an unavailable body verifier", target.ID))
+				}
+				result := actuator.BodyProber.ProbeTarget(ctx,
+					health.Path{ID: selection.PathID, ModemID: selection.ModemID, SubscriptionID: selection.SubscriptionID, ProviderName: selection.Names.ProviderName, ProbeGroupName: selection.Names.ProbeGroupName},
+					health.Candidate{NodeID: selection.NodeID, ProviderNodeName: selection.Names.NodePrefix + selection.ExternalName},
+					health.Target{ID: target.ID, URL: target.NormalizedURL, Timeout: time.Duration(target.TimeoutSeconds) * time.Second, ExpectedStatus: target.ExpectedStatus, ExpectedBodySubstring: target.ExpectedBodySubstring},
+				)
+				if result.State != health.ProbePassed {
+					return actuator.activationFailure(ctx, fmt.Errorf("reverify required target %s body through selected path: %s", target.ID, result.ErrorCode))
+				}
+				continue
+			default:
+				return actuator.activationFailure(ctx, fmt.Errorf("required target %s has invalid success mode", target.ID))
+			}
+			if _, err := actuator.Mihomo.ProxyDelay(ctx, mihomo.ActiveGroupName, target.NormalizedURL, time.Duration(target.TimeoutSeconds)*time.Second, expected); err != nil {
+				return actuator.activationFailure(ctx, fmt.Errorf("reverify required target %s through active path: %w", target.ID, err))
+			}
 		}
 	}
 	if err := actuator.Broker.ActivatePath(ctx, uint32(candidate.ConfigGeneration)); err != nil {
@@ -304,6 +318,17 @@ func (actuator *Actuator) requiredTargets(ctx context.Context) ([]bypass.Target,
 func (actuator *Actuator) validate() error {
 	if actuator == nil || actuator.Database == nil || actuator.Targets == nil || actuator.Broker == nil || actuator.Mihomo == nil {
 		return errors.New("complete path actuator dependencies are required")
+	}
+	return nil
+}
+
+func (actuator *Actuator) validateStartupProbe() error {
+	parsed, err := url.Parse(actuator.StartupProbeURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || actuator.StartupProbeTimeout < time.Second || actuator.StartupProbeTimeout > time.Minute {
+		return errors.New("bounded HTTPS startup transport probe is required")
+	}
+	if _, err := bypass.NormalizeStatusExpression(actuator.StartupProbeExpected); err != nil {
+		return errors.New("startup transport status expression is invalid")
 	}
 	return nil
 }

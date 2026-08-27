@@ -195,7 +195,7 @@ func (snapshot RetentionSnapshot) Validate() error {
 	if !storage.Available || storage.PageSizeBytes <= 0 || storage.PageCount <= 0 || storage.FreelistPageCount > storage.PageCount || storage.PageCount > int64(^uint64(0)>>1)/storage.PageSizeBytes || storage.AllocatedPageBytes != storage.PageSizeBytes*storage.PageCount || storage.LivePageBytes != storage.PageSizeBytes*(storage.PageCount-storage.FreelistPageCount) {
 		return errors.New("diagnostic database storage counters are unavailable or inconsistent")
 	}
-	if !validTemporalStats(snapshot.HealthSamples, time.RFC3339Nano) || !validTemporalStats(snapshot.Events, time.RFC3339Nano) || !validTemporalStats(snapshot.TrafficDailyTotals, "2006-01-02") {
+	if !validTemporalStats(snapshot.HealthSamples, time.RFC3339Nano) || !validTemporalStats(snapshot.Events, time.RFC3339Nano) || !validTemporalStats(snapshot.Operations, time.RFC3339Nano) || !validTemporalStats(snapshot.TrafficDailyTotals, "2006-01-02") {
 		return errors.New("diagnostic retention time ranges are inconsistent")
 	}
 	return nil
@@ -221,6 +221,9 @@ func (snapshot RetentionSnapshot) PolicyFindings(at time.Time) []Finding {
 	}
 	if olderThan(snapshot.Events.Oldest, at.UTC().AddDate(0, 0, -30).Add(-tolerance), false) {
 		findings = append(findings, Finding{Code: "EVENT_RETENTION_NOT_CONVERGED", Metric: "events"})
+	}
+	if olderThan(snapshot.Operations.Oldest, at.UTC().AddDate(0, 0, -30).Add(-tolerance), false) {
+		findings = append(findings, Finding{Code: "OPERATION_RETENTION_NOT_CONVERGED", Metric: "operations"})
 	}
 	if olderThan(snapshot.TrafficDailyTotals.Oldest, at.UTC().AddDate(0, -24, 0), true) {
 		findings = append(findings, Finding{Code: "TRAFFIC_RETENTION_NOT_CONVERGED", Metric: "traffic_daily_totals"})

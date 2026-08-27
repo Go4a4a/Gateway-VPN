@@ -41,18 +41,22 @@ func TestEvaluateTransitionUsesStableWindowCooldownAndHardFailure(t *testing.T) 
 func TestTemporaryDirectOnlySurvivesProcessRestartButNotHostReboot(t *testing.T) {
 	ctx, database := accessDatabase(t)
 	repository := NewRepository(database)
+	firstBoot, err := repository.ReconcileBoot(ctx, "boot-a")
+	if err != nil || !firstBoot.NewBoot || !firstBoot.StartupBlockUntilQualified || !firstBoot.QualificationInvalidated {
+		t.Fatalf("first boot reconciliation = %+v, %v", firstBoot, err)
+	}
 	if err := repository.SetTemporaryDirectOnly(ctx, true, "boot-a"); err != nil {
 		t.Fatal(err)
 	}
-	if reset, err := repository.ReconcileBoot(ctx, "boot-a"); err != nil || reset {
-		t.Fatalf("same-boot reconciliation = %t, %v", reset, err)
+	if sameBoot, err := repository.ReconcileBoot(ctx, "boot-a"); err != nil || sameBoot.NewBoot || sameBoot.TemporaryDirectOnlyReset || sameBoot.QualificationInvalidated {
+		t.Fatalf("same-boot reconciliation = %+v, %v", sameBoot, err)
 	}
 	current, err := repository.GetSelectionRuntime(ctx)
 	if err != nil || !current.TemporaryDirectOnly || current.TemporaryDirectBootID != "boot-a" {
 		t.Fatalf("same-boot runtime = %+v, %v", current, err)
 	}
-	if reset, err := repository.ReconcileBoot(ctx, "boot-b"); err != nil || !reset {
-		t.Fatalf("new-boot reconciliation = %t, %v", reset, err)
+	if nextBoot, err := repository.ReconcileBoot(ctx, "boot-b"); err != nil || !nextBoot.NewBoot || !nextBoot.TemporaryDirectOnlyReset || !nextBoot.QualificationInvalidated {
+		t.Fatalf("new-boot reconciliation = %+v, %v", nextBoot, err)
 	}
 	current, err = repository.GetSelectionRuntime(ctx)
 	if err != nil || current.TemporaryDirectOnly || current.TemporaryDirectBootID != "" {

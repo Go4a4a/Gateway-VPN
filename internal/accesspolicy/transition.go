@@ -36,6 +36,13 @@ type TransitionDecision struct {
 	Reason       string
 }
 
+type BootReconciliation struct {
+	NewBoot                    bool
+	StartupBlockUntilQualified bool
+	TemporaryDirectOnlyReset   bool
+	QualificationInvalidated   bool
+}
+
 func EvaluateTransition(input TransitionInput) (TransitionDecision, error) {
 	if strings.TrimSpace(input.ProposedKey) == "" || input.Now.IsZero() {
 		return TransitionDecision{}, errors.New("proposed access candidate and current time are required")
@@ -155,37 +162,120 @@ WHERE singleton_id=1`, now, reason, now)
 	return nil
 }
 
-// ReconcileBoot resets temporary direct-only when the host boot ID changes.
-// A process restart in the same boot intentionally preserves the emergency
-// mode; a host reboot always returns to the permanent ordered policy.
-func (repository *Repository) ReconcileBoot(ctx context.Context, bootID string) (bool, error) {
+// ReconcileBoot atomically records the current host boot, resets boot-scoped
+// temporary direct-only state, and invalidates old qualification evidence when
+// the configured startup gate is enabled. A same-boot process restart leaves
+// both the active tuple and its evidence untouched.
+func (repository *Repository) ReconcileBoot(ctx context.Context, bootID string) (BootReconciliation, error) {
 	if !safeBootID(bootID) {
-		return false, errors.New("boot id is invalid")
+		return BootReconciliation{}, errors.New("boot id is invalid")
 	}
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("begin access boot reconciliation: %w", err)
+		return BootReconciliation{}, fmt.Errorf("begin access boot reconciliation: %w", err)
 	}
 	defer transaction.Rollback()
-	var enabled int
-	var stored sql.NullString
-	if err := transaction.QueryRowContext(ctx, "SELECT temporary_direct_only, temporary_direct_boot_id FROM access_selection_runtime WHERE singleton_id=1").Scan(&enabled, &stored); err != nil {
-		return false, fmt.Errorf("read temporary direct-only state: %w", err)
+	var startupBlock, directOnly int
+	var directBootID, observedBootID sql.NullString
+	if err := transaction.QueryRowContext(ctx, `
+SELECT p.startup_block_until_qualified, r.temporary_direct_only,
+       r.temporary_direct_boot_id, r.observed_boot_id
+FROM access_policy AS p
+JOIN access_selection_runtime AS r ON r.singleton_id=p.singleton_id
+WHERE p.singleton_id=1`).Scan(&startupBlock, &directOnly, &directBootID, &observedBootID); err != nil {
+		return BootReconciliation{}, fmt.Errorf("read access boot state: %w", err)
 	}
-	if enabled == 0 || stored.String == bootID {
-		return false, transaction.Commit()
+	result := BootReconciliation{
+		NewBoot:                    !observedBootID.Valid || observedBootID.String != bootID,
+		StartupBlockUntilQualified: startupBlock != 0,
+		TemporaryDirectOnlyReset:   directOnly != 0 && directBootID.String != bootID,
+	}
+	if !result.NewBoot && !result.TemporaryDirectOnlyReset {
+		return result, transaction.Commit()
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
-	if _, err := transaction.ExecContext(ctx, `
+	if result.TemporaryDirectOnlyReset {
+		if _, err := transaction.ExecContext(ctx, `
 UPDATE access_selection_runtime
 SET temporary_direct_only=0, temporary_direct_boot_id=NULL, updated_at=?
-WHERE singleton_id=1`, now); err != nil {
-		return false, fmt.Errorf("reset temporary direct-only state: %w", err)
+		WHERE singleton_id=1`, now); err != nil {
+			return BootReconciliation{}, fmt.Errorf("reset temporary direct-only state: %w", err)
+		}
+		if err := appendAccessEvent(ctx, transaction, now, "TEMPORARY_DIRECT_ONLY_RESET_AFTER_REBOOT", map[string]any{}); err != nil {
+			return BootReconciliation{}, err
+		}
 	}
-	if err := appendAccessEvent(ctx, transaction, now, "TEMPORARY_DIRECT_ONLY_RESET_AFTER_REBOOT", map[string]any{}); err != nil {
-		return false, err
+	if result.NewBoot {
+		if result.StartupBlockUntilQualified {
+			if err := invalidateBootQualification(ctx, transaction, now); err != nil {
+				return BootReconciliation{}, err
+			}
+			result.QualificationInvalidated = true
+		}
+		if _, err := transaction.ExecContext(ctx, `
+UPDATE access_selection_runtime
+SET observed_boot_id=?, pending_candidate_key=NULL,
+    pending_candidate_since=NULL, updated_at=?
+WHERE singleton_id=1`, bootID, now); err != nil {
+			return BootReconciliation{}, fmt.Errorf("record reconciled host boot: %w", err)
+		}
+		if err := appendAccessEvent(ctx, transaction, now, "HOST_BOOT_RECONCILED", map[string]any{
+			"startup_block_until_qualified": result.StartupBlockUntilQualified,
+			"qualification_invalidated":     result.QualificationInvalidated,
+		}); err != nil {
+			return BootReconciliation{}, err
+		}
 	}
-	return true, transaction.Commit()
+	if err := transaction.Commit(); err != nil {
+		return BootReconciliation{}, fmt.Errorf("commit access boot reconciliation: %w", err)
+	}
+	return result, nil
+}
+
+func invalidateBootQualification(ctx context.Context, transaction *sql.Tx, now string) error {
+	statements := []struct {
+		name string
+		SQL  string
+	}{
+		{name: "subscription paths", SQL: `
+UPDATE subscription_modem_paths
+SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
+    candidate_nodes=0, qualified_nodes=0,
+    required_targets_passed=0, required_targets_total=0,
+    optional_targets_passed=0, optional_targets_total=0,
+    quality_class='UNKNOWN', functional_score=0, latency_ms=NULL,
+    last_checked_at=NULL, expires_at=NULL, updated_at=?`},
+		{name: "subscription nodes", SQL: `
+UPDATE path_nodes
+SET qualification_state='STALE', qualification_expires_at=NULL,
+    latency_ms=NULL, failure_code=NULL`},
+		{name: "subscription target evidence", SQL: "DELETE FROM path_node_target_results"},
+		{name: "direct paths", SQL: `
+UPDATE direct_modem_paths
+SET state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, required_targets_total=0,
+    optional_targets_passed=0, optional_targets_total=0, latency_ms=NULL,
+    last_checked_at=NULL, expires_at=NULL, failure_code=NULL, updated_at=?`},
+		{name: "direct target evidence", SQL: "DELETE FROM direct_path_target_results"},
+		{name: "periodic schedules", SQL: `
+UPDATE path_health_runtime
+SET next_probe_at=?, last_probe_at=NULL, last_result='UNKNOWN',
+    consecutive_successes=0, consecutive_failures=0,
+    deferred_reason=NULL, updated_at=?`},
+	}
+	for _, statement := range statements {
+		arguments := []any{}
+		switch statement.name {
+		case "subscription paths", "direct paths":
+			arguments = []any{now}
+		case "periodic schedules":
+			arguments = []any{now, now}
+		}
+		if _, err := transaction.ExecContext(ctx, statement.SQL, arguments...); err != nil {
+			return fmt.Errorf("invalidate boot %s: %w", statement.name, err)
+		}
+	}
+	return nil
 }
 
 func (repository *Repository) SetTemporaryDirectOnly(ctx context.Context, enabled bool, bootID string) error {

@@ -20,6 +20,17 @@ func TestDatabaseRetentionReportContainsBoundedCountsAndNoPath(t *testing.T) {
 	if _, err := database.ExecContext(ctx, "INSERT INTO traffic_daily_totals(date,checkpointed_at) VALUES('2026-08-25', ?)", now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO operations(id,kind,scope_type,status,requested_by,summary_code,created_at,started_at,finished_at,updated_at)
+VALUES('operation-finished', 'SUBSCRIPTION_REFRESH', 'SUBSCRIPTION', 'SUCCEEDED', 'SYSTEM', 'DONE', ?, ?, ?, ?)`,
+		now.Add(-2*time.Hour).Format(time.RFC3339Nano), now.Add(-time.Hour).Format(time.RFC3339Nano), now.Add(-30*time.Minute).Format(time.RFC3339Nano), now.Add(-30*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO operations(id,kind,scope_type,status,requested_by,created_at,updated_at)
+VALUES('operation-running', 'SUBSCRIPTION_REFRESH', 'SUBSCRIPTION', 'QUEUED', 'SYSTEM', ?, ?)`, now.AddDate(0, 0, -90).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 	repository := subscription.NewRepository(database)
 	if _, err := repository.Create(ctx, subscription.CreateInput{ID: "sub-a", Name: "A", SourceType: "url", SourceSecretRef: "/secret/sub-a", RefreshInterval: time.Hour}); err != nil {
 		t.Fatal(err)
@@ -49,7 +60,7 @@ VALUES(?, 'sub-a', ?, 1, ?, ?, ?)`, item.id, strings.Repeat("a", 64), item.state
 	if report.SchemaVersion != 1 || report.Policy.HealthDays != 7 || report.Policy.EventDays != 30 || report.Policy.OperationDays != 30 || report.Policy.TrafficMonths != 24 || report.Policy.PreviousSuccessfulVersions != 2 || report.Policy.FailedVersions != 2 {
 		t.Fatalf("policy report = %+v", report)
 	}
-	if report.HealthSamples.Rows != 2 || report.HealthSamples.Oldest != "2026-08-01T00:00:00Z" || report.HealthSamples.MostRecent != "2026-08-26T11:00:00Z" || report.TrafficDailyTotals.Rows != 1 {
+	if report.HealthSamples.Rows != 2 || report.HealthSamples.Oldest != "2026-08-01T00:00:00Z" || report.HealthSamples.MostRecent != "2026-08-26T11:00:00Z" || report.Operations.Rows != 1 || report.Operations.Oldest != now.Add(-30*time.Minute).Format(time.RFC3339Nano) || report.Operations.MostRecent != now.Add(-30*time.Minute).Format(time.RFC3339Nano) || report.TrafficDailyTotals.Rows != 1 {
 		t.Fatalf("temporal report = %+v", report)
 	}
 	versions := report.SubscriptionVersions

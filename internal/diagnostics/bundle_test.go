@@ -176,7 +176,7 @@ func TestDiagnosticBundleContainsManifestRequiredSectionsAndNoSecrets(t *testing
 			t.Fatalf("diagnostic bundle leaked %q", forbidden)
 		}
 	}
-	for _, expected := range []string{"***1234", "Whitelist subscription", "visible", "https://event.example/", "https://journal.example/", `"integrity_check": "PASS"`, `"schema_version": 15`, `"health_days": 7`, `"traffic_months": 24`} {
+	for _, expected := range []string{"***1234", "Whitelist subscription", "visible", "https://event.example/", "https://journal.example/", `"integrity_check": "PASS"`, `"schema_version": 16`, `"health_days": 7`, `"traffic_months": 24`} {
 		if !strings.Contains(combined, expected) {
 			t.Fatalf("diagnostic bundle missing %q", expected)
 		}

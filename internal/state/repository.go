@@ -92,6 +92,123 @@ func (repository *Repository) Get(ctx context.Context) (Snapshot, error) {
 	return scanSnapshot(repository.database.QueryRowContext(ctx, runtimeSelect))
 }
 
+// PrepareStartupRecovery preserves one previously active exact tuple while
+// the boot firewall remains blocked. It accepts only a currently enabled LKG
+// method with an unchanged modem route generation. Fresh qualification is
+// still required by Begin/Finish activation; this method merely records the
+// boot-scoped verifying intent and schedules an immediate full background
+// check after the lightweight recovery succeeds.
+func (repository *Repository) PrepareStartupRecovery(ctx context.Context) (Snapshot, bool, error) {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("begin startup recovery intent: %w", err)
+	}
+	defer transaction.Rollback()
+	current, err := scanSnapshot(transaction.QueryRowContext(ctx, runtimeSelect))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	if current.PathState != PathActive || current.PolicyTransitionGeneration != 0 || current.PolicyTransitionStartedAt != "" || current.PolicyTransitionDeadline != "" ||
+		(current.ActiveQualityClass != "FULL" && current.ActiveQualityClass != "LIMITED") {
+		return Snapshot{}, false, store.ErrNotFound
+	}
+	switch current.ActiveMethodKind {
+	case "SUBSCRIPTION":
+		if current.ActivePathID == "" || current.ActiveDirectPathID != "" || current.ActiveModemID == "" || current.ActiveSubscriptionID == "" || current.ActiveNodeID == "" || current.ActiveMethodID == "" {
+			return Snapshot{}, false, store.ErrNotFound
+		}
+		err = transaction.QueryRowContext(ctx, `
+SELECT 1
+FROM subscription_modem_paths AS p
+JOIN modems AS m ON m.id=p.modem_id
+JOIN subscriptions AS s ON s.id=p.subscription_id
+JOIN subscription_versions AS v ON v.id=s.active_version_id AND v.state='LKG'
+JOIN nodes AS n ON n.id=? AND n.version_id=v.id
+JOIN access_methods AS a ON a.id=? AND a.kind='SUBSCRIPTION' AND a.subscription_id=s.id
+WHERE p.id=? AND p.modem_id=? AND p.subscription_id=?
+  AND p.route_generation=m.route_generation
+  AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
+  AND a.enabled=1 AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'
+  AND n.enabled=1 AND n.selection_override<>'exclude'`,
+			current.ActiveNodeID, current.ActiveMethodID, current.ActivePathID,
+			current.ActiveModemID, current.ActiveSubscriptionID).Scan(new(int))
+	case "DIRECT":
+		if current.ActiveDirectPathID == "" || current.ActivePathID != "" || current.ActiveModemID == "" || current.ActiveSubscriptionID != "" || current.ActiveNodeID != "" || current.ActiveMethodID == "" {
+			return Snapshot{}, false, store.ErrNotFound
+		}
+		err = transaction.QueryRowContext(ctx, `
+SELECT 1
+FROM direct_modem_paths AS p
+JOIN modems AS m ON m.id=p.modem_id
+JOIN access_methods AS a ON a.id=? AND a.kind='DIRECT'
+WHERE p.id=? AND p.modem_id=? AND p.route_generation=m.route_generation
+  AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
+  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
+			current.ActiveMethodID, current.ActiveDirectPathID, current.ActiveModemID).Scan(new(int))
+	default:
+		return Snapshot{}, false, store.ErrNotFound
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return Snapshot{}, false, store.ErrNotFound
+	}
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("validate startup recovery tuple: %w", err)
+	}
+	nowTime := repository.now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE runtime_state
+SET gateway_state=?, path_state=?, config_generation=config_generation+1,
+    policy_transition_generation=NULL, policy_transition_started_at=NULL,
+    policy_transition_deadline=NULL, updated_at=?
+WHERE singleton_id=1`, GatewayVerifying, PathVerifying, now); err != nil {
+		return Snapshot{}, false, fmt.Errorf("record startup recovery intent: %w", err)
+	}
+	if current.ActiveMethodKind == "SUBSCRIPTION" {
+		if _, err := transaction.ExecContext(ctx, `
+INSERT INTO path_health_runtime(path_id,probe_class,next_probe_at,last_result,updated_at)
+VALUES(?, 'ACTIVE', ?, 'UNKNOWN', ?)
+ON CONFLICT(path_id) DO UPDATE SET
+    probe_class='ACTIVE', next_probe_at=excluded.next_probe_at,
+    last_probe_at=NULL, last_result='UNKNOWN', consecutive_successes=0,
+    consecutive_failures=0, deferred_reason=NULL, updated_at=excluded.updated_at`,
+			current.ActivePathID, now, now); err != nil {
+			return Snapshot{}, false, fmt.Errorf("schedule startup VPN requalification: %w", err)
+		}
+	} else {
+		refreshDeadline := nowTime.Add(30 * time.Second).Format(time.RFC3339Nano)
+		if _, err := transaction.ExecContext(ctx, `
+UPDATE direct_modem_paths
+SET expires_at=CASE
+        WHEN expires_at IS NOT NULL AND julianday(expires_at)>julianday(?) THEN ?
+        ELSE expires_at
+    END,
+    updated_at=?
+WHERE id=?`, refreshDeadline, refreshDeadline, now, current.ActiveDirectPathID); err != nil {
+			return Snapshot{}, false, fmt.Errorf("schedule startup direct requalification: %w", err)
+		}
+	}
+	pathID := current.ActivePathID
+	if current.ActiveMethodKind == "DIRECT" {
+		pathID = current.ActiveDirectPathID
+	}
+	if err := appendEventTx(ctx, transaction, now, EventInput{
+		Severity: "INFO", Type: "STARTUP_MINIMAL_RECOVERY_PREPARED",
+		ModemID: current.ActiveModemID, SubscriptionID: current.ActiveSubscriptionID,
+		PathID: pathID, Details: map[string]any{
+			"method_kind":   current.ActiveMethodKind,
+			"quality_class": current.ActiveQualityClass,
+		},
+	}); err != nil {
+		return Snapshot{}, false, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Snapshot{}, false, fmt.Errorf("commit startup recovery intent: %w", err)
+	}
+	result, err := repository.Get(ctx)
+	return result, true, err
+}
+
 // BeginActivation records a resumable desired transition only for a fresh,
 // currently-qualified path and selected node.
 func (repository *Repository) BeginActivation(ctx context.Context, pathID string, expectedPolicyGeneration, expectedRouteGeneration int64) (Snapshot, bool, error) {

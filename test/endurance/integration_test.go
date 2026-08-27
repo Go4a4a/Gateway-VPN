@@ -116,7 +116,7 @@ func cliDiagnosticFixture(t *testing.T, now time.Time) []byte {
 	t.Helper()
 	retention := endurancepkg.RetentionSnapshot{
 		SchemaVersion: 1, CollectedAt: now.Format(time.RFC3339Nano),
-		Policy:        endurancepkg.RetentionPolicySnapshot{HealthDays: 7, EventDays: 30, TrafficMonths: 24, PreviousSuccessfulVersions: 2, FailedVersions: 2, RowBatch: 500, VersionBatch: 20},
+		Policy:        endurancepkg.RetentionPolicySnapshot{HealthDays: 7, EventDays: 30, OperationDays: 30, TrafficMonths: 24, PreviousSuccessfulVersions: 2, FailedVersions: 2, RowBatch: 500, VersionBatch: 20},
 		HealthSamples: endurancepkg.RetentionTemporalStats{}, Events: endurancepkg.RetentionTemporalStats{}, TrafficDailyTotals: endurancepkg.RetentionTemporalStats{},
 		SubscriptionVersions: endurancepkg.RetentionVersionStats{},
 		Storage:              endurancepkg.RetentionStorageStats{Available: true, DatabaseBytes: 16 * 4096, WALBytes: 4096, PageSizeBytes: 4096, PageCount: 16, FreelistPageCount: 2, AllocatedPageBytes: 16 * 4096, LivePageBytes: 14 * 4096},

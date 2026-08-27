@@ -189,6 +189,38 @@ func TestReconcilerSelectsReverifiesAndOpensOnlyVerifiedTUNGate(t *testing.T) {
 	}
 }
 
+func TestStartupRecoveryUsesOnlyBoundedTransportProbe(t *testing.T) {
+	fixture := newFixture(t)
+	defer fixture.database.Close()
+	var nodeID string
+	if err := fixture.database.QueryRowContext(fixture.ctx, `
+SELECT selected_node_id FROM subscription_modem_paths WHERE id=?`, fixture.cell.ID).Scan(&nodeID); err != nil {
+		t.Fatal(err)
+	}
+	candidate := reconcile.Candidate{
+		MethodKind: accesspolicy.MethodSubscription, QualityClass: accesspolicy.QualityFull,
+		PathID: fixture.cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
+		PolicyGeneration: fixture.cell.PolicyGeneration, RouteGeneration: fixture.cell.RouteGeneration,
+		ConfigGeneration: 1, StartupRecovery: true,
+	}
+	if err := fixture.reconciler.Actuator.(*Actuator).Activate(fixture.ctx, candidate); err != nil {
+		t.Fatalf("Activate(startup recovery) error = %v", err)
+	}
+	wantDelay := "delay:" + mihomo.ActiveGroupName + "=https://transport.example/generate_204"
+	delays := []string{}
+	for _, event := range fixture.broker.events {
+		if len(event) >= len("delay:") && event[:len("delay:")] == "delay:" {
+			delays = append(delays, event)
+		}
+	}
+	if !reflect.DeepEqual(delays, []string{wantDelay}) || fixture.mihomo.delayCalls != 1 {
+		t.Fatalf("startup delay probes = %v (calls=%d), want only %q", delays, fixture.mihomo.delayCalls, wantDelay)
+	}
+	if !fixture.broker.state.Active {
+		t.Fatalf("startup transport success did not open the TUN gate: %+v", fixture.broker.state)
+	}
+}
+
 func TestLimitedVPNActivationReverifiesOnlyFreshPassedTargets(t *testing.T) {
 	fixture := newFixture(t)
 	defer fixture.database.Close()
@@ -387,7 +419,11 @@ func newFixture(t *testing.T) fixture {
 	broker := &fakeBroker{}
 	events := &broker.events
 	control := &fakeMihomo{version: "v1.2.3", selected: map[string]string{}, events: events}
-	actuator := &Actuator{Database: database, Targets: targets, Broker: broker, Mihomo: control, Now: func() time.Time { return now }}
+	actuator := &Actuator{
+		Database: database, Targets: targets, Broker: broker, Mihomo: control,
+		StartupProbeURL: "https://transport.example/generate_204", StartupProbeTimeout: 5 * time.Second,
+		StartupProbeExpected: "200-299", Now: func() time.Time { return now },
+	}
 	observer := Observer{Database: database, Broker: broker, Mihomo: control, TUN: readyTUN{ready: true}, State: states, TUNName: "gateway-vpn-tun", ExpectedVersion: "v1.2.3"}
 	reconciler := &reconcile.Reconciler{Observer: observer, Inventory: reconcile.SQLiteInventory{Database: database, Now: func() time.Time { return now }}, State: states, Actuator: actuator}
 	return fixture{ctx: ctx, database: database, now: now, state: states, broker: broker, mihomo: control, reconciler: reconciler, cell: cell}

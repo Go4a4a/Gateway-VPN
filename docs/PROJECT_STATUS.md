@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-27
-**Общее состояние:** `RESILIENT_REFRESH_LADDER_LOCAL_PASS / REMOTE_CI_PENDING / HARDWARE_VALIDATION_PENDING`
-**Текущий этап:** unified selector/firewall schema v3 опубликован в `5f2e521`, GitHub Actions run `33101289685` завершён `success`, включая Linux nftables/netns gate. В локальном worktree завершён resilient subscription refresh ladder: service-only попытки идут через active/other allowed VPN nodes и direct ready-модемы, не меняют user data path, имеют bounded time/attempt/operation budgets, durable redacted DNS/TLS/HTTP stages и учитывают `Retry-After`. Startup gate OFF и новые access-method/API/OpenAPI/WebUI interfaces ещё не завершены, поэтому successor пока не является новым install-ready release candidate.
+**Общее состояние:** `BOOT_SCOPED_STARTUP_LOCAL_PASS / REMOTE_CI_PENDING / HARDWARE_VALIDATION_PENDING`
+**Текущий этап:** resilient subscription refresh ladder опубликован в `bfcb66e`. GitHub Actions run `33105093173` выявил забытый `OperationDays` в Linux endurance fixture; причина исправлена локально вместе с более точной проверкой operation retention. В текущем worktree завершён boot-scoped startup contract: настоящий Linux boot ID отличает reboot от process restart, временный direct-only сбрасывается только после reboot, startup gate ON атомарно инвалидирует старое evidence, а OFF разрешает ровно одно bounded восстановление только прежнего точного LKG/direct tuple с немедленной полной фоновой qualification. Полный race/vet/build/syntax, pinned Ubuntu 24.04 systemd и privileged nftables/netns gates прошли; API/OpenAPI/WebUI управления access methods и operation panel остаются следующим блоком.
 
-**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `74%`: готовы schema/domain/persistence, direct qualification, schema-v3 actuator, единый selector, FULL/LIMITED VPN evidence, recovery-safe runtime identity и resilient refresh ladder с backend operation history; впереди startup gate OFF, API/OpenAPI/WebUI управления и полный operation panel. Общая production-готовность оценивается примерно в `88–90%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
+**Оценка прогресса:** опубликованный baseline остаётся локально готовым к первой установке по прежней access-path модели. Новый unified-access successor выполнен примерно на `82%`: готовы schema/domain/persistence, direct qualification, schema-v3 actuator, единый selector, FULL/LIMITED VPN evidence, recovery-safe runtime identity, resilient refresh ladder и boot-scoped ON/OFF startup behavior; впереди API/OpenAPI/WebUI управления и полный operation panel. Общая production-готовность оценивается примерно в `89–91%`; после завершения successor по-прежнему останутся production signing/publish, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательный 24/72-часовой endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_5F2E521 / RESILIENT_REFRESH_LOCAL` | Unified selector/schema-v3 опубликован в `Go4a4a/Gateway-VPN`; refresh ladder прошёл локальный аудит, но ещё не commit/push. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN_BFCB66E / BOOT_STARTUP_LOCAL` | Resilient refresh опубликован в `Go4a4a/Gateway-VPN`; boot-scoped startup и retention fix прошли полный локальный Linux gate, но ещё не commit/push. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -43,9 +43,9 @@
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `RESILIENT_REFRESH_LADDER_LOCAL_PASS / LINUX_NOT_RUN` | Active target node → other allowed target nodes → allowed nodes других subscriptions → policy-enabled direct ready-модемы подключены через отдельный Mihomo probe listener; EXCLUDE повторно проверяется под operation lock. Disabled user method обновляет service-only LKG без публикации user path; `Retry-After`, lease, redacted stages и bounded retention покрыты tests |
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
-| Unified access methods | `SELECTOR_ACTUATOR_REMOTE_PASS / REFRESH_LOCAL_PASS / API_UI_PENDING` | Migration v15, unified selector и exact direct/TUN gate подтверждены remote kernel CI; service refresh не меняет runtime tuple и сохраняет disabled subscriptions только в qualification-only probe groups. Startup OFF и интерфейсы управления остаются следующими блоками |
+| Unified access methods | `SELECTOR_ACTUATOR_REMOTE_PASS / STARTUP_LOCAL_PASS / API_UI_PENDING` | Migration v16 хранит last observed boot ID; single-use startup recovery сохраняет только прежний exact tuple, обычное переключение по-прежнему требует полного evidence. Gate ON инвалидирует boot-stale qualification; OFF не отключает firewall/quarantine. Интерфейсы управления остаются следующим блоком |
 | Self-health / watchdog | `EXACT_SIGNED_SYSTEMD_PASS / HARDWARE_PENDING` | `aa15477` выявил recovery-start race/runtime-directory hazard/rejected Go-thread notification; fix убрал self-start recovery, связал lifecycle control/watchdog и использует cgroup-scoped notify. Exact `618d617` fresh install и новый PID 1 имеют `HEALTHY`, fresh heartbeats, accepted systemd watchdog timestamps, внешний outage отдельно, `NRestarts=0`, default-off reboot и quiet blocked state |
-| SQLite | `V15_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
+| SQLite | `V16_LOCAL_PASS / V13_EXACT_UPDATE_ROLLBACK_PASS` | Migration/recovery fixture `13 → 14 → 15 → 16`, backup/restore и update unit contracts проходят локально; последний exact signed lifecycle по-прежнему доказан только для v13 (`12 → 13 → 12`) |
 | Safe network apply | `CODE_PASS / LINUX_NOT_RUN` | UID-bound root broker, typed Ubuntu backend, persistent networkd snapshot/apply/rollback+reload, 60-секундный systemd rollback, destination-bound confirm и reboot recovery покрыты tests; реальные nft/ip/systemd не запускались |
 | API / Web UI | `DOCKER_TLS_PASS / HOST_NOT_RUN` | 85 `/api/v1` routes покрыты OpenAPI, включая watchdog settings/status; signed Ubuntu install ранее реально слушал `192.168.200.1:8443`, возвращал HTTP 200 и CSP/Permissions-Policy/no-sniff. Watchdog-карточка прошла JS syntax/API tests; actual signed browser smoke и реальная LAN-карта ещё не проверены |
 | Logging / audit | `DOCKER_JOURNALD_PASS / HOST_NOT_RUN` | Dynamic levels/TTL, redaction и bounded reader покрыты tests; namespaced persistent journald реально стартовал в systemd rehearsal, broker-unavailable и отсутствующие WAL/SHM больше не создают ложные ошибки |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_5F2E521_PASS / REFRESH_FULL_LOCAL_PASS` | Run `33101289685` для `5f2e521` завершён `success`, обе jobs зелёные. Текущий refresh-ladder worktree прошёл полный `go test ./... -count=1`, `go vet ./...`, `git diff --check` и CGO-free Linux/amd64 `go build ./...`; exact remote CI ожидается после push |
+| Автоматические тесты | `REMOTE_CI_BFCB66E_FAILED_FIX_LOCAL_PASS` | Run `33105093173` для `bfcb66e` упал только на забытом `OperationDays` в endurance fixture. Исправленный worktree прошёл `go test -race ./... -count=1`, `go vet ./...`, CGO-free Linux/amd64 build, JS/shell syntax, pinned Ubuntu 24.04 systemd verify и оба privileged netns сценария; exact remote CI ожидается после push |
 
 ## Матрица доказательств Definition of Done
 
@@ -68,7 +68,7 @@
 | 2 | `PARTIAL_EXTERNAL` | Unit/integration/netns failure matrix и точечные systemd recovery gates проходят; полная H1/H2 matrix на физическом packet path не запускалась |
 | 3 | `PARTIAL_EXTERNAL` | Kernel/netns fail-closed и IPv6 policy проверены; обязательные IPv4/DNS/IPv6 captures за Keenetic и через реальные HiLink отсутствуют |
 | 4 | `PASS_LOCAL` | Invalid subscription/config сохраняют LKG; signed format-2 update имеет доказанные rollback `13 → 12`, recovery и terminal no-op |
-| 5 | `IN_PROGRESS_LOCAL` | Прежний blocked startup доказан; новая ON/OFF startup policy имеет persistent model/transition tests, но ещё не подключена к boot runtime/firewall |
+| 5 | `PARTIAL_EXTERNAL` | ON/OFF startup policy подключена к реальному Linux boot ID, runtime и firewall-gated actuator: ON инвалидирует старое evidence, OFF разрешает одно exact LKG/direct recovery и не отключает quarantine. Реальный reboot на физическом Gateway ещё не выполнен |
 | 6 | `PARTIAL_EXTERNAL` | Production broker и synthetic WireGuard handshake/failover прошли; реальный VPS/provider UDP и переключение между physical modem uplinks не проверены |
 | 7 | `PASS_LOCAL` | Exact Ubuntu/systemd install слушает HTTPS только на management LAN; auth/bootstrap/session/CSRF/rate-limit и bind allowlist покрыты tests |
 | 8 | `PASS_LOCAL` | Logging, API serializers и diagnostic bundle используют fixed allowlists/redaction; adversarial tests не допускают secrets/paths/backend text |
@@ -109,10 +109,10 @@
 
 1. Текущая host-среда — Windows, команды `nft`, `ip` и `sqlite3` на host отсутствуют; Linux gates доступны внутри Docker Desktop.
 2. WSL установлен, но доступ к списку дистрибутивов завершился `E_ACCESSDENIED`.
-3. Docker Desktop ранее использовался для privileged Ubuntu 24.04 nftables/netns/systemd gates опубликованного baseline; из текущей restricted Windows session Engine недоступен. Новый unified-access successor пока имеет только Windows/unit SQLite evidence. Docker в любом случае не заменяет реальный systemd host, reboot, USB HiLink и двухмашинный VPS gate.
+3. Docker Desktop доступен через подтверждаемое privileged execution; текущий unified-access successor прошёл Linux race/build, pinned Ubuntu 24.04 systemd и privileged nftables/netns gates. Docker в любом случае не заменяет реальный systemd host reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
-6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact run `33062528338` для `5892f7d` прошёл; CI не получает release secrets. Permanent encrypted production key и byte-identical backup готовы, но tag/release не создавались. Unified-access worktree ещё не опубликован.
+6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact run `33105093173` для `bfcb66e` выявил endurance fixture regression, исправленный текущим worktree; новый terminal CI ожидается после push. CI не получает release secrets. Permanent encrypted production key и byte-identical backup готовы, но tag/release не создавались.
 7. Gateway installer/systemd/networkd/nftables/sysctl/HTTPS, exact signed update/rollback/finalize `3c13b09`, docs-complete fresh install/reboot `47297a7`, restore и uninstall прошли privileged Ubuntu 24.04 Docker acceptance, включая fresh rootfs, новые PID 1 и durable recovery. Это не заменяет bare-metal reboot/power cut, APT dependency installation на произвольной машине или USB hotplug.
 8. VPS signed installer прошёл privileged Docker systemd acceptance на Ubuntu 22.04/24.04/26.04; current uninstaller дополнительно прошёл preserve/reinstall/purge на Ubuntu 24.04. Vanilla Ubuntu 20.04 доказанно отклоняется без Pro/ESM до mutation. Положительный 20.04, Debian 12, реальный VPS reboot/provider firewall и внешний UDP handshake остаются `NOT_RUN`.
 
@@ -279,8 +279,44 @@
 | DEV-157 | 2026-08-27 | Startup block становится явной ON/OFF policy, но OFF не отключает nftables: до полной qualification разрешается только минимально проверенный LKG/direct generation. Boot-scoped direct-only override сбрасывается после reboot; служебный direct refresh регулируется отдельно | Пользователь может выбрать более быстрый старт без неконтролируемого forwarding, а диагностический direct-only режим не должен незаметно стать постоянной политикой или отключить обновление подписок |
 | DEV-158 | 2026-08-27 | Active direct path хранить отдельным `runtime_state.active_direct_path_id` с FK на `direct_modem_paths`; VPN сохраняет `active_path_id`. Firewall schema v3 открывает TUN и direct только взаимоисключающе, а LIMITED VPN перед открытием gate повторно проверяет все ранее прошедшие fresh targets | Полиморфный FK либо modem-only direct identity не позволяют доказать точный путь при recovery. LIMITED нельзя считать безопасно активированным только по aggregate score без node/target evidence и post-selection recheck |
 | DEV-159 | 2026-08-27 | Subscription refresh использует отдельный service-only Mihomo probe selector и последовательность `active target node → другие allowed target nodes → allowed nodes других subscriptions → direct ready-modems`, не изменяя `gateway-vpn-active`/runtime/firewall user gate. Disabled user method сохраняет LKG как qualification-only provider; EXCLUDE повторно проверяется после получения общего operation lock. Одна operation ограничена 5 минутами, 20 секундами на route, 1024 VPN attempts и 32768 redacted steps | Общий selector без сериализации смешивает маршруты конкурентных probes; выключение user method не должно лишать auto-refresh или случайно разрешать user path. Явные bounds не позволяют большой/враждебной подписке бесконечно удерживать worker и раздувать SQLite, а limit фиксируется в operation status до direct fallback |
+| DEV-160 | 2026-08-27 | Linux boot ID хранится отдельно от process lifetime. Gate ON на каждом новом boot атомарно инвалидирует qualification evidence; gate OFF разрешает ровно одно восстановление только прежнего exact enabled LKG/direct tuple, после bounded transport/routing checks, и немедленно планирует полную qualification. Firewall/quarantine не отключаются. Same-boot restart сохраняет tuple; temporary direct-only сбрасывается только при новом boot | Настройка быстрого старта не должна превращаться в общий bypass либо считать process restart перезагрузкой. Exact boot identity, одноразовое разрешение и generation checks ограничивают окно восстановления прежним известным путём, а stale/corrupt state остаётся fail-closed |
 
 ## Журнал разработки
+
+### Сессия 076 — boot-scoped startup policy и retention CI fix — 2026-08-27
+
+**Причина:** после публикации refresh ladder GitHub Actions run `33105093173` упал в Linux race suite, а незавершённым архитектурным пунктом оставалось точное поведение настройки «Блокировать доступ до проверки после запуска» при reboot и обычном restart процесса.
+
+**Сделано:**
+
+- исправлена CI-регрессия: `test/endurance` теперь передаёт `OperationDays: 30`; diagnostic retention считает только завершённые operations по `finished_at`, валидирует их temporal range и выдаёт `OPERATION_RETENTION_NOT_CONVERGED`;
+- добавлена migration v16 с `access_selection_runtime.observed_boot_id` и безопасный reader канонического UUID из `/proc/sys/kernel/random/boot_id`; symlink, relative path, oversized и некорректный UUID отклоняются;
+- boot reconciliation одной SQLite transaction различает host reboot и restart процесса, очищает pending switch и сбрасывает temporary direct-only только на новом boot;
+- при включённой startup block policy новый boot атомарно переводит VPN/direct qualification в `STALE`, удаляет target evidence, сбрасывает periodic schedules и оставляет runtime в `PATH_BLOCKED` до новой полной qualification;
+- при выключенной policy разрешается только прежний точный active tuple: subscription должен ссылаться на текущую enabled LKG version и разрешённый node, direct/VPN method и modem должны быть enabled, modem — `MODEM_READY`, route/policy generations — текущими;
+- startup recovery переводит tuple в `PATH_VERIFYING`, увеличивает config generation и немедленно планирует полную фоновую qualification; VPN до открытия TUN gate проходит один bounded HTTPS transport probe, а обычная activation по-прежнему повторно проверяет configured required targets;
+- разрешение startup recovery одноразовое: block, ошибка, policy transition или выбор другого более функционального/приоритетного candidate его потребляет; после этого действует только обычная полная процедура;
+- process restart в том же boot не уничтожает действующий tuple и не имитирует reboot. Повреждённый, неполный или отсутствующий LKG/runtime tuple остаётся blocked; firewall/quarantine никогда не отключаются независимо от пользовательской настройки;
+- schema-v16 ожидания проведены через migration, backup/recovery, diagnostics и update tests.
+
+**Найдено и исправлено:**
+
+- исходный targeted suite обнаружил, что pre-migration backup fixture после появления v16 откатывался только до v15, хотя ожидал v13; fixture теперь удаляет обе migrations v16/v15 и снова проверяет настоящий `13 → 16` путь;
+- первая попытка privileged netns gate в Debian container не дошла до теста: APT mirror был недоступен и packages отсутствовали. Запуск перенесён на pinned Ubuntu 24.04 image;
+- первый multi-LAN запуск в минимальном Ubuntu image остановился до теста из-за отсутствующего `python3`; зависимость добавлена только в одноразовый test container, повторный сценарий прошёл.
+
+**Проверено:**
+
+- `go test -race ./... -count=1` — PASS для всех packages;
+- `go vet ./...`, CGO-free Linux/amd64 `go build ./...`, `node --check`, `bash -n` и `git diff --check` — PASS;
+- pinned Ubuntu 24.04 `systemd-analyze verify` — PASS для Gateway/VPS units, timers, sockets и WireGuard drop-in;
+- privileged Ubuntu netns `firewall_guard.sh` — PASS: LAN quarantine, восстановление owned `PATH_BLOCKED` после удаления table/flush и отсутствие direct route;
+- privileged Ubuntu netns `lan_bridge_ssh.sh` — PASS: один bridge IPv4, TCP/22 через оба LAN member и блокировка uplink;
+- отдельные tests доказывают ON/OFF/first boot/same-boot restart/no-LKG, атомарную инвалидацию evidence, exact direct/VPN preparation, one-shot reconciler permit и использование startup transport probe вместо required target loop.
+
+**Не проверено:** настоящий reboot физического Ubuntu Gateway, сохранение/восстановление nftables через PID 1 на железе, HiLink/Keenetic packet capture, USB hotplug/failover и полный фоновой probe cycle с реальным Mihomo. Эти gates остаются аппаратными, а не считаются выполненными по Docker/netns.
+
+**Следующий шаг:** API/OpenAPI для access methods, startup policy, temporary direct-only и operations; затем asynchronous manual subscription refresh с operation ID и WebUI «Способы доступа»/operation panel.
 
 ### Сессия 075 — resilient subscription refresh ladder — 2026-08-27
 

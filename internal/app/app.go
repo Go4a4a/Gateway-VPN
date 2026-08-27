@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/bootstrap"
@@ -26,6 +27,7 @@ import (
 	"gateway-vpn/internal/diagnostics"
 	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/hilink"
+	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/mihomo"
 	"gateway-vpn/internal/modem"
@@ -34,6 +36,7 @@ import (
 	"gateway-vpn/internal/reconcile"
 	retentionpkg "gateway-vpn/internal/retention"
 	"gateway-vpn/internal/state"
+	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/tlsbootstrap"
 	"gateway-vpn/internal/traffic"
@@ -130,12 +133,13 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		return fail(err)
 	}
 	states := state.NewRepository(database)
-	recoveredPolicy, err := states.RecoverPolicyTransition(ctx)
+	bootID, err := hostboot.Read("")
 	if err != nil {
-		return fail(fmt.Errorf("recover interrupted policy verification: %w", err))
+		return fail(fmt.Errorf("read Linux boot identity: %w", err))
 	}
-	if !recoveredPolicy {
-		_, _, _ = states.Block(ctx, state.GatewayBlocked, "DATA_PLANE_NOT_YET_OBSERVED")
+	startupRecovery, err := initializeStartupPolicy(ctx, database, states, bootID)
+	if err != nil {
+		return fail(err)
 	}
 	modems := modem.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart)
 	subscriptions := subscription.NewRepository(database)
@@ -150,6 +154,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
+	dataPlane.Reconciler.StartupRecovery = startupRecovery
 	systemLogger := logger.With("component", loggingpkg.ComponentSystem)
 	subscriptionLogger := logger.With("component", loggingpkg.ComponentSubscription)
 	modemLogger := logger.With("component", loggingpkg.ComponentModem)
@@ -278,6 +283,56 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		return fail(err)
 	}
 	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+}
+
+func initializeStartupPolicy(ctx context.Context, database *sql.DB, states *state.Repository, bootID string) (bool, error) {
+	if database == nil || states == nil {
+		return false, errors.New("startup policy repositories are required")
+	}
+	boot, err := accesspolicy.NewRepository(database).ReconcileBoot(ctx, bootID)
+	if err != nil {
+		return false, fmt.Errorf("reconcile host boot policy: %w", err)
+	}
+	recoveredPolicy, err := states.RecoverPolicyTransition(ctx)
+	if err != nil {
+		return false, fmt.Errorf("recover interrupted policy verification: %w", err)
+	}
+	if recoveredPolicy {
+		return false, nil
+	}
+	snapshot, err := states.Get(ctx)
+	if err != nil {
+		return false, fmt.Errorf("read startup runtime state: %w", err)
+	}
+	if !boot.NewBoot {
+		// A process restart must not manufacture a host reboot. Preserve an
+		// active/verifying tuple so the observer can compare it with nftables;
+		// all blocked states are already fail-closed.
+		if snapshot.PathState == state.PathActive || snapshot.PathState == state.PathVerifying || snapshot.PathState == state.PathBlocked && snapshot.GatewayState != state.GatewayBooting {
+			return false, nil
+		}
+		if _, _, err := states.Block(ctx, state.GatewayBlocked, "DATA_PLANE_NOT_YET_OBSERVED"); err != nil {
+			return false, fmt.Errorf("record same-boot startup quarantine: %w", err)
+		}
+		return false, nil
+	}
+	if boot.StartupBlockUntilQualified {
+		if _, _, err := states.Block(ctx, state.GatewayBlocked, "STARTUP_QUALIFICATION_REQUIRED"); err != nil {
+			return false, fmt.Errorf("record startup qualification quarantine: %w", err)
+		}
+		return false, nil
+	}
+	_, prepared, err := states.PrepareStartupRecovery(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		if _, _, blockErr := states.Block(ctx, state.GatewayBlocked, "STARTUP_RECOVERY_UNAVAILABLE"); blockErr != nil {
+			return false, errors.Join(err, blockErr)
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("prepare minimal startup recovery: %w", err)
+	}
+	return prepared, nil
 }
 
 // RequestReconcile coalesces fixed SIGHUP requests from the privileged

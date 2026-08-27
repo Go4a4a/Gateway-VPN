@@ -36,10 +36,11 @@ func TestRetentionPolicyFindingsDetectExpiredRowsAndExcessVersions(t *testing.T)
 	retention := validRetentionSnapshot()
 	retention.HealthSamples.Oldest = now.AddDate(0, 0, -8).Format(time.RFC3339Nano)
 	retention.Events.Oldest = now.AddDate(0, 0, -31).Format(time.RFC3339Nano)
+	retention.Operations.Oldest = now.AddDate(0, 0, -31).Format(time.RFC3339Nano)
 	retention.TrafficDailyTotals.Oldest = now.AddDate(0, -25, 0).Format("2006-01-02")
 	retention.SubscriptionVersions.RetainedExcess = 1
 	findings := retention.PolicyFindings(now)
-	for _, code := range []string{"HEALTH_RETENTION_NOT_CONVERGED", "EVENT_RETENTION_NOT_CONVERGED", "TRAFFIC_RETENTION_NOT_CONVERGED", "VERSION_RETENTION_NOT_CONVERGED"} {
+	for _, code := range []string{"HEALTH_RETENTION_NOT_CONVERGED", "EVENT_RETENTION_NOT_CONVERGED", "OPERATION_RETENTION_NOT_CONVERGED", "TRAFFIC_RETENTION_NOT_CONVERGED", "VERSION_RETENTION_NOT_CONVERGED"} {
 		found := false
 		for _, finding := range findings {
 			if finding.Code == code {
@@ -53,6 +54,7 @@ func TestRetentionPolicyFindingsDetectExpiredRowsAndExcessVersions(t *testing.T)
 	retention = validRetentionSnapshot()
 	retention.HealthSamples.Oldest = now.AddDate(0, 0, -7).Format(time.RFC3339Nano)
 	retention.Events.Oldest = now.AddDate(0, 0, -30).Format(time.RFC3339Nano)
+	retention.Operations.Oldest = now.AddDate(0, 0, -30).Format(time.RFC3339Nano)
 	retention.TrafficDailyTotals.Oldest = now.AddDate(0, -24, 0).Format("2006-01-02")
 	if findings := retention.PolicyFindings(now); len(findings) != 0 {
 		t.Fatalf("valid retention reported findings: %v", findings)
@@ -65,6 +67,7 @@ func validRetentionSnapshot() RetentionSnapshot {
 		Policy:               RetentionPolicySnapshot{HealthDays: 7, EventDays: 30, OperationDays: 30, TrafficMonths: 24, PreviousSuccessfulVersions: 2, FailedVersions: 2, RowBatch: 500, VersionBatch: 20},
 		HealthSamples:        RetentionTemporalStats{Rows: 10, Oldest: "2026-08-26T11:00:00Z", MostRecent: "2026-08-26T12:00:00Z"},
 		Events:               RetentionTemporalStats{Rows: 10, Oldest: "2026-08-26T11:00:00Z", MostRecent: "2026-08-26T12:00:00Z"},
+		Operations:           RetentionTemporalStats{Rows: 10, Oldest: "2026-08-26T11:00:00Z", MostRecent: "2026-08-26T12:00:00Z"},
 		TrafficDailyTotals:   RetentionTemporalStats{Rows: 1, Oldest: "2026-08-26", MostRecent: "2026-08-26"},
 		SubscriptionVersions: RetentionVersionStats{Total: 4, LKG: 1, Candidate: 1, Retained: 1, Failed: 1, ActiveLKG: 1},
 		Storage:              RetentionStorageStats{Available: true, DatabaseBytes: 16 * 4096, WALBytes: 4096, PageSizeBytes: 4096, PageCount: 16, FreelistPageCount: 2, AllocatedPageBytes: 16 * 4096, LivePageBytes: 14 * 4096},

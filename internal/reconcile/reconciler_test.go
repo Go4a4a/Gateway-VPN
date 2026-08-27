@@ -382,6 +382,46 @@ WHERE singleton_id=1`); err != nil {
 	}
 }
 
+func TestUnifiedStartupRecoveryIsExactAndOneShot(t *testing.T) {
+	ctx, database, _ := reconcileFixture(t, true)
+	paths := accesspolicy.NewDirectPathRepository(database)
+	if err := paths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	actuator := &fakeActuator{}
+	observer := &staticObserver{observed: Observed{FirewallReady: true, MihomoReady: true, TUNReady: true}}
+	states := state.NewRepository(database)
+	reconciler := &Reconciler{
+		Observer: observer, Inventory: SQLiteInventory{Database: database}, State: states, Actuator: actuator,
+		AccessPaths: paths, AccessPolicy: accesspolicy.NewRepository(database),
+	}
+	initial, err := reconciler.Reconcile(ctx)
+	if err != nil || initial.Action != "ACCESS_METHOD_ACTIVATED" || len(actuator.activations) != 1 {
+		t.Fatalf("initial activation = %+v activations=%+v err=%v", initial, actuator.activations, err)
+	}
+	active, err := states.Get(ctx)
+	if err != nil || active.PathState != state.PathActive || active.ActivePathID == "" || active.ActiveNodeID == "" {
+		t.Fatalf("initial active tuple = %+v, %v", active, err)
+	}
+	prepared, changed, err := states.PrepareStartupRecovery(ctx)
+	if err != nil || !changed || prepared.PathState != state.PathVerifying || prepared.ActivePathID != active.ActivePathID || prepared.ActiveNodeID != active.ActiveNodeID {
+		t.Fatalf("PrepareStartupRecovery() = %+v/%v/%v", prepared, changed, err)
+	}
+	reconciler.StartupRecovery = true
+	restored, err := reconciler.Reconcile(ctx)
+	if err != nil || restored.Action != "STARTUP_MINIMAL_PATH_RESTORED" || len(actuator.activations) != 2 {
+		t.Fatalf("startup recovery = %+v activations=%+v err=%v", restored, actuator.activations, err)
+	}
+	last := actuator.activations[len(actuator.activations)-1]
+	if !last.StartupRecovery || last.PathID != active.ActivePathID || last.NodeID != active.ActiveNodeID || reconciler.StartupRecovery {
+		t.Fatalf("startup recovery candidate/permit = %+v permit=%v", last, reconciler.StartupRecovery)
+	}
+	final, err := states.Get(ctx)
+	if err != nil || final.PathState != state.PathActive || final.ActivePathID != active.ActivePathID || final.ActiveNodeID != active.ActiveNodeID {
+		t.Fatalf("restored active tuple = %+v, %v", final, err)
+	}
+}
+
 func reconcileFixture(t *testing.T, withTarget bool) (context.Context, *sql.DB, Candidate) {
 	t.Helper()
 	ctx := context.Background()

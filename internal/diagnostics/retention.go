@@ -86,7 +86,7 @@ func buildDatabaseRetentionReport(ctx context.Context, database *sql.DB, now tim
 	if report.Events, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(occurred_at), ''), COALESCE(MAX(occurred_at), '') FROM events"); err != nil {
 		return databaseRetentionReport{}, err
 	}
-	if report.Operations, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(created_at), ''), COALESCE(MAX(created_at), '') FROM operations"); err != nil {
+	if report.Operations, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(finished_at), ''), COALESCE(MAX(finished_at), '') FROM operations WHERE status IN ('SUCCEEDED', 'FAILED', 'CANCELLED')"); err != nil {
 		return databaseRetentionReport{}, err
 	}
 	if report.TrafficDailyTotals, err = readTemporalRetentionStats(ctx, database, "SELECT COUNT(*), COALESCE(MIN(date), ''), COALESCE(MAX(date), '') FROM traffic_daily_totals"); err != nil {

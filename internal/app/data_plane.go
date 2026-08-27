@@ -198,7 +198,13 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	}
 	discoveries := hilink.NewDiscoveryRegistry(modems)
 	modemRunner := &hilink.Runner{Manager: modemManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}
-	pathActuator := &pathruntime.Actuator{Database: database, Targets: targets, Broker: broker, Mihomo: client, BodyProber: scheduledProber, OperationLock: operationLock}
+	pathActuator := &pathruntime.Actuator{
+		Database: database, Targets: targets, Broker: broker, Mihomo: client,
+		BodyProber: scheduledProber, OperationLock: operationLock,
+		StartupProbeURL:      configuration.Mihomo.TransportProbeURL,
+		StartupProbeTimeout:  time.Duration(configuration.Mihomo.TransportProbeTimeoutSeconds) * time.Second,
+		StartupProbeExpected: configuration.Mihomo.TransportExpectedStatus,
+	}
 	pathObserver := pathruntime.Observer{Database: database, Broker: broker, Mihomo: client, TUN: tunInspector, State: states, TUNName: configuration.Mihomo.TunName, ExpectedVersion: buildinfo.MihomoVersion, OperationLock: operationLock}
 	reconciler := &reconcile.Reconciler{
 		Observer: pathObserver, Inventory: reconcile.SQLiteInventory{Database: database},
