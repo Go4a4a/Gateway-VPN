@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED` | Зафиксирован `PLAN_v1.1.md`; явная пользовательская поправка 2026-08-26 добавила §9.8 про круглосуточный самоконтроль, не переписывая остальные решения |
-| Репозиторий | `PUBLIC_MAIN_SYNCED / REMOTE_CI_PASS` | Пользователь явно разрешил push; public `Go4a4a/Gateway-VPN` получил полный local history до `5d86e14`. Exact GitHub Actions run `33024593573` завершился `success`; tag/release/signing key не создавались |
+| Репозиторий | `PUBLIC_MAIN_SYNCED / REMOTE_CI_PASS` | Пользователь явно разрешил push; security increment `00f7e29` опубликован в `Go4a4a/Gateway-VPN`. Exact GitHub Actions run `33028034972` завершился `completed/success`; tag/release/signing key не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -55,7 +55,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `REMOTE_CI_7F36928_PASS` | Exact GitHub Actions run `33026304197` для key-custody HEAD: race-enabled suite, vet, Linux release entrypoints, JS/shell syntax, native nft/netns fail-closed и Gateway/VPS systemd verification на Ubuntu 24.04 — PASS |
+| Автоматические тесты | `REMOTE_CI_00F7E29_PASS` | Exact GitHub Actions run `33028034972` для use-time key lifecycle HEAD: formatting, race-enabled suite, vet, Linux release entrypoints, JS/shell syntax, native nft/netns fail-closed и Gateway/VPS systemd verification на Ubuntu 24.04 — PASS |
 
 ## Матрица доказательств Definition of Done
 
@@ -264,6 +264,16 @@
 | DEV-147 | 2026-08-27 | Primary и backup keypair проверяются cryptographically private→public; backup создаётся exclusive в другом заранее созданном secure directory, fsync-ится, перечитывается и не перезаписывается | Обычное копирование без self-verification может сохранить повреждённую или mismatched пару; CLI доказывает целостность копии, но encryption и физическую независимость носителя обязан обеспечить оператор |
 
 ## Журнал разработки
+
+### Сессия 066 — remote CI use-time key lifecycle — 2026-08-27
+
+**Exact public identity:** проверенный security increment зафиксирован commit `00f7e293074644dca560b232ecbf077d868bdd5c` и отправлен в явно разрешённую ветку `main`; `git ls-remote` подтвердил тот же SHA в `refs/heads/main`.
+
+**Remote evidence:** GitHub Actions workflow `Gateway VPN CI`, run `33028034972`, завершился `completed/success` для exact `00f7e29`. Job `Go, packaging and syntax gates` прошла exact checkout, pinned Go toolchain, formatting, race-enabled full suite, vet, сборку всех Linux release entrypoints и JavaScript/shell syntax. Job `Linux nftables fail-closed gate` прошла native Linux build, реальное fail-closed/no-direct-route nftables evidence и Gateway/VPS systemd verification на Ubuntu 24.04.
+
+**Граница результата:** production signing key, tag, GitHub Release и assets не создавались. Hardware H1/H2, реальный VPS/provider path и 24/72h endurance не повышались и остаются внешними gates.
+
+**Следующий шаг:** пользователь должен выбрать два абсолютных Linux-visible пути: primary encrypted/offline storage и независимый encrypted backup, затем отдельно написать `Разрешаю создать production signing key`. Только после проверки mounts/ownership/modes/free space допускается keygen/verify/backup; `0.1.0-rc.1` tag и draft Release потребуют отдельного последующего разрешения.
 
 ### Сессия 065 — use-time key custody и verified backup — 2026-08-27
 
