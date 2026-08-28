@@ -84,6 +84,14 @@ func TestRepositoryRejectsUnsafeOrAlreadyAssignedEthernetInterface(t *testing.T)
 	}); err == nil {
 		t.Fatal("out-of-subnet static gateway accepted")
 	}
+	for _, input := range []CreateEthernetInput{
+		{ID: "network-host", Name: "Bad", NetworkInterfaceID: "netif:a", AddressMode: AddressStatic, IPv4CIDR: "192.168.1.0/24", Gateway: "192.168.1.1"},
+		{ID: "broadcast-gateway", Name: "Bad", NetworkInterfaceID: "netif:a", AddressMode: AddressStatic, IPv4CIDR: "192.168.1.10/24", Gateway: "192.168.1.255"},
+	} {
+		if _, err := repository.CreateEthernet(ctx, input); err == nil {
+			t.Fatalf("unusable static host accepted: %+v", input)
+		}
+	}
 	first, err := repository.CreateEthernet(ctx, CreateEthernetInput{
 		ID: "ethernet-a", Name: "A", NetworkInterfaceID: "netif:a", AddressMode: AddressDHCP,
 	})
@@ -108,6 +116,33 @@ func TestRepositoryRejectsUnsafeOrAlreadyAssignedEthernetInterface(t *testing.T)
 	var count int
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplinks WHERE type='ETHERNET'").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("Ethernet count = %d, %v", count, err)
+	}
+}
+
+func TestCreateEthernetAllowsExplicitSharedOneArmRole(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	if _, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: "netif:shared", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: "abababababababababababababababababababababababababababababababab",
+		CurrentIfname:      "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-08-28T12:00:00Z"
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO interface_role_assignments(id, network_interface_id, role, created_at, updated_at)
+VALUES ('role:shared', 'netif:shared', 'SHARED_ONE_ARM', ?, ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{
+		ID: "ethernet-shared", Name: "One arm", NetworkInterfaceID: "netif:shared", AddressMode: AddressDHCP,
+	})
+	if err != nil || created.NetworkInterfaceID != "netif:shared" {
+		t.Fatalf("CreateEthernet(shared one-arm) = %+v, %v", created, err)
+	}
+	var roles int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM interface_role_assignments WHERE network_interface_id='netif:shared'").Scan(&roles); err != nil || roles != 2 {
+		t.Fatalf("shared roles = %d, %v", roles, err)
 	}
 }
 
@@ -155,6 +190,41 @@ func TestReplaceInterfaceUsesGenerationAndInvalidatesOnlyOwnedPaths(t *testing.T
 	}
 	if _, err := repository.ReplaceInterface(ctx, created.ID, "netif:old", created.DesiredGeneration); !errors.Is(err, store.ErrStaleGeneration) {
 		t.Fatalf("stale replacement error = %v", err)
+	}
+}
+
+func TestUpdateEthernetConfigurationUsesGenerationAndInvalidatesOwnedPaths(t *testing.T) {
+	ctx, _, repository := newFixture(t)
+	if _, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: "3333333333333333333333333333333333333333333333333333333333333333",
+		CurrentIfname:      "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{
+		ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan", AddressMode: AddressDHCP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := repository.UpdateEthernetConfiguration(ctx, created.ID, UpdateEthernetInput{
+		NetworkInterfaceID: "netif:wan", AddressMode: AddressStatic,
+		IPv4CIDR: "172.20.1.2/24", Gateway: "172.20.1.1", DNS: []string{"1.1.1.1"},
+		MTU: 1492, ExpectedDesiredGeneration: created.DesiredGeneration,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.AddressMode != AddressStatic || updated.IPv4CIDR != "172.20.1.2/24" || updated.Gateway != "172.20.1.1" || updated.MTU != 1492 || updated.DesiredGeneration != created.DesiredGeneration+1 || updated.RouteGeneration != created.RouteGeneration+1 {
+		t.Fatalf("updated Ethernet = %+v", updated)
+	}
+	_, err = repository.UpdateEthernetConfiguration(ctx, created.ID, UpdateEthernetInput{
+		NetworkInterfaceID: "netif:wan", AddressMode: AddressDHCP,
+		ExpectedDesiredGeneration: created.DesiredGeneration,
+	})
+	if !errors.Is(err, store.ErrStaleGeneration) {
+		t.Fatalf("stale update error = %v", err)
 	}
 }
 

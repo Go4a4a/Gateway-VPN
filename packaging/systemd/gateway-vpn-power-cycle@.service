@@ -1,0 +1,39 @@
+[Unit]
+Description=Gateway VPN verified RTC power-cycle (%i seconds)
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target
+ConditionPathExists=/usr/sbin/rtcwake
+ConditionPathExists=/sys/class/rtc/rtc0/wakealarm
+ConditionPathExists=/var/lib/gateway-vpn-privileged/rtc-wake-from-s5.verified
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+ExecStart=/usr/sbin/rtcwake --mode no --seconds %i
+ExecStart=/usr/bin/systemctl --no-block poweroff
+TimeoutStartSec=20s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=no
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_SYS_BOOT CAP_SYS_TIME CAP_WAKE_ALARM
+AmbientCapabilities=CAP_SYS_BOOT CAP_SYS_TIME CAP_WAKE_ALARM
+DevicePolicy=closed
+DeviceAllow=/dev/rtc0 rw
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service @clock
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/gateway-vpn /var/lib/gateway-vpn-privileged/rtc-wake-from-s5.verified

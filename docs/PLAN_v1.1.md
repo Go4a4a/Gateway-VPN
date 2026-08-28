@@ -1683,7 +1683,8 @@ PATCH  /api/v1/uplinks/{id}
 DELETE /api/v1/uplinks/{id}
 PUT    /api/v1/uplinks/priorities
 POST   /api/v1/uplinks/{id}/probe
-POST   /api/v1/network/interfaces/{id}/replace
+POST   /api/v1/uplinks/{id}/replace-interface
+PUT    /api/v1/uplinks/{id}/network
 POST   /api/v1/network/roles/preview
 
 GET    /api/v1/subscriptions
@@ -1763,7 +1764,10 @@ POST   /api/v1/wireguard/configure
 
 POST   /api/v1/system/backup
 POST   /api/v1/system/restore
+GET    /api/v1/system/power/capabilities
 POST   /api/v1/system/reboot
+POST   /api/v1/system/shutdown
+POST   /api/v1/system/power-cycle
 ```
 
 `GET /paths/matrix` является каноническим read model для Dashboard, **Выходы в интернет**, **Модемы**, **Подписки** и **Матрица путей**. Ответ содержит direct uplink paths и одну запись на пару `uplink_id × subscription_id`, выбранную node, quality/functional score, свежесть результата и объяснимый reason code. Frontend не вычисляет health или ranking самостоятельно. Legacy modem routes являются alias на HiLink uplink и не образуют вторую матрицу.
@@ -1788,13 +1792,15 @@ Web UI разделяется по предметным областям; одн
 12. **WireGuard-клиенты:** `wg-ingress` server, peers, managed/external keys, standard configs/QR, policies, handshake/RX/TX и per-peer log.
 13. **Удалённое управление:** VPS peer, выбранный management-uplink, handshake и admin peers `wg-mgmt`.
 14. **Сеть и интерфейсы:** physical inventory, понятные ingress/management/uplink roles, topology profile, transit LAN, DHCP/DNS, replacement, routing tables/marks read-only и safe apply.
-15. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
+15. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle, отдельная карточка **Самоконтроль 24/7** с component health, recovery history и bounded watchdog settings, а также отдельная карточка **Питание** для ручных reboot/shutdown и capability-gated RTC power-cycle.
 
 Каждая настройка имеет видимое понятное название, короткое inline-объяснение и help trigger. На desktop подсказка появляется после bounded hover delay, при keyboard focus — немедленно, на touch — по нажатию `?`; hover не является единственным способом получить описание. Help сообщает назначение, рекомендуемое значение и причину, prerequisites, точные последствия, возможность потери управления/Internet, restart/requalification, rollback и пример. Обычный режим скрывает CIDR/fwmark/table/AllowedIPs за **«Дополнительными сведениями»**, advanced mode всё равно принимает только typed validated values, а не arbitrary commands.
 
 Перед сохранением risky settings Web UI показывает mutation/impact preview: какие роли/addresses/firewall/routes/services изменятся, ожидаемое краткое прерывание, confirmation path и deadline rollback. Dashboard и каждая detail card имеют **«Почему выбран этот путь»**, **«Открыть журнал объекта»** и конкретный recovery next step. Термин `PATH_BLOCKED` остаётся внутренним; пользователь видит **«Нет доступного интернет-канала»** с причиной и состоянием продолжающейся диагностики.
 
 Operation panel показывает стадии `QUEUED → ROUTE_SELECTED → DNS → TLS → HTTP → IMPORT → VALIDATE → QUALIFY → ACTIVATE → COMPLETE/FAILED`, timestamps и безопасные reason codes. Backend error text, URL credentials и proxy secrets не отображаются. Ручная кнопка немедленно возвращает operation ID; обновление страницы не теряет статус.
+
+Карточка **Питание** не смешивает ручные действия пользователя с автоматической recovery policy. `Перезагрузить` и `Выключить` требуют свежей password re-authentication, отдельного typed confirmation и короткого отменяемого countdown. `Выключить и включить через N секунд` доступно только после server-side проверки RTC device, `rtcwake` и поддержки wake-from-S5 конкретной системой; допустимый интервал bounded и по умолчанию равен 30 секундам. Таймер считается от отправки команды, а Web UI явно предупреждает, что фактическое время в состоянии S5 короче на длительность корректного shutdown. Если UEFI/RTC не подтверждены, Web UI показывает функцию как недоступную и не обещает автоматическое включение. Все power actions имеют operation ID и audit event и отклоняются во время install/update/restore, network safe apply, backup mutation или другой power operation. Root broker принимает только enum `REBOOT`, `SHUTDOWN`, `RTC_POWER_CYCLE` и bounded delay, никогда не принимает command, unit или path из API/SQLite.
 
 Вкладка **Модемы** использует такой же управляемый список, как **Подписки**: стабильный номер/имя, enabled и явный priority; priority не выводится из USB port или порядка обнаружения. Строка модема показывает configured/observed operator, interface, management subnet/gateway/DNS, routing table/fwmark, signal/registration, telemetry state, WireGuard endpoint reachability, `last_seen_at`, subnet conflict и компактные badges по всем subscriptions. Доступны Adopt, Disable/Enable, Probe, Recover, Replace identity и Forget; Forget разрешён только для offline-модема с подтверждением.
 
@@ -2465,6 +2471,7 @@ Fixtures не содержат production credentials, настоящие subscr
 - [ ] node matcher CRUD/preview и policy requalification status;
 - [ ] health/events;
 - [ ] settings с safe apply;
+- [ ] capability-gated power management с re-authentication, audit и блокировкой во время критических транзакций;
 - [ ] secret redaction;
 - [ ] diagnostics download.
 
@@ -2539,6 +2546,7 @@ Fixtures не содержат production credentials, настоящие subscr
 32. `wg-ingress` полностью управляется через authenticated Web UI/API; managed/external peers, config/QR, revoke/rotation, one-card mode, per-peer policy и leak/loop tests проходят.
 33. Web UI имеет понятные роли, help для mouse/keyboard/touch, impact preview и safe rollback; технические термины не являются единственным объяснением mutable setting.
 34. canonical journald stream имеет тематические Web UI tabs и bounded redacted `/var/log/gateway-vpn` exports, доступные штатным SFTP только через management paths.
+35. ручные reboot/shutdown требуют re-authentication и typed confirmation; RTC power-cycle доступен только при доказанной поддержке железом, а любая power action блокируется во время критической durable transaction и полностью отражается в audit/operation status.
 
 ---
 

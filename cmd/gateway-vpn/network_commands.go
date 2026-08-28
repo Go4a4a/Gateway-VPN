@@ -27,6 +27,7 @@ import (
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
@@ -150,6 +151,7 @@ func runNetworkBroker(args []string) int {
 		fmt.Fprintf(os.Stderr, "create network broker: %v\n", err)
 		return 1
 	}
+	server.Power = power.DefaultLinuxBackend(database, executor)
 	if err := networkapply.ServeBroker(ctx, listener, server); err != nil {
 		fmt.Fprintf(os.Stderr, "network broker stopped: %v\n", err)
 		return 1
@@ -161,6 +163,7 @@ func runNetworkRollback(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpn network-rollback", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	applyID := flags.String("id", "", "safe network apply id")
+	configPath := flags.String("config", "/etc/gateway-vpn/config.yaml", "strict bootstrap YAML path")
 	transactionRoot := flags.String("transaction-root", defaultNetworkTransactionRoot, "root-owned transaction directory")
 	apply := flags.Bool("apply", false, "perform the rollback")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *applyID == "" {
@@ -176,16 +179,45 @@ func runNetworkRollback(args []string) int {
 		return 1
 	}
 	paths := networkapply.DefaultUbuntuPaths()
+	paths.ConfigFile = *configPath
 	paths.ConfigGID = int(gid)
-	backend := networkapply.UbuntuBackend{Executor: platformexec.OSExecutor{}, Paths: paths}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	changed, err := networkapply.RollbackFromDisk(ctx, networkapply.DiskStore{Root: *transactionRoot}, backend, *applyID)
+	store := networkapply.DiskStore{Root: *transactionRoot}
+	manifest, _, err := store.Load(*applyID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load network rollback transaction: %v\n", err)
+		return 1
+	}
+	var backend networkapply.SnapshotBackend = networkapply.UbuntuBackend{Executor: platformexec.OSExecutor{}, Paths: paths}
+	var rollbackEngine *networkapply.Engine
+	var database *sql.DB
+	engine, opened, initErr := productionNetworkEngine(ctx, *configPath, *transactionRoot)
+	if initErr == nil {
+		rollbackEngine = engine
+		database = opened
+		defer database.Close()
+		backend = engine.Backend
+	} else if manifest.SchemaVersion == networkapply.ManifestSchema {
+		fmt.Fprintf(os.Stderr, "initialize Ethernet network rollback: %v\n", initErr)
+		return 1
+	}
+	changed, err := networkapply.RollbackFromDisk(ctx, store, backend, *applyID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "network rollback failed: %v\n", err)
 		return 1
 	}
 	if changed {
+		if rollbackEngine != nil {
+			transaction, stateErr := rollbackEngine.Repository.Get(ctx, *applyID)
+			if stateErr == nil && (transaction.State == networkapply.StatePreparing || transaction.State == networkapply.StateArmed || transaction.State == networkapply.StateApplied || transaction.State == networkapply.StateConfirming) {
+				stateErr = rollbackEngine.Repository.Transition(ctx, transaction.ID, []string{transaction.State}, networkapply.StateRolledBack, "ROLLBACK_TIMER")
+			}
+			if stateErr != nil {
+				fmt.Fprintf(os.Stderr, "network rollback restored host state but could not finalize SQLite status: %v\n", stateErr)
+				return 1
+			}
+		}
 		fmt.Println("Gateway VPN network transaction rolled back")
 	} else {
 		fmt.Println("Gateway VPN network transaction already terminal")
@@ -244,7 +276,11 @@ func productionNetworkEngine(ctx context.Context, configPath, transactionRoot st
 	paths.ConfigFile = configPath
 	paths.ConfigGID = int(gid)
 	executor := platformexec.OSExecutor{}
-	backend := networkapply.UbuntuBackend{Executor: executor, Paths: paths}
+	backend := networkapply.UbuntuBackend{
+		Executor: executor, Paths: paths, Database: database,
+		RoutingTableStart: configuration.Modems.RoutingTableStart,
+		FwmarkStart:       configuration.Modems.FwmarkStart,
+	}
 	timer := networkapply.SystemdRollbackTimer{Executor: executor, Systemctl: paths.Systemctl}
 	engine := networkapply.NewEngine(networkapply.NewRepository(database), networkapply.DiskStore{Root: transactionRoot}, backend, timer)
 	return engine, database, nil

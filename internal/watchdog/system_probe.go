@@ -49,6 +49,22 @@ var maintenanceUnits = []struct {
 	{"gateway-vpn-network-recovery.service", "NETWORK_RECOVERY_ACTIVE"},
 }
 
+// MaintenanceUnit is the fixed destructive-lifecycle surface shared with the
+// manual power controller. Returning a copy prevents callers from extending
+// the watchdog/root allowlist at runtime.
+type MaintenanceUnit struct {
+	Unit string
+	Code string
+}
+
+func MaintenanceUnits() []MaintenanceUnit {
+	result := make([]MaintenanceUnit, 0, len(maintenanceUnits))
+	for _, item := range maintenanceUnits {
+		result = append(result, MaintenanceUnit{Unit: item.unit, Code: item.code})
+	}
+	return result
+}
+
 type SystemProbe struct {
 	Executor          platformexec.Executor
 	Systemctl         string

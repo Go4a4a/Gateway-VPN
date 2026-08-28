@@ -519,6 +519,7 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd/gateway-vpn-firewall.service",
 	"packaging/systemd/gateway-vpn-firewall-guard.service",
 	"packaging/systemd/gateway-vpn-network-broker.socket",
+	"packaging/systemd/gateway-vpn-power-cycle@.service",
 	"packaging/systemd/gateway-vpn-update.service",
 	"packaging/systemd/gateway-vpn-update-recovery.service",
 	"packaging/systemd/gateway-vpn-update-resume.service",

@@ -113,3 +113,48 @@ func TestLoginRateLimitUsesProgressiveBlock(t *testing.T) {
 		t.Fatalf("auth audit password leaks = %d, %v", leaked, err)
 	}
 }
+
+func TestReauthenticateCurrentSessionIsRateLimitedAndAudited(t *testing.T) {
+	ctx := context.Background()
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	service := Service{Database: database, Parameters: Argon2Parameters{MemoryKiB: 8 * 1024, Iterations: 1, Parallelism: 1, SaltBytes: 16, KeyBytes: 32}, Now: func() time.Time { return now }}
+	if _, err := service.CreateBootstrapAdmin(ctx, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.Login(ctx, "admin", "correct horse battery staple", "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := service.Authenticate(ctx, session.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := service.Reauthenticate(ctx, principal, "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Reauthenticate(wrong %d) = %v", attempt, err)
+		}
+	}
+	if err := service.Reauthenticate(ctx, principal, "correct horse battery staple"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Reauthenticate(blocked) = %v", err)
+	}
+	now = now.Add(2 * time.Second)
+	if err := service.Reauthenticate(ctx, principal, "correct horse battery staple"); err != nil {
+		t.Fatalf("Reauthenticate(after block) = %v", err)
+	}
+	var failed, limited, succeeded, leaked int
+	_ = database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='AUTH_REAUTH_FAILED'").Scan(&failed)
+	_ = database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='AUTH_REAUTH_RATE_LIMITED'").Scan(&limited)
+	_ = database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='AUTH_REAUTH_SUCCEEDED'").Scan(&succeeded)
+	_ = database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE details_json LIKE '%wrong%' OR details_json LIKE '%correct horse%'").Scan(&leaked)
+	if failed != 3 || limited != 1 || succeeded != 1 || leaked != 0 {
+		t.Fatalf("reauth audit failed=%d limited=%d succeeded=%d leaked=%d", failed, limited, succeeded, leaked)
+	}
+}

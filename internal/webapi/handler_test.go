@@ -36,6 +36,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
 	"gateway-vpn/internal/state"
@@ -1531,6 +1532,61 @@ func TestSafeNetworkApplyReturnsTokenBeforeAsyncApplyAndUsesSocketDestination(t 
 	}
 }
 
+func TestEthernetSafeApplyBuildsStableIDCandidateWithoutBrokerIfname(t *testing.T) {
+	server, ctx := testServer(t)
+	attachBackupManager(t, server)
+	if _, err := server.dependencies.Uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("7", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	broker := &fakeNetworkBroker{applied: make(chan string, 1), prepared: networkapply.Prepared{
+		ApplyID: "apply-ethernet", ConfirmToken: strings.Repeat("b", 64),
+		OldURL: "https://192.168.200.1:8443", NewURL: "https://192.168.200.1:8443",
+		RollbackDeadline: time.Now().Add(time.Minute),
+	}}
+	server.dependencies.NetworkBroker = broker
+	cookie, csrf := login(t, server)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/uplinks/ethernet", strings.NewReader(`{
+        "name":"Проводной Internet","network_interface_id":"netif:wan",
+        "address_mode":"STATIC","ipv4_cidr":"172.20.1.2/24",
+        "gateway":"172.20.1.1","dns":["1.1.1.1"],"mtu":1500
+    }`))
+	request = request.WithContext(context.WithValue(request.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("192.168.200.1"), Port: 8443}))
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || broker.staged.Ethernet == nil {
+		t.Fatalf("Ethernet stage = %d %s / %+v", response.Code, response.Body.String(), broker.staged)
+	}
+	mutation := broker.staged.Ethernet
+	if !strings.HasPrefix(mutation.UplinkID, "ethernet-") || mutation.TargetInterfaceID != "netif:wan" || mutation.Operation != networkapply.EthernetCreate || broker.staged.InterfaceName != "" || broker.staged.ManagementDestinationIP != "192.168.200.1" {
+		t.Fatalf("bounded Ethernet candidate = %+v", broker.staged)
+	}
+	select {
+	case id := <-broker.applied:
+		if id != broker.prepared.ApplyID {
+			t.Fatalf("async Ethernet apply id = %s", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async Ethernet apply did not start")
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/uplinks/ethernet", strings.NewReader(`{
+        "name":"WAN","network_interface_id":"netif:wan","interface_name":"enp9s0","address_mode":"DHCP"
+    }`))
+	request = request.WithContext(context.WithValue(request.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("192.168.200.1"), Port: 8443}))
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("Ethernet API accepted interface_name: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestAccessMethodsPolicyDirectOnlyAndOperationsAPI(t *testing.T) {
 	server, ctx := testServer(t)
 	server.dependencies.BootIDReader = func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }
@@ -2256,10 +2312,101 @@ func TestDisablingActiveModemBlocksPathBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestPowerAPIRequiresReauthenticationTypedConfirmationAndAuditsDispatch(t *testing.T) {
+	server, ctx := testServer(t)
+	controller := &fakePowerController{capabilities: power.Capabilities{
+		Reboot:                 power.Capability{Available: true, Detected: true, Verified: true, State: "AVAILABLE"},
+		Shutdown:               power.Capability{Available: true, Detected: true, Verified: true, State: "AVAILABLE"},
+		RTCPowerCycle:          power.Capability{Detected: true, State: "DETECTED_NOT_VERIFIED", ReasonCode: "RTC_WAKE_FROM_S5_NOT_VERIFIED"},
+		MinimumRTCDelaySeconds: 30, MaximumRTCDelaySeconds: 3600, DefaultRTCDelaySeconds: 30,
+	}}
+	server.dependencies.Power = controller
+	cookie, csrf := login(t, server)
+
+	capabilityRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/power/capabilities", nil)
+	capabilityRequest.AddCookie(cookie)
+	capabilityResponse := httptest.NewRecorder()
+	server.ServeHTTP(capabilityResponse, capabilityRequest)
+	if capabilityResponse.Code != http.StatusOK || !strings.Contains(capabilityResponse.Body.String(), "DETECTED_NOT_VERIFIED") {
+		t.Fatalf("power capabilities = %d %s", capabilityResponse.Code, capabilityResponse.Body.String())
+	}
+
+	requestPower := func(path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	wrongConfirmation := requestPower("/api/v1/system/reboot", `{"password":"correct horse battery staple","confirmation":"ДА","delay_seconds":0}`)
+	if wrongConfirmation.Code != http.StatusBadRequest || len(controller.commands) != 0 {
+		t.Fatalf("wrong confirmation status/calls = %d/%d", wrongConfirmation.Code, len(controller.commands))
+	}
+	for _, delay := range []int{29, 3601} {
+		response := requestPower("/api/v1/system/power-cycle", `{"password":"correct horse battery staple","confirmation":"ВЫКЛЮЧИТЬ И ВКЛЮЧИТЬ","delay_seconds":`+strconv.Itoa(delay)+`}`)
+		if response.Code != http.StatusBadRequest || len(controller.commands) != 0 {
+			t.Fatalf("out-of-range RTC delay %d status/calls = %d/%d", delay, response.Code, len(controller.commands))
+		}
+	}
+	wrongPassword := requestPower("/api/v1/system/reboot", `{"password":"wrong","confirmation":"ПЕРЕЗАГРУЗИТЬ","delay_seconds":0}`)
+	if wrongPassword.Code != http.StatusUnauthorized || len(controller.commands) != 0 {
+		t.Fatalf("wrong password status/calls = %d/%d", wrongPassword.Code, len(controller.commands))
+	}
+	success := requestPower("/api/v1/system/reboot", `{"password":"correct horse battery staple","confirmation":"ПЕРЕЗАГРУЗИТЬ","delay_seconds":0}`)
+	if success.Code != http.StatusAccepted || len(controller.commands) != 1 || controller.commands[0].Action != power.ActionReboot || !strings.Contains(success.Body.String(), "POWER_ACTION_DISPATCHED") {
+		t.Fatalf("power success = %d calls=%+v body=%s", success.Code, controller.commands, success.Body.String())
+	}
+	var requested, dispatched int
+	_ = server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='SYSTEM_POWER_REQUESTED'").Scan(&requested)
+	_ = server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='SYSTEM_POWER_DISPATCHED'").Scan(&dispatched)
+	if requested != 1 || dispatched != 1 {
+		t.Fatalf("power API audit = %d/%d", requested, dispatched)
+	}
+}
+
+func TestPowerAndMaintenanceMutationGateIsMutuallyExclusive(t *testing.T) {
+	server, _ := testServer(t)
+	if !server.beginMaintenanceMutation() {
+		t.Fatal("first maintenance mutation was blocked")
+	}
+	if server.reservePowerAction() {
+		t.Fatal("power action raced an active maintenance mutation")
+	}
+	server.endMaintenanceMutation()
+	if !server.reservePowerAction() {
+		t.Fatal("power action was not reserved after backup completed")
+	}
+	if server.beginMaintenanceMutation() {
+		t.Fatal("maintenance mutation raced a pending power action")
+	}
+	server.releasePowerAction()
+	if !server.beginMaintenanceMutation() {
+		t.Fatal("maintenance mutation did not resume after failed power action")
+	}
+	server.endMaintenanceMutation()
+}
+
 type fakeNetworkBroker struct {
 	prepared  networkapply.Prepared
+	staged    networkapply.Candidate
 	applied   chan string
 	confirmed networkapply.ConfirmEvidence
+}
+
+type fakePowerController struct {
+	capabilities power.Capabilities
+	commands     []power.Command
+	err          error
+}
+
+func (controller *fakePowerController) PowerCapabilities(context.Context) (power.Capabilities, error) {
+	return controller.capabilities, controller.err
+}
+
+func (controller *fakePowerController) ExecutePower(_ context.Context, command power.Command) error {
+	controller.commands = append(controller.commands, command)
+	return controller.err
 }
 
 type fakeLoggingSynchronizer struct {
@@ -2544,7 +2691,8 @@ func (refresher *fakeSubscriptionRefresher) ReclassifyOne(_ context.Context, id 
 	return refresher.result, refresher.err
 }
 
-func (broker *fakeNetworkBroker) Stage(context.Context, networkapply.Candidate) (networkapply.Prepared, error) {
+func (broker *fakeNetworkBroker) Stage(_ context.Context, candidate networkapply.Candidate) (networkapply.Prepared, error) {
+	broker.staged = candidate
 	return broker.prepared, nil
 }
 

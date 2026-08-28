@@ -482,6 +482,7 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 	for _, name := range []string{
 		"gateway-vpn.service", "gateway-vpn-watchdog.service", "gateway-vpn-firewall.service",
 		"gateway-vpn-firewall-guard.service", "gateway-vpn-network-broker.socket",
+		"gateway-vpn-power-cycle@.service",
 		"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service",
 		"gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer",
 	} {

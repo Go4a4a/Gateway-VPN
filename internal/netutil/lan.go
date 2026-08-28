@@ -9,17 +9,27 @@ var wireGuardManagement = netip.MustParsePrefix("10.80.0.0/24")
 // prefix. Network and broadcast addresses are rejected.
 func ParsePrivateLAN(value string) (netip.Prefix, bool) {
 	prefix, err := netip.ParsePrefix(value)
-	if err != nil || !prefix.Addr().Is4() || !prefix.Addr().IsPrivate() || prefix.Bits() < 16 || prefix.Bits() > 30 {
-		return netip.Prefix{}, false
-	}
-	network := prefix.Masked()
-	addressValue := ipv4Value(prefix.Addr())
-	networkValue := ipv4Value(network.Addr())
-	hostMask := uint32(1)<<(32-prefix.Bits()) - 1
-	if addressValue == networkValue || addressValue == networkValue|hostMask {
+	if err != nil || !prefix.Addr().IsPrivate() || prefix.Bits() < 16 || prefix.Bits() > 30 || !IsUsableIPv4Host(prefix, prefix.Addr()) {
 		return netip.Prefix{}, false
 	}
 	return prefix, true
+}
+
+// IsUsableIPv4Host verifies that address is a unicast host inside prefix. For
+// ordinary IPv4 subnets it rejects the network and broadcast addresses; /31
+// point-to-point prefixes intentionally treat both addresses as usable.
+func IsUsableIPv4Host(prefix netip.Prefix, address netip.Addr) bool {
+	if !prefix.IsValid() || !prefix.Addr().Is4() || !address.Is4() || !address.IsGlobalUnicast() || !prefix.Contains(address) {
+		return false
+	}
+	if prefix.Bits() >= 31 {
+		return true
+	}
+	network := prefix.Masked()
+	addressValue := ipv4Value(address)
+	networkValue := ipv4Value(network.Addr())
+	hostMask := uint32(1)<<(32-prefix.Bits()) - 1
+	return addressValue != networkValue && addressValue != networkValue|hostMask
 }
 
 // ParseGatewayLAN additionally reserves the fixed WireGuard management

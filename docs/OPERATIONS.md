@@ -553,6 +553,12 @@ Safe-default policy проверяет фиксированный allowlist ко
 
 Host reboot по умолчанию выключен. Его включение требует отдельного подтверждения в WebUI; даже после включения нужны непрерывный локальный critical failure не менее 15 минут, исчерпанная безопасная локальная recovery ladder, повторный `PATH_BLOCKED`, 60-секундный grace и свободный durable budget (по умолчанию один reboot за 24 часа). История записывается и fsync-ится до privileged action, не очищается restart-ом supervisor или изменением settings и блокирует reboot loop. Disk/memory/FD pressure, maintenance transaction и внешний outage не являются reboot-eligible причинами.
 
+### Ручное управление питанием
+
+Во вкладке **Система и безопасность → Питание** доступны отдельные от watchdog операции **Перезагрузить** и **Выключить**. Каждая требует текущий пароль, точную русскую фразу подтверждения и имеет отменяемый пятисекундный отсчёт до отправки. После передачи команды systemd WebUI показывает operation ID; разрыв HTTPS после этого является ожидаемым и не означает, что команда не принята. Install/update/restore, safe network apply, backup mutation и другая power operation блокируют ручное действие.
+
+**Выключить и включить по таймеру** не включается только по наличию `/dev/rtc0` или `rtcwake`: firmware может не поддерживать wake-from-S5. Сначала оператор отдельно проверяет конкретный Gateway на тестовом интервале и только после успешного физического включения создаёт root-owned regular marker `/var/lib/gateway-vpn-privileged/rtc-wake-from-s5.verified` с mode `0600` и точным содержимым `RTC_WAKE_FROM_S5_VERIFIED_V1`. До этого WebUI показывает RTC как **обнаружен, но не проверен**, а кнопка заблокирована. RTC alarm отсчитывается от отправки команды, поэтому фактическое время в полностью выключенном состоянии короче на время корректного завершения Ubuntu. Реальный hardware acceptance этой функции выполняется только на физическом Gateway; Docker и VM не доказывают S5 wake.
+
 Control и supervisor используют systemd watchdog heartbeats. Runtime status считается доступным только при свежих root status и control heartbeat с правильными owner/mode; старый файл после смерти процесса не отображается как healthy. `gateway-vpn.service` следует lifecycle supervisor, а его heartbeat-каталог сохраняется при restart обоих units, поэтому control не продолжает работу в отдельном устаревшем mount namespace.
 
 Диагностика:

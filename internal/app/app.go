@@ -35,6 +35,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/reconcile"
 	retentionpkg "gateway-vpn/internal/retention"
 	"gateway-vpn/internal/state"
@@ -111,6 +112,9 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	fail := func(err error) (*Runtime, error) {
 		database.Close()
 		return nil, err
+	}
+	if _, err := (power.Repository{Database: database}).RecoverInterrupted(ctx); err != nil {
+		return fail(fmt.Errorf("recover interrupted power operation: %w", err))
 	}
 	if err := loggingController.Attach(ctx, database); err != nil {
 		return fail(fmt.Errorf("initialize logging settings: %w", err))
@@ -293,6 +297,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		UpdateApply:          networkBroker,
 		Watchdog:             &watchdog.Repository{Database: database},
 		WatchdogStatus:       watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
+		Power:                networkBroker,
 		NetworkCandidate:     networkCandidateBuilder(configuration, database),
 		NetworkInterface:     configuration.Network.LANInterface,
 		NetworkLANAddress:    configuration.Network.LANAddress,

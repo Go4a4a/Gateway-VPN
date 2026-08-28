@@ -17,6 +17,7 @@ import (
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modemrecovery"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/traffic"
 )
 
@@ -36,6 +37,7 @@ type BrokerServer struct {
 	Update      UpdateAdmin
 	Traffic     TrafficAdmin
 	Recovery    ModemRecoveryAdmin
+	Power       PowerAdmin
 	handler     http.Handler
 }
 
@@ -117,6 +119,14 @@ type TrafficAdmin interface {
 // the current interface, active attempt and physical identity context.
 type ModemRecoveryAdmin interface {
 	Execute(context.Context, modemrecovery.Command) error
+}
+
+// PowerAdmin is restricted to capability discovery and three typed actions.
+// The root implementation independently blocks critical maintenance and never
+// accepts a command, executable, unit name, or path from the caller.
+type PowerAdmin interface {
+	Capabilities(context.Context) (power.Capabilities, error)
+	Execute(context.Context, power.Command) error
 }
 
 // UpdateTransactionStatus is the only update-journal information exposed to
@@ -242,12 +252,59 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	if recoveryAdmin != nil {
 		mux.HandleFunc("POST /v1/modem/recovery/execute", server.executeModemRecovery)
 	}
+	mux.HandleFunc("POST /v1/power/capabilities", server.powerCapabilities)
+	mux.HandleFunc("POST /v1/power/execute", server.executePower)
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) powerCapabilities(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.Power == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "POWER_CONTROLLER_UNAVAILABLE")
+		return
+	}
+	capabilities, err := server.Power.Capabilities(request.Context())
+	if err != nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "POWER_CAPABILITIES_UNAVAILABLE")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, capabilities)
+}
+
+func (server *BrokerServer) executePower(writer http.ResponseWriter, request *http.Request) {
+	var command power.Command
+	if err := decodeBrokerJSON(request, &command); err != nil || command.Validate() != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_POWER_COMMAND")
+		return
+	}
+	if server.Power == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "POWER_CONTROLLER_UNAVAILABLE")
+		return
+	}
+	err := server.Power.Execute(request.Context(), command)
+	switch {
+	case err == nil:
+		writer.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, power.ErrMaintenanceActive):
+		writeBrokerError(writer, http.StatusConflict, "POWER_BLOCKED_BY_MAINTENANCE")
+	case errors.Is(err, power.ErrOperationInProgress):
+		writeBrokerError(writer, http.StatusConflict, "POWER_OPERATION_IN_PROGRESS")
+	case errors.Is(err, power.ErrUnavailable):
+		writeBrokerError(writer, http.StatusConflict, "POWER_ACTION_UNAVAILABLE")
+	case errors.Is(err, power.ErrInvalidCommand):
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_POWER_COMMAND")
+	default:
+		writeBrokerError(writer, http.StatusServiceUnavailable, "POWER_ACTION_FAILED")
+	}
 }
 
 func (server *BrokerServer) executeModemRecovery(writer http.ResponseWriter, request *http.Request) {
@@ -735,6 +792,32 @@ func (client *BrokerClient) Execute(ctx context.Context, command modemrecovery.C
 		return modemrecovery.ErrDeviceRemoved
 	case strings.Contains(message, "RECOVERY_STALE_GENERATION"):
 		return modemrecovery.ErrStaleGeneration
+	default:
+		return err
+	}
+}
+
+func (client *BrokerClient) PowerCapabilities(ctx context.Context) (power.Capabilities, error) {
+	var capabilities power.Capabilities
+	err := client.call(ctx, "/v1/power/capabilities", struct{}{}, http.StatusOK, &capabilities)
+	return capabilities, err
+}
+
+func (client *BrokerClient) ExecutePower(ctx context.Context, command power.Command) error {
+	err := client.call(ctx, "/v1/power/execute", command, http.StatusNoContent, nil)
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "POWER_BLOCKED_BY_MAINTENANCE"):
+		return power.ErrMaintenanceActive
+	case strings.Contains(message, "POWER_OPERATION_IN_PROGRESS"):
+		return power.ErrOperationInProgress
+	case strings.Contains(message, "POWER_ACTION_UNAVAILABLE"):
+		return power.ErrUnavailable
+	case strings.Contains(message, "INVALID_POWER_COMMAND"):
+		return power.ErrInvalidCommand
 	default:
 		return err
 	}

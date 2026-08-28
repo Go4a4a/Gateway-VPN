@@ -134,7 +134,7 @@ func ubuntuBackendFixture(t *testing.T) (UbuntuBackend, *statefulBackendExecutor
 		t.Fatal(err)
 	}
 	manifest := Manifest{
-		SchemaVersion: ManifestSchema, ID: "apply-test", InterfaceName: "enp2s0",
+		SchemaVersion: LegacyManifestSchema, ID: "apply-test", InterfaceName: "enp2s0",
 		OldLANCIDR: "192.168.200.1/24", NewLANCIDR: "192.168.210.1/24",
 		OldURL: "https://192.168.200.1:8443", NewURL: "https://192.168.210.1:8443",
 		NewDestinationIP: "192.168.210.1",

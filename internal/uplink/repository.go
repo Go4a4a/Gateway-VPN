@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/store"
 )
 
@@ -92,6 +93,16 @@ type CreateEthernetInput struct {
 	Gateway            string
 	DNS                []string
 	MTU                int64
+}
+
+type UpdateEthernetInput struct {
+	NetworkInterfaceID        string
+	AddressMode               string
+	IPv4CIDR                  string
+	Gateway                   string
+	DNS                       []string
+	MTU                       int64
+	ExpectedDesiredGeneration int64
 }
 
 type Uplink struct {
@@ -265,7 +276,7 @@ func (repository *Repository) CreateEthernet(ctx context.Context, input CreateEt
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM interface_role_assignments
-WHERE network_interface_id=? AND role<>'UNUSED'`, input.NetworkInterfaceID).Scan(&conflictingRoles); err != nil {
+WHERE network_interface_id=? AND role NOT IN ('UNUSED', 'SHARED_ONE_ARM')`, input.NetworkInterfaceID).Scan(&conflictingRoles); err != nil {
 		return Uplink{}, fmt.Errorf("read interface roles: %w", err)
 	}
 	if conflictingRoles != 0 {
@@ -438,7 +449,7 @@ FROM uplinks WHERE id=?`, uplinkID).Scan(&uplinkType, &previousInterfaceID, &cur
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM interface_role_assignments
-WHERE network_interface_id=? AND role<>'UNUSED'`, replacementInterfaceID).Scan(&conflictingRoles); err != nil {
+WHERE network_interface_id=? AND role NOT IN ('UNUSED', 'SHARED_ONE_ARM')`, replacementInterfaceID).Scan(&conflictingRoles); err != nil {
 		return ReplacementResult{}, fmt.Errorf("read replacement roles: %w", err)
 	}
 	if conflictingRoles != 0 {
@@ -519,6 +530,111 @@ WHERE uplink_id=?`, currentRoute+1, now, uplinkID)
 	}, nil
 }
 
+// UpdateEthernetConfiguration changes only canonical desired state. Host
+// networkd mutation and confirmation are owned by the network safe-apply
+// transaction; direct Web/API callers must not invoke this method.
+func (repository *Repository) UpdateEthernetConfiguration(ctx context.Context, uplinkID string, input UpdateEthernetInput) (Uplink, error) {
+	if input.ExpectedDesiredGeneration < 1 {
+		return Uplink{}, errors.New("expected Ethernet desired generation is required")
+	}
+	if err := validateEthernetInput(CreateEthernetInput{
+		ID: uplinkID, Name: "validated", NetworkInterfaceID: input.NetworkInterfaceID,
+		AddressMode: input.AddressMode, IPv4CIDR: input.IPv4CIDR, Gateway: input.Gateway,
+		DNS: input.DNS, MTU: input.MTU,
+	}); err != nil {
+		return Uplink{}, err
+	}
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Uplink{}, fmt.Errorf("begin Ethernet configuration update: %w", err)
+	}
+	defer transaction.Rollback()
+	var uplinkType, currentInterfaceID, currentAddressMode, currentCIDR, currentGateway, currentDNS string
+	var currentMTU sql.NullInt64
+	var currentDesired, currentRoute int64
+	err = transaction.QueryRowContext(ctx, `
+SELECT type, COALESCE(network_interface_id, ''), address_mode,
+       COALESCE(ipv4_cidr, ''), COALESCE(gateway, ''), dns_json, mtu,
+       desired_generation, route_generation
+FROM uplinks WHERE id=?`, uplinkID).Scan(
+		&uplinkType, &currentInterfaceID, &currentAddressMode, &currentCIDR,
+		&currentGateway, &currentDNS, &currentMTU, &currentDesired, &currentRoute)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Uplink{}, store.ErrNotFound
+	}
+	if err != nil {
+		return Uplink{}, fmt.Errorf("read Ethernet configuration: %w", err)
+	}
+	if uplinkType != TypeEthernet {
+		return Uplink{}, errors.New("only an Ethernet uplink configuration can be updated")
+	}
+	if currentDesired != input.ExpectedDesiredGeneration {
+		return Uplink{}, store.ErrStaleGeneration
+	}
+	if currentInterfaceID != input.NetworkInterfaceID {
+		return Uplink{}, errors.New("Ethernet interface changed before configuration update")
+	}
+	dnsJSON, err := json.Marshal(input.DNS)
+	if err != nil {
+		return Uplink{}, fmt.Errorf("encode Ethernet DNS: %w", err)
+	}
+	if currentAddressMode == input.AddressMode && currentCIDR == input.IPv4CIDR && currentGateway == input.Gateway && currentDNS == string(dnsJSON) && currentMTU.Int64 == input.MTU {
+		return Uplink{}, errors.New("Ethernet configuration is unchanged")
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	result, err := transaction.ExecContext(ctx, `
+UPDATE uplinks
+SET address_mode=?, ipv4_cidr=?, gateway=?, dns_json=?, mtu=?,
+    desired_generation=desired_generation+1, observed_generation=0,
+    route_generation=route_generation+1, state='UPLINK_CONFIGURING',
+    last_seen_at=NULL, stable_since=NULL, updated_at=?
+WHERE id=? AND desired_generation=? AND network_interface_id=?`,
+		input.AddressMode, nullIfEmpty(input.IPv4CIDR), nullIfEmpty(input.Gateway),
+		string(dnsJSON), nullIfZero(input.MTU), now, uplinkID,
+		input.ExpectedDesiredGeneration, input.NetworkInterfaceID)
+	if err != nil {
+		return Uplink{}, fmt.Errorf("update Ethernet configuration: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return Uplink{}, store.ErrStaleGeneration
+	}
+	if err := invalidateUplinkPathsTx(ctx, transaction, uplinkID, currentRoute+1, now); err != nil {
+		return Uplink{}, err
+	}
+	if err := appendEventTx(ctx, transaction, now, "UPLINK_CONFIGURATION_UPDATED", uplinkID, map[string]any{
+		"address_mode": input.AddressMode, "desired_generation": currentDesired + 1,
+		"route_generation": currentRoute + 1,
+	}); err != nil {
+		return Uplink{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Uplink{}, fmt.Errorf("commit Ethernet configuration update: %w", err)
+	}
+	return repository.Get(ctx, uplinkID)
+}
+
+func invalidateUplinkPathsTx(ctx context.Context, transaction *sql.Tx, uplinkID string, routeGeneration int64, now string) error {
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE subscription_uplink_paths
+SET route_generation=?, state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0, last_checked_at=NULL,
+    expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, routeGeneration, now, uplinkID); err != nil {
+		return fmt.Errorf("invalidate Ethernet VPN paths: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE direct_uplink_paths
+SET route_generation=?, state='STALE', transport_state='UNKNOWN',
+    quality_class='UNKNOWN', functional_score=0, required_targets_passed=0,
+    optional_targets_passed=0, whitelist_targets_passed=0,
+    last_checked_at=NULL, expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, routeGeneration, now, uplinkID); err != nil {
+		return fmt.Errorf("invalidate Ethernet direct path: %w", err)
+	}
+	return nil
+}
+
 func validateInterfaceObservation(input InterfaceObservation) error {
 	if !validIdentifier(input.ID) || !validIdentifier(input.StableIdentityKind) {
 		return errors.New("interface id and identity kind are required and must be safe identifiers")
@@ -558,7 +674,7 @@ func validateEthernetInput(input CreateEthernetInput) error {
 	var err error
 	if input.IPv4CIDR != "" {
 		prefix, err = netip.ParsePrefix(input.IPv4CIDR)
-		if err != nil || !prefix.Addr().Is4() {
+		if err != nil || !netutil.IsUsableIPv4Host(prefix, prefix.Addr()) {
 			return errors.New("Ethernet IPv4 CIDR is invalid")
 		}
 	}
@@ -570,7 +686,7 @@ func validateEthernetInput(input CreateEthernetInput) error {
 		}
 	}
 	if input.AddressMode == AddressStatic {
-		if !prefix.IsValid() || !gateway.IsValid() || !prefix.Contains(gateway) || prefix.Addr() == gateway {
+		if !prefix.IsValid() || !gateway.IsValid() || !netutil.IsUsableIPv4Host(prefix, gateway) || prefix.Addr() == gateway {
 			return errors.New("static Ethernet mode requires an IPv4 CIDR and a different gateway inside that subnet")
 		}
 	} else if prefix.IsValid() || gateway.IsValid() {

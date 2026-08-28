@@ -530,7 +530,7 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 		}
 	}
 	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
-	for _, required := range []string{"network-broker", "User=" /* root is intentionally implicit */, "CAP_NET_ADMIN", "CAP_NET_RAW", "NoNewPrivileges=yes", "/var/lib/gateway-vpn-privileged/network-transactions"} {
+	for _, required := range []string{"network-broker", "User=" /* root is intentionally implicit */, "CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_SYS_BOOT", "NoNewPrivileges=yes", "/var/lib/gateway-vpn-privileged/network-transactions"} {
 		if required == "User=" {
 			if strings.Contains(broker, required) {
 				t.Error("broker service must run as the default root user, not switch identities")

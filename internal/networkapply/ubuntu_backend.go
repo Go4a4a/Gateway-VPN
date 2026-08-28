@@ -3,6 +3,7 @@ package networkapply
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,35 +26,43 @@ import (
 )
 
 type UbuntuPaths struct {
-	ConfigFile     string
-	DNSMasqFile    string
-	BootNFTFile    string
-	LANNetworkFile string
-	IP             string
-	NFT            string
-	DNSMasq        string
-	Systemctl      string
-	Networkctl     string
-	ConfigGID      int
+	ConfigFile         string
+	DNSMasqFile        string
+	BootNFTFile        string
+	LANNetworkFile     string
+	EthernetNetworkDir string
+	IP                 string
+	NFT                string
+	DNSMasq            string
+	Systemctl          string
+	Networkctl         string
+	ConfigGID          int
 }
 
 func DefaultUbuntuPaths() UbuntuPaths {
 	return UbuntuPaths{
-		ConfigFile:     "/etc/gateway-vpn/config.yaml",
-		DNSMasqFile:    "/etc/gateway-vpn/dnsmasq.conf",
-		BootNFTFile:    "/etc/gateway-vpn/nftables/boot.nft",
-		LANNetworkFile: "/etc/systemd/network/05-gateway-vpn-lan.network",
-		IP:             "/usr/sbin/ip", NFT: "/usr/sbin/nft", DNSMasq: "/usr/sbin/dnsmasq",
+		ConfigFile:         "/etc/gateway-vpn/config.yaml",
+		DNSMasqFile:        "/etc/gateway-vpn/dnsmasq.conf",
+		BootNFTFile:        "/etc/gateway-vpn/nftables/boot.nft",
+		LANNetworkFile:     "/etc/systemd/network/05-gateway-vpn-lan.network",
+		EthernetNetworkDir: "/etc/systemd/network",
+		IP:                 "/usr/sbin/ip", NFT: "/usr/sbin/nft", DNSMasq: "/usr/sbin/dnsmasq",
 		Systemctl: "/usr/bin/systemctl", Networkctl: "/usr/bin/networkctl", ConfigGID: -1,
 	}
 }
 
 type UbuntuBackend struct {
-	Executor platformexec.Executor
-	Paths    UbuntuPaths
+	Executor          platformexec.Executor
+	Paths             UbuntuPaths
+	Database          *sql.DB
+	RoutingTableStart uint32
+	FwmarkStart       uint32
 }
 
 func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == ManifestSchema {
+		return backend.snapshotEthernet(ctx, manifest, transactionDirectory)
+	}
 	if err := backend.validate(); err != nil {
 		return err
 	}
@@ -156,6 +165,9 @@ func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, tr
 }
 
 func (backend UbuntuBackend) Apply(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == ManifestSchema {
+		return backend.applyEthernet(ctx, manifest, transactionDirectory)
+	}
 	if err := backend.validate(); err != nil {
 		return err
 	}
@@ -218,6 +230,9 @@ func (backend UbuntuBackend) Apply(ctx context.Context, manifest Manifest, trans
 }
 
 func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, _ string) error {
+	if manifest.SchemaVersion == ManifestSchema {
+		return backend.commitEthernet(ctx, manifest)
+	}
 	if err := backend.validate(); err != nil {
 		return err
 	}
@@ -237,6 +252,9 @@ func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, _ st
 }
 
 func (backend UbuntuBackend) Rollback(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == ManifestSchema {
+		return backend.rollbackEthernet(ctx, manifest, transactionDirectory)
+	}
 	if err := backend.validate(); err != nil {
 		return err
 	}

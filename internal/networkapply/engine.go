@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -17,11 +18,14 @@ import (
 )
 
 type Candidate struct {
-	InterfaceName string
-	OldLANCIDR    string
-	NewLANCIDR    string
-	OldURL        string
-	NewURL        string
+	InterfaceName           string
+	OldLANCIDR              string
+	NewLANCIDR              string
+	OldURL                  string
+	NewURL                  string
+	Ethernet                *EthernetMutation
+	ManagementURL           string
+	ManagementDestinationIP string
 }
 
 type SnapshotBackend interface {
@@ -96,7 +100,7 @@ func (engine *Engine) Stage(ctx context.Context, candidate Candidate) (Prepared,
 	if err := engine.validate(); err != nil {
 		return Prepared{}, err
 	}
-	oldPrefix, newPrefix, err := validateCandidate(candidate)
+	manifest, err := buildManifest(candidate)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -113,12 +117,12 @@ func (engine *Engine) Stage(ctx context.Context, candidate Candidate) (Prepared,
 	tokenDigest := sha256.Sum256([]byte(confirmToken))
 	now := engine.Now().UTC()
 	deadline := now.Add(engine.RollbackAfter)
-	manifest := Manifest{
-		SchemaVersion: ManifestSchema, ID: applyID, InterfaceName: candidate.InterfaceName,
-		OldLANCIDR: oldPrefix.String(), NewLANCIDR: newPrefix.String(),
-		OldURL: candidate.OldURL, NewURL: candidate.NewURL,
-		NewDestinationIP: newPrefix.Addr().String(),
-		RollbackDeadline: deadline.Format(time.RFC3339Nano), CreatedAt: now.Format(time.RFC3339Nano),
+	manifest.ID = applyID
+	manifest.RollbackDeadline = deadline.Format(time.RFC3339Nano)
+	manifest.CreatedAt = now.Format(time.RFC3339Nano)
+	candidateJSON, err := manifestCandidateJSON(manifest)
+	if err != nil {
+		return Prepared{}, err
 	}
 	directory, err := engine.Store.Directory(applyID)
 	if err != nil {
@@ -126,8 +130,9 @@ func (engine *Engine) Stage(ctx context.Context, candidate Candidate) (Prepared,
 	}
 	record := Transaction{
 		ID: applyID, State: StatePreparing, ConfirmTokenSHA256: hex.EncodeToString(tokenDigest[:]),
+		ManifestSchema: manifest.SchemaVersion, OperationKind: effectiveOperationKind(manifest), CandidateJSON: candidateJSON,
 		InterfaceName: candidate.InterfaceName, OldLANCIDR: manifest.OldLANCIDR,
-		NewLANCIDR: manifest.NewLANCIDR, OldURL: candidate.OldURL, NewURL: candidate.NewURL,
+		NewLANCIDR: manifest.NewLANCIDR, OldURL: manifest.OldURL, NewURL: manifest.NewURL,
 		NewDestinationIP: manifest.NewDestinationIP, RollbackDeadline: manifest.RollbackDeadline,
 		TransactionDir: directory,
 	}
@@ -177,7 +182,7 @@ func (engine *Engine) Stage(ctx context.Context, candidate Candidate) (Prepared,
 	if err := engine.Repository.Transition(ctx, applyID, []string{StatePreparing}, StateArmed, ""); err != nil {
 		return rollback("ARMED_DB_FAILED")
 	}
-	return Prepared{ApplyID: applyID, ConfirmToken: confirmToken, OldURL: candidate.OldURL, NewURL: candidate.NewURL, RollbackDeadline: deadline}, nil
+	return Prepared{ApplyID: applyID, ConfirmToken: confirmToken, OldURL: manifest.OldURL, NewURL: manifest.NewURL, RollbackDeadline: deadline}, nil
 }
 
 // Apply changes the network only for a previously armed durable transaction.
@@ -425,6 +430,64 @@ func validateCandidate(candidate Candidate) (netip.Prefix, netip.Prefix, error) 
 	return oldPrefix, newPrefix, nil
 }
 
+func buildManifest(candidate Candidate) (Manifest, error) {
+	if candidate.Ethernet == nil {
+		oldPrefix, newPrefix, err := validateCandidate(candidate)
+		if err != nil {
+			return Manifest{}, err
+		}
+		return Manifest{
+			SchemaVersion: LegacyManifestSchema,
+			InterfaceName: candidate.InterfaceName,
+			OldLANCIDR:    oldPrefix.String(), NewLANCIDR: newPrefix.String(),
+			OldURL: candidate.OldURL, NewURL: candidate.NewURL,
+			NewDestinationIP: newPrefix.Addr().String(),
+		}, nil
+	}
+	if candidate.InterfaceName != "" || candidate.OldLANCIDR != "" || candidate.NewLANCIDR != "" || candidate.OldURL != "" || candidate.NewURL != "" {
+		return Manifest{}, errors.New("Ethernet candidate cannot contain LAN mutation fields")
+	}
+	mutation := *candidate.Ethernet
+	mutation.UplinkID = strings.TrimSpace(mutation.UplinkID)
+	mutation.TargetInterfaceID = strings.TrimSpace(mutation.TargetInterfaceID)
+	mutation.Name = strings.TrimSpace(mutation.Name)
+	mutation.DNS = append([]string(nil), mutation.DNS...)
+	if err := validateEthernetMutation(mutation); err != nil {
+		return Manifest{}, fmt.Errorf("invalid Ethernet network candidate: %w", err)
+	}
+	destination, err := netip.ParseAddr(candidate.ManagementDestinationIP)
+	if err != nil || !destination.Is4() {
+		return Manifest{}, errors.New("current management destination must be an IPv4 address")
+	}
+	if err := validateManagementURL(candidate.ManagementURL, destination); err != nil {
+		return Manifest{}, fmt.Errorf("current management URL: %w", err)
+	}
+	manifest := Manifest{
+		SchemaVersion: ManifestSchema, OperationKind: OperationEthernetUplink,
+		OldURL: candidate.ManagementURL, NewURL: candidate.ManagementURL,
+		NewDestinationIP: destination.String(), Ethernet: &mutation,
+	}
+	return manifest, nil
+}
+
+func effectiveOperationKind(manifest Manifest) string {
+	if manifest.SchemaVersion == LegacyManifestSchema {
+		return OperationLANAddress
+	}
+	return manifest.OperationKind
+}
+
+func manifestCandidateJSON(manifest Manifest) (string, error) {
+	if manifest.SchemaVersion == LegacyManifestSchema {
+		return "{}", nil
+	}
+	payload, err := json.Marshal(manifest.Ethernet)
+	if err != nil {
+		return "", errors.New("encode network apply candidate failed")
+	}
+	return string(payload), nil
+}
+
 func validPrivateIPv4LAN(prefix netip.Prefix) bool {
 	return prefix.IsValid() && netutil.ValidGatewayLAN(prefix.String())
 }
@@ -447,7 +510,14 @@ func manifestMatchesTransaction(manifest Manifest, transaction Transaction, dire
 }
 
 func manifestCoreMatchesTransaction(manifest Manifest, transaction Transaction, directory string) bool {
+	candidateJSON, err := manifestCandidateJSON(manifest)
+	if err != nil {
+		return false
+	}
 	return manifest.ID == transaction.ID &&
+		manifest.SchemaVersion == transaction.ManifestSchema &&
+		effectiveOperationKind(manifest) == transaction.OperationKind &&
+		candidateJSON == transaction.CandidateJSON &&
 		manifest.InterfaceName == transaction.InterfaceName &&
 		manifest.OldLANCIDR == transaction.OldLANCIDR &&
 		manifest.NewLANCIDR == transaction.NewLANCIDR &&

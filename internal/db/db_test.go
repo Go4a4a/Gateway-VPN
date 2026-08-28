@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 18 {
+	if err != nil || version != 20 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 18 {
+	if err != nil || latest != 20 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -233,8 +233,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 18 {
-		t.Fatalf("SchemaVersion() = %d, want 18", version)
+	if version != 20 {
+		t.Fatalf("SchemaVersion() = %d, want 20", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -278,8 +278,48 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 18 {
-		t.Fatalf("migration count = %d, want 18", count)
+	if count != 20 {
+		t.Fatalf("migration count = %d, want 20", count)
+	}
+}
+
+func TestMigration19BackfillsLegacyNetworkApplyAndAddsTypedMetadata(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 18)); err != nil {
+		t.Fatalf("migrate schema 18: %v", err)
+	}
+	_, err = database.ExecContext(ctx, `
+INSERT INTO network_apply_transactions(
+    id, state, confirm_token_sha256, interface_name, old_lan_cidr, new_lan_cidr,
+    old_url, new_url, new_destination_ip, rollback_deadline, transaction_dir,
+    created_at, updated_at
+) VALUES (
+    'apply-legacy', 'CONFIRMED', 'digest', 'enp2s0', '192.168.200.1/24',
+    '192.168.210.1/24', 'https://192.168.200.1:8443',
+    'https://192.168.210.1:8443', '192.168.210.1', '2026-08-28T12:01:00Z',
+    '/var/lib/gateway-vpn-privileged/network-transactions/apply-legacy',
+    '2026-08-28T12:00:00Z', '2026-08-28T12:00:30Z'
+)`)
+	if err != nil {
+		t.Fatalf("insert schema-18 transaction: %v", err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate schema 19: %v", err)
+	}
+	var schema int
+	var kind, candidate string
+	if err := database.QueryRowContext(ctx, `
+SELECT manifest_schema, operation_kind, candidate_json
+FROM network_apply_transactions WHERE id='apply-legacy'`).Scan(&schema, &kind, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if schema != 1 || kind != "LAN_ADDRESS" || candidate != "{}" {
+		t.Fatalf("legacy metadata = %d / %s / %s", schema, kind, candidate)
 	}
 }
 

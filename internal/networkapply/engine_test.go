@@ -130,6 +130,47 @@ func TestEngineStageReturnsTokenBeforeSeparateNetworkApply(t *testing.T) {
 	}
 }
 
+func TestEnginePersistsBoundedEthernetManifestWithoutInterfaceName(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, backend, _ := testEngine(t, database)
+	candidate := Candidate{
+		Ethernet: &EthernetMutation{
+			Operation: EthernetCreate, UplinkID: "ethernet-a", TargetInterfaceID: "netif:wan-a",
+			Name: "Проводной Internet", AddressMode: "STATIC", IPv4CIDR: "172.20.1.2/24",
+			Gateway: "172.20.1.1", DNS: []string{"1.1.1.1", "9.9.9.9"}, MTU: 1500,
+		},
+		ManagementURL: "https://192.168.200.1:8443", ManagementDestinationIP: "192.168.200.1",
+	}
+	prepared, err := engine.Stage(ctx, candidate)
+	if err != nil {
+		t.Fatalf("Stage(Ethernet) error = %v", err)
+	}
+	if prepared.NewURL != candidate.ManagementURL || strings.Join(*backend.calls, ",") != "snapshot,arm" {
+		t.Fatalf("prepared/calls = %+v / %v", prepared, *backend.calls)
+	}
+	transaction, err := engine.Repository.Get(ctx, prepared.ApplyID)
+	if err != nil || transaction.ManifestSchema != ManifestSchema || transaction.OperationKind != OperationEthernetUplink || transaction.InterfaceName != "" || strings.Contains(transaction.CandidateJSON, "ifname") {
+		t.Fatalf("Ethernet transaction = %+v, %v", transaction, err)
+	}
+	manifest, _, err := engine.Store.Load(prepared.ApplyID)
+	if err != nil || manifest.Ethernet == nil || manifest.Ethernet.TargetInterfaceID != "netif:wan-a" || manifest.InterfaceName != "" {
+		t.Fatalf("Ethernet manifest = %+v, %v", manifest, err)
+	}
+}
+
+func TestEngineRejectsEthernetCandidateContainingBrokerSuppliedIfname(t *testing.T) {
+	_, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	_, err := engine.Stage(context.Background(), Candidate{
+		InterfaceName: "enp9s0",
+		Ethernet:      &EthernetMutation{Operation: EthernetCreate, UplinkID: "ethernet-a", TargetInterfaceID: "netif:a", Name: "WAN", AddressMode: "DHCP"},
+		ManagementURL: "https://192.168.200.1:8443", ManagementDestinationIP: "192.168.200.1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot contain LAN mutation fields") {
+		t.Fatalf("Stage(Ethernet with ifname) error = %v", err)
+	}
+}
+
 func TestEngineAcceptsConfirmationThroughWireGuard(t *testing.T) {
 	ctx, database := networkApplyDatabase(t)
 	engine, _, _ := testEngine(t, database)

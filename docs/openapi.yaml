@@ -211,6 +211,36 @@ paths:
       operationId: getWatchdogStatus
       summary: Получить secret-free component health, recovery history и suppression state
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/power/capabilities:
+    get:
+      tags: [System]
+      operationId: getPowerCapabilities
+      summary: Получить reboot/shutdown и hardware-verified RTC power-cycle capabilities
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/reboot:
+    post:
+      tags: [System]
+      operationId: rebootSystem
+      summary: После password re-authentication и точного подтверждения перезагрузить Gateway
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PowerAction'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/shutdown:
+    post:
+      tags: [System]
+      operationId: shutdownSystem
+      summary: После password re-authentication и точного подтверждения выключить Gateway
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PowerAction'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/power-cycle:
+    post:
+      tags: [System]
+      operationId: rtcPowerCycleSystem
+      summary: Выключить Gateway и запланировать RTC wake только после аппаратного подтверждения wake-from-S5
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/RTCPowerAction'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/gateway/reconcile:
     post:
       tags: [Gateway]
@@ -245,6 +275,32 @@ paths:
       operationId: listUplinks
       summary: Перечислить secret-free инвентарь HiLink и Ethernet выходов вместе с путями доступа
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/ethernet:
+    post:
+      tags: [Uplinks, Network]
+      operationId: createEthernetUplink
+      summary: Создать Ethernet-выход через durable safe apply без передачи ifname в root broker
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}/replace-interface:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Uplinks, Network]
+      operationId: replaceEthernetInterface
+      summary: Переназначить stable NIC Ethernet-выхода через generation-checked safe apply
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}/network:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Uplinks, Network]
+      operationId: updateEthernetNetwork
+      summary: Изменить DHCP/static IPv4, DNS и MTU Ethernet-выхода через safe apply
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/network/interfaces:
     get:
       tags: [Network]
@@ -908,6 +964,30 @@ components:
             properties:
               password: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
               password_confirmation: {type: string, minLength: 12, maxLength: 1024, writeOnly: true}
+    PowerAction:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [password, confirmation]
+            properties:
+              password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+              confirmation: {type: string, minLength: 1, maxLength: 64}
+              delay_seconds: {type: integer, const: 0, default: 0}
+    RTCPowerAction:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [password, confirmation, delay_seconds]
+            properties:
+              password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+              confirmation: {type: string, const: 'ВЫКЛЮЧИТЬ И ВКЛЮЧИТЬ'}
+              delay_seconds: {type: integer, minimum: 30, maximum: 3600, default: 30}
     UserCreate:
       required: true
       content:

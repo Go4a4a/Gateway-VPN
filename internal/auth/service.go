@@ -203,6 +203,72 @@ WHERE s.id_hash=? AND s.revoked_at IS NULL AND u.enabled=1`, digestHex(token)).S
 	return principal, nil
 }
 
+// Reauthenticate verifies the password of the current authenticated principal
+// without creating another session. Attempts are rate-limited per session and
+// always produce a redacted audit event because callers use this method before
+// destructive host operations.
+func (service Service) Reauthenticate(ctx context.Context, principal Principal, password string) error {
+	if service.Database == nil || principal.UserID == "" || principal.SessionHash == "" || password == "" || len(password) > 1024 {
+		return ErrInvalidCredentials
+	}
+	attemptKey := digestHex("reauth\x00" + principal.UserID + "\x00" + principal.SessionHash)
+	transaction, err := service.Database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin reauthentication: %w", err)
+	}
+	defer transaction.Rollback()
+	now := service.now()
+	if blocked, err := loginBlocked(ctx, transaction, attemptKey, now); err != nil {
+		return err
+	} else if blocked {
+		if err := appendAuthEvent(ctx, transaction, now, "AUTH_REAUTH_RATE_LIMITED", map[string]any{"user_id": principal.UserID}); err != nil {
+			return err
+		}
+		if err := transaction.Commit(); err != nil {
+			return fmt.Errorf("commit rate-limited reauthentication audit: %w", err)
+		}
+		return ErrRateLimited
+	}
+	var storedHash string
+	err = transaction.QueryRowContext(ctx, `
+SELECT u.password_hash
+FROM users AS u JOIN sessions AS s ON s.user_id=u.id
+WHERE u.id=? AND u.enabled=1 AND s.id_hash=? AND s.revoked_at IS NULL AND s.expires_at>?`,
+		principal.UserID, principal.SessionHash, now.Format(time.RFC3339Nano)).Scan(&storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidSession
+	}
+	if err != nil {
+		return fmt.Errorf("read reauthentication principal: %w", err)
+	}
+	verified, err := VerifyPassword(password, storedHash)
+	if err != nil {
+		return fmt.Errorf("verify reauthentication password: %w", err)
+	}
+	if !verified {
+		if err := recordLoginFailure(ctx, transaction, attemptKey, now); err != nil {
+			return err
+		}
+		if err := appendAuthEvent(ctx, transaction, now, "AUTH_REAUTH_FAILED", map[string]any{"user_id": principal.UserID}); err != nil {
+			return err
+		}
+		if err := transaction.Commit(); err != nil {
+			return fmt.Errorf("commit failed reauthentication audit: %w", err)
+		}
+		return ErrInvalidCredentials
+	}
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM login_attempts WHERE key_hash=?", attemptKey); err != nil {
+		return fmt.Errorf("clear reauthentication failures: %w", err)
+	}
+	if err := appendAuthEvent(ctx, transaction, now, "AUTH_REAUTH_SUCCEEDED", map[string]any{"user_id": principal.UserID}); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit successful reauthentication audit: %w", err)
+	}
+	return nil
+}
+
 func (service Service) ValidateCSRF(principal Principal, token string) error {
 	actual := digestHex(token)
 	if token == "" || subtle.ConstantTimeCompare([]byte(actual), []byte(principal.CSRFHash)) != 1 {

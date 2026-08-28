@@ -33,6 +33,9 @@ type Transaction struct {
 	ID                 string
 	State              string
 	ConfirmTokenSHA256 string
+	ManifestSchema     int
+	OperationKind      string
+	CandidateJSON      string
 	InterfaceName      string
 	OldLANCIDR         string
 	NewLANCIDR         string
@@ -58,7 +61,16 @@ func NewRepository(database *sql.DB) *Repository {
 }
 
 func (repository *Repository) Create(ctx context.Context, transaction Transaction) error {
-	if repository == nil || repository.database == nil || !safeID(transaction.ID) || transaction.State != StatePreparing || transaction.ConfirmTokenSHA256 == "" || transaction.TransactionDir == "" {
+	if transaction.ManifestSchema == 0 {
+		transaction.ManifestSchema = LegacyManifestSchema
+	}
+	if transaction.OperationKind == "" {
+		transaction.OperationKind = OperationLANAddress
+	}
+	if transaction.CandidateJSON == "" {
+		transaction.CandidateJSON = "{}"
+	}
+	if repository == nil || repository.database == nil || !safeID(transaction.ID) || transaction.State != StatePreparing || transaction.ConfirmTokenSHA256 == "" || transaction.TransactionDir == "" || !validTransactionOperation(transaction) {
 		return errors.New("complete preparing network transaction is required")
 	}
 	databaseTransaction, err := repository.database.BeginTx(ctx, nil)
@@ -78,11 +90,13 @@ WHERE state IN (?, ?, ?, ?)`, StatePreparing, StateArmed, StateApplied, StateCon
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	_, err = databaseTransaction.ExecContext(ctx, `
 INSERT INTO network_apply_transactions(
-    id, state, confirm_token_sha256, interface_name, old_lan_cidr,
+    id, state, confirm_token_sha256, manifest_schema, operation_kind, candidate_json,
+    interface_name, old_lan_cidr,
     new_lan_cidr, old_url, new_url, new_destination_ip,
     rollback_deadline, transaction_dir, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		transaction.ID, transaction.State, transaction.ConfirmTokenSHA256,
+		transaction.ManifestSchema, transaction.OperationKind, transaction.CandidateJSON,
 		transaction.InterfaceName, transaction.OldLANCIDR, transaction.NewLANCIDR,
 		transaction.OldURL, transaction.NewURL, transaction.NewDestinationIP,
 		transaction.RollbackDeadline, transaction.TransactionDir, now, now)
@@ -186,7 +200,8 @@ func (repository *Repository) ListUnfinished(ctx context.Context) ([]Transaction
 }
 
 const transactionSelect = `
-SELECT id, state, confirm_token_sha256, interface_name, old_lan_cidr,
+SELECT id, state, confirm_token_sha256, manifest_schema, operation_kind, candidate_json,
+       interface_name, old_lan_cidr,
        new_lan_cidr, old_url, new_url, new_destination_ip,
        rollback_deadline, transaction_dir, error_code, created_at, updated_at,
        confirmed_at, rolled_back_at
@@ -200,7 +215,8 @@ func scanTransaction(row rowScanner) (Transaction, error) {
 	var item Transaction
 	var errorCode, confirmed, rolledBack sql.NullString
 	err := row.Scan(
-		&item.ID, &item.State, &item.ConfirmTokenSHA256, &item.InterfaceName,
+		&item.ID, &item.State, &item.ConfirmTokenSHA256,
+		&item.ManifestSchema, &item.OperationKind, &item.CandidateJSON, &item.InterfaceName,
 		&item.OldLANCIDR, &item.NewLANCIDR, &item.OldURL, &item.NewURL,
 		&item.NewDestinationIP, &item.RollbackDeadline, &item.TransactionDir,
 		&errorCode, &item.CreatedAt, &item.UpdatedAt, &confirmed, &rolledBack,
@@ -209,6 +225,16 @@ func scanTransaction(row rowScanner) (Transaction, error) {
 	item.ConfirmedAt = confirmed.String
 	item.RolledBackAt = rolledBack.String
 	return item, err
+}
+
+func validTransactionOperation(transaction Transaction) bool {
+	if transaction.ManifestSchema == LegacyManifestSchema && transaction.OperationKind == OperationLANAddress {
+		return transaction.CandidateJSON == "{}" && validInterfaceName(transaction.InterfaceName) && transaction.OldLANCIDR != "" && transaction.NewLANCIDR != ""
+	}
+	if transaction.ManifestSchema == ManifestSchema && transaction.OperationKind == OperationEthernetUplink {
+		return transaction.InterfaceName == "" && transaction.OldLANCIDR == "" && transaction.NewLANCIDR == "" && transaction.CandidateJSON != "" && transaction.CandidateJSON != "{}"
+	}
+	return false
 }
 
 func validState(value string) bool {

@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gateway-vpn/internal/accesspolicy"
@@ -44,6 +45,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
 	"gateway-vpn/internal/state"
@@ -112,11 +114,17 @@ type Dependencies struct {
 	UpdateApply             UpdateApplyTrigger
 	Watchdog                *watchdog.Repository
 	WatchdogStatus          WatchdogStatusReader
+	Power                   PowerController
 	Now                     func() time.Time
 }
 
 type WatchdogStatusReader interface {
 	Read() (watchdog.Status, error)
+}
+
+type PowerController interface {
+	PowerCapabilities(context.Context) (power.Capabilities, error)
+	ExecutePower(context.Context, power.Command) error
 }
 
 type ProbeBudgetReader interface {
@@ -230,6 +238,9 @@ type Server struct {
 	snapshotLimiter       *diagnosticRateLimiter
 	portableBackupLimiter *diagnosticRateLimiter
 	updateLimiter         *diagnosticRateLimiter
+	maintenanceMutex      sync.Mutex
+	maintenanceMutations  int
+	powerPending          bool
 }
 
 type contextKey string
@@ -291,6 +302,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.accessPolicySettings)))
 	mux.Handle("PUT /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.updateAccessPolicySettings)))
 	mux.Handle("GET /api/v1/uplinks", server.protected(http.HandlerFunc(server.uplinks)))
+	mux.Handle("POST /api/v1/uplinks/ethernet", server.protected(http.HandlerFunc(server.createEthernetUplink)))
+	mux.Handle("POST /api/v1/uplinks/{id}/replace-interface", server.protected(http.HandlerFunc(server.replaceEthernetInterface)))
+	mux.Handle("PUT /api/v1/uplinks/{id}/network", server.protected(http.HandlerFunc(server.updateEthernetNetwork)))
 	mux.Handle("GET /api/v1/network/interfaces", server.protected(http.HandlerFunc(server.networkInterfaces)))
 	mux.Handle("GET /api/v1/modems", server.protected(http.HandlerFunc(server.modems)))
 	mux.Handle("PUT /api/v1/modems/priorities", server.protected(http.HandlerFunc(server.reorderModems)))
@@ -346,6 +360,10 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/settings/watchdog", server.protected(http.HandlerFunc(server.watchdogSettings)))
 	mux.Handle("PUT /api/v1/settings/watchdog", server.protected(http.HandlerFunc(server.updateWatchdogSettings)))
 	mux.Handle("GET /api/v1/system/watchdog", server.protected(http.HandlerFunc(server.watchdogStatus)))
+	mux.Handle("GET /api/v1/system/power/capabilities", server.protected(http.HandlerFunc(server.systemPowerCapabilities)))
+	mux.Handle("POST /api/v1/system/reboot", server.protected(http.HandlerFunc(server.rebootSystem)))
+	mux.Handle("POST /api/v1/system/shutdown", server.protected(http.HandlerFunc(server.shutdownSystem)))
+	mux.Handle("POST /api/v1/system/power-cycle", server.protected(http.HandlerFunc(server.powerCycleSystem)))
 	mux.Handle("GET /api/v1/logs", server.protected(http.HandlerFunc(server.logs)))
 	mux.Handle("POST /api/v1/system/diagnostics", server.protected(http.HandlerFunc(server.downloadDiagnostics)))
 	mux.Handle("GET /api/v1/system/backups", server.protected(http.HandlerFunc(server.backupInventory)))
@@ -2733,6 +2751,125 @@ func (server *Server) watchdogStatus(writer http.ResponseWriter, request *http.R
 	})
 }
 
+func (server *Server) systemPowerCapabilities(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Power == nil {
+		writeError(writer, http.StatusNotImplemented, "POWER_NOT_AVAILABLE", "Управление питанием не подключено")
+		return
+	}
+	capabilities, err := server.dependencies.Power.PowerCapabilities(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "POWER_CAPABILITIES_UNAVAILABLE", "Не удалось безопасно определить возможности управления питанием")
+		return
+	}
+	latest, exists, err := (power.Repository{Database: server.dependencies.Database}).Latest(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	response := map[string]any{"capabilities": capabilities, "latest_operation": nil}
+	if exists {
+		response["latest_operation"] = operationResponse(latest, true)
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) rebootSystem(writer http.ResponseWriter, request *http.Request) {
+	server.executeSystemPower(writer, request, power.ActionReboot)
+}
+
+func (server *Server) shutdownSystem(writer http.ResponseWriter, request *http.Request) {
+	server.executeSystemPower(writer, request, power.ActionShutdown)
+}
+
+func (server *Server) powerCycleSystem(writer http.ResponseWriter, request *http.Request) {
+	server.executeSystemPower(writer, request, power.ActionRTCPowerCycle)
+}
+
+func (server *Server) executeSystemPower(writer http.ResponseWriter, request *http.Request, action power.Action) {
+	if server.dependencies.Power == nil {
+		writeError(writer, http.StatusNotImplemented, "POWER_NOT_AVAILABLE", "Управление питанием не подключено")
+		return
+	}
+	var input struct {
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+		DelaySeconds int    `json:"delay_seconds"`
+	}
+	if err := decodeJSON(request, &input); err != nil || len(input.Password) > 1024 || len(input.Confirmation) > 64 {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректный запрос управления питанием")
+		return
+	}
+	command := power.Command{Action: action, DelaySeconds: input.DelaySeconds}
+	if err := command.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_POWER_COMMAND", err.Error())
+		return
+	}
+	if input.Confirmation != power.ExpectedConfirmation(action) {
+		writeError(writer, http.StatusBadRequest, "POWER_CONFIRMATION_MISMATCH", "Введите точную показанную фразу подтверждения")
+		return
+	}
+	principal, ok := request.Context().Value(principalKey).(auth.Principal)
+	if !ok {
+		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
+		return
+	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrRateLimited):
+			writer.Header().Set("Retry-After", "2")
+			writeError(writer, http.StatusTooManyRequests, "REAUTH_RATE_LIMITED", "Слишком много неверных попыток; повторите позже")
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(writer, http.StatusUnauthorized, "REAUTH_FAILED", "Текущий пароль указан неверно")
+		case errors.Is(err, auth.ErrInvalidSession):
+			writeError(writer, http.StatusUnauthorized, "SESSION_INVALID", "Сессия истекла или отозвана")
+		default:
+			writeInternalError(writer, err)
+		}
+		return
+	}
+	if !server.reservePowerAction() {
+		writeError(writer, http.StatusConflict, "POWER_BLOCKED_BY_MAINTENANCE", "Дождитесь завершения активной операции установки, обновления, восстановления, сети или резервного копирования")
+		return
+	}
+	repository := power.Repository{Database: server.dependencies.Database}
+	operation, err := repository.Start(request.Context(), principal.UserID, command)
+	if err != nil {
+		server.releasePowerAction()
+		if errors.Is(err, power.ErrOperationInProgress) {
+			writeError(writer, http.StatusConflict, "POWER_OPERATION_IN_PROGRESS", "Другая операция питания уже выполняется")
+			return
+		}
+		writeInternalError(writer, err)
+		return
+	}
+	if err := server.dependencies.Power.ExecutePower(request.Context(), command); err != nil {
+		server.releasePowerAction()
+		reason := "POWER_ACTION_FAILED"
+		status, code, message := http.StatusBadGateway, reason, "Команду питания не удалось безопасно отправить"
+		switch {
+		case errors.Is(err, power.ErrMaintenanceActive):
+			reason, status, code, message = "POWER_BLOCKED_BY_MAINTENANCE", http.StatusConflict, "POWER_BLOCKED_BY_MAINTENANCE", "Сначала завершите установку, обновление, восстановление или безопасное применение сети"
+		case errors.Is(err, power.ErrOperationInProgress):
+			reason, status, code, message = "POWER_OPERATION_IN_PROGRESS", http.StatusConflict, "POWER_OPERATION_IN_PROGRESS", "Другая операция питания уже выполняется"
+		case errors.Is(err, power.ErrUnavailable):
+			reason, status, code, message = "POWER_ACTION_UNAVAILABLE", http.StatusConflict, "POWER_ACTION_UNAVAILABLE", "Эта операция питания недоступна на данном оборудовании"
+		case errors.Is(err, power.ErrInvalidCommand):
+			reason, status, code, message = "INVALID_POWER_COMMAND", http.StatusBadRequest, "INVALID_POWER_COMMAND", "Некорректные параметры операции питания"
+		}
+		_, _ = repository.Finish(request.Context(), operation.ID, false, reason)
+		writeError(writer, status, code, message)
+		return
+	}
+	finished, err := repository.Finish(request.Context(), operation.ID, true, "")
+	if err != nil {
+		// systemd already accepted the action. Do not claim it failed merely
+		// because the host began shutting down before SQLite acknowledgement.
+		writeJSON(writer, http.StatusAccepted, map[string]any{"operation_id": operation.ID, "action": action, "status": "DISPATCHED_STATUS_PENDING"})
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, operationResponse(finished, true))
+}
+
 func (server *Server) diagnosticDescription(writer http.ResponseWriter, request *http.Request) {
 	if server.dependencies.Diagnostics == nil {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Диагностический архив не подключён")
@@ -2852,6 +2989,11 @@ func (server *Server) createDatabaseSnapshot(writer http.ResponseWriter, request
 		writeError(writer, http.StatusTooManyRequests, "BACKUP_RATE_LIMITED", "Слишком много операций резервного копирования")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "BACKUP_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	snapshot, err := server.dependencies.Backups.Create(request.Context(), backup.KindManual)
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "BACKUP_CREATE_FAILED", "Не удалось создать и проверить локальный снимок")
@@ -2900,6 +3042,11 @@ func (server *Server) downloadEncryptedBackup(writer http.ResponseWriter, reques
 		writeError(writer, http.StatusTooManyRequests, "BACKUP_RATE_LIMITED", "Слишком много операций резервного копирования")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "BACKUP_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	passphrase := input.Passphrase
 	input.Passphrase, input.PassphraseConfirmation = "", ""
 	artifact, err := server.dependencies.PortableBackups.Build(request.Context(), passphrase)
@@ -2953,6 +3100,11 @@ func (server *Server) stageRestore(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Восстановление не подключено")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "RESTORE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	mediaType, parameters, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/form-data" || parameters["boundary"] == "" {
 		writeError(writer, http.StatusBadRequest, "INVALID_RESTORE_UPLOAD", "Ожидается multipart backup upload")
@@ -3035,6 +3187,11 @@ func (server *Server) applyRestore(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Применение восстановления не подключено")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "RESTORE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	if request.Header.Get("X-Confirm-Destructive") != "apply-verified-restore" {
 		writeError(writer, http.StatusConflict, "RESTORE_CONFIRMATION_REQUIRED", "Требуется явное подтверждение применения verified restore")
 		return
@@ -3081,6 +3238,11 @@ func (server *Server) discardRestore(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Восстановление не подключено")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "RESTORE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	if request.Header.Get("X-Confirm-Destructive") != "discard-staged-restore" {
 		writeError(writer, http.StatusConflict, "RESTORE_DISCARD_CONFIRMATION_REQUIRED", "Требуется явное подтверждение удаления staged restore")
 		return
@@ -3152,6 +3314,11 @@ func (server *Server) stageUpdate(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Подписанные обновления не подключены")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UPDATE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	if allowed, retry := server.updateLimiter.allow(principal.SessionHash, server.now()); !allowed {
 		seconds := int64((retry + time.Second - 1) / time.Second)
@@ -3225,6 +3392,11 @@ func (server *Server) applyUpdate(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Применение подписанных обновлений не подключено")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UPDATE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	if request.Header.Get("X-Confirm-Destructive") != "apply-verified-update" {
 		writeError(writer, http.StatusConflict, "UPDATE_CONFIRMATION_REQUIRED", "Требуется явное подтверждение применения verified signed release")
 		return
@@ -3266,6 +3438,11 @@ func (server *Server) discardUpdate(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Подписанные обновления не подключены")
 		return
 	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UPDATE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	if request.Header.Get("X-Confirm-Destructive") != "discard-staged-update" {
 		writeError(writer, http.StatusConflict, "UPDATE_DISCARD_CONFIRMATION_REQUIRED", "Требуется явное подтверждение удаления staged release")
 		return
@@ -3573,12 +3750,167 @@ func (server *Server) stageNetworkApply(writer http.ResponseWriter, request *htt
 		writeDomainError(writer, err)
 		return
 	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, "LAN_ADDRESS", "")
+}
+
+type ethernetNetworkInput struct {
+	AddressMode string   `json:"address_mode"`
+	IPv4CIDR    string   `json:"ipv4_cidr"`
+	Gateway     string   `json:"gateway"`
+	DNS         []string `json:"dns"`
+	MTU         int64    `json:"mtu"`
+}
+
+func (server *Server) createEthernetUplink(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление Ethernet-выходами не подключено")
+		return
+	}
+	var input struct {
+		Name               string `json:"name"`
+		NetworkInterfaceID string `json:"network_interface_id"`
+		ethernetNetworkInput
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	uplinkID, err := newEthernetUplinkID()
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	candidate, err := server.ethernetCandidate(request, networkapply.EthernetMutation{
+		Operation: networkapply.EthernetCreate, UplinkID: uplinkID,
+		TargetInterfaceID: input.NetworkInterfaceID, Name: input.Name,
+		AddressMode: input.AddressMode, IPv4CIDR: input.IPv4CIDR,
+		Gateway: input.Gateway, DNS: input.DNS, MTU: input.MTU,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.EthernetCreate, uplinkID)
+}
+
+func (server *Server) replaceEthernetInterface(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление Ethernet-выходами не подключено")
+		return
+	}
+	var input struct {
+		NetworkInterfaceID        string `json:"network_interface_id"`
+		ExpectedDesiredGeneration int64  `json:"expected_desired_generation"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	current, err := server.dependencies.Uplinks.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	if current.Type != uplink.TypeEthernet {
+		writeError(writer, http.StatusConflict, "UPLINK_TYPE_INVALID", "Переназначить сетевую карту можно только для Ethernet-выхода")
+		return
+	}
+	var dns []string
+	if err := json.Unmarshal([]byte(current.DNSJSON), &dns); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	candidate, err := server.ethernetCandidate(request, networkapply.EthernetMutation{
+		Operation: networkapply.EthernetReplaceInterface, UplinkID: current.ID,
+		ExpectedDesiredGeneration: input.ExpectedDesiredGeneration,
+		TargetInterfaceID:         input.NetworkInterfaceID, AddressMode: current.AddressMode,
+		IPv4CIDR: current.IPv4CIDR, Gateway: current.Gateway, DNS: dns, MTU: current.MTU,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.EthernetReplaceInterface, current.ID)
+}
+
+func (server *Server) updateEthernetNetwork(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление Ethernet-выходами не подключено")
+		return
+	}
+	var input struct {
+		ExpectedDesiredGeneration int64 `json:"expected_desired_generation"`
+		ethernetNetworkInput
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	current, err := server.dependencies.Uplinks.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	if current.Type != uplink.TypeEthernet {
+		writeError(writer, http.StatusConflict, "UPLINK_TYPE_INVALID", "IP-настройки применимы только к Ethernet-выходу")
+		return
+	}
+	candidate, err := server.ethernetCandidate(request, networkapply.EthernetMutation{
+		Operation: networkapply.EthernetUpdateAddress, UplinkID: current.ID,
+		ExpectedDesiredGeneration: input.ExpectedDesiredGeneration,
+		TargetInterfaceID:         current.NetworkInterfaceID, AddressMode: input.AddressMode,
+		IPv4CIDR: input.IPv4CIDR, Gateway: input.Gateway, DNS: input.DNS, MTU: input.MTU,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.EthernetUpdateAddress, current.ID)
+}
+
+func (server *Server) ethernetCandidate(request *http.Request, mutation networkapply.EthernetMutation) (networkapply.Candidate, error) {
+	localIP, _, err := confirmationDestination(request.Context())
+	if err != nil {
+		return networkapply.Candidate{}, errors.New("не удалось определить текущий защищённый адрес управления")
+	}
+	local, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || local == nil {
+		return networkapply.Candidate{}, errors.New("локальный адрес API недоступен")
+	}
+	_, port, err := net.SplitHostPort(local.String())
+	if err != nil || port == "" {
+		return networkapply.Candidate{}, errors.New("порт текущего API недоступен")
+	}
+	return networkapply.Candidate{
+		Ethernet: &mutation, ManagementDestinationIP: localIP,
+		ManagementURL: "https://" + net.JoinHostPort(localIP, port),
+	}, nil
+}
+
+func newEthernetUplinkID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", errors.New("allocate Ethernet uplink id failed")
+	}
+	return "ethernet-" + hex.EncodeToString(value), nil
+}
+
+func (server *Server) stagePreparedNetworkCandidate(writer http.ResponseWriter, request *http.Request, candidate networkapply.Candidate, operation, uplinkID string) {
+	if server.dependencies.NetworkBroker == nil || server.dependencies.Backups == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Привилегированный сетевой broker не подключён")
+		return
+	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "NETWORK_APPLY_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
 	snapshot, err := server.dependencies.Backups.Create(request.Context(), backup.KindPreNetworkApply)
 	if err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "PRE_APPLY_BACKUP_FAILED", "Сетевая операция не начата: проверенный снимок состояния создать не удалось")
 		return
 	}
-	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "INFO", Type: "DATABASE_PRE_NETWORK_APPLY_SNAPSHOT_CREATED", Details: map[string]any{"snapshot_id": snapshot.Manifest.SnapshotID, "sha256": snapshot.Manifest.Database.SHA256, "schema_version": snapshot.Manifest.SchemaVersion}}); err != nil {
+	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "INFO", Type: "DATABASE_PRE_NETWORK_APPLY_SNAPSHOT_CREATED", Details: map[string]any{"snapshot_id": snapshot.Manifest.SnapshotID, "sha256": snapshot.Manifest.Database.SHA256, "schema_version": snapshot.Manifest.SchemaVersion, "operation": operation, "uplink_id": uplinkID}}); err != nil {
 		writeInternalError(writer, err)
 		return
 	}
@@ -3604,12 +3936,12 @@ func (server *Server) networkSettings(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Сетевые настройки runtime не подключены")
 		return
 	}
-	var activeID, activeState, oldURL, newURL, deadline string
+	var activeID, activeState, operationKind, oldURL, newURL, deadline string
 	err := server.dependencies.Database.QueryRowContext(request.Context(), `
-SELECT id, state, old_url, new_url, rollback_deadline
+SELECT id, state, operation_kind, old_url, new_url, rollback_deadline
 FROM network_apply_transactions
 WHERE state IN (?, ?, ?, ?)
-ORDER BY created_at DESC LIMIT 1`, networkapply.StatePreparing, networkapply.StateArmed, networkapply.StateApplied, networkapply.StateConfirming).Scan(&activeID, &activeState, &oldURL, &newURL, &deadline)
+	ORDER BY created_at DESC LIMIT 1`, networkapply.StatePreparing, networkapply.StateArmed, networkapply.StateApplied, networkapply.StateConfirming).Scan(&activeID, &activeState, &operationKind, &oldURL, &newURL, &deadline)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeInternalError(writer, err)
 		return
@@ -3617,20 +3949,20 @@ ORDER BY created_at DESC LIMIT 1`, networkapply.StatePreparing, networkapply.Sta
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"interface_name": server.dependencies.NetworkInterface,
 		"lan_address":    server.dependencies.NetworkLANAddress,
-		"active_apply":   map[string]any{"apply_id": activeID, "state": activeState, "old_url": oldURL, "new_url": newURL, "rollback_deadline": deadline},
+		"active_apply":   map[string]any{"apply_id": activeID, "state": activeState, "operation_kind": operationKind, "old_url": oldURL, "new_url": newURL, "rollback_deadline": deadline},
 	})
 }
 
 func (server *Server) networkApplyStatus(writer http.ResponseWriter, request *http.Request) {
 	var item struct {
-		ID, State, OldURL, NewURL, RollbackDeadline, ErrorCode, CreatedAt, UpdatedAt, ConfirmedAt, RolledBackAt string
+		ID, State, OperationKind, CandidateJSON, OldURL, NewURL, RollbackDeadline, ErrorCode, CreatedAt, UpdatedAt, ConfirmedAt, RolledBackAt string
 	}
 	var errorCode, confirmedAt, rolledBackAt sql.NullString
 	err := server.dependencies.Database.QueryRowContext(request.Context(), `
-SELECT id, state, old_url, new_url, rollback_deadline, error_code,
+SELECT id, state, operation_kind, candidate_json, old_url, new_url, rollback_deadline, error_code,
        created_at, updated_at, confirmed_at, rolled_back_at
 FROM network_apply_transactions WHERE id=?`, request.PathValue("id")).Scan(
-		&item.ID, &item.State, &item.OldURL, &item.NewURL, &item.RollbackDeadline,
+		&item.ID, &item.State, &item.OperationKind, &item.CandidateJSON, &item.OldURL, &item.NewURL, &item.RollbackDeadline,
 		&errorCode, &item.CreatedAt, &item.UpdatedAt, &confirmedAt, &rolledBackAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3642,8 +3974,17 @@ FROM network_apply_transactions WHERE id=?`, request.PathValue("id")).Scan(
 		return
 	}
 	item.ErrorCode, item.ConfirmedAt, item.RolledBackAt = errorCode.String, confirmedAt.String, rolledBackAt.String
+	var ethernetOperation, uplinkID string
+	if item.OperationKind == networkapply.OperationEthernetUplink {
+		var candidate networkapply.EthernetMutation
+		if err := json.Unmarshal([]byte(item.CandidateJSON), &candidate); err == nil {
+			ethernetOperation, uplinkID = candidate.Operation, candidate.UplinkID
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"apply_id": item.ID, "state": item.State, "old_url": item.OldURL, "new_url": item.NewURL,
+		"apply_id": item.ID, "state": item.State, "operation_kind": item.OperationKind,
+		"ethernet_operation": ethernetOperation, "uplink_id": uplinkID,
+		"old_url": item.OldURL, "new_url": item.NewURL,
 		"rollback_deadline": item.RollbackDeadline, "error_code": item.ErrorCode,
 		"created_at": item.CreatedAt, "updated_at": item.UpdatedAt,
 		"confirmed_at": item.ConfirmedAt, "rolled_back_at": item.RolledBackAt,
@@ -3709,6 +4050,40 @@ func (server *Server) now() time.Time {
 		return server.dependencies.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (server *Server) beginMaintenanceMutation() bool {
+	server.maintenanceMutex.Lock()
+	defer server.maintenanceMutex.Unlock()
+	if server.powerPending {
+		return false
+	}
+	server.maintenanceMutations++
+	return true
+}
+
+func (server *Server) endMaintenanceMutation() {
+	server.maintenanceMutex.Lock()
+	defer server.maintenanceMutex.Unlock()
+	if server.maintenanceMutations > 0 {
+		server.maintenanceMutations--
+	}
+}
+
+func (server *Server) reservePowerAction() bool {
+	server.maintenanceMutex.Lock()
+	defer server.maintenanceMutex.Unlock()
+	if server.powerPending || server.maintenanceMutations != 0 {
+		return false
+	}
+	server.powerPending = true
+	return true
+}
+
+func (server *Server) releasePowerAction() {
+	server.maintenanceMutex.Lock()
+	server.powerPending = false
+	server.maintenanceMutex.Unlock()
 }
 
 func effectivePathState(cell pathmatrix.Cell, now time.Time) (string, string) {

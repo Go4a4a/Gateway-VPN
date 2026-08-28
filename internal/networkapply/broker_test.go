@@ -14,6 +14,7 @@ import (
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modemrecovery"
+	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/traffic"
 )
 
@@ -84,6 +85,21 @@ type fakeModemRecoveryAdmin struct {
 	err      error
 }
 
+type fakePowerAdmin struct {
+	capabilities power.Capabilities
+	commands     []power.Command
+	err          error
+}
+
+func (admin *fakePowerAdmin) Capabilities(context.Context) (power.Capabilities, error) {
+	return admin.capabilities, admin.err
+}
+
+func (admin *fakePowerAdmin) Execute(_ context.Context, command power.Command) error {
+	admin.commands = append(admin.commands, command)
+	return admin.err
+}
+
 func (admin *fakeModemRecoveryAdmin) Execute(_ context.Context, command modemrecovery.Command) error {
 	admin.commands = append(admin.commands, command)
 	return admin.err
@@ -129,6 +145,60 @@ func TestBrokerModemRecoveryAcceptsOnlyTypedBoundedTuple(t *testing.T) {
 	admin.err = modemrecovery.ErrActionUnsupported
 	if err := client.Execute(context.Background(), command); !errors.Is(err, modemrecovery.ErrActionUnsupported) {
 		t.Fatalf("unsupported action mapping = %v", err)
+	}
+}
+
+func TestBrokerPowerSurfaceAcceptsOnlyTypedBoundedCommands(t *testing.T) {
+	_, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakePowerAdmin{capabilities: power.Capabilities{Reboot: power.Capability{Available: true}}}
+	server.Power = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	if capabilities, err := client.PowerCapabilities(context.Background()); err != nil || !capabilities.Reboot.Available {
+		t.Fatalf("PowerCapabilities() = %+v, %v", capabilities, err)
+	}
+	command := power.Command{Action: power.ActionRTCPowerCycle, DelaySeconds: 30}
+	if err := client.ExecutePower(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if len(admin.commands) != 1 || admin.commands[0] != command {
+		t.Fatalf("power commands = %+v", admin.commands)
+	}
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/power/execute", strings.NewReader(`{"action":"REBOOT","delay_seconds":0,"command":"shutdown -h now"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || len(admin.commands) != 1 {
+		t.Fatalf("arbitrary power command status=%d commands=%+v", response.StatusCode, admin.commands)
+	}
+	for _, body := range []string{
+		`{"action":"RTC_POWER_CYCLE","delay_seconds":29}`,
+		`{"action":"RTC_POWER_CYCLE","delay_seconds":3601}`,
+	} {
+		request, _ = http.NewRequest(http.MethodPost, httpServer.URL+"/v1/power/execute", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response, err = httpServer.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest || len(admin.commands) != 1 {
+			t.Fatalf("out-of-range power command %s status=%d commands=%+v", body, response.StatusCode, admin.commands)
+		}
+	}
+	admin.err = power.ErrMaintenanceActive
+	if err := client.ExecutePower(context.Background(), power.Command{Action: power.ActionReboot}); !errors.Is(err, power.ErrMaintenanceActive) {
+		t.Fatalf("maintenance mapping = %v", err)
 	}
 }
 
