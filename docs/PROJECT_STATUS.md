@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN_E5B5E7C / CLEAN` | Local HEAD и `origin/main` совпадают на `e5b5e7c456f0c40adba23f242dc3ed31d16b70fa`; exact CI run `33128823746` завершён `success`. Tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN / CLEAN` | `origin/main` содержит test/evidence commit `e5b5e7c456f0c40adba23f242dc3ed31d16b70fa` и текущий журнал; local HEAD совпадает с origin. Exact CI run `33128823746` завершён `success`. Tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `47297A7_DOCKER_SYSTEMD_PASS / HOST_NOT_RUN` | Docs-complete successor прошёл clean dry-run/apply/idempotency, persistent `lan0`, HTTPS bind, DB/config ownership, recovery markers и новый fresh-systemd boot; реальный bare-metal/VM host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -97,7 +97,7 @@
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент — из exact clean `e5b5e7c` собрать новый disposable signed successor candidate и выполнить clean Ubuntu 24.04 dry-run/apply/strict idempotency, read-only systemd validator, новый PID 1/reboot и повторный exact kernel/netns gate без создания public tag/Release.
+Следующий инкремент — из exact clean текущего `main` собрать новый disposable signed successor candidate и выполнить clean Ubuntu 24.04 dry-run/apply/strict idempotency, read-only systemd validator, новый PID 1/reboot и повторный exact kernel/netns gate без создания public tag/Release.
 
 ## Критический путь до release
 
