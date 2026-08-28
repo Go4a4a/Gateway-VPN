@@ -67,10 +67,12 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 			"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
 			"--channel", "stable", "--release-version", version, "--source-commit", commit,
 			"--github-repository", "owner/gateway-vpn", "--release-tag", "v1.2.0",
-			"--lan-interface", "enp2s0", "--lan-address", "192.168.200.1/24", "--install-dependencies", "--apply",
+			"--lan-interface", "enp2s0", "--lan-address", "192.168.200.1/24",
+			"--boot-network-policy", "gateway-nonblocking", "--grub-policy", "automatic-hidden",
+			"--install-dependencies", "--apply",
 		})
 	})
-	if code != 0 || !strings.Contains(command, "sha256sum --binary") || !strings.Contains(command, "sudo ") || !strings.Contains(command, "--install-dependencies") || !strings.Contains(command, "--apply") {
+	if code != 0 || !strings.Contains(command, "sha256sum --binary") || !strings.Contains(command, "sudo ") || !strings.Contains(command, "--boot-network-policy gateway-nonblocking") || !strings.Contains(command, "--grub-policy automatic-hidden") || !strings.Contains(command, "--install-dependencies") || !strings.Contains(command, "--apply") {
 		t.Fatalf("generated command code=%d output=%q", code, command)
 	}
 	if strings.Index(command, "test ") < 0 || strings.Index(command, "sudo ") < 0 || strings.Index(command, "test ") > strings.Index(command, "sudo ") {
