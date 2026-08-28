@@ -595,7 +595,7 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 		}
 	}
 	lanNetwork := read(t, filepath.Join(root, "packaging", "systemd-networkd", "05-gateway-vpn-lan.network.in"))
-	for _, required := range []string{"Name=__LAN_INTERFACE__", "Address=__LAN_ADDRESS__", "DHCP=no", "IPv6AcceptRA=no", "LinkLocalAddressing=no", "RequiredForOnline=no"} {
+	for _, required := range []string{"Name=__LAN_INTERFACE__", "Address=__LAN_ADDRESS__", "DHCP=no", "IPv6AcceptRA=no", "LinkLocalAddressing=no", "ConfigureWithoutCarrier=yes", "RequiredForOnline=no"} {
 		if !strings.Contains(lanNetwork, required) {
 			t.Errorf("persistent LAN networkd policy missing %q", required)
 		}
