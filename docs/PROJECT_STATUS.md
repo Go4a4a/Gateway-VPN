@@ -1,8 +1,8 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-28
-**Общее состояние:** `UNIFIED_ACCESS_LOCAL_DOD_PASS / FRESH_FINAL_GATES_PENDING`
-**Текущий этап:** exact signed successor `0.1.0-successor.9301e05` доказал update/rollback/finalize и boot/process recovery. Source-only release/startup harness опубликован в `e5b5e7c456f0c40adba23f242dc3ed31d16b70fa`; exact GitHub Actions run `33128823746` дополнительно доказал Linux kernel startup policy на четырёх process/boot phases, firewall guard, multi-port LAN isolation и pinned systemd units. Все локально реализуемые пункты DoD теперь имеют `PASS_LOCAL` или более строгий внешний статус; до install-ready handoff остаётся новый exact signed fresh install/idempotency/reboot текущего дерева.
+**Общее состояние:** `SIGNED_SUCCESSOR_5723940_REPRODUCIBLE / FRESH_FINAL_GATES_PENDING`
+**Текущий этап:** successor `0.1.0-successor.5723940` дважды offline собран и подписан из exact commit `57239401732c18822729499656801b994d627477`; все `78` файлов совпали побайтно, по SHA-256, Unix mode и size, а Gateway/VPS/channel повторно прошли canonical verification. Предыдущий candidate `9301e05` уже доказал update/rollback/finalize и boot/process recovery, а exact CI `33128823746` доказал kernel startup policy. До install-ready handoff остаётся fresh Ubuntu 24.04 apply/strict idempotency/new-PID1 acceptance именно нового signed candidate.
 
 **Оценка прогресса:** программная реализация unified-access successor выполнена примерно на `99%`; exact update/rollback/finalize, reboot/power-cut recovery и startup-policy kernel integration прошли, а новый fresh signed final gate текущего дерева ещё не завершён. Общая production-готовность оценивается примерно в `93%`: public RC, реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательные реальные 24/72-часовые endurance остаются отдельными несокращаемыми gates. Test-only перенос stability deadline не считается фактически прошедшими 24 часами.
 
@@ -52,7 +52,7 @@
 | Diagnostic bundle | `CODE_PASS / LINUX_HOST_NOT_RUN` | Memory-only bounded ZIP, manifest/SHA-256, partial section codes, host snapshot, audit/rate limit и WebUI download покрыты tests; fixed `database/retention.json` дополнительно даёт path-free policy, table ranges/counts, version excess и DB/WAL/page/freelist sizes. Реальные `ip/nft/wg/journalctl` данные Ubuntu ещё не собирались |
 | Backup / restore | `EXACT_SIGNED_SYSTEMD_POWER_CUT_PASS / HOST_NOT_RUN` | Exact signed `.27` на двух clean Ubuntu 24.04 rootfs доказал: corrupt backup отклоняется; `STAGED` reboot не меняет live state; success восстанавливает DB/config/secrets; exit-137 после трёх replacements откатывается в `STAGED`, отзывает nonce, не повторяет Apply, очищает root journal/temp и возвращает management; новый explicit Apply и последующий reboot завершаются success. Bare-metal power cut ещё не выполнялся |
 | Signed update | `EXACT_13_TO_16_ROLLBACK_FINALIZE_REBOOT_POWER_CUT_PASS` | Candidate `9301e05` прошёл controlled health rejection, successful `13 → 16`, early finalizer no-op, exact finalization, finalized reboot и whole-host interruption в `HEALTH_CHECKING`. Recovery вернул baseline/schema 13 с `BOOT_OR_PROCESS_RECOVERY`; `PATH_BLOCKED` сохранялся. Реальные 24 часа не ожидались и не заявляются |
-| Packaging | `PRODUCTION_GVKEY_READY / REPRODUCIBLE_9301E05_SIGNED / FRESH_GATE_PENDING` | Две offline сборки exact candidate совпали по SHA-256/mode/size всех 78 файлов. Signer fingerprint `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`; generic installer не кодирует NIC/CIDR. Public tags/releases отсутствуют |
+| Packaging | `PRODUCTION_GVKEY_READY / REPRODUCIBLE_5723940_SIGNED / FRESH_GATE_PENDING` | Две offline сборки `0.1.0-successor.5723940` совпали по bytes/SHA-256/mode/size всех 78 файлов. Gateway `c4ff9417…`, VPS `58c33730…`, bootstrap `aa76dccb…`, deploy `4e91bba7…`, channel `b978f197…`; signer `8231e4d3…`; generic installer не кодирует NIC/CIDR. Public tags/releases отсутствуют |
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
@@ -97,7 +97,7 @@
 
 ## Ближайший следующий инкремент
 
-Следующий инкремент — из exact clean текущего `main` собрать новый disposable signed successor candidate и выполнить clean Ubuntu 24.04 dry-run/apply/strict idempotency, read-only systemd validator, новый PID 1/reboot и повторный exact kernel/netns gate без создания public tag/Release.
+Следующий инкремент — подключить read-only build1 `0.1.0-successor.5723940` к clean Ubuntu 24.04, выполнить dry-run/apply/strict idempotency, read-only systemd validator, затем создать новый PID 1/reboot fixture и повторить validator/kernel gate без создания public tag/Release.
 
 ## Критический путь до release
 
@@ -109,7 +109,7 @@
 
 1. Текущая host-среда — Windows, команды `nft`, `ip` и `sqlite3` на host отсутствуют; Linux gates доступны внутри Docker Desktop.
 2. WSL установлен, но доступ к списку дистрибутивов завершился `E_ACCESSDENIED`.
-3. Docker Desktop доступен через подтверждаемое privileged execution; текущий unified-access successor прошёл Linux race/build, pinned Ubuntu 24.04 systemd и privileged nftables/netns gates. Docker в любом случае не заменяет реальный systemd host reboot, USB HiLink и двухмашинный VPS gate.
+3. Docker Desktop доступен через подтверждаемое privileged execution; непривилегированная double-build `5723940` завершена. Fresh apply/new-PID1 exact candidate требует отдельного разрешения на `--privileged`; Docker в любом случае не заменяет реальный systemd host reboot, USB HiLink и двухмашинный VPS gate.
 4. Системный Go отсутствует. Официальный portable Go 1.26.7 загружен только в gitignored-каталог `.tools`, SHA-256 проверен; production/CI всё равно потребуют воспроизводимую Linux toolchain setup.
 5. Обычная установка поддерживает `1..N` модемов и полностью работоспособна с одним. Этап 0 для multi-modem feature нельзя считать пройденным без реального packet capture минимум через два модема с разными management-подсетями; это стендовое требование, а не минимум для эксплуатации.
 6. Публичный remote и GitHub CI работают; GitHub release immutability включена. Exact run `33128823746` для `e5b5e7c456f0c40adba23f242dc3ed31d16b70fa` завершён `success`, включая root nftables/netns startup-policy gate. Предыдущий run `33128409761` не запустил сценарий из-за mode `0644`; это исправлено отдельным mode-only commit. CI не получает release secrets. Permanent encrypted production key и byte-identical backup готовы, но tag/release не создавались.
@@ -288,6 +288,28 @@
 | DEV-166 | 2026-08-28 | Startup-policy integration выполняется четырьмя отдельными process phases над persistent SQLite и одним isolated kernel namespace; production `firewall-boot`, `FirewallBackend` и `RoutingBackend` являются actuator-ами, а изменяемый boot ID моделирует host boundary | Domain tests не доказывают соответствие DB intent фактическим nft sets/policy route. Раздельные процессы выявляют ложное manufacture-reboot, а новый boot обязан закрыть kernel до control recovery и не создавать unmarked default route |
 
 ## Журнал разработки
+
+### Сессия 082 — reproducible signed successor 5723940 — 2026-08-28
+
+**Exact candidate:**
+
+- source commit: `57239401732c18822729499656801b994d627477`;
+- version: `0.1.0-successor.5723940`, Mihomo `v1.19.30`, schema `1..16`;
+- signer SHA-256: `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`;
+- host contract: `db8de3d29a520938f98f2a24baa304b75875ba3606d7fd3c0bb0b267f5eeaa41`;
+- Gateway archive: `c4ff94175081de8f6869d14ce3e001faab9517e096eb6fd37651cbb7e9794093`;
+- VPS archive: `58c337301c267725b6bdde1efdd53700245c97a6ab24b730474601f0aa0be809`;
+- bootstrap: `aa76dccb62719cea4b4fbf33ecd7f4c3b6cfd9cacf14e82c49cb99bf50b47deb`;
+- deploy: `4e91bba7fd32c6c3efec8de1f2f902786c05d6814cf667a6fec92265998dd134`;
+- channel manifest: `b978f1973866be6f07ebfc32f6ff2089e987cdc75116700165e54b31467dcd00`.
+
+**Сборка и custody:** две отдельные containers клонировали clean read-only worktree в разные writable layers, имели `--network none`, `GOPROXY=off`, read-only pinned module cache и read-only disposable signer volume. Production encrypted `.gvkey` не открывался, не перемещался и не подключался. Результаты сохранены раздельно в `gvpn-xhigh-dist-5723940/build1` и `build2`; signer volume пока не удаляется.
+
+**Проверено:** `artifacts.sha256`, `artifacts.meta` и recursive tree сравнение совпали для всех `78` файлов. Canonical `release-verify`, `vps-release-verify` и `channel-verify` повторно прошли из read-only build1; release trees не содержат symlink/device/FIFO/socket, полный dist не содержит PEM private-key marker, generated one-command не кодирует интерфейс/CIDR конкретного Gateway.
+
+**Не заявляется:** candidate ещё не установлен на fresh Ubuntu systemd host, strict idempotency и новый PID 1 не проверены. Двойная сборка и signature verification не заменяют installer/runtime acceptance.
+
+**Следующий шаг:** после явного разрешения privileged Docker — fresh dry-run/apply/idempotency, tracked `validate_gateway_systemd.sh`, новый PID 1/reboot и kernel gate; после PASS удалить старые containers/images/volumes и тяжёлые `.tools`, сохранив production `.gvkey` и необходимый signer до завершения gates.
 
 ### Сессия 081 — remote kernel startup-policy gate и завершение локального DoD — 2026-08-28
 
