@@ -129,7 +129,7 @@ INSERT INTO bypass_probe_targets (
 		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 10,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
-		Targets: []accesspolicy.DirectTargetResult{{TargetID: "direct-target", State: "PASSED", LatencyMS: 10, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "direct-target", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 10, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -53,29 +53,29 @@ func (repository *RouteRepository) ListVPNRoutes(ctx context.Context, targetSubs
 	}
 	var activeKind, activeModemID, activeSubscriptionID, activeNodeID sql.NullString
 	if err := repository.database.QueryRowContext(ctx, `
-SELECT active_method_kind, active_modem_id, active_subscription_id, active_node_id
+SELECT active_method_kind, active_uplink_id, active_subscription_id, active_node_id
 FROM runtime_state WHERE singleton_id=1`).Scan(&activeKind, &activeModemID, &activeSubscriptionID, &activeNodeID); err != nil {
 		return nil, fmt.Errorf("read active route identity for subscription refresh: %w", err)
 	}
 	rows, err := repository.database.QueryContext(ctx, `
-SELECT m.id, m.priority, s.id, a.enabled, a.priority,
+SELECT u.id, u.priority, s.id, a.enabled, a.priority,
        n.id, n.external_name, p.selected_node_id,
        pref.preferred_rank, pn.qualification_state
-FROM modems AS m
+FROM uplinks AS u
 JOIN subscriptions AS s ON s.active_version_id IS NOT NULL
 JOIN access_methods AS a
      ON a.kind='SUBSCRIPTION' AND a.subscription_id=s.id
 JOIN nodes AS n ON n.version_id=s.active_version_id
 LEFT JOIN subscription_node_preferences AS pref
        ON pref.subscription_id=s.id AND pref.fingerprint=n.fingerprint
-LEFT JOIN subscription_modem_paths AS p
-       ON p.modem_id=m.id AND p.subscription_id=s.id
-LEFT JOIN path_nodes AS pn
+LEFT JOIN subscription_uplink_paths AS p
+       ON p.uplink_id=u.id AND p.subscription_id=s.id
+LEFT JOIN uplink_path_nodes AS pn
        ON pn.path_id=p.id AND pn.node_id=n.id
-WHERE m.enabled=1 AND m.state='MODEM_READY'
+WHERE u.enabled=1 AND u.state='UPLINK_READY'
   AND n.enabled=1
   AND COALESCE(pref.selection_override, n.selection_override, 'auto')<>'exclude'
-ORDER BY s.id, n.id, m.priority, m.id
+ORDER BY s.id, n.id, u.priority, u.id
 LIMIT ?`, maximumVPNRouteCandidates+1)
 	if err != nil {
 		return nil, fmt.Errorf("list VPN subscription refresh routes: %w", err)
@@ -135,13 +135,13 @@ func (repository *RouteRepository) ValidateVPNRoute(ctx context.Context, route V
 	var externalName string
 	err := repository.database.QueryRowContext(ctx, `
 SELECT n.external_name
-FROM modems AS m
+FROM uplinks AS u
 JOIN subscriptions AS s ON s.id=? AND s.active_version_id IS NOT NULL
 JOIN access_methods AS a ON a.kind='SUBSCRIPTION' AND a.subscription_id=s.id
 JOIN nodes AS n ON n.id=? AND n.version_id=s.active_version_id
 LEFT JOIN subscription_node_preferences AS pref
        ON pref.subscription_id=s.id AND pref.fingerprint=n.fingerprint
-WHERE m.id=? AND m.enabled=1 AND m.state='MODEM_READY'
+WHERE u.id=? AND u.enabled=1 AND u.state='UPLINK_READY'
   AND n.enabled=1
   AND COALESCE(pref.selection_override, n.selection_override, 'auto')<>'exclude'`, route.SubscriptionID, route.NodeID, route.ModemID).Scan(&externalName)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -1,5 +1,5 @@
 // Package directprobe qualifies direct Internet access through one exact
-// modem routing context without consulting the host default route.
+// uplink routing context without consulting the host default route.
 package directprobe
 
 import (
@@ -18,9 +18,9 @@ import (
 
 	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/bypass"
-	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/netbind"
 	"gateway-vpn/internal/scheduler"
+	"gateway-vpn/internal/uplink"
 )
 
 const (
@@ -51,7 +51,7 @@ type HTTPDoer interface {
 type HTTPClientFactory func(DialContextFunc, string, string, []netip.Addr, time.Duration) (HTTPDoer, func(), error)
 
 type Prober struct {
-	Modems          *modem.Repository
+	Uplinks         *uplink.Repository
 	Paths           *accesspolicy.DirectPathRepository
 	Targets         *bypass.Repository
 	Broker          RouteAuthorizer
@@ -64,9 +64,9 @@ type Prober struct {
 	now             func() time.Time
 }
 
-func New(modems *modem.Repository, paths *accesspolicy.DirectPathRepository, targets *bypass.Repository, broker RouteAuthorizer, probeScheduler *scheduler.Scheduler, bootstrapDNS []string) (*Prober, error) {
+func New(uplinks *uplink.Repository, paths *accesspolicy.DirectPathRepository, targets *bypass.Repository, broker RouteAuthorizer, probeScheduler *scheduler.Scheduler, bootstrapDNS []string) (*Prober, error) {
 	prober := &Prober{
-		Modems: modems, Paths: paths, Targets: targets, Broker: broker,
+		Uplinks: uplinks, Paths: paths, Targets: targets, Broker: broker,
 		Scheduler: probeScheduler, BootstrapDNS: append([]string(nil), bootstrapDNS...),
 		EvidenceTTL: 5 * time.Minute, DialerFactory: defaultDialer,
 		ResolverFactory: defaultResolver, ClientFactory: defaultHTTPClient,
@@ -92,12 +92,12 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 	if err := prober.Broker.SyncRouting(ctx); err != nil {
 		return accesspolicy.DirectResultUpdate{}, errors.New("direct probe routing synchronization failed")
 	}
-	currentModem, err := prober.Modems.Get(ctx, path.ModemID)
-	if err != nil || !currentModem.Enabled || currentModem.State != modem.StateReady ||
-		currentModem.InterfaceName == "" || currentModem.Fwmark == 0 || currentModem.RouteGeneration != path.RouteGeneration {
-		return accesspolicy.DirectResultUpdate{}, errors.New("direct probe modem context is unavailable or stale")
+	currentUplink, err := prober.Uplinks.Get(ctx, path.UplinkID)
+	if err != nil || !currentUplink.Enabled || currentUplink.State != "UPLINK_READY" ||
+		currentUplink.CurrentIfname == "" || currentUplink.Fwmark <= 0 || currentUplink.Fwmark > 1<<32-1 || currentUplink.RouteGeneration != path.RouteGeneration {
+		return accesspolicy.DirectResultUpdate{}, errors.New("direct probe uplink context is unavailable or stale")
 	}
-	dial, err := prober.DialerFactory(currentModem.InterfaceName, currentModem.Fwmark)
+	dial, err := prober.DialerFactory(currentUplink.CurrentIfname, uint32(currentUplink.Fwmark))
 	if err != nil {
 		return accesspolicy.DirectResultUpdate{}, errors.New("direct probe socket binding is unavailable")
 	}
@@ -107,7 +107,7 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 	}
 	enabledTargets := make([]bypass.Target, 0, len(storedTargets))
 	for _, target := range storedTargets {
-		if target.Enabled {
+		if target.Enabled && target.TargetClass != bypass.TargetClassServiceEndpoint {
 			enabledTargets = append(enabledTargets, target)
 		}
 	}
@@ -132,17 +132,22 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 	var responseLatencyTotal int64
 	var responses int64
 	for _, target := range enabledTargets {
-		if target.Required {
+		switch target.TargetClass {
+		case bypass.TargetClassGlobalRequired:
 			update.RequiredTargetsTotal++
-		} else {
+		case bypass.TargetClassGlobalOptional:
 			update.OptionalTargetsTotal++
+		case bypass.TargetClassWhitelistIndicator:
+			update.WhitelistTargetsTotal++
+		default:
+			return accesspolicy.DirectResultUpdate{}, errors.New("direct probe target class is invalid")
 		}
 		estimatedBytes := int64(defaultEstimatedBytes)
 		if target.ExpectedBodySubstring != "" {
 			estimatedBytes = defaultBodyEstimatedBytes
 		}
 		admission, err := prober.Scheduler.Acquire(ctx, scheduler.Request{
-			ModemID: currentModem.ID, TargetID: target.ID, Class: class, EstimatedBytes: estimatedBytes,
+			ModemID: currentUplink.ID, TargetID: target.ID, Class: class, EstimatedBytes: estimatedBytes,
 		})
 		if err != nil {
 			return accesspolicy.DirectResultUpdate{}, err
@@ -150,13 +155,13 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 		if admission.Decision == scheduler.DecisionDeferredBudget || admission.Permit == nil {
 			return accesspolicy.DirectResultUpdate{}, ErrDeferredBudget
 		}
-		result, reachedHTTP, probeErr := prober.probeTarget(ctx, currentModem, target, dial, checkedAt, expiresAt)
+		result, reachedHTTP, probeErr := prober.probeTarget(ctx, currentUplink, target, dial, checkedAt, expiresAt)
 		admission.Permit.Release(estimatedBytes)
 		if err := ctx.Err(); err != nil {
 			return accesspolicy.DirectResultUpdate{}, err
 		}
 		if probeErr != nil {
-			result = accesspolicy.DirectTargetResult{TargetID: target.ID, State: "FAILED", ErrorCode: classifyError(probeErr), CheckedAt: checkedAt, ExpiresAt: expiresAt}
+			result = accesspolicy.DirectTargetResult{TargetID: target.ID, TargetClass: target.TargetClass, State: "FAILED", ErrorCode: classifyError(probeErr), CheckedAt: checkedAt, ExpiresAt: expiresAt}
 		}
 		update.Targets = append(update.Targets, result)
 		if reachedHTTP {
@@ -165,24 +170,34 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 			responses++
 		}
 		if result.State == "PASSED" {
-			if target.Required {
+			switch target.TargetClass {
+			case bypass.TargetClassGlobalRequired:
 				update.RequiredTargetsPassed++
-			} else {
+			case bypass.TargetClassGlobalOptional:
 				update.OptionalTargetsPassed++
+			case bypass.TargetClassWhitelistIndicator:
+				update.WhitelistTargetsPassed++
 			}
 		}
 	}
 	if responses > 0 {
 		update.LatencyMS = responseLatencyTotal / responses
 	}
-	update.FunctionalScore = update.RequiredTargetsPassed*1000 + update.OptionalTargetsPassed
+	globalScore := update.RequiredTargetsPassed*1000 + update.OptionalTargetsPassed
+	update.FunctionalScore = globalScore
+	if globalScore == 0 {
+		update.FunctionalScore = update.WhitelistTargetsPassed
+	}
 	switch {
 	case update.RequiredTargetsTotal > 0 && update.RequiredTargetsPassed == update.RequiredTargetsTotal:
 		update.QualityClass = accesspolicy.QualityFull
 		update.FailureCode = ""
-	case update.FunctionalScore > 0:
+	case globalScore > 0:
 		update.QualityClass = accesspolicy.QualityLimited
 		update.FailureCode = "PARTIAL_TARGET_ACCESS"
+	case update.WhitelistTargetsPassed > 0:
+		update.QualityClass = accesspolicy.QualityWhitelistOnly
+		update.FailureCode = "WHITELIST_ONLY_ACCESS"
 	default:
 		update.QualityClass = accesspolicy.QualityFailed
 		update.FailureCode = "ALL_TARGETS_FAILED"
@@ -196,7 +211,7 @@ func (prober *Prober) ProbePath(ctx context.Context, pathID, class string) (acce
 	return update, nil
 }
 
-func (prober *Prober) probeTarget(ctx context.Context, currentModem modem.Modem, target bypass.Target, dial DialContextFunc, checkedAt, expiresAt time.Time) (accesspolicy.DirectTargetResult, bool, error) {
+func (prober *Prober) probeTarget(ctx context.Context, currentUplink uplink.Uplink, target bypass.Target, dial DialContextFunc, checkedAt, expiresAt time.Time) (accesspolicy.DirectTargetResult, bool, error) {
 	parsed, err := url.Parse(target.NormalizedURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
 		return accesspolicy.DirectTargetResult{}, false, errors.New("stored target URL is invalid")
@@ -220,7 +235,7 @@ func (prober *Prober) probeTarget(ctx context.Context, currentModem modem.Modem,
 	for _, address := range addresses {
 		addressStrings = append(addressStrings, address.String())
 	}
-	if err := prober.Broker.AuthorizeDirectProbe(probeContext, currentModem.ID, target.ID, addressStrings, uint16(portNumber)); err != nil {
+	if err := prober.Broker.AuthorizeDirectProbe(probeContext, currentUplink.ID, target.ID, addressStrings, uint16(portNumber)); err != nil {
 		return accesspolicy.DirectTargetResult{}, false, errors.New("direct probe firewall authorization failed")
 	}
 	client, cleanup, err := prober.ClientFactory(dial, parsed.Hostname(), port, addresses, timeout)
@@ -244,7 +259,7 @@ func (prober *Prober) probeTarget(ctx context.Context, currentModem modem.Modem,
 	if latency < 0 {
 		latency = 0
 	}
-	result := accesspolicy.DirectTargetResult{TargetID: target.ID, State: "FAILED", LatencyMS: latency, HTTPStatus: response.StatusCode, CheckedAt: checkedAt, ExpiresAt: expiresAt}
+	result := accesspolicy.DirectTargetResult{TargetID: target.ID, TargetClass: target.TargetClass, State: "FAILED", LatencyMS: latency, HTTPStatus: response.StatusCode, CheckedAt: checkedAt, ExpiresAt: expiresAt}
 	switch target.SuccessMode {
 	case bypass.SuccessAnyHTTPResponse:
 		result.State = "PASSED"
@@ -311,11 +326,11 @@ func (prober *Prober) resolveIPv4(ctx context.Context, dial DialContextFunc, hos
 			return result, nil
 		}
 	}
-	return nil, errors.New("modem-bound direct probe DNS failed")
+	return nil, errors.New("uplink-bound direct probe DNS failed")
 }
 
 func (prober *Prober) validate() error {
-	if prober == nil || prober.Modems == nil || prober.Paths == nil || prober.Targets == nil || prober.Broker == nil || prober.Scheduler == nil || prober.DialerFactory == nil || prober.ResolverFactory == nil || prober.ClientFactory == nil || prober.now == nil || prober.EvidenceTTL < time.Minute || prober.EvidenceTTL > time.Hour || len(prober.BootstrapDNS) == 0 || len(prober.BootstrapDNS) > 8 {
+	if prober == nil || prober.Uplinks == nil || prober.Paths == nil || prober.Targets == nil || prober.Broker == nil || prober.Scheduler == nil || prober.DialerFactory == nil || prober.ResolverFactory == nil || prober.ClientFactory == nil || prober.now == nil || prober.EvidenceTTL < time.Minute || prober.EvidenceTTL > time.Hour || len(prober.BootstrapDNS) == 0 || len(prober.BootstrapDNS) > 8 {
 		return errors.New("direct prober dependencies or evidence policy are invalid")
 	}
 	for _, raw := range prober.BootstrapDNS {

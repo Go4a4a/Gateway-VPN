@@ -30,18 +30,18 @@ SET gateway_state='VERIFYING_POLICY',
     policy_transition_deadline=?, updated_at=?
 WHERE singleton_id=1 AND path_state='PATH_ACTIVE'
   AND active_method_kind='SUBSCRIPTION' AND active_direct_path_id IS NULL
-  AND active_modem_id IS NOT NULL AND active_path_id IS NOT NULL
+  AND active_uplink_id IS NOT NULL AND active_path_id IS NOT NULL
   AND active_subscription_id IS NOT NULL AND active_node_id IS NOT NULL`,
 		generation, updatedAt, deadline, updatedAt)
 	if err != nil {
 		return 0, fmt.Errorf("start runtime policy transition: %w", err)
 	}
-	var modemID, pathID, subscriptionID, nodeID string
+	var uplinkID, pathID, subscriptionID, nodeID string
 	err = transaction.QueryRowContext(ctx, `
-SELECT active_modem_id, active_path_id, active_subscription_id, active_node_id
+SELECT active_uplink_id, active_path_id, active_subscription_id, active_node_id
 FROM runtime_state
 WHERE singleton_id=1 AND gateway_state='VERIFYING_POLICY'
-  AND policy_transition_generation=?`, generation).Scan(&modemID, &pathID, &subscriptionID, &nodeID)
+	  AND policy_transition_generation=?`, generation).Scan(&uplinkID, &pathID, &subscriptionID, &nodeID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
@@ -55,22 +55,23 @@ WHERE singleton_id=1 AND gateway_state='VERIFYING_POLICY'
 			return 0, fmt.Errorf("encode policy transition event: %w", marshalErr)
 		}
 		_, err = transaction.ExecContext(ctx, `
-INSERT INTO events(occurred_at, severity, type, modem_id, subscription_id, path_id, details_json)
-VALUES (?, 'INFO', 'POLICY_VERIFICATION_STARTED', ?, ?, ?, ?)`,
-			updatedAt, modemID, subscriptionID, pathID, string(details))
+INSERT INTO events(occurred_at, severity, type, uplink_id, modem_id, subscription_id, path_id, details_json)
+VALUES (?, 'INFO', 'POLICY_VERIFICATION_STARTED', ?,
+        (SELECT uplink_id FROM hilink_modems WHERE uplink_id=?), ?, ?, ?)`,
+			updatedAt, uplinkID, uplinkID, subscriptionID, pathID, string(details))
 		if err != nil {
 			return 0, fmt.Errorf("record policy transition event: %w", err)
 		}
 	}
 	_, err = transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET policy_generation=?,
     state=CASE
-        WHEN state IN ('MODEM_DISABLED', 'SUBSCRIPTION_DISABLED', 'MODEM_OFFLINE') THEN state
+		WHEN state IN ('UPLINK_DISABLED', 'SUBSCRIPTION_DISABLED', 'UPLINK_OFFLINE') THEN state
         ELSE 'STALE'
     END,
     transport_state=CASE
-        WHEN state IN ('MODEM_DISABLED', 'SUBSCRIPTION_DISABLED', 'MODEM_OFFLINE') THEN transport_state
+		WHEN state IN ('UPLINK_DISABLED', 'SUBSCRIPTION_DISABLED', 'UPLINK_OFFLINE') THEN transport_state
         ELSE 'UNKNOWN'
     END,
     selected_node_id=NULL, qualified_nodes=0, required_targets_passed=0,
@@ -80,17 +81,17 @@ SET policy_generation=?,
 		return 0, fmt.Errorf("invalidate path policy results: %w", err)
 	}
 	_, err = transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
+UPDATE direct_uplink_paths
 SET policy_generation=?, state=CASE
-        WHEN state IN ('MODEM_DISABLED', 'MODEM_OFFLINE') THEN state
+		WHEN state IN ('UPLINK_DISABLED', 'UPLINK_OFFLINE') THEN state
         ELSE 'STALE'
     END,
     transport_state=CASE
-        WHEN state IN ('MODEM_DISABLED', 'MODEM_OFFLINE') THEN transport_state
+		WHEN state IN ('UPLINK_DISABLED', 'UPLINK_OFFLINE') THEN transport_state
         ELSE 'UNKNOWN'
     END,
     quality_class='UNKNOWN', functional_score=0,
-    required_targets_passed=0, optional_targets_passed=0,
+    required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?`, generation, updatedAt)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate direct path policy results: %w", err)

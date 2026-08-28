@@ -298,7 +298,7 @@ func (repository *Repository) SetEnabled(ctx context.Context, id string, enabled
 		return fmt.Errorf("advance access ranking after subscription state change: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state=?, transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, expires_at=NULL, updated_at=?
 WHERE subscription_id=?`, pathState, now, id); err != nil {

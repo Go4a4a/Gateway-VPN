@@ -111,7 +111,7 @@ func TestPeriodicRepositoryReclassifiesImmediatelyAndFiltersUnavailablePaths(t *
 		t.Fatalf("Due(with active modem offline) = %+v, %v", due, err)
 	}
 
-	if _, err := database.ExecContext(ctx, "DELETE FROM subscription_modem_paths WHERE id=?", paths[0].ID); err != nil {
+	if _, err := database.ExecContext(ctx, "DELETE FROM subscription_uplink_paths WHERE id=?", paths[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.Get(ctx, paths[0].ID); err == nil {
@@ -163,7 +163,7 @@ VALUES ('version-a', 'sub-a', ?, 0, 'LKG', ?, ?)`, hex.EncodeToString(make([]byt
 	paths := []periodicTestPath{{ID: "path-a", ModemID: "modem-a"}, {ID: "path-b", ModemID: "modem-b"}}
 	for _, path := range paths {
 		if _, err := database.ExecContext(ctx, `
-INSERT INTO subscription_modem_paths(id, modem_id, subscription_id, created_at, updated_at)
+INSERT INTO subscription_uplink_paths(id, uplink_id, subscription_id, created_at, updated_at)
 VALUES (?, ?, 'sub-a', ?, ?)`, path.ID, path.ModemID, now, now); err != nil {
 			t.Fatal(err)
 		}

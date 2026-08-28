@@ -88,7 +88,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (CycleResult, error) {
 	deadline := runner.now().UTC().Add(runner.Config.RefreshLead)
 	dueIndexes := make([]int, 0, len(paths))
 	for index, path := range paths {
-		if path.State == "MODEM_DISABLED" || path.State == "MODEM_OFFLINE" || path.State == "SUBNET_CONFLICT" {
+		if path.State == "UPLINK_DISABLED" || path.State == "UPLINK_OFFLINE" || path.State == "SUBNET_CONFLICT" {
 			continue
 		}
 		if path.ExpiresAt != "" {
@@ -132,6 +132,49 @@ func (runner *Runner) RunOnce(ctx context.Context) (CycleResult, error) {
 		result.Published++
 	}
 	runner.nextPathID = paths[dueIndexes[(start+attempted)%len(dueIndexes)]].ID
+	return result, errors.Join(cycleErrors...)
+}
+
+// ProbeAllNow re-evaluates every eligible direct uplink even when its previous
+// evidence is still fresh. It is intended for an explicit user action or a
+// policy transition; the same mutex prevents it from racing the periodic
+// runner and every probe still passes through the shared traffic budget.
+func (runner *Runner) ProbeAllNow(ctx context.Context) (CycleResult, error) {
+	runner.mutex.Lock()
+	defer runner.mutex.Unlock()
+	if err := runner.validate(); err != nil {
+		return CycleResult{}, err
+	}
+	if err := runner.Prober.Paths.Reconcile(ctx); err != nil {
+		return CycleResult{}, fmt.Errorf("reconcile direct paths before manual probe: %w", err)
+	}
+	paths, err := runner.Prober.Paths.List(ctx)
+	if err != nil {
+		return CycleResult{}, err
+	}
+	result := CycleResult{Errors: make(map[string]string)}
+	var cycleErrors []error
+	for _, path := range paths {
+		if path.State == "UPLINK_DISABLED" || path.State == "UPLINK_OFFLINE" || path.State == "SUBNET_CONFLICT" {
+			continue
+		}
+		result.Due++
+		_, probeErr := runner.Prober.ProbePath(ctx, path.ID, scheduler.ClassFailover)
+		if errors.Is(probeErr, ErrDeferredBudget) {
+			result.Deferred++
+			continue
+		}
+		result.Probed++
+		if probeErr != nil {
+			result.Errors[path.ID] = stableCycleError(probeErr)
+			cycleErrors = append(cycleErrors, fmt.Errorf("manual direct path %s: %w", path.ID, probeErr))
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		result.Published++
+	}
 	return result, errors.Join(cycleErrors...)
 }
 

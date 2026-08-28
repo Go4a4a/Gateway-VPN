@@ -242,7 +242,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	}
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: states,
-		Modems: modems, Subscriptions: subscriptions, Nodes: nodes,
+		Modems: modems, Uplinks: dataPlane.Uplinks, Subscriptions: subscriptions, Nodes: nodes,
 		Paths: paths, Targets: targets,
 		Matchers: matchers, NetworkBroker: networkBroker,
 		Discoveries:         dataPlane.Discoveries,
@@ -254,6 +254,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 			return dataPlane.ModemRunner.Manager.Reconcile(ctx)
 		},
 		ModemPathProbe:       dataPlane.PathProbe,
+		DirectPathProbe:      dataPlane.DirectRunner,
 		PathOperations:       dataPlane.PathProbe,
 		PathActivator:        dataPlane.Reconciler,
 		SubscriptionRefresh:  dataPlane.Refresh,

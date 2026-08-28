@@ -62,9 +62,11 @@ func TestRouteRepositoryOrdersTargetSubscriptionFirstAndNeverReturnsExcludedNode
 	}
 	if _, err := database.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state='ONLINE', path_state='PATH_ACTIVE', active_method_id='access:subscription:sub-a',
-    active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
-    active_modem_id='modem-b', active_subscription_id='sub-a', active_node_id=?
+	SET gateway_state='ONLINE', path_state='PATH_ACTIVE', active_method_id='access:subscription:sub-a',
+	    active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
+	    active_uplink_id='modem-b', active_modem_id='modem-b',
+	    active_path_id=(SELECT id FROM subscription_uplink_paths WHERE uplink_id='modem-b' AND subscription_id='sub-a'),
+	    active_subscription_id='sub-a', active_node_id=?
 WHERE singleton_id=1`, targetNodes[0].ID); err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +119,11 @@ func TestRouteLadderSerializesSelectorAndHTTPSAndPersistsRedactedAttempts(t *tes
 	}
 	if _, err := database.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state='ONLINE', path_state='PATH_ACTIVE', active_method_id='access:subscription:sub-a',
-    active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
-    active_modem_id='modem-a', active_subscription_id='sub-a', active_node_id=?
+	SET gateway_state='ONLINE', path_state='PATH_ACTIVE', active_method_id='access:subscription:sub-a',
+	    active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
+	    active_uplink_id='modem-a', active_modem_id='modem-a',
+	    active_path_id=(SELECT id FROM subscription_uplink_paths WHERE uplink_id='modem-a' AND subscription_id='sub-a'),
+	    active_subscription_id='sub-a', active_node_id=?
 WHERE singleton_id=1`, nodes[0].ID); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +236,7 @@ func activateRouteSubscription(t *testing.T, ctx context.Context, subscriptions 
 func runtimeIdentity(t *testing.T, database *sql.DB) string {
 	t.Helper()
 	var method, modemID, subscriptionID, nodeID sql.NullString
-	if err := database.QueryRow(`SELECT active_method_id, active_modem_id, active_subscription_id, active_node_id FROM runtime_state WHERE singleton_id=1`).Scan(&method, &modemID, &subscriptionID, &nodeID); err != nil {
+	if err := database.QueryRow(`SELECT active_method_id, active_uplink_id, active_subscription_id, active_node_id FROM runtime_state WHERE singleton_id=1`).Scan(&method, &modemID, &subscriptionID, &nodeID); err != nil {
 		t.Fatal(err)
 	}
 	return strings.Join([]string{method.String, modemID.String, subscriptionID.String, nodeID.String}, "|")

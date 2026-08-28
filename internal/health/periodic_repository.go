@@ -59,7 +59,7 @@ func (repository PeriodicRepository) Reconcile(ctx context.Context, activePathID
 	if _, err := transaction.ExecContext(ctx, `
 INSERT INTO path_health_runtime(path_id, probe_class, next_probe_at, updated_at)
 SELECT p.id, CASE WHEN p.id=? THEN 'ACTIVE' ELSE 'STANDBY' END, ?, ?
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 WHERE 1=1
 ON CONFLICT(path_id) DO NOTHING`, activePathID, now, now); err != nil {
 		return fmt.Errorf("insert periodic health schedules: %w", err)
@@ -101,13 +101,13 @@ func (repository PeriodicRepository) Due(ctx context.Context, limit int) ([]DueP
 		return nil, errors.New("periodic health database and due limit 1..100 are required")
 	}
 	rows, err := repository.Database.QueryContext(ctx, `
-SELECT h.path_id, p.modem_id, p.subscription_id, h.probe_class,
+SELECT h.path_id, p.uplink_id, p.subscription_id, h.probe_class,
        h.last_result, h.consecutive_successes, h.consecutive_failures
 FROM path_health_runtime AS h
-JOIN subscription_modem_paths AS p ON p.id=h.path_id
-JOIN modems AS m ON m.id=p.modem_id
+JOIN subscription_uplink_paths AS p ON p.id=h.path_id
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
-WHERE h.next_probe_at<=? AND m.enabled=1 AND m.state='MODEM_READY'
+WHERE h.next_probe_at<=? AND u.enabled=1 AND u.state='UPLINK_READY'
   AND s.enabled=1 AND s.active_version_id IS NOT NULL
 ORDER BY CASE h.probe_class WHEN 'ACTIVE' THEN 0 ELSE 1 END,
          h.next_probe_at, h.path_id

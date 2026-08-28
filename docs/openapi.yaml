@@ -15,6 +15,7 @@ tags:
   - name: Auth
   - name: Gateway
   - name: Access
+  - name: Uplinks
   - name: Modems
   - name: Subscriptions
   - name: Nodes
@@ -237,6 +238,19 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+
+  /api/v1/uplinks:
+    get:
+      tags: [Uplinks]
+      operationId: listUplinks
+      summary: Перечислить secret-free инвентарь HiLink и Ethernet выходов вместе с путями доступа
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/network/interfaces:
+    get:
+      tags: [Network]
+      operationId: listNetworkInterfaces
+      summary: Перечислить обнаруженные NIC и назначения ролей без identity hash и полного MAC
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/modems:
     get:

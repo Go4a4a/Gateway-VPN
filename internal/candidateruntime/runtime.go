@@ -21,10 +21,10 @@ import (
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/mihomo"
-	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/uplink"
 )
 
 const defaultEvidenceTTL = 5 * time.Minute
@@ -53,7 +53,7 @@ type TargetStateEvaluator interface {
 type Runtime struct {
 	Subscriptions  *subscription.Repository
 	Versions       *subscription.VersionRepository
-	Modems         *modem.Repository
+	Uplinks        *uplink.Repository
 	Targets        *bypass.Repository
 	Paths          *pathmatrix.Repository
 	Preferences    *accesspolicy.PreferenceRepository
@@ -95,6 +95,8 @@ type qualification struct {
 }
 
 type RequalificationResult struct {
+	UplinkID string
+	// ModemID is populated by the modem-specific compatibility entry point.
 	ModemID              string
 	SubscriptionsChecked int
 	Qualified            int
@@ -141,7 +143,7 @@ func (current *Runtime) Promote(ctx context.Context, candidate subscription.Cand
 	if err != nil {
 		return nil, err
 	}
-	modems, err := current.readyModems(ctx)
+	uplinks, err := current.readyUplinks(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +154,7 @@ func (current *Runtime) Promote(ctx context.Context, candidate subscription.Cand
 	if err := current.Paths.ReconcileCells(ctx); err != nil {
 		return nil, fmt.Errorf("reconcile path matrix before candidate qualification: %w", err)
 	}
-	temporaryBundle, err := current.buildBundle(ctx, modems, &material)
+	temporaryBundle, err := current.buildBundle(ctx, uplinks, &material)
 	if err != nil {
 		return nil, err
 	}
@@ -192,11 +194,11 @@ func (current *Runtime) Promote(ctx context.Context, candidate subscription.Cand
 	}, nil
 }
 
-// RequalifyModem rebuilds the complete active LKG bundle and refreshes path
-// evidence only for one ready modem. It never stages or promotes a new
+// RequalifyUplink rebuilds the complete active LKG bundle and refreshes path
+// evidence only for one ready uplink. It never stages or promotes a new
 // subscription version and therefore is suitable for the manual Modem Probe
 // operation and post-recovery verification.
-func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (RequalificationResult, error) {
+func (current *Runtime) RequalifyUplink(ctx context.Context, uplinkID string) (RequalificationResult, error) {
 	if current == nil {
 		return RequalificationResult{}, errors.New("candidate runtime is nil")
 	}
@@ -209,28 +211,28 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 	if err := current.validate(); err != nil {
 		return RequalificationResult{}, err
 	}
-	if strings.TrimSpace(modemID) == "" {
-		return RequalificationResult{}, errors.New("modem id is required for requalification")
+	if strings.TrimSpace(uplinkID) == "" {
+		return RequalificationResult{}, errors.New("uplink id is required for requalification")
 	}
 	if err := current.Routing.SyncRouting(ctx); err != nil {
-		return RequalificationResult{}, fmt.Errorf("synchronize modem routing before requalification: %w", err)
+		return RequalificationResult{}, fmt.Errorf("synchronize uplink routing before requalification: %w", err)
 	}
-	readyModems, err := current.readyModems(ctx)
+	readyUplinks, err := current.readyUplinks(ctx)
 	if err != nil {
 		return RequalificationResult{}, err
 	}
 	ready := false
-	for _, item := range readyModems {
-		if item.ID == modemID {
+	for _, item := range readyUplinks {
+		if item.ID == uplinkID {
 			ready = true
 			break
 		}
 	}
 	if !ready {
-		return RequalificationResult{}, errors.New("requested modem is not ready")
+		return RequalificationResult{}, errors.New("requested uplink is not ready")
 	}
 	if err := current.Paths.ReconcileCells(ctx); err != nil {
-		return RequalificationResult{}, fmt.Errorf("reconcile path matrix before modem requalification: %w", err)
+		return RequalificationResult{}, fmt.Errorf("reconcile path matrix before uplink requalification: %w", err)
 	}
 	targets, err := current.probeTargets(ctx)
 	if err != nil {
@@ -254,18 +256,18 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 		versionIDs = append(versionIDs, material.VersionID)
 	}
 	if len(materials) == 0 {
-		return RequalificationResult{}, errors.New("modem requalification requires at least one active subscription LKG")
+		return RequalificationResult{}, errors.New("uplink requalification requires at least one active subscription LKG")
 	}
 	transition, transitioning, err := current.policyTransition(ctx)
 	if err != nil {
 		return RequalificationResult{}, err
 	}
-	if transitioning && transition.ActiveModemID == modemID {
+	if transitioning && transition.ActiveUplinkID == uplinkID {
 		sort.SliceStable(materials, func(i, j int) bool {
 			return materials[i].Subscription.ID == transition.ActiveSubscriptionID && materials[j].Subscription.ID != transition.ActiveSubscriptionID
 		})
 	}
-	bundle, err := current.buildBundle(ctx, readyModems, nil)
+	bundle, err := current.buildBundle(ctx, readyUplinks, nil)
 	if err != nil {
 		return RequalificationResult{}, err
 	}
@@ -273,9 +275,9 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 	if err := current.EndpointAccess.AuthorizeMihomoVersions(ctx, versionIDs); err != nil {
 		return RequalificationResult{}, fmt.Errorf("authorize active endpoints before modem requalification: %w", err)
 	}
-	apply, err := current.Controller.Apply(ctx, generationID("requalify-"+modemID, strings.Join(versionIDs, ",")), bundle)
+	apply, err := current.Controller.Apply(ctx, generationID("requalify-"+uplinkID, strings.Join(versionIDs, ",")), bundle)
 	if err != nil {
-		return RequalificationResult{}, fmt.Errorf("apply active bundle for modem requalification: %w", err)
+		return RequalificationResult{}, fmt.Errorf("apply active bundle for uplink requalification: %w", err)
 	}
 	restoreOnError := func(cause error) (RequalificationResult, error) {
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
@@ -283,21 +285,21 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 		return RequalificationResult{}, errors.Join(cause, current.Controller.Restore(restoreCtx, apply.PreviousGeneration))
 	}
 	checkedAt := current.now().UTC()
-	result := RequalificationResult{ModemID: modemID, CheckedAt: checkedAt}
+	result := RequalificationResult{UplinkID: uplinkID, CheckedAt: checkedAt}
 	for _, material := range materials {
 		qualifications, err := current.qualifyPaths(ctx, material, bundle, targets, func(path mihomo.Path) bool {
-			return !path.QualificationOnly && path.SubscriptionID == material.Subscription.ID && path.ModemID == modemID
+			return !path.QualificationOnly && path.SubscriptionID == material.Subscription.ID && path.UplinkID == uplinkID
 		})
 		if err != nil {
 			return restoreOnError(err)
 		}
 		if len(qualifications) != 1 {
-			return restoreOnError(fmt.Errorf("active bundle has %d paths for modem %s subscription %s", len(qualifications), modemID, material.Subscription.ID))
+			return restoreOnError(fmt.Errorf("active bundle has %d paths for uplink %s subscription %s", len(qualifications), uplinkID, material.Subscription.ID))
 		}
 		item := qualifications[0]
 		snapshot := pathmatrix.SnapshotFromHealth(item.Result, item.PolicyGeneration, item.RouteGeneration, checkedAt, checkedAt.Add(current.evidenceTTL()))
 		if err := current.Paths.StoreQualification(ctx, snapshot); err != nil {
-			return restoreOnError(fmt.Errorf("store modem requalification for path %s: %w", item.Result.PathID, err))
+			return restoreOnError(fmt.Errorf("store uplink requalification for path %s: %w", item.Result.PathID, err))
 		}
 		result.SubscriptionsChecked++
 		if item.Result.State == health.CellQualified && item.Result.SelectedNodeID != "" {
@@ -307,7 +309,7 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 			}
 			var generatedPath mihomo.Path
 			for _, path := range bundle.Paths {
-				if !path.QualificationOnly && path.SubscriptionID == material.Subscription.ID && path.ModemID == modemID {
+				if !path.QualificationOnly && path.SubscriptionID == material.Subscription.ID && path.UplinkID == uplinkID {
 					generatedPath = path
 					break
 				}
@@ -327,8 +329,16 @@ func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (Req
 	return result, nil
 }
 
+// RequalifyModem is the HiLink-specific compatibility entry point used by the
+// existing modem API. Generic Ethernet callers use RequalifyUplink.
+func (current *Runtime) RequalifyModem(ctx context.Context, modemID string) (RequalificationResult, error) {
+	result, err := current.RequalifyUplink(ctx, modemID)
+	result.ModemID = modemID
+	return result, err
+}
+
 func (current *Runtime) validate() error {
-	if current.Subscriptions == nil || current.Versions == nil || current.Modems == nil || current.Targets == nil || current.Paths == nil || current.Preferences == nil || current.State == nil || current.TargetStates == nil || current.Controller == nil || current.Selector == nil || current.Routing == nil || current.EndpointAccess == nil || current.Prober == nil || strings.TrimSpace(current.PayloadRoot) == "" {
+	if current.Subscriptions == nil || current.Versions == nil || current.Uplinks == nil || current.Targets == nil || current.Paths == nil || current.Preferences == nil || current.State == nil || current.TargetStates == nil || current.Controller == nil || current.Selector == nil || current.Routing == nil || current.EndpointAccess == nil || current.Prober == nil || strings.TrimSpace(current.PayloadRoot) == "" {
 		return errors.New("candidate runtime dependencies are incomplete")
 	}
 	if current.EvidenceTTL < 0 {
@@ -406,20 +416,20 @@ func (current *Runtime) loadActive(ctx context.Context, currentSubscription subs
 	return candidateMaterial{Subscription: currentSubscription, VersionID: version.ID, Imported: filtered, NodesByID: identities}, nil
 }
 
-func (current *Runtime) readyModems(ctx context.Context) ([]mihomo.Modem, error) {
-	stored, err := current.Modems.List(ctx)
+func (current *Runtime) readyUplinks(ctx context.Context) ([]mihomo.Uplink, error) {
+	stored, err := current.Uplinks.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list modems for candidate runtime: %w", err)
+		return nil, fmt.Errorf("list uplinks for candidate runtime: %w", err)
 	}
-	result := make([]mihomo.Modem, 0, len(stored))
+	result := make([]mihomo.Uplink, 0, len(stored))
 	for _, item := range stored {
-		if !item.Enabled || item.State != modem.StateReady {
+		if !item.Enabled || item.State != uplink.StateReady || item.CurrentIfname == "" || item.Fwmark <= 0 || item.Fwmark > 1<<32-1 {
 			continue
 		}
-		result = append(result, mihomo.Modem{ID: item.ID, Priority: item.Priority, InterfaceName: item.InterfaceName, Fwmark: item.Fwmark, Enabled: true, Online: true})
+		result = append(result, mihomo.Uplink{ID: item.ID, Priority: item.Priority, InterfaceName: item.CurrentIfname, Fwmark: uint32(item.Fwmark), Enabled: true, Online: true})
 	}
 	if len(result) == 0 {
-		return nil, errors.New("candidate qualification requires at least one ready modem")
+		return nil, errors.New("candidate qualification requires at least one ready uplink")
 	}
 	return result, nil
 }
@@ -432,7 +442,7 @@ func (current *Runtime) probeTargets(ctx context.Context) ([]health.Target, erro
 	result := make([]health.Target, 0, len(stored))
 	required := 0
 	for _, item := range stored {
-		if !item.Enabled {
+		if !item.Enabled || (item.TargetClass != bypass.TargetClassGlobalRequired && item.TargetClass != bypass.TargetClassGlobalOptional) {
 			continue
 		}
 		expectedStatus := ""
@@ -453,7 +463,7 @@ func (current *Runtime) probeTargets(ctx context.Context) ([]health.Target, erro
 // buildBundle loads every enabled subscription from its immutable SQLite LKG
 // pointer. When shadow is non-nil, that version is added under an isolated
 // runtime key and never appears in gateway-vpn-active.
-func (current *Runtime) buildBundle(ctx context.Context, modems []mihomo.Modem, shadow *candidateMaterial) (mihomo.Bundle, error) {
+func (current *Runtime) buildBundle(ctx context.Context, uplinks []mihomo.Uplink, shadow *candidateMaterial) (mihomo.Bundle, error) {
 	transition, transitioning, err := current.policyTransition(ctx)
 	if err != nil {
 		return mihomo.Bundle{}, err
@@ -510,7 +520,8 @@ func (current *Runtime) buildBundle(ctx context.Context, modems []mihomo.Modem, 
 		})
 	}
 	input := current.BaseInput
-	input.Modems = append([]mihomo.Modem(nil), modems...)
+	input.Uplinks = append([]mihomo.Uplink(nil), uplinks...)
+	input.Modems = nil
 	input.Subscriptions = generated
 	input.BootstrapDNS = append([]string(nil), current.BaseInput.BootstrapDNS...)
 	bundle, err := mihomo.Generate(input)
@@ -547,11 +558,11 @@ func (current *Runtime) qualifyPaths(ctx context.Context, material candidateMate
 	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
 	results := make([]qualification, 0, len(paths))
 	for _, generatedPath := range paths {
-		cell, err := current.Paths.Get(ctx, generatedPath.ModemID, material.Subscription.ID)
+		cell, err := current.Paths.Get(ctx, generatedPath.UplinkID, material.Subscription.ID)
 		if err != nil {
 			return nil, fmt.Errorf("read path matrix cell for qualification: %w", err)
 		}
-		healthPath := health.Path{ID: cell.ID, ModemID: generatedPath.ModemID, SubscriptionID: material.Subscription.ID, ProviderName: generatedPath.ProviderName, ProbeGroupName: generatedPath.ProbeGroupName}
+		healthPath := health.Path{ID: cell.ID, ModemID: generatedPath.UplinkID, SubscriptionID: material.Subscription.ID, ProviderName: generatedPath.ProviderName, ProbeGroupName: generatedPath.ProbeGroupName}
 		stickyNodeID := ""
 		if transitioning && !generatedPath.QualificationOnly && transition.ActivePathID == cell.ID && transition.PolicyTransitionGeneration == cell.PolicyGeneration {
 			stickyNodeID = transition.ActiveNodeID
@@ -673,11 +684,11 @@ func (current *promotion) Commit(ctx context.Context) error {
 		return fmt.Errorf("read candidate subscription routing state before runtime commit: %w", err)
 	}
 	currentEnabled := freshSubscription.Enabled
-	modems, err := current.runtime.readyModems(ctx)
+	uplinks, err := current.runtime.readyUplinks(ctx)
 	if err != nil {
 		return err
 	}
-	finalBundle, err := current.runtime.buildBundle(ctx, modems, nil)
+	finalBundle, err := current.runtime.buildBundle(ctx, uplinks, nil)
 	if err != nil {
 		return err
 	}
@@ -698,7 +709,7 @@ func (current *promotion) Commit(ctx context.Context) error {
 	finalPaths := make(map[string]mihomo.Path)
 	for _, item := range finalBundle.Paths {
 		if item.SubscriptionID == current.candidate.Subscription.ID && (!item.QualificationOnly || !currentEnabled) {
-			finalPaths[item.ModemID] = item
+			finalPaths[item.UplinkID] = item
 		}
 	}
 	for _, item := range current.qualifications {

@@ -14,6 +14,13 @@ import (
 
 var ErrLastRequiredConfirmation = errors.New("removing the last enabled required target requires confirmation")
 
+const (
+	TargetClassGlobalRequired     = "GLOBAL_REQUIRED"
+	TargetClassGlobalOptional     = "GLOBAL_OPTIONAL"
+	TargetClassWhitelistIndicator = "WHITELIST_INDICATOR"
+	TargetClassServiceEndpoint    = "SERVICE_ENDPOINT"
+)
+
 type Repository struct {
 	database *sql.DB
 	now      func() time.Time
@@ -25,6 +32,7 @@ type CreateInput struct {
 	Kind                  string
 	Value                 string
 	Required              bool
+	TargetClass           string
 	Timeout               time.Duration
 	SuccessMode           string
 	ExpectedStatus        string
@@ -37,6 +45,7 @@ type UpdateInput struct {
 	Value                 string
 	Enabled               bool
 	Required              bool
+	TargetClass           string
 	Timeout               time.Duration
 	SuccessMode           string
 	ExpectedStatus        string
@@ -52,6 +61,7 @@ type Target struct {
 	NormalizedURL         string
 	Enabled               bool
 	Required              bool
+	TargetClass           string
 	Priority              int64
 	TimeoutSeconds        int64
 	SuccessMode           string
@@ -78,6 +88,10 @@ func (repository *Repository) Create(ctx context.Context, input CreateInput) (Ta
 	if err != nil {
 		return Target{}, err
 	}
+	targetClass, err := normalizeTargetClass(input.TargetClass, input.Required)
+	if err != nil {
+		return Target{}, err
+	}
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Target{}, fmt.Errorf("begin target create: %w", err)
@@ -92,8 +106,8 @@ func (repository *Repository) Create(ctx context.Context, input CreateInput) (Ta
 INSERT INTO bypass_probe_targets (
     id, name, target_kind, target_value, normalized_url, enabled, required,
     priority, timeout_seconds, success_mode, expected_status,
-    expected_body_substring, state, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'UNKNOWN', ?, ?)`,
+    expected_body_substring, state, created_at, updated_at, target_class
+) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'UNKNOWN', ?, ?, ?)`,
 		input.ID,
 		name,
 		input.Kind,
@@ -107,6 +121,7 @@ INSERT INTO bypass_probe_targets (
 		nullIfEmpty(expectedBody),
 		now,
 		now,
+		targetClass,
 	)
 	if err != nil {
 		return Target{}, fmt.Errorf("insert probe target: %w", err)
@@ -138,8 +153,9 @@ func (repository *Repository) Update(ctx context.Context, id string, input Updat
 	}
 	defer transaction.Rollback()
 	var wasEnabled, wasRequired int
+	var currentClass string
 	var priority int64
-	if err := transaction.QueryRowContext(ctx, "SELECT enabled, required, priority FROM bypass_probe_targets WHERE id=?", id).Scan(&wasEnabled, &wasRequired, &priority); errors.Is(err, sql.ErrNoRows) {
+	if err := transaction.QueryRowContext(ctx, "SELECT enabled, required, priority, target_class FROM bypass_probe_targets WHERE id=?", id).Scan(&wasEnabled, &wasRequired, &priority, &currentClass); errors.Is(err, sql.ErrNoRows) {
 		return store.ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("read target for update: %w", err)
@@ -148,6 +164,14 @@ func (repository *Repository) Update(ctx context.Context, id string, input Updat
 		if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM bypass_probe_targets WHERE enabled=1").Scan(&priority); err != nil {
 			return fmt.Errorf("allocate re-enabled target priority: %w", err)
 		}
+	}
+	targetClass := input.TargetClass
+	if strings.TrimSpace(targetClass) == "" {
+		targetClass = currentClass
+	}
+	targetClass, err = normalizeTargetClass(targetClass, input.Required)
+	if err != nil {
+		return err
 	}
 	if wasEnabled != 0 && wasRequired != 0 && (!input.Enabled || !input.Required) && !input.AllowNoRequired {
 		var remaining int
@@ -163,8 +187,8 @@ func (repository *Repository) Update(ctx context.Context, id string, input Updat
 UPDATE bypass_probe_targets
 SET name=?, target_kind=?, target_value=?, normalized_url=?, enabled=?, required=?,
     priority=?, timeout_seconds=?, success_mode=?, expected_status=?,
-    expected_body_substring=?, state='UNKNOWN', updated_at=?
-WHERE id=?`, name, input.Kind, strings.TrimSpace(input.Value), normalized, boolInt(input.Enabled), boolInt(input.Required), priority, int64(input.Timeout/time.Second), successMode, nullIfEmpty(expectedStatus), nullIfEmpty(expectedBody), now, id)
+    expected_body_substring=?, target_class=?, state='UNKNOWN', updated_at=?
+WHERE id=?`, name, input.Kind, strings.TrimSpace(input.Value), normalized, boolInt(input.Enabled), boolInt(input.Required), priority, int64(input.Timeout/time.Second), successMode, nullIfEmpty(expectedStatus), nullIfEmpty(expectedBody), targetClass, now, id)
 	if err != nil {
 		return fmt.Errorf("update probe target: %w", err)
 	}
@@ -373,7 +397,7 @@ func validateEnabledSet(ctx context.Context, transaction *sql.Tx, orderedIDs []s
 const targetSelect = `
 SELECT id, name, target_kind, target_value, normalized_url, enabled, required,
        priority, timeout_seconds, success_mode, expected_status,
-       expected_body_substring, state, created_at, updated_at
+       expected_body_substring, state, created_at, updated_at, target_class
 FROM bypass_probe_targets`
 
 type scanner interface {
@@ -400,12 +424,36 @@ func scanTarget(row scanner) (Target, error) {
 		&item.State,
 		&item.CreatedAt,
 		&item.UpdatedAt,
+		&item.TargetClass,
 	)
 	item.Enabled = enabled != 0
 	item.Required = required != 0
 	item.ExpectedStatus = expectedStatus.String
 	item.ExpectedBodySubstring = expectedBody.String
 	return item, err
+}
+
+func normalizeTargetClass(value string, required bool) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		if required {
+			return TargetClassGlobalRequired, nil
+		}
+		return TargetClassGlobalOptional, nil
+	}
+	switch value {
+	case TargetClassGlobalRequired:
+		if !required {
+			return "", errors.New("GLOBAL_REQUIRED target must be required")
+		}
+	case TargetClassGlobalOptional, TargetClassWhitelistIndicator, TargetClassServiceEndpoint:
+		if required {
+			return "", errors.New("only GLOBAL_REQUIRED target can be required")
+		}
+	default:
+		return "", errors.New("probe target class is invalid")
+	}
+	return value, nil
 }
 
 func boolInt(value bool) int {

@@ -47,10 +47,10 @@ INSERT INTO bypass_probe_targets (
 		t.Fatalf("qualified cell = %+v", qualified)
 	}
 	var nodeCount, targetCount int
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM path_nodes WHERE path_id=?", cell.ID).Scan(&nodeCount); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplink_path_nodes WHERE path_id=?", cell.ID).Scan(&nodeCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM path_node_target_results WHERE path_id=?", cell.ID).Scan(&targetCount); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplink_path_node_target_results WHERE path_id=?", cell.ID).Scan(&targetCount); err != nil {
 		t.Fatal(err)
 	}
 	if nodeCount != 1 || targetCount != 1 {
@@ -64,7 +64,7 @@ INSERT INTO bypass_probe_targets (
 		t.Fatalf("stale StoreQualification() error = %v", err)
 	}
 	var afterStale int
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM path_nodes WHERE path_id=?", cell.ID).Scan(&afterStale); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplink_path_nodes WHERE path_id=?", cell.ID).Scan(&afterStale); err != nil {
 		t.Fatal(err)
 	}
 	if afterStale != 1 {
@@ -99,7 +99,7 @@ func TestStoreQualificationRejectsNodeFromAnotherSubscription(t *testing.T) {
 		t.Fatal("StoreQualification(foreign node) error = nil")
 	}
 	var count int
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM path_nodes WHERE path_id=?", cell.ID).Scan(&count); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplink_path_nodes WHERE path_id=?", cell.ID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -159,7 +159,7 @@ INSERT INTO bypass_probe_targets (
 		t.Fatalf("aggregate after exact failure = %+v", updated)
 	}
 	var nodeCount int
-	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM path_nodes WHERE path_id=?", cell.ID).Scan(&nodeCount); err != nil || nodeCount != 2 {
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplink_path_nodes WHERE path_id=?", cell.ID).Scan(&nodeCount); err != nil || nodeCount != 2 {
 		t.Fatalf("preserved path node count = %d, %v", nodeCount, err)
 	}
 	updated, err = repository.StoreNodeQualification(ctx, NodeQualificationSnapshot{

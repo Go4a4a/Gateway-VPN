@@ -21,6 +21,7 @@ import (
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/scheduler"
+	"gateway-vpn/internal/uplink"
 )
 
 type probeBroker struct {
@@ -60,10 +61,10 @@ type doerFunc func(*http.Request) (*http.Response, error)
 func (function doerFunc) Do(request *http.Request) (*http.Response, error) { return function(request) }
 
 func TestProbePathUsesOneModemContextAndPublishesFullThenLimited(t *testing.T) {
-	ctx, database, modems, paths, targets, path := directProbeFixture(t)
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
 	broker := &probeBroker{}
 	probeScheduler := testProbeScheduler(t, 10<<20)
-	prober, err := New(modems, paths, targets, broker, probeScheduler, []string{"1.1.1.1", "8.8.8.8"})
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, broker, probeScheduler, []string{"1.1.1.1", "8.8.8.8"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,8 +155,8 @@ func TestProbePathUsesOneModemContextAndPublishesFullThenLimited(t *testing.T) {
 }
 
 func TestProbePathBudgetDeferralDoesNotOverwriteEvidence(t *testing.T) {
-	ctx, _, modems, paths, targets, path := directProbeFixture(t)
-	prober, err := New(modems, paths, targets, &probeBroker{}, testProbeScheduler(t, 1), []string{"1.1.1.1"})
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, &probeBroker{}, testProbeScheduler(t, 1), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +173,8 @@ func TestProbePathBudgetDeferralDoesNotOverwriteEvidence(t *testing.T) {
 }
 
 func TestProbePathTreatsTargetTimeoutAsEvidenceButCallerCancellationAsAbort(t *testing.T) {
-	ctx, _, modems, paths, targets, path := directProbeFixture(t)
-	prober, err := New(modems, paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +223,8 @@ func TestProbePathTreatsTargetTimeoutAsEvidenceButCallerCancellationAsAbort(t *t
 }
 
 func TestResolveIPv4RejectsPrivateMixedAndIPv6Answers(t *testing.T) {
-	_, _, modems, paths, targets, _ := directProbeFixture(t)
-	prober, err := New(modems, paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1", "8.8.8.8"})
+	_, database, _, paths, targets, _ := directProbeFixture(t)
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1", "8.8.8.8"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,12 +248,12 @@ func TestResolveIPv4RejectsPrivateMixedAndIPv6Answers(t *testing.T) {
 }
 
 func TestProbePathRejectsRouteGenerationChangedDuringRoutingSync(t *testing.T) {
-	ctx, database, modems, paths, targets, path := directProbeFixture(t)
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
 	broker := &probeBroker{syncFunc: func() error {
 		_, err := database.ExecContext(ctx, "UPDATE modems SET route_generation=route_generation+1 WHERE id='modem-a'")
 		return err
 	}}
-	prober, err := New(modems, paths, targets, broker, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, broker, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,14 +275,14 @@ func TestProbePathRejectsRouteGenerationChangedDuringRoutingSync(t *testing.T) {
 }
 
 func TestProbePathWithOnlyOptionalTargetIsLimitedAndNoTargetsIsFailed(t *testing.T) {
-	ctx, _, modems, paths, targets, path := directProbeFixture(t)
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
 	setProbeTargetEnabled(t, ctx, targets, "required-status", false, false)
 	setProbeTargetEnabled(t, ctx, targets, "required-body", false, true)
 	if err := paths.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	broker := &probeBroker{}
-	prober, err := New(modems, paths, targets, broker, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, broker, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +318,66 @@ func TestProbePathWithOnlyOptionalTargetIsLimitedAndNoTargetsIsFailed(t *testing
 	}
 }
 
+func TestProbePathClassifiesWhitelistOnlyAndSkipsServiceEndpoints(t *testing.T) {
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
+	setProbeTargetEnabled(t, ctx, targets, "required-status", false, false)
+	setProbeTargetEnabled(t, ctx, targets, "required-body", false, true)
+	setProbeTargetEnabled(t, ctx, targets, "optional", false, true)
+	if _, err := targets.Create(ctx, bypass.CreateInput{
+		ID: "whitelist", Name: "Whitelist", Kind: bypass.KindDomain,
+		Value: "whitelist.example", TargetClass: bypass.TargetClassWhitelistIndicator,
+		Timeout: 5 * time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := targets.Create(ctx, bypass.CreateInput{
+		ID: "service", Name: "Service", Kind: bypass.KindDomain,
+		Value: "service.example", TargetClass: bypass.TargetClassServiceEndpoint,
+		Timeout: 5 * time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	path, err := paths.Get(ctx, path.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &probeBroker{}
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, broker, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prober.DialerFactory = func(string, uint32) (DialContextFunc, error) {
+		return func(context.Context, string, string) (net.Conn, error) { return nil, nil }, nil
+	}
+	prober.ResolverFactory = func(DialContextFunc, string) Resolver {
+		return resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("203.0.113.41")}, nil
+		})
+	}
+	prober.ClientFactory = func(DialContextFunc, string, string, []netip.Addr, time.Duration) (HTTPDoer, func(), error) {
+		return doerFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Hostname() != "whitelist.example" {
+				t.Fatalf("service endpoint was probed as user Internet evidence: %s", request.URL.Hostname())
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("available")), Header: make(http.Header)}, nil
+		}), func() {}, nil
+	}
+	result, err := prober.ProbePath(ctx, path.ID, scheduler.ClassStandby)
+	if err != nil || result.QualityClass != accesspolicy.QualityWhitelistOnly || result.WhitelistTargetsPassed != 1 || result.WhitelistTargetsTotal != 1 || result.RequiredTargetsTotal != 0 || result.OptionalTargetsTotal != 0 || result.FunctionalScore != 1 || result.FailureCode != "WHITELIST_ONLY_ACCESS" {
+		t.Fatalf("whitelist-only ProbePath() = %+v, %v", result, err)
+	}
+	if len(result.Targets) != 1 || result.Targets[0].TargetClass != bypass.TargetClassWhitelistIndicator || len(broker.authorizations) != 1 || broker.authorizations[0].targetID != "whitelist" {
+		t.Fatalf("whitelist/service evidence = targets %+v authorizations %+v", result.Targets, broker.authorizations)
+	}
+	stored, err := paths.Get(ctx, path.ID)
+	if err != nil || stored.State != "DEGRADED" || stored.QualityClass != accesspolicy.QualityWhitelistOnly || stored.WhitelistTargetsPassed != 1 || stored.WhitelistTargetsTotal != 1 {
+		t.Fatalf("stored whitelist-only path = %+v, %v", stored, err)
+	}
+}
+
 func TestPinnedDialerUsesOnlyResolvedIPv4AndExactOrigin(t *testing.T) {
 	var called string
 	dial := func(_ context.Context, network, address string) (net.Conn, error) {
@@ -343,8 +404,8 @@ func TestPinnedDialerUsesOnlyResolvedIPv4AndExactOrigin(t *testing.T) {
 }
 
 func TestRunnerProbesDuePathAndSkipsFreshEvidence(t *testing.T) {
-	ctx, _, modems, paths, targets, path := directProbeFixture(t)
-	prober, err := New(modems, paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	ctx, database, _, paths, targets, path := directProbeFixture(t)
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,6 +441,10 @@ func TestRunnerProbesDuePathAndSkipsFreshEvidence(t *testing.T) {
 	if err != nil || second.Due != 0 || second.Probed != 0 {
 		t.Fatalf("fresh RunOnce() = %+v, %v", second, err)
 	}
+	manual, err := runner.ProbeAllNow(ctx)
+	if err != nil || manual.Due != 1 || manual.Probed != 1 || manual.Published != 1 {
+		t.Fatalf("manual ProbeAllNow() with fresh evidence = %+v, %v", manual, err)
+	}
 	stored, _ := paths.Get(ctx, path.ID)
 	if stored.QualityClass != accesspolicy.QualityFull {
 		t.Fatalf("runner stored path = %+v", stored)
@@ -387,7 +452,7 @@ func TestRunnerProbesDuePathAndSkipsFreshEvidence(t *testing.T) {
 }
 
 func TestRunnerRotatesDuePathsAfterFailures(t *testing.T) {
-	ctx, _, modems, paths, targets, _ := directProbeFixture(t)
+	ctx, database, modems, paths, targets, _ := directProbeFixture(t)
 	for _, item := range []struct {
 		id     string
 		subnet int
@@ -400,7 +465,7 @@ func TestRunnerRotatesDuePathsAfterFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	prober, err := New(modems, paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
+	prober, err := New(uplink.NewRepository(database, 1101, 0x1101), paths, targets, &probeBroker{}, testProbeScheduler(t, 10<<20), []string{"1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
 	}

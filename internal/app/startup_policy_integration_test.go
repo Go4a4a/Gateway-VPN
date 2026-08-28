@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/state"
+	"gateway-vpn/internal/uplink"
 )
 
 const (
@@ -135,16 +136,17 @@ func TestStartupPolicyAgainstKernelFirewall(t *testing.T) {
 
 func startupIntegrationFirewall(database *sql.DB, modems *modem.Repository) *dataplane.FirewallBackend {
 	executor := platformexec.OSExecutor{}
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
 	backend := &dataplane.FirewallBackend{
 		Database: database,
-		Modems:   modems,
+		Uplinks:  uplinks,
 		Executor: executor,
 		NFT:      "/usr/sbin/nft",
 		TUNName:  "gateway-vpn-tun",
 		LANName:  "lan0",
 	}
 	backend.Routing = &dataplane.RoutingBackend{
-		Modems:            modems,
+		Uplinks:           uplinks,
 		Executor:          executor,
 		IP:                "/usr/sbin/ip",
 		LANPrefix:         "192.168.200.0/24",
@@ -191,7 +193,7 @@ func seedStartupIntegrationDirect(t *testing.T, ctx context.Context, database *s
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 10,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
 		Targets: []accesspolicy.DirectTargetResult{{
-			TargetID: "target-startup", State: "PASSED", LatencyMS: 10,
+			TargetID: "target-startup", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 10,
 			HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour),
 		}},
 	}); err != nil {

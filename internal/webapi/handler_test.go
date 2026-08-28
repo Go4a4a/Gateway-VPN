@@ -28,6 +28,7 @@ import (
 	"gateway-vpn/internal/candidateruntime"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/diagnostics"
+	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
 	loggingpkg "gateway-vpn/internal/logging"
@@ -41,6 +42,7 @@ import (
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
@@ -88,6 +90,61 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 	var count int
 	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("target count = %d, %v", count, err)
+	}
+}
+
+func TestGenericUplinkAndInterfaceInventoryAreAuthenticatedAndRedacted(t *testing.T) {
+	server, ctx := testServer(t)
+	identity := strings.Repeat("d", 64)
+	if _, err := server.dependencies.Uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:ethernet:test", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: identity,
+		PermanentMAC: "02:00:00:12:34:56", TopologyPath: "pci-0000:03:00.0",
+		CurrentIfname: "enp3s0", Driver: "igc", Vendor: "Intel", Model: "I225-V",
+		CarrierState: "UP", Addresses: []string{"198.51.100.20/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := server.dependencies.Uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "Ethernet A", NetworkInterfaceID: "netif:ethernet:test",
+		AddressMode: uplink.AddressDHCP, DNS: []string{"1.1.1.1"}, MTU: 1500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.dependencies.Paths.ReconcileCells(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.dependencies.DirectPaths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	unauthenticated := httptest.NewRecorder()
+	server.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/v1/uplinks", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated uplinks = %d", unauthenticated.Code)
+	}
+	cookie, _ := login(t, server)
+	request := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, req)
+		return response
+	}
+	uplinksResponse := request("/api/v1/uplinks")
+	if uplinksResponse.Code != http.StatusOK {
+		t.Fatalf("uplinks = %d %s", uplinksResponse.Code, uplinksResponse.Body.String())
+	}
+	if body := uplinksResponse.Body.String(); !strings.Contains(body, `"id":"`+created.ID+`"`) || !strings.Contains(body, `"type":"ETHERNET"`) || !strings.Contains(body, `"uplink_id":"`+created.ID+`"`) || strings.Contains(body, "identity_hash") || strings.Contains(body, "api_secret_ref") {
+		t.Fatalf("unexpected uplink inventory = %s", body)
+	}
+	interfacesResponse := request("/api/v1/network/interfaces")
+	if interfacesResponse.Code != http.StatusOK {
+		t.Fatalf("interfaces = %d %s", interfacesResponse.Code, interfacesResponse.Body.String())
+	}
+	if body := interfacesResponse.Body.String(); !strings.Contains(body, `"masked_mac":"xx:xx:xx:12:34:56"`) || !strings.Contains(body, `"role":"ETHERNET_UPLINK"`) || !strings.Contains(body, `"uplink_id":"`+created.ID+`"`) || strings.Contains(body, identity) || strings.Contains(body, "02:00:00:12:34:56") || strings.Contains(body, "stable_identity_hash") {
+		t.Fatalf("unexpected interface inventory = %s", body)
 	}
 }
 
@@ -1254,7 +1311,9 @@ func TestTargetCRUDPolicyConfirmationReorderAndProbeTriggerRequalification(t *te
 		t.Fatal(err)
 	}
 	pathProber := &fakeModemPathProber{}
+	directProber := &fakeDirectPathProber{result: directprobe.CycleResult{Due: 1, Probed: 1, Published: 1}}
 	server.dependencies.ModemPathProbe = pathProber
+	server.dependencies.DirectPathProbe = directProber
 	cookie, csrf := login(t, server)
 	call := func(method, path, body, confirmation string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1296,8 +1355,8 @@ func TestTargetCRUDPolicyConfirmationReorderAndProbeTriggerRequalification(t *te
 		t.Fatalf("reorder target = %d probes=%d %s", response.Code, pathProber.calls, response.Body.String())
 	}
 	response = call(http.MethodPost, "/api/v1/bypass-targets/"+targetID+"/probe", `{}`, "")
-	if response.Code != http.StatusAccepted || pathProber.calls != 5 || !strings.Contains(response.Body.String(), `"scope":"ALL_ELIGIBLE_PATHS"`) {
-		t.Fatalf("probe target = %d probes=%d %s", response.Code, pathProber.calls, response.Body.String())
+	if response.Code != http.StatusAccepted || pathProber.calls != 5 || directProber.calls != 1 || !strings.Contains(response.Body.String(), `"scope":"DIRECT_AND_VPN_ELIGIBLE_PATHS"`) || !strings.Contains(response.Body.String(), `"published":1`) {
+		t.Fatalf("probe target = %d vpn-probes=%d direct-probes=%d %s", response.Code, pathProber.calls, directProber.calls, response.Body.String())
 	}
 	response = call(http.MethodDelete, "/api/v1/bypass-targets/"+targetID, `{}`, "")
 	if response.Code != http.StatusConflict || pathProber.calls != 5 {
@@ -1306,6 +1365,31 @@ func TestTargetCRUDPolicyConfirmationReorderAndProbeTriggerRequalification(t *te
 	response = call(http.MethodDelete, "/api/v1/bypass-targets/"+targetID, `{}`, "remove-last-required-target")
 	if response.Code != http.StatusAccepted || pathProber.calls != 6 {
 		t.Fatalf("delete last required with confirmation = %d probes=%d %s", response.Code, pathProber.calls, response.Body.String())
+	}
+}
+
+func TestWhitelistIndicatorManualProbeUsesOnlyDirectUplinks(t *testing.T) {
+	server, ctx := testServer(t)
+	target, err := server.dependencies.Targets.Create(ctx, bypass.CreateInput{
+		ID: "whitelist-a", Name: "Белый список", Kind: bypass.KindDomain, Value: "yandex.ru",
+		TargetClass: bypass.TargetClassWhitelistIndicator, Timeout: 5 * time.Second,
+		SuccessMode: bypass.SuccessAnyHTTPResponse,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vpn := &fakeModemPathProber{}
+	direct := &fakeDirectPathProber{result: directprobe.CycleResult{Due: 2, Probed: 2, Published: 2}}
+	server.dependencies.ModemPathProbe = vpn
+	server.dependencies.DirectPathProbe = direct
+	cookie, csrf := login(t, server)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/bypass-targets/"+target.ID+"/probe", nil)
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || direct.calls != 1 || vpn.calls != 0 || !strings.Contains(response.Body.String(), `"scope":"DIRECT_UPLINKS"`) || !strings.Contains(response.Body.String(), `"vpn_qualification":"NOT_APPLICABLE"`) || !strings.Contains(response.Body.String(), `"published":2`) {
+		t.Fatalf("whitelist probe = %d direct=%d vpn=%d %s", response.Code, direct.calls, vpn.calls, response.Body.String())
 	}
 }
 
@@ -1528,7 +1612,7 @@ func TestPreferredNodeOrderAPIUsesActiveNodeIDsAndPreservesRuntime(t *testing.T)
 	if _, err := server.dependencies.Database.ExecContext(ctx, `
 UPDATE runtime_state SET gateway_state='ONLINE', path_state='PATH_ACTIVE',
 active_method_id='access:direct', active_method_kind='DIRECT',
-active_direct_path_id='direct:path:modem-a', active_modem_id='modem-a'
+active_direct_path_id='direct:path:modem-a', active_uplink_id='modem-a', active_modem_id='modem-a'
 WHERE singleton_id=1`); err != nil {
 		t.Fatal(err)
 	}
@@ -1837,7 +1921,7 @@ func TestDiscoveredModemAdoptionIsCSRFProtectedAndRedactsIdentity(t *testing.T) 
 	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM modems").Scan(&modemCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscription_modem_paths").Scan(&pathCount); err != nil {
+	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscription_uplink_paths").Scan(&pathCount); err != nil {
 		t.Fatal(err)
 	}
 	if modemCount != 2 || pathCount != 2 || len(registry.List()) != 0 {
@@ -1964,6 +2048,12 @@ type fakeModemPathProber struct {
 	err   error
 }
 
+type fakeDirectPathProber struct {
+	calls  int
+	result directprobe.CycleResult
+	err    error
+}
+
 type fakePathOperator struct {
 	result candidateruntime.PathOperationResult
 	err    error
@@ -1999,6 +2089,11 @@ func (activator *fakePathActivator) ActivateExact(_ context.Context, pathID, nod
 func (prober *fakeModemPathProber) RequalifyModem(_ context.Context, modemID string) (candidateruntime.RequalificationResult, error) {
 	prober.calls++
 	return candidateruntime.RequalificationResult{ModemID: modemID, SubscriptionsChecked: 1, Qualified: 1, CheckedAt: time.Now()}, prober.err
+}
+
+func (prober *fakeDirectPathProber) ProbeAllNow(context.Context) (directprobe.CycleResult, error) {
+	prober.calls++
+	return prober.result, prober.err
 }
 
 func (runtime *fakeModemRuntime) BlockPath(context.Context) error {
@@ -2147,7 +2242,7 @@ func TestDisablingActiveModemBlocksPathBeforeMutation(t *testing.T) {
 	server, ctx := testServer(t)
 	runtime := &fakeModemRuntime{}
 	server.dependencies.ModemRuntime = runtime
-	if _, err := server.dependencies.Database.ExecContext(ctx, "UPDATE runtime_state SET active_modem_id='modem-a' WHERE singleton_id=1"); err != nil {
+	if _, err := server.dependencies.Database.ExecContext(ctx, "UPDATE runtime_state SET active_uplink_id='modem-a', active_modem_id='modem-a' WHERE singleton_id=1"); err != nil {
 		t.Fatal(err)
 	}
 	cookie, csrf := login(t, server)
@@ -2503,7 +2598,7 @@ func testServer(t *testing.T) (*Server, context.Context) {
 	if _, err := matchers.EnsureDefaults(ctx); err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(Dependencies{Database: database, Auth: authService, State: state.NewRepository(database), Modems: modems, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: bypass.NewRepository(database), Matchers: matchers, WireGuardRuntime: &wireguardpkg.RuntimeStore{Database: database}})
+	server, err := New(Dependencies{Database: database, Auth: authService, State: state.NewRepository(database), Modems: modems, Uplinks: uplink.NewRepository(database, 1101, 0x1101), Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: bypass.NewRepository(database), Matchers: matchers, WireGuardRuntime: &wireguardpkg.RuntimeStore{Database: database}})
 	if err != nil {
 		t.Fatal(err)
 	}

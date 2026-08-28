@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 17 {
+	if err != nil || version != 18 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 17 {
+	if err != nil || latest != 18 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -233,8 +233,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 17 {
-		t.Fatalf("SchemaVersion() = %d, want 17", version)
+	if version != 18 {
+		t.Fatalf("SchemaVersion() = %d, want 18", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -278,8 +278,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 17 {
-		t.Fatalf("migration count = %d, want 17", count)
+	if count != 18 {
+		t.Fatalf("migration count = %d, want 18", count)
 	}
 }
 
@@ -406,7 +406,7 @@ func TestMigration17CompatibilityBridgeMirrorsLegacyWritesAtomically(t *testing.
 		t.Fatal(err)
 	}
 	defer database.Close()
-	if err := Migrate(ctx, database); err != nil {
+	if err := migrateFS(ctx, database, migrationsThrough(t, 17)); err != nil {
 		t.Fatal(err)
 	}
 	now := "2026-08-28T13:00:00Z"

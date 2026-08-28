@@ -328,13 +328,13 @@ WHERE id=?`, input.InterfaceName, input.ManagementCIDR, input.Gateway, string(dn
 			return LeaseUpdate{}, fmt.Errorf("advance modem route generation after lease change: %w", err)
 		}
 		result, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE subscription_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state='STALE', transport_state='UNKNOWN',
     selected_node_id=NULL, qualified_nodes=0, required_targets_passed=0,
     optional_targets_passed=0, quality_class='UNKNOWN', functional_score=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, now, id)
+WHERE uplink_id=?`, id, now, id)
 		if err != nil {
 			return LeaseUpdate{}, fmt.Errorf("invalidate modem paths after lease change: %w", err)
 		}
@@ -343,12 +343,12 @@ WHERE modem_id=?`, id, now, id)
 			return LeaseUpdate{}, fmt.Errorf("count invalidated modem paths: %w", err)
 		}
 		if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE direct_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
-    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, now, id); err != nil {
+WHERE uplink_id=?`, id, now, id); err != nil {
 			return LeaseUpdate{}, fmt.Errorf("invalidate direct path after lease change: %w", err)
 		}
 	}
@@ -379,21 +379,21 @@ WHERE id=?`, StateConfiguredOffline, StateDisabled, now, id)
 		return store.ErrNotFound
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
-    state='MODEM_OFFLINE', transport_state='UNKNOWN', selected_node_id=NULL,
+UPDATE subscription_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
+    state='UPLINK_OFFLINE', transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
     quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, now, id); err != nil {
+WHERE uplink_id=?`, id, now, id); err != nil {
 		return fmt.Errorf("mark modem paths offline: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
-    state='MODEM_OFFLINE', transport_state='UNKNOWN', quality_class='UNKNOWN',
-    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+UPDATE direct_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
+    state='UPLINK_OFFLINE', transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
     expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, now, id); err != nil {
+WHERE uplink_id=?`, id, now, id); err != nil {
 		return fmt.Errorf("mark direct modem path offline: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
@@ -437,26 +437,26 @@ SET enabled=?, priority=?, state=?, stable_since=NULL,
 WHERE id=?`, boolInt(enabled), priority, state, boolInt(enabled), now, id); err != nil {
 		return fmt.Errorf("update modem enabled state: %w", err)
 	}
-	pathState := "MODEM_DISABLED"
+	pathState := "UPLINK_DISABLED"
 	if enabled {
-		pathState = "MODEM_OFFLINE"
+		pathState = "UPLINK_OFFLINE"
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE subscription_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state=?, transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
     quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, pathState, now, id); err != nil {
+WHERE uplink_id=?`, id, pathState, now, id); err != nil {
 		return fmt.Errorf("update modem path enabled state: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE direct_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state=?, transport_state='UNKNOWN', quality_class='UNKNOWN',
-    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
     expires_at=NULL, updated_at=?
-WHERE modem_id=?`, id, pathState, now, id); err != nil {
+WHERE uplink_id=?`, id, pathState, now, id); err != nil {
 		return fmt.Errorf("update direct modem path enabled state: %w", err)
 	}
 	if err := appendModemEventTx(ctx, transaction, now, "MODEM_ENABLED_CHANGED", id, map[string]any{"enabled": enabled, "priority": priority}); err != nil {
@@ -496,19 +496,19 @@ WHERE id=? AND enabled=1`, StateRecovering, now, id)
 		return store.ErrNotFound
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
     quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, now, id); err != nil {
+WHERE uplink_id=?`, now, id); err != nil {
 		return fmt.Errorf("invalidate paths for modem recovery: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
+UPDATE direct_uplink_paths
 SET state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
-    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
     expires_at=NULL, updated_at=?
-WHERE modem_id=?`, now, id); err != nil {
+WHERE uplink_id=?`, now, id); err != nil {
 		return fmt.Errorf("invalidate direct path for modem recovery: %w", err)
 	}
 	if err := appendModemEventTx(ctx, transaction, now, "MODEM_RECOVERY_REQUESTED", id, nil); err != nil {

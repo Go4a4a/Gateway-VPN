@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"gateway-vpn/internal/firewall"
-	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/uplink"
 )
 
 const (
@@ -47,7 +47,7 @@ type RoutingSynchronizer interface {
 
 type FirewallBackend struct {
 	Database *sql.DB
-	Modems   *modem.Repository
+	Uplinks  *uplink.Repository
 	Routing  RoutingSynchronizer
 	Executor platformexec.Executor
 	NFT      string
@@ -63,32 +63,32 @@ func (backend *FirewallBackend) ActivatePath(ctx context.Context, generation uin
 	return backend.apply(ctx, PathState{Active: true, Mode: PathModeTUN, Generation: generation})
 }
 
-func (backend *FirewallBackend) ActivateDirectPath(ctx context.Context, modemID string, routeGeneration int64) error {
-	if backend == nil || backend.Database == nil || backend.Modems == nil || backend.Routing == nil || !validInterfaceName(backend.LANName) || strings.TrimSpace(modemID) == "" || routeGeneration <= 0 || routeGeneration > math.MaxUint32 {
+func (backend *FirewallBackend) ActivateDirectPath(ctx context.Context, uplinkID string, routeGeneration int64) error {
+	if backend == nil || backend.Database == nil || backend.Uplinks == nil || backend.Routing == nil || !validInterfaceName(backend.LANName) || strings.TrimSpace(uplinkID) == "" || routeGeneration <= 0 || routeGeneration > math.MaxUint32 {
 		return errors.New("bounded authoritative direct path activation is required")
 	}
 	if err := backend.Routing.SyncRouting(ctx); err != nil {
-		return fmt.Errorf("synchronize direct modem routing before activation: %w", err)
+		return fmt.Errorf("synchronize direct uplink routing before activation: %w", err)
 	}
-	currentModem, err := backend.Modems.Get(ctx, modemID)
-	if err != nil || !currentModem.Enabled || currentModem.State != modem.StateReady || currentModem.RouteGeneration != routeGeneration || !validInterfaceName(currentModem.InterfaceName) || currentModem.Fwmark == 0 {
-		return errors.New("direct activation modem context is unavailable or stale")
+	currentUplink, err := backend.Uplinks.Get(ctx, uplinkID)
+	if err != nil || !currentUplink.Enabled || currentUplink.State != uplink.StateReady || currentUplink.RouteGeneration != routeGeneration || !validInterfaceName(currentUplink.CurrentIfname) || currentUplink.Fwmark == 0 {
+		return errors.New("direct activation uplink context is unavailable or stale")
 	}
 	var configGeneration int64
 	err = backend.Database.QueryRowContext(ctx, `
 SELECT r.config_generation
 FROM runtime_state AS r
-JOIN direct_modem_paths AS p ON p.id=r.active_direct_path_id AND p.modem_id=r.active_modem_id
+JOIN direct_uplink_paths AS p ON p.id=r.active_direct_path_id AND p.uplink_id=r.active_uplink_id
 JOIN access_methods AS a ON a.id=r.active_method_id AND a.id='access:direct'
-JOIN modems AS m ON m.id=p.modem_id
+JOIN uplinks AS u ON u.id=p.uplink_id
 WHERE r.singleton_id=1 AND r.gateway_state='VERIFYING' AND r.path_state='PATH_VERIFYING'
   AND r.active_method_kind='DIRECT' AND r.active_subscription_id IS NULL AND r.active_node_id IS NULL
   AND r.active_path_id IS NULL AND r.active_direct_path_id IS NOT NULL
-  AND r.active_modem_id=? AND p.route_generation=? AND p.route_generation=m.route_generation
-  AND p.quality_class IN ('FULL', 'LIMITED') AND julianday(p.expires_at)>julianday(?)
+  AND r.active_uplink_id=? AND p.route_generation=? AND p.route_generation=u.route_generation
+  AND p.quality_class IN ('FULL', 'LIMITED', 'WHITELIST_ONLY') AND julianday(p.expires_at)>julianday(?)
   AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
-  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
-		modemID, routeGeneration, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&configGeneration)
+  AND a.enabled=1 AND u.enabled=1 AND u.state='UPLINK_READY'`,
+		uplinkID, routeGeneration, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&configGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errors.New("direct activation intent or fresh evidence is unavailable")
 	}
@@ -100,7 +100,7 @@ WHERE r.singleton_id=1 AND r.gateway_state='VERIFYING' AND r.path_state='PATH_VE
 	}
 	return backend.apply(ctx, PathState{
 		Active: true, Mode: PathModeDirect, Generation: uint32(configGeneration),
-		DirectInterface: currentModem.InterfaceName, DirectMark: currentModem.Fwmark,
+		DirectInterface: currentUplink.CurrentIfname, DirectMark: uint32(currentUplink.Fwmark),
 		RouteGeneration: uint32(routeGeneration),
 	})
 }

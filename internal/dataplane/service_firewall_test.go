@@ -16,6 +16,7 @@ import (
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/uplink"
 )
 
 type serviceExecutor struct {
@@ -88,7 +89,7 @@ func TestServiceFirewallAuthorizesExactWireGuardEndpointTuple(t *testing.T) {
 	executor := &serviceExecutor{}
 	policies := accesspolicy.NewRepository(database)
 	backend := ServiceFirewallBackend{
-		Routing: testRoutingBackend(modems, executor, &routingGate{}), Modems: modems,
+		Routing: testRoutingBackend(uplink.NewRepository(database, 1101, 0x1101), executor, &routingGate{}), Modems: modems,
 		Subscriptions: subscriptions, AccessPolicy: policies, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"},
 	}
 	current, err := modems.Get(context.Background(), "modem-a")
@@ -131,7 +132,7 @@ func TestServiceFirewallSynchronizesModemTuplesAndAuthorizesBoundHTTPS(t *testin
 	}
 	executor := &serviceExecutor{}
 	gate := &routingGate{}
-	routingBackend := testRoutingBackend(modems, executor, gate)
+	routingBackend := testRoutingBackend(uplink.NewRepository(database, 1101, 0x1101), executor, gate)
 	backend := ServiceFirewallBackend{Routing: routingBackend, Modems: modems, Subscriptions: subscriptions, AccessPolicy: accesspolicy.NewRepository(database), Targets: targets, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}}
 	if err := backend.SyncRouting(context.Background()); err != nil {
 		t.Fatalf("SyncRouting() error = %v", err)
@@ -199,7 +200,7 @@ func TestServiceFirewallRejectsPrivateOrNonHTTPSBootstrap(t *testing.T) {
 	database, modems, subscriptions, closeDatabase := serviceRepositories(t)
 	defer closeDatabase()
 	executor := &serviceExecutor{}
-	backend := ServiceFirewallBackend{Routing: testRoutingBackend(modems, executor, &routingGate{}), Modems: modems, Subscriptions: subscriptions, AccessPolicy: accesspolicy.NewRepository(database), Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}}
+	backend := ServiceFirewallBackend{Routing: testRoutingBackend(uplink.NewRepository(database, 1101, 0x1101), executor, &routingGate{}), Modems: modems, Subscriptions: subscriptions, AccessPolicy: accesspolicy.NewRepository(database), Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}}
 	for _, input := range []BootstrapAuthorization{
 		{ModemID: "modem-a", SubscriptionID: "sub-a", Addresses: []string{"192.168.8.1"}, Port: 443},
 		{ModemID: "modem-a", SubscriptionID: "sub-a", Addresses: []string{"203.0.113.10"}, Port: 80},
@@ -220,7 +221,7 @@ func TestServiceFirewallAllowsRefreshForRoutingDisabledURLSubscription(t *testin
 	executor := &serviceExecutor{}
 	policies := accesspolicy.NewRepository(database)
 	backend := ServiceFirewallBackend{
-		Routing: testRoutingBackend(modems, executor, &routingGate{}), Modems: modems,
+		Routing: testRoutingBackend(uplink.NewRepository(database, 1101, 0x1101), executor, &routingGate{}), Modems: modems,
 		Subscriptions: subscriptions, AccessPolicy: policies, Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"},
 	}
 	if err := backend.AuthorizeBootstrap(ctx, BootstrapAuthorization{ModemID: "modem-a", SubscriptionID: "sub-a", Addresses: []string{"203.0.113.12"}, Port: 443}); err != nil {
@@ -266,7 +267,7 @@ func TestServiceFirewallBuildsMihomoEndpointSetsFromProtectedVersion(t *testing.
 	}
 	executor := &serviceExecutor{}
 	backend := ServiceFirewallBackend{
-		Routing: testRoutingBackend(modems, executor, &routingGate{}), Modems: modems, Subscriptions: subscriptions,
+		Routing: testRoutingBackend(uplink.NewRepository(database, 1101, 0x1101), executor, &routingGate{}), Modems: modems, Subscriptions: subscriptions,
 		AccessPolicy: accesspolicy.NewRepository(database), Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"}, Versions: versions, PayloadRoot: payloadRoot,
 	}
 	if err := backend.AuthorizeMihomoEndpoints(ctx, MihomoEndpointAuthorization{VersionIDs: []string{"version-a"}}); err != nil {

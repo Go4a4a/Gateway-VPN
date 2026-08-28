@@ -238,7 +238,7 @@ func invalidateBootQualification(ctx context.Context, transaction *sql.Tx, now s
 		SQL  string
 	}{
 		{name: "subscription paths", SQL: `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
     candidate_nodes=0, qualified_nodes=0,
     required_targets_passed=0, required_targets_total=0,
@@ -246,17 +246,18 @@ SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
     quality_class='UNKNOWN', functional_score=0, latency_ms=NULL,
     last_checked_at=NULL, expires_at=NULL, updated_at=?`},
 		{name: "subscription nodes", SQL: `
-UPDATE path_nodes
+UPDATE uplink_path_nodes
 SET qualification_state='STALE', qualification_expires_at=NULL,
     latency_ms=NULL, failure_code=NULL`},
-		{name: "subscription target evidence", SQL: "DELETE FROM path_node_target_results"},
+		{name: "subscription target evidence", SQL: "DELETE FROM uplink_path_node_target_results"},
 		{name: "direct paths", SQL: `
-UPDATE direct_modem_paths
+UPDATE direct_uplink_paths
 SET state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
     functional_score=0, required_targets_passed=0, required_targets_total=0,
-    optional_targets_passed=0, optional_targets_total=0, latency_ms=NULL,
+    optional_targets_passed=0, optional_targets_total=0,
+    whitelist_targets_passed=0, whitelist_targets_total=0, latency_ms=NULL,
     last_checked_at=NULL, expires_at=NULL, failure_code=NULL, updated_at=?`},
-		{name: "direct target evidence", SQL: "DELETE FROM direct_path_target_results"},
+		{name: "direct target evidence", SQL: "DELETE FROM direct_uplink_path_target_results"},
 		{name: "periodic schedules", SQL: `
 UPDATE path_health_runtime
 SET next_probe_at=?, last_probe_at=NULL, last_result='UNKNOWN',

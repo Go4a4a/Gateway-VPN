@@ -30,9 +30,9 @@ func (repository *Repository) MarkTargetDegraded(ctx context.Context, pathID, no
 	err = transaction.QueryRowContext(ctx, `
 SELECT p.policy_generation, p.route_generation, p.candidate_nodes,
        pn.qualification_state, pn.qualification_expires_at, pn.latency_ms
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN runtime_state AS rs ON rs.active_path_id=p.id AND rs.active_node_id=? AND rs.path_state='PATH_ACTIVE'
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN nodes AS n ON n.id=pn.node_id AND n.enabled=1 AND n.version_id=s.active_version_id
 WHERE p.id=? AND pn.qualification_generation=p.policy_generation
@@ -53,10 +53,10 @@ WHERE p.id=? AND pn.qualification_generation=p.policy_generation
 	rows, err := transaction.QueryContext(ctx, `
 SELECT t.state, r.state, r.checked_at
 FROM bypass_probe_targets AS t
-LEFT JOIN path_node_target_results AS r
+LEFT JOIN uplink_path_node_target_results AS r
   ON r.path_id=? AND r.node_id=? AND r.target_id=t.id
   AND r.policy_generation=? AND r.route_generation=? AND r.expires_at>?
-WHERE t.enabled=1 AND t.required=1
+WHERE t.enabled=1 AND t.target_class='GLOBAL_REQUIRED'
 ORDER BY t.priority, t.id`, pathID, nodeID, expectedPolicyGeneration, expectedRouteGeneration, formattedNow)
 	if err != nil {
 		return Cell{}, fmt.Errorf("read required target degradation evidence: %w", err)
@@ -98,7 +98,7 @@ ORDER BY t.priority, t.id`, pathID, nodeID, expectedPolicyGeneration, expectedRo
 		return Cell{}, errors.New("target degradation requires a suspect required failure")
 	}
 	result, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state='DEGRADED', transport_state='PASSED', selected_node_id=?,
     candidate_nodes=?, qualified_nodes=0, required_targets_passed=?,
     required_targets_total=?, latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?

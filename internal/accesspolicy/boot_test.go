@@ -105,7 +105,7 @@ func seedBootEvidence(t *testing.T, ctx context.Context, database *sql.DB) (stri
 		TransportState: "PASSED", QualityClass: QualityFull, FunctionalScore: 1000,
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 9,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
-		Targets: []DirectTargetResult{{TargetID: "target-a", State: "PASSED", LatencyMS: 9, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+		Targets: []DirectTargetResult{{TargetID: "target-a", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 9, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +121,10 @@ func assertBootEvidence(t *testing.T, database *sql.DB, vpnPathID, directPathID,
 	t.Helper()
 	var gotVPN, gotDirect string
 	var vpnExpiry, directExpiry sql.NullString
-	if err := database.QueryRow("SELECT state, expires_at FROM subscription_modem_paths WHERE id=?", vpnPathID).Scan(&gotVPN, &vpnExpiry); err != nil {
+	if err := database.QueryRow("SELECT state, expires_at FROM subscription_uplink_paths WHERE id=?", vpnPathID).Scan(&gotVPN, &vpnExpiry); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.QueryRow("SELECT state, expires_at FROM direct_modem_paths WHERE id=?", directPathID).Scan(&gotDirect, &directExpiry); err != nil {
+	if err := database.QueryRow("SELECT state, expires_at FROM direct_uplink_paths WHERE id=?", directPathID).Scan(&gotDirect, &directExpiry); err != nil {
 		t.Fatal(err)
 	}
 	if gotVPN != vpnState || gotDirect != directState {
@@ -134,7 +134,7 @@ func assertBootEvidence(t *testing.T, database *sql.DB, vpnPathID, directPathID,
 		t.Fatalf("invalidated expiry remains: vpn=%q direct=%q", vpnExpiry.String, directExpiry.String)
 	}
 	var count int
-	if err := database.QueryRow("SELECT (SELECT COUNT(*) FROM path_node_target_results)+(SELECT COUNT(*) FROM direct_path_target_results)").Scan(&count); err != nil || count != targetRows {
+	if err := database.QueryRow("SELECT (SELECT COUNT(*) FROM uplink_path_node_target_results)+(SELECT COUNT(*) FROM direct_uplink_path_target_results)").Scan(&count); err != nil || count != targetRows {
 		t.Fatalf("target evidence rows = %d, %v; want %d", count, err, targetRows)
 	}
 }

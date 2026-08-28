@@ -95,18 +95,18 @@ func (current *Runtime) runPathOperation(ctx context.Context, pathID, nodeID str
 	if err != nil {
 		return PathOperationResult{}, err
 	}
-	readyModems, err := current.readyModems(ctx)
+	readyUplinks, err := current.readyUplinks(ctx)
 	if err != nil {
 		return PathOperationResult{}, err
 	}
-	pathModemReady := false
-	for _, item := range readyModems {
-		if item.ID == cell.ModemID {
-			pathModemReady = true
+	pathUplinkReady := false
+	for _, item := range readyUplinks {
+		if item.ID == cell.UplinkID {
+			pathUplinkReady = true
 			break
 		}
 	}
-	if !pathModemReady {
+	if !pathUplinkReady {
 		return PathOperationResult{}, ErrPathNotReady
 	}
 	currentSubscription, err := current.Subscriptions.Get(ctx, cell.SubscriptionID)
@@ -129,11 +129,11 @@ func (current *Runtime) runPathOperation(ctx context.Context, pathID, nodeID str
 	if err != nil {
 		return PathOperationResult{}, err
 	}
-	bundle, err := current.buildBundle(ctx, readyModems, nil)
+	bundle, err := current.buildBundle(ctx, readyUplinks, nil)
 	if err != nil {
 		return PathOperationResult{}, err
 	}
-	generatedPath, exists := findGeneratedPath(bundle.Paths, cell.ModemID, cell.SubscriptionID)
+	generatedPath, exists := findGeneratedPath(bundle.Paths, cell.UplinkID, cell.SubscriptionID)
 	if !exists {
 		return PathOperationResult{}, errors.New("active Mihomo bundle has no requested path")
 	}
@@ -161,7 +161,7 @@ func (current *Runtime) runPathOperation(ctx context.Context, pathID, nodeID str
 	}
 	healthPath := health.Path{
 		ID:             cell.ID,
-		ModemID:        cell.ModemID,
+		ModemID:        cell.UplinkID,
 		SubscriptionID: cell.SubscriptionID,
 		ProviderName:   generatedPath.ProviderName,
 		ProbeGroupName: generatedPath.ProbeGroupName,
@@ -322,9 +322,9 @@ func deferredReason(result health.CellResult) string {
 	return ""
 }
 
-func findGeneratedPath(paths []mihomo.Path, modemID, subscriptionID string) (mihomo.Path, bool) {
+func findGeneratedPath(paths []mihomo.Path, uplinkID, subscriptionID string) (mihomo.Path, bool) {
 	for _, item := range paths {
-		if !item.QualificationOnly && item.ModemID == modemID && item.SubscriptionID == subscriptionID {
+		if !item.QualificationOnly && item.UplinkID == uplinkID && item.SubscriptionID == subscriptionID {
 			return item, true
 		}
 	}
@@ -338,7 +338,7 @@ func (current *Runtime) appendPathOperationEvent(ctx context.Context, eventType 
 		"authoritative": operation.Authoritative,
 	}
 	_ = current.State.AppendEvent(ctx, state.EventInput{
-		Severity: "INFO", Type: eventType, ModemID: operation.Result.ModemID,
+		Severity: "INFO", Type: eventType, UplinkID: operation.Result.ModemID,
 		SubscriptionID: operation.Result.SubscriptionID, PathID: operation.PathID, Details: details,
 	})
 }

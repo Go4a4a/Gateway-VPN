@@ -25,6 +25,7 @@ const (
 
 	StateConfiguredOffline = "UPLINK_CONFIGURED_OFFLINE"
 	StateConfiguring       = "UPLINK_CONFIGURING"
+	StateReady             = "UPLINK_READY"
 )
 
 type Repository struct {
@@ -64,6 +65,22 @@ type NetworkInterface struct {
 	ReplacementForID   string
 	CreatedAt          string
 	UpdatedAt          string
+}
+
+// InterfaceRole is the non-secret assignment projected for inventory and UI.
+// The stable identity hash remains internal to NetworkInterface persistence and
+// must never be serialized by callers.
+type InterfaceRole struct {
+	Role               string
+	UplinkID           string
+	DesiredGeneration  int64
+	ObservedGeneration int64
+	State              string
+}
+
+type InterfaceInventory struct {
+	NetworkInterface
+	Roles []InterfaceRole
 }
 
 type CreateEthernetInput struct {
@@ -182,6 +199,52 @@ func (repository *Repository) GetInterface(ctx context.Context, id string) (Netw
 		return NetworkInterface{}, fmt.Errorf("get network interface: %w", err)
 	}
 	return item, nil
+}
+
+func (repository *Repository) ListInterfaces(ctx context.Context) ([]InterfaceInventory, error) {
+	rows, err := repository.database.QueryContext(ctx, interfaceSelect+" ORDER BY COALESCE(current_ifname, ''), id")
+	if err != nil {
+		return nil, fmt.Errorf("list network interfaces: %w", err)
+	}
+	defer rows.Close()
+	result := make([]InterfaceInventory, 0)
+	byID := make(map[string]int)
+	for rows.Next() {
+		item, err := scanInterface(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan network interface: %w", err)
+		}
+		byID[item.ID] = len(result)
+		result = append(result, InterfaceInventory{NetworkInterface: item, Roles: []InterfaceRole{}})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate network interfaces: %w", err)
+	}
+	roleRows, err := repository.database.QueryContext(ctx, `
+SELECT network_interface_id, role, COALESCE(uplink_id, ''),
+       desired_generation, observed_generation, state
+FROM interface_role_assignments
+ORDER BY network_interface_id, role, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list network interface roles: %w", err)
+	}
+	defer roleRows.Close()
+	for roleRows.Next() {
+		var interfaceID string
+		var role InterfaceRole
+		if err := roleRows.Scan(&interfaceID, &role.Role, &role.UplinkID, &role.DesiredGeneration, &role.ObservedGeneration, &role.State); err != nil {
+			return nil, fmt.Errorf("scan network interface role: %w", err)
+		}
+		index, exists := byID[interfaceID]
+		if !exists {
+			return nil, fmt.Errorf("network interface role references missing interface %s", interfaceID)
+		}
+		result[index].Roles = append(result[index].Roles, role)
+	}
+	if err := roleRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate network interface roles: %w", err)
+	}
+	return result, nil
 }
 
 func (repository *Repository) CreateEthernet(ctx context.Context, input CreateEthernetInput) (Uplink, error) {

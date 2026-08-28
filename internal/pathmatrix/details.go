@@ -75,7 +75,7 @@ func (repository *Repository) ListPathNodes(ctx context.Context, pathID string, 
 		return PathNodePage{}, errors.New("path id, limit 1..200, bounded cursor, and current time are required")
 	}
 	var exists int
-	if err := repository.database.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscription_modem_paths WHERE id=?", pathID).Scan(&exists); err != nil {
+	if err := repository.database.QueryRowContext(ctx, "SELECT COUNT(*) FROM subscription_uplink_paths WHERE id=?", pathID).Scan(&exists); err != nil {
 		return PathNodePage{}, fmt.Errorf("validate path node page: %w", err)
 	}
 	if exists != 1 {
@@ -91,16 +91,16 @@ SELECT p.id, n.id, n.external_name, n.proxy_type, n.candidate_source,
        CASE WHEN rs.active_path_id=p.id AND rs.active_node_id=n.id THEN 1 ELSE 0 END,
        p.policy_generation, p.route_generation,
        (
-           SELECT COUNT(*) FROM path_node_target_results AS r
+           SELECT COUNT(*) FROM uplink_path_node_target_results AS r
            WHERE r.path_id=p.id AND r.node_id=n.id
              AND r.policy_generation=p.policy_generation
              AND r.route_generation=p.route_generation AND r.expires_at>?
        )
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN subscription_versions AS v ON v.id=s.active_version_id
 JOIN nodes AS n ON n.version_id=v.id AND n.enabled=1
-LEFT JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=n.id
+LEFT JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=n.id
 CROSS JOIN runtime_state AS rs
 WHERE p.id=? AND n.id>?
 ORDER BY n.id
@@ -168,7 +168,7 @@ func (repository *Repository) ListNodeTargets(ctx context.Context, pathID, nodeI
 	var valid int
 	if err := repository.database.QueryRowContext(ctx, `
 SELECT COUNT(*)
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN nodes AS n ON n.version_id=s.active_version_id AND n.enabled=1
 WHERE p.id=? AND n.id=?`, pathID, nodeID).Scan(&valid); err != nil {
@@ -182,9 +182,10 @@ SELECT t.id, t.name, t.priority, t.required, t.success_mode,
        r.state, r.latency_ms, r.http_status, r.error_code, r.checked_at,
        r.expires_at, r.policy_generation, r.route_generation,
        p.policy_generation, p.route_generation
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN bypass_probe_targets AS t ON t.enabled=1
-LEFT JOIN path_node_target_results AS r
+	AND t.target_class IN ('GLOBAL_REQUIRED','GLOBAL_OPTIONAL')
+LEFT JOIN uplink_path_node_target_results AS r
   ON r.path_id=p.id AND r.node_id=? AND r.target_id=t.id
 WHERE p.id=?`
 	args := []any{nodeID, pathID}

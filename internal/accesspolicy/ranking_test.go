@@ -6,7 +6,7 @@ import (
 )
 
 func TestRankPrefersFullRegardlessOfMethodPriority(t *testing.T) {
-	direct := candidate("direct-a", MethodDirect, QualityLimited, 900, 1, 1, 0)
+	direct := candidate("direct-a", MethodDirect, QualityWhitelistOnly, 900, 1, 1, 0)
 	vpn := candidate("vpn-a", MethodSubscription, QualityFull, 0, 20, 2, 1)
 	decision, err := Rank([]Candidate{direct, vpn}, "direct-a")
 	if err != nil || decision.Candidate.Key != "vpn-a" || decision.Sticky {
@@ -23,7 +23,7 @@ func TestRankLimitedUsesFunctionBeforePriority(t *testing.T) {
 	}
 }
 
-func TestRankUsesMethodModemNodeAndStickyTie(t *testing.T) {
+func TestRankUsesMethodUplinkNodeAndStickyTie(t *testing.T) {
 	items := []Candidate{
 		candidate("method-second", MethodSubscription, QualityFull, 0, 20, 1, 1),
 		candidate("modem-second", MethodSubscription, QualityFull, 0, 10, 2, 1),
@@ -43,7 +43,7 @@ func TestRankUsesMethodModemNodeAndStickyTie(t *testing.T) {
 
 func TestRankFiltersUnavailableAndRejectsInvalidCandidates(t *testing.T) {
 	unavailable := candidate("offline", MethodDirect, QualityFull, 0, 1, 1, 0)
-	unavailable.ModemReady = false
+	unavailable.UplinkReady = false
 	failed := candidate("failed", MethodDirect, QualityFailed, 0, 1, 1, 0)
 	if _, err := Rank([]Candidate{unavailable, failed}, ""); !errors.Is(err, ErrNoCandidate) {
 		t.Fatalf("Rank() error = %v, want ErrNoCandidate", err)
@@ -55,12 +55,12 @@ func TestRankFiltersUnavailableAndRejectsInvalidCandidates(t *testing.T) {
 	}
 }
 
-func candidate(key, kind, quality string, score, methodPriority, modemPriority, nodePriority int64) Candidate {
+func candidate(key, kind, quality string, score, methodPriority, uplinkPriority, nodePriority int64) Candidate {
 	item := Candidate{
-		Key: key, MethodID: "method:" + key, MethodKind: kind, ModemID: "modem-a",
+		Key: key, MethodID: "method:" + key, MethodKind: kind, UplinkID: "modem-a",
 		Quality: quality, FunctionalScore: score, MethodPriority: methodPriority,
-		ModemPriority: modemPriority, NodePriority: nodePriority,
-		MethodEnabled: true, ModemReady: true, NodeAllowed: true, Fresh: true,
+		UplinkPriority: uplinkPriority, NodePriority: nodePriority,
+		MethodEnabled: true, UplinkReady: true, NodeAllowed: true, Fresh: true,
 	}
 	if kind == MethodSubscription {
 		item.SubscriptionID = "sub-a"

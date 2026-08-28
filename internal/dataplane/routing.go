@@ -10,13 +10,13 @@ import (
 	"strconv"
 	"strings"
 
-	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkplan"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/routing"
+	"gateway-vpn/internal/uplink"
 )
 
-const maximumModemAllocations = 1 << 16
+const maximumUplinkAllocations = 1 << 16
 
 // PathBlocker is intentionally narrower than the complete path firewall API.
 // A routing mutation may close the verified TUN gate, but it can never open it.
@@ -25,10 +25,10 @@ type PathBlocker interface {
 }
 
 // RoutingBackend reconciles the privileged policy-routing state from the
-// authoritative modem inventory. The caller supplies no routes, marks, tables,
+// authoritative uplink inventory. The caller supplies no routes, marks, tables,
 // interfaces, or gateways across the privilege boundary.
 type RoutingBackend struct {
-	Modems            *modem.Repository
+	Uplinks           *uplink.Repository
 	Executor          platformexec.Executor
 	IP                string
 	LANPrefix         string
@@ -43,29 +43,29 @@ func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 	if err := backend.validate(); err != nil {
 		return err
 	}
-	stored, err := backend.Modems.List(ctx)
+	stored, err := backend.Uplinks.List(ctx)
 	if err != nil {
-		return fmt.Errorf("read authoritative modem inventory: %w", err)
+		return fmt.Errorf("read authoritative uplink inventory: %w", err)
 	}
 	inputs := make([]networkplan.ModemInput, 0, len(stored))
 	for _, item := range stored {
 		if err := backend.validateAllocation(item); err != nil {
 			return err
 		}
-		if !item.Enabled || item.State != modem.StateReady {
+		if !item.Enabled || item.State != uplink.StateReady {
 			continue
 		}
 		inputs = append(inputs, networkplan.ModemInput{
-			ID: item.ID, Priority: item.Priority, InterfaceName: item.InterfaceName,
-			ManagementPrefix: item.ManagementCIDR, Gateway: item.Gateway,
-			RoutingTableID: item.RoutingTableID, Fwmark: item.Fwmark,
+			ID: item.ID, Priority: item.Priority, InterfaceName: item.CurrentIfname,
+			ManagementPrefix: item.IPv4CIDR, Gateway: item.Gateway,
+			RoutingTableID: uint32(item.RoutingTableID), Fwmark: uint32(item.Fwmark),
 		})
 	}
 	desired, err := networkplan.Build(networkplan.Input{
 		LANPrefix: backend.LANPrefix, WireGuardPrefix: backend.WireGuardPrefix, Modems: inputs,
 	})
 	if err != nil {
-		return fmt.Errorf("build authoritative modem routing plan: %w", err)
+		return fmt.Errorf("build authoritative uplink routing plan: %w", err)
 	}
 	current, err := backend.observe(ctx)
 	if err != nil {
@@ -94,14 +94,14 @@ func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 		return err
 	}
 	if !observed.matches(desired) {
-		return errors.New("policy-routing verification differs from authoritative modem plan")
+		return errors.New("policy-routing verification differs from authoritative uplink plan")
 	}
 	return backend.verifyLookups(ctx, desired)
 }
 
 func (backend RoutingBackend) validate() error {
-	if backend.Modems == nil || backend.Executor == nil || backend.Gate == nil || backend.IP != "/usr/sbin/ip" {
-		return errors.New("fixed Ubuntu iproute2 backend, modem inventory, and path blocker are required")
+	if backend.Uplinks == nil || backend.Executor == nil || backend.Gate == nil || backend.IP != "/usr/sbin/ip" {
+		return errors.New("fixed Ubuntu iproute2 backend, uplink inventory, and path blocker are required")
 	}
 	if backend.RoutingTableStart < 256 || backend.FwmarkStart == 0 {
 		return errors.New("valid modem routing allocation ranges are required")
@@ -124,14 +124,14 @@ func (backend RoutingBackend) validate() error {
 	return nil
 }
 
-func (backend RoutingBackend) validateAllocation(item modem.Modem) error {
-	tableLimit := uint64(backend.RoutingTableStart) + maximumModemAllocations
-	markLimit := uint64(backend.FwmarkStart) + maximumModemAllocations
+func (backend RoutingBackend) validateAllocation(item uplink.Uplink) error {
+	tableLimit := uint64(backend.RoutingTableStart) + maximumUplinkAllocations
+	markLimit := uint64(backend.FwmarkStart) + maximumUplinkAllocations
 	if uint64(item.RoutingTableID) < uint64(backend.RoutingTableStart) || uint64(item.RoutingTableID) >= tableLimit {
-		return fmt.Errorf("modem %s routing table is outside the configured allocation range", item.ID)
+		return fmt.Errorf("uplink %s routing table is outside the configured allocation range", item.ID)
 	}
 	if uint64(item.Fwmark) < uint64(backend.FwmarkStart) || uint64(item.Fwmark) >= markLimit {
-		return fmt.Errorf("modem %s fwmark is outside the configured allocation range", item.ID)
+		return fmt.Errorf("uplink %s fwmark is outside the configured allocation range", item.ID)
 	}
 	return nil
 }

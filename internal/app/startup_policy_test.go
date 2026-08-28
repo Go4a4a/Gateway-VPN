@@ -132,7 +132,7 @@ func activeDirectStartupFixture(t *testing.T) (context.Context, *sql.DB, *state.
 		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 10,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
-		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", State: "PASSED", LatencyMS: 10, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 10, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -12,15 +12,16 @@ const (
 	MethodDirect       = "DIRECT"
 	MethodSubscription = "SUBSCRIPTION"
 
-	QualityUnknown = "UNKNOWN"
-	QualityFull    = "FULL"
-	QualityLimited = "LIMITED"
-	QualityFailed  = "FAILED"
+	QualityUnknown       = "UNKNOWN"
+	QualityFull          = "FULL"
+	QualityLimited       = "LIMITED"
+	QualityWhitelistOnly = "WHITELIST_ONLY"
+	QualityFailed        = "FAILED"
 )
 
 var ErrNoCandidate = errors.New("no eligible access candidate")
 
-// Candidate is a fresh, concrete method/modem/(optional node) choice. The
+// Candidate is a fresh, concrete method/uplink/(optional node) choice. The
 // ranker is deliberately independent from SQL so the exact failover ordering
 // is deterministic and can be tested without a network namespace.
 type Candidate struct {
@@ -28,16 +29,16 @@ type Candidate struct {
 	PathID           string
 	MethodID         string
 	MethodKind       string
-	ModemID          string
+	UplinkID         string
 	SubscriptionID   string
 	NodeID           string
 	Quality          string
 	FunctionalScore  int64
 	MethodPriority   int64
-	ModemPriority    int64
+	UplinkPriority   int64
 	NodePriority     int64
 	MethodEnabled    bool
-	ModemReady       bool
+	UplinkReady      bool
 	NodeAllowed      bool
 	Fresh            bool
 	PolicyGeneration int64
@@ -52,7 +53,7 @@ type Decision struct {
 
 // Rank applies the architectural order:
 //
-//	FULL -> highest LIMITED score -> method -> modem -> node -> sticky tie.
+//	FULL -> highest LIMITED/WHITELIST_ONLY score -> method -> uplink -> node -> sticky tie.
 //
 // Latency is intentionally absent. A small latency change must not move a
 // stable user path; operators control the order explicitly.
@@ -67,10 +68,10 @@ func Rank(candidates []Candidate, currentKey string) (Decision, error) {
 			return Decision{}, fmt.Errorf("duplicate access candidate key %q", candidate.Key)
 		}
 		seen[candidate.Key] = struct{}{}
-		if !candidate.MethodEnabled || !candidate.ModemReady || !candidate.NodeAllowed || !candidate.Fresh {
+		if !candidate.MethodEnabled || !candidate.UplinkReady || !candidate.NodeAllowed || !candidate.Fresh {
 			continue
 		}
-		if candidate.Quality != QualityFull && candidate.Quality != QualityLimited {
+		if candidate.Quality != QualityFull && candidate.Quality != QualityLimited && candidate.Quality != QualityWhitelistOnly {
 			continue
 		}
 		eligible = append(eligible, candidate)
@@ -84,7 +85,7 @@ func Rank(candidates []Candidate, currentKey string) (Decision, error) {
 	winner := eligible[0]
 	sticky := winner.Key == currentKey
 	reason := "FULL_PRIORITY"
-	if winner.Quality == QualityLimited {
+	if winner.Quality == QualityLimited || winner.Quality == QualityWhitelistOnly {
 		reason = "LIMITED_FUNCTIONAL_SCORE"
 	}
 	if sticky {
@@ -98,14 +99,14 @@ func candidateLess(left, right Candidate, currentKey string) bool {
 	if leftClass != rightClass {
 		return leftClass > rightClass
 	}
-	if left.Quality == QualityLimited && left.FunctionalScore != right.FunctionalScore {
+	if (left.Quality == QualityLimited || left.Quality == QualityWhitelistOnly) && left.FunctionalScore != right.FunctionalScore {
 		return left.FunctionalScore > right.FunctionalScore
 	}
 	if left.MethodPriority != right.MethodPriority {
 		return left.MethodPriority < right.MethodPriority
 	}
-	if left.ModemPriority != right.ModemPriority {
-		return left.ModemPriority < right.ModemPriority
+	if left.UplinkPriority != right.UplinkPriority {
+		return left.UplinkPriority < right.UplinkPriority
 	}
 	if left.NodePriority != right.NodePriority {
 		return left.NodePriority < right.NodePriority
@@ -121,7 +122,7 @@ func qualityRank(value string) int {
 	switch value {
 	case QualityFull:
 		return 2
-	case QualityLimited:
+	case QualityLimited, QualityWhitelistOnly:
 		return 1
 	default:
 		return 0
@@ -129,19 +130,19 @@ func qualityRank(value string) int {
 }
 
 func validateCandidate(candidate Candidate) error {
-	if strings.TrimSpace(candidate.Key) == "" || strings.TrimSpace(candidate.MethodID) == "" || strings.TrimSpace(candidate.ModemID) == "" {
-		return errors.New("access candidate key, method, and modem are required")
+	if strings.TrimSpace(candidate.Key) == "" || strings.TrimSpace(candidate.MethodID) == "" || strings.TrimSpace(candidate.UplinkID) == "" {
+		return errors.New("access candidate key, method, and uplink are required")
 	}
-	if candidate.MethodPriority <= 0 || candidate.ModemPriority <= 0 || candidate.FunctionalScore < 0 {
+	if candidate.MethodPriority <= 0 || candidate.UplinkPriority <= 0 || candidate.FunctionalScore < 0 {
 		return errors.New("access candidate priorities and functional score are invalid")
 	}
 	switch candidate.Quality {
-	case QualityUnknown, QualityFull, QualityLimited, QualityFailed:
+	case QualityUnknown, QualityFull, QualityLimited, QualityWhitelistOnly, QualityFailed:
 	default:
 		return fmt.Errorf("access candidate %s has invalid quality %q", candidate.Key, candidate.Quality)
 	}
-	if candidate.Quality == QualityLimited && candidate.FunctionalScore == 0 {
-		return errors.New("LIMITED access candidate requires a positive functional score")
+	if (candidate.Quality == QualityLimited || candidate.Quality == QualityWhitelistOnly) && candidate.FunctionalScore == 0 {
+		return errors.New("limited access candidate requires a positive functional score")
 	}
 	switch candidate.MethodKind {
 	case MethodDirect:

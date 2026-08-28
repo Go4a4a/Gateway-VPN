@@ -27,6 +27,10 @@ func TestRepositoryMigratesHiLinkAndCreatesEthernetFromUnusedInterface(t *testin
 	if observed.CurrentIfname != "enp3s0" || observed.CarrierState != "UP" {
 		t.Fatalf("observed interface = %+v", observed)
 	}
+	inventory, err := repository.ListInterfaces(ctx)
+	if err != nil || len(inventory) != 2 {
+		t.Fatalf("interface inventory before Ethernet assignment = %+v, %v", inventory, err)
+	}
 	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{
 		ID: "uplink-ethernet-a", Name: "Основной Ethernet", NetworkInterfaceID: observed.ID,
 		AddressMode: AddressDHCP, DNS: []string{"1.1.1.1"}, MTU: 1500,
@@ -48,6 +52,19 @@ func TestRepositoryMigratesHiLinkAndCreatesEthernetFromUnusedInterface(t *testin
 	var role string
 	if err := database.QueryRowContext(ctx, "SELECT role FROM interface_role_assignments WHERE uplink_id=?", created.ID).Scan(&role); err != nil || role != "ETHERNET_UPLINK" {
 		t.Fatalf("Ethernet role = %q, %v", role, err)
+	}
+	inventory, err = repository.ListInterfaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ethernet InterfaceInventory
+	for _, item := range inventory {
+		if item.ID == observed.ID {
+			ethernet = item
+		}
+	}
+	if ethernet.CurrentIfname != "enp3s0" || len(ethernet.Roles) != 1 || ethernet.Roles[0].Role != "ETHERNET_UPLINK" || ethernet.Roles[0].UplinkID != created.ID {
+		t.Fatalf("Ethernet inventory = %+v", ethernet)
 	}
 }
 

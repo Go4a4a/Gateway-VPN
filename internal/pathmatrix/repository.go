@@ -1,4 +1,4 @@
-// Package pathmatrix stores the canonical modem-by-subscription status matrix.
+// Package pathmatrix stores the canonical uplink-by-subscription status matrix.
 package pathmatrix
 
 import (
@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	StateModemOffline         = "MODEM_OFFLINE"
-	StateModemDisabled        = "MODEM_DISABLED"
+	StateUplinkOffline        = "UPLINK_OFFLINE"
+	StateUplinkDisabled       = "UPLINK_DISABLED"
+	StateModemOffline         = StateUplinkOffline  // deprecated compatibility name
+	StateModemDisabled        = StateUplinkDisabled // deprecated compatibility name
 	StateSubscriptionDisabled = "SUBSCRIPTION_DISABLED"
 	StateUntested             = "UNTESTED"
 	StateProbing              = "PROBING"
@@ -30,7 +32,13 @@ type Repository struct {
 }
 
 type Cell struct {
-	ID                    string
+	ID                  string
+	UplinkID            string
+	UplinkDisplayNumber int64
+	UplinkType          string
+	UplinkName          string
+	UplinkPriority      int64
+	// Deprecated modem aliases remain populated during the bounded API migration.
 	ModemID               string
 	ModemDisplayNumber    int64
 	ModemName             string
@@ -105,76 +113,76 @@ func (repository *Repository) ReconcileCells(ctx context.Context) error {
 	}
 
 	_, err = transaction.ExecContext(ctx, `
-INSERT INTO subscription_modem_paths (
-    id, modem_id, subscription_id, state, transport_state,
+INSERT INTO subscription_uplink_paths (
+    id, uplink_id, subscription_id, state, transport_state,
     policy_generation, route_generation, created_at, updated_at
 )
 SELECT
-    'path:' || m.id || ':' || s.id,
-    m.id,
+	'path:' || u.id || ':' || s.id,
+	u.id,
     s.id,
     CASE
-        WHEN m.enabled=0 THEN 'MODEM_DISABLED'
+		WHEN u.enabled=0 THEN 'UPLINK_DISABLED'
         WHEN s.enabled=0 THEN 'SUBSCRIPTION_DISABLED'
-        WHEN m.state='MODEM_CONFIGURED_OFFLINE' THEN 'MODEM_OFFLINE'
+		WHEN u.state<>'UPLINK_READY' THEN 'UPLINK_OFFLINE'
         ELSE 'UNTESTED'
     END,
     'UNKNOWN',
 	?,
-    m.route_generation,
+	u.route_generation,
     ?,
     ?
-FROM modems AS m
+FROM uplinks AS u
 CROSS JOIN subscriptions AS s
 WHERE 1=1
-ON CONFLICT(modem_id, subscription_id) DO NOTHING`, policyGeneration, now, now)
+ON CONFLICT(uplink_id, subscription_id) DO NOTHING`, policyGeneration, now, now)
 	if err != nil {
 		return fmt.Errorf("create path matrix cells: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths AS p
+UPDATE subscription_uplink_paths AS p
 SET state = CASE
-        WHEN m.enabled=0 THEN 'MODEM_DISABLED'
+		WHEN u.enabled=0 THEN 'UPLINK_DISABLED'
         WHEN s.enabled=0 THEN 'SUBSCRIPTION_DISABLED'
-        WHEN m.state='MODEM_CONFIGURED_OFFLINE' THEN 'MODEM_OFFLINE'
-        WHEN p.state IN ('MODEM_DISABLED', 'SUBSCRIPTION_DISABLED', 'MODEM_OFFLINE') THEN 'UNTESTED'
+		WHEN u.state<>'UPLINK_READY' THEN 'UPLINK_OFFLINE'
+		WHEN p.state IN ('UPLINK_DISABLED', 'SUBSCRIPTION_DISABLED', 'UPLINK_OFFLINE') THEN 'UNTESTED'
         ELSE p.state
     END,
     transport_state = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 'UNKNOWN'
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 'UNKNOWN'
         ELSE p.transport_state
     END,
     selected_node_id = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN NULL
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN NULL
         ELSE p.selected_node_id
     END,
     qualified_nodes = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 0
         ELSE p.qualified_nodes
     END,
     required_targets_passed = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 0
         ELSE p.required_targets_passed
     END,
     quality_class = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 'UNKNOWN'
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 'UNKNOWN'
         ELSE p.quality_class
     END,
     functional_score = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 0
         ELSE p.functional_score
     END,
     optional_targets_passed = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN 0
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN 0
         ELSE p.optional_targets_passed
     END,
     expires_at = CASE
-        WHEN m.enabled=0 OR s.enabled=0 OR m.state='MODEM_CONFIGURED_OFFLINE' THEN NULL
+		WHEN u.enabled=0 OR s.enabled=0 OR u.state<>'UPLINK_READY' THEN NULL
         ELSE p.expires_at
     END,
     updated_at = ?
-FROM modems AS m, subscriptions AS s
-WHERE p.modem_id=m.id AND p.subscription_id=s.id`, now); err != nil {
+FROM uplinks AS u, subscriptions AS s
+WHERE p.uplink_id=u.id AND p.subscription_id=s.id`, now); err != nil {
 		return fmt.Errorf("refresh disabled path states: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
@@ -184,7 +192,7 @@ WHERE p.modem_id=m.id AND p.subscription_id=s.id`, now); err != nil {
 }
 
 func (repository *Repository) List(ctx context.Context) ([]Cell, error) {
-	rows, err := repository.database.QueryContext(ctx, cellSelect+` ORDER BY m.priority, s.priority, m.display_number`)
+	rows, err := repository.database.QueryContext(ctx, cellSelect+` ORDER BY u.priority, s.priority, u.display_number`)
 	if err != nil {
 		return nil, fmt.Errorf("list path matrix: %w", err)
 	}
@@ -203,8 +211,8 @@ func (repository *Repository) List(ctx context.Context) ([]Cell, error) {
 	return result, nil
 }
 
-func (repository *Repository) Get(ctx context.Context, modemID, subscriptionID string) (Cell, error) {
-	item, err := scanCell(repository.database.QueryRowContext(ctx, cellSelect+" WHERE p.modem_id=? AND p.subscription_id=?", modemID, subscriptionID))
+func (repository *Repository) Get(ctx context.Context, uplinkID, subscriptionID string) (Cell, error) {
+	item, err := scanCell(repository.database.QueryRowContext(ctx, cellSelect+" WHERE p.uplink_id=? AND p.subscription_id=?", uplinkID, subscriptionID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cell{}, store.ErrNotFound
 	}
@@ -234,7 +242,7 @@ func (repository *Repository) UpdateResult(ctx context.Context, update ResultUpd
 	}
 	qualityClass, functionalScore := resultQuality(update)
 	result, err := repository.database.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
     optional_targets_passed=?, optional_targets_total=?,
@@ -273,43 +281,43 @@ WHERE id=? AND policy_generation=? AND route_generation=?`,
 	return nil
 }
 
-func (repository *Repository) BumpRouteGeneration(ctx context.Context, modemID string) error {
+func (repository *Repository) BumpRouteGeneration(ctx context.Context, uplinkID string) error {
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin modem route generation bump: %w", err)
+		return fmt.Errorf("begin uplink route generation bump: %w", err)
 	}
 	defer transaction.Rollback()
 	now := repository.now().UTC().Format(time.RFC3339Nano)
-	modemResult, err := transaction.ExecContext(ctx, `
-UPDATE modems SET route_generation=route_generation+1, updated_at=? WHERE id=?`, now, modemID)
+	uplinkResult, err := transaction.ExecContext(ctx, `
+UPDATE uplinks SET route_generation=route_generation+1, updated_at=? WHERE id=?`, now, uplinkID)
 	if err != nil {
-		return fmt.Errorf("bump modem route generation: %w", err)
+		return fmt.Errorf("bump uplink route generation: %w", err)
 	}
-	if count, countErr := modemResult.RowsAffected(); countErr != nil || count != 1 {
+	if count, countErr := uplinkResult.RowsAffected(); countErr != nil || count != 1 {
 		return store.ErrNotFound
 	}
 	result, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE subscription_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
     quality_class='UNKNOWN', functional_score=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, modemID, now, modemID)
+WHERE uplink_id=?`, uplinkID, now, uplinkID)
 	if err != nil {
-		return fmt.Errorf("bump modem route generation: %w", err)
+		return fmt.Errorf("bump uplink route generation: %w", err)
 	}
 	if _, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("read route generation update count: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
-SET route_generation=(SELECT route_generation FROM modems WHERE id=?),
+UPDATE direct_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
     state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
     functional_score=0, required_targets_passed=0, optional_targets_passed=0,
     last_checked_at=NULL, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, modemID, now, modemID); err != nil {
-		return fmt.Errorf("invalidate direct modem route generation: %w", err)
+WHERE uplink_id=?`, uplinkID, now, uplinkID); err != nil {
+		return fmt.Errorf("invalidate direct uplink route generation: %w", err)
 	}
 	return transaction.Commit()
 }
@@ -331,15 +339,15 @@ func (repository *Repository) BumpPolicyGeneration(ctx context.Context) (int64, 
 	return generation, nil
 }
 
-func (repository *Repository) MarkModemOffline(ctx context.Context, modemID string) error {
+func (repository *Repository) MarkUplinkOffline(ctx context.Context, uplinkID string) error {
 	result, err := repository.database.ExecContext(ctx, `
-UPDATE subscription_modem_paths
-SET state='MODEM_OFFLINE', transport_state='UNKNOWN', selected_node_id=NULL,
+UPDATE subscription_uplink_paths
+SET state='UPLINK_OFFLINE', transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
     quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
-WHERE modem_id=?`, repository.now().UTC().Format(time.RFC3339Nano), modemID)
+WHERE uplink_id=?`, repository.now().UTC().Format(time.RFC3339Nano), uplinkID)
 	if err != nil {
-		return fmt.Errorf("mark modem paths offline: %w", err)
+		return fmt.Errorf("mark uplink paths offline: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
@@ -349,6 +357,11 @@ WHERE modem_id=?`, repository.now().UTC().Format(time.RFC3339Nano), modemID)
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// MarkModemOffline is retained while HiLink callers migrate to uplink terminology.
+func (repository *Repository) MarkModemOffline(ctx context.Context, modemID string) error {
+	return repository.MarkUplinkOffline(ctx, modemID)
 }
 
 func validResultState(state string) bool {
@@ -444,7 +457,7 @@ func formatOptionalTime(value time.Time) any {
 }
 
 const cellSelect = `
-SELECT p.id, p.modem_id, m.display_number, m.name, m.priority,
+SELECT p.id, p.uplink_id, u.display_number, u.type, u.name, u.priority,
        p.subscription_id, s.name, s.priority, p.state, p.transport_state,
        p.selected_node_id, p.candidate_nodes, p.qualified_nodes,
        p.required_targets_passed, p.required_targets_total,
@@ -452,8 +465,8 @@ SELECT p.id, p.modem_id, m.display_number, m.name, m.priority,
        p.quality_class, p.functional_score, p.latency_ms,
        p.policy_generation, p.route_generation, p.last_checked_at,
        p.expires_at, p.created_at, p.updated_at
-FROM subscription_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM subscription_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id`
 
 type scanner interface {
@@ -466,10 +479,11 @@ func scanCell(row scanner) (Cell, error) {
 	var latencyMS sql.NullInt64
 	err := row.Scan(
 		&item.ID,
-		&item.ModemID,
-		&item.ModemDisplayNumber,
-		&item.ModemName,
-		&item.ModemPriority,
+		&item.UplinkID,
+		&item.UplinkDisplayNumber,
+		&item.UplinkType,
+		&item.UplinkName,
+		&item.UplinkPriority,
 		&item.SubscriptionID,
 		&item.SubscriptionName,
 		&item.SubscriptionPriority,
@@ -493,6 +507,9 @@ func scanCell(row scanner) (Cell, error) {
 		&item.UpdatedAt,
 	)
 	item.SelectedNodeID = selectedNodeID.String
+	if item.UplinkType == "HILINK" {
+		item.ModemID, item.ModemDisplayNumber, item.ModemName, item.ModemPriority = item.UplinkID, item.UplinkDisplayNumber, item.UplinkName, item.UplinkPriority
+	}
 	item.LatencyMS = latencyMS.Int64
 	item.LastCheckedAt = lastCheckedAt.String
 	item.ExpiresAt = expiresAt.String

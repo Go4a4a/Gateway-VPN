@@ -69,12 +69,12 @@ VALUES (?, ?, ?, ?, ?, 'vless')`, nodeID, versionID, nodeID, nodeID, "fp-"+nodeI
 		}
 		nodeID := "node-" + pair[1]
 		if _, err := database.ExecContext(ctx, `
-INSERT INTO path_nodes(path_id, node_id, qualification_state, qualification_generation, route_generation, qualification_expires_at)
+INSERT INTO uplink_path_nodes(path_id, node_id, qualification_state, qualification_generation, route_generation, qualification_expires_at)
 VALUES (?, ?, 'BYPASS_FAILED', 0, 0, ?)`, path.ID, nodeID, expires); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := database.ExecContext(ctx, `
-INSERT INTO path_node_target_results(
+INSERT INTO uplink_path_node_target_results(
     path_id, node_id, target_id, state, checked_at, expires_at,
     policy_generation, route_generation
 ) VALUES (?, ?, 'target', 'FAILED', ?, ?, 0, 0)`, path.ID, nodeID, checked, expires); err != nil {
@@ -90,12 +90,12 @@ INSERT INTO bypass_probe_targets (
 		t.Fatal(err)
 	}
 	if _, err := database.ExecContext(ctx, `
-INSERT INTO path_node_target_results(
+INSERT INTO uplink_path_node_target_results(
     path_id, node_id, target_id, state, checked_at, expires_at,
     policy_generation, route_generation
 )
 SELECT path_id, node_id, 'target-ok', 'PASSED', ?, ?, policy_generation, route_generation
-FROM path_node_target_results WHERE target_id='target'`, checked, expires); err != nil {
+FROM uplink_path_node_target_results WHERE target_id='target'`, checked, expires); err != nil {
 		t.Fatal(err)
 	}
 	normal, err := evaluator.Evaluate(ctx, "target-ok")
@@ -107,7 +107,7 @@ FROM path_node_target_results WHERE target_id='target'`, checked, expires); err 
 		t.Fatalf("Evaluate(failures) = %+v, %v", assessment, err)
 	}
 	if _, err := database.ExecContext(ctx, `
-UPDATE path_node_target_results SET state='PASSED'
+UPDATE uplink_path_node_target_results SET state='PASSED'
 WHERE path_id IN ('path:m1:s1', 'path:m2:s2')`); err != nil {
 		t.Fatal(err)
 	}

@@ -3,13 +3,22 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	databasepkg "gateway-vpn/internal/db"
+	"gateway-vpn/migrations"
 )
 
 func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testing.T) {
@@ -54,7 +63,7 @@ func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testi
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 17 {
+	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 18 {
 		t.Fatalf("recovery result = %+v", result)
 	}
 	preserved, err := os.ReadFile(filepath.Join(stateDirectory, "recovery", "quarantine", result.QuarantineID, "state.db"))
@@ -156,7 +165,7 @@ func TestOpenManagedCreatesFreshSchemaWithoutPretendingItWasRecovery(t *testing.
 		t.Fatalf("fresh managed recovery = %+v", managed.Recovery)
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 17 {
+	if err != nil || version != 18 {
 		t.Fatalf("managed schema = %d, %v", version, err)
 	}
 	if err := databasepkg.IntegrityCheck(ctx, managed.Database); err != nil {
@@ -172,87 +181,7 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := databasepkg.Migrate(ctx, database); err != nil {
-		database.Close()
-		t.Fatal(err)
-	}
-	transaction, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		database.Close()
-		t.Fatal(err)
-	}
-	for _, statement := range []string{
-		"DROP TRIGGER bypass_targets_generic_class_update",
-		"DROP TRIGGER runtime_state_generic_update",
-		"DROP TRIGGER direct_path_target_results_generic_delete",
-		"DROP TRIGGER direct_path_target_results_generic_update",
-		"DROP TRIGGER direct_path_target_results_generic_insert",
-		"DROP TRIGGER direct_modem_paths_generic_delete",
-		"DROP TRIGGER direct_modem_paths_generic_update",
-		"DROP TRIGGER direct_modem_paths_generic_insert",
-		"DROP TRIGGER path_node_target_results_generic_delete",
-		"DROP TRIGGER path_node_target_results_generic_update",
-		"DROP TRIGGER path_node_target_results_generic_insert",
-		"DROP TRIGGER path_nodes_generic_delete",
-		"DROP TRIGGER path_nodes_generic_update",
-		"DROP TRIGGER path_nodes_generic_insert",
-		"DROP TRIGGER subscription_modem_paths_generic_delete",
-		"DROP TRIGGER subscription_modem_paths_generic_update",
-		"DROP TRIGGER subscription_modem_paths_generic_insert",
-		"DROP TRIGGER modems_generic_delete",
-		"DROP TRIGGER modems_generic_update",
-		"DROP TRIGGER modems_generic_insert",
-		"ALTER TABLE runtime_state DROP COLUMN management_uplink_id",
-		"ALTER TABLE runtime_state DROP COLUMN active_uplink_id",
-		"DROP TABLE log_export_policy",
-		"DROP TABLE modem_recovery_attempts",
-		"DROP TABLE modem_recovery_runtime",
-		"DROP TABLE modem_recovery_policy",
-		"DROP TABLE wireguard_ingress_peer_runtime",
-		"DROP TABLE wireguard_ingress_peer_routes",
-		"DROP TABLE wireguard_ingress_peers",
-		"DROP TABLE wireguard_ingress_runtime",
-		"DROP TABLE wireguard_ingress_servers",
-		"DROP TABLE direct_uplink_path_target_results",
-		"DROP TABLE direct_uplink_paths",
-		"DROP TABLE uplink_path_node_target_results",
-		"DROP TABLE uplink_path_nodes",
-		"DROP TABLE subscription_uplink_paths",
-		"DROP TABLE interface_role_assignments",
-		"DROP TABLE legacy_modem_uplink_map",
-		"DROP TABLE hilink_modems",
-		"DROP TABLE uplinks",
-		"DROP TABLE network_interfaces",
-		"ALTER TABLE bypass_probe_targets DROP COLUMN target_class",
-		"DELETE FROM schema_migrations WHERE version=17",
-		"ALTER TABLE runtime_state DROP COLUMN active_direct_path_id",
-		"DELETE FROM schema_migrations WHERE version=16",
-		"DELETE FROM schema_migrations WHERE version=15",
-		"DROP TABLE operation_steps",
-		"DROP TABLE operations",
-		"DROP TABLE access_selection_runtime",
-		"DROP TABLE subscription_node_preferences",
-		"DROP TABLE direct_path_target_results",
-		"DROP TABLE direct_modem_paths",
-		"DROP TABLE access_policy",
-		"DROP TABLE access_methods",
-		"ALTER TABLE runtime_state DROP COLUMN active_quality_class",
-		"ALTER TABLE runtime_state DROP COLUMN active_method_kind",
-		"ALTER TABLE runtime_state DROP COLUMN active_method_id",
-		"ALTER TABLE subscription_modem_paths DROP COLUMN optional_targets_total",
-		"ALTER TABLE subscription_modem_paths DROP COLUMN optional_targets_passed",
-		"ALTER TABLE subscription_modem_paths DROP COLUMN functional_score",
-		"ALTER TABLE subscription_modem_paths DROP COLUMN quality_class",
-		"ALTER TABLE modems DROP COLUMN route_generation",
-		"DELETE FROM schema_migrations WHERE version=14",
-	} {
-		if _, err := transaction.ExecContext(ctx, statement); err != nil {
-			transaction.Rollback()
-			database.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := transaction.Commit(); err != nil {
+	if err := migrateEmbeddedThrough(ctx, database, 13); err != nil {
 		database.Close()
 		t.Fatal(err)
 	}
@@ -267,7 +196,7 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal("pre-migration snapshot id is empty")
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 17 {
+	if err != nil || version != 18 {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	items, err := managed.Backups.List(ctx, true)
@@ -278,4 +207,57 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 	if err := managed.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='DATABASE_PRE_MIGRATION_SNAPSHOT_CREATED'").Scan(&audit); err != nil || audit != 1 {
 		t.Fatalf("pre-migration audit count = %d, %v", audit, err)
 	}
+}
+
+// migrateEmbeddedThrough constructs a real older schema instead of attempting
+// lossy reverse DDL against the current schema. It is intentionally test-only.
+func migrateEmbeddedThrough(ctx context.Context, database *sql.DB, maximum int64) error {
+	if _, err := database.ExecContext(ctx, `CREATE TABLE schema_migrations (
+version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum_sha256 TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(migrations.Files, ".")
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, maximum)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
+			continue
+		}
+		parts := strings.SplitN(entry.Name(), "_", 2)
+		version, parseErr := strconv.ParseInt(parts[0], 10, 64)
+		if parseErr == nil && version <= maximum {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		parts := strings.SplitN(strings.TrimSuffix(name, ".sql"), "_", 2)
+		version, _ := strconv.ParseInt(parts[0], 10, 64)
+		content, readErr := fs.ReadFile(migrations.Files, name)
+		if readErr != nil {
+			return readErr
+		}
+		transaction, beginErr := database.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		digest := sha256.Sum256(content)
+		if _, err = transaction.ExecContext(ctx, string(content)); err == nil {
+			_, err = transaction.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum_sha256,applied_at) VALUES(?,?,?,?)`,
+				version, parts[1], hex.EncodeToString(digest[:]), "2026-08-24T00:00:00Z")
+		}
+		if err != nil {
+			transaction.Rollback()
+			return fmt.Errorf("apply test migration %d: %w", version, err)
+		}
+		if err := transaction.Commit(); err != nil {
+			return err
+		}
+	}
+	if int64(len(names)) != maximum {
+		return fmt.Errorf("test migration count %d, want %d", len(names), maximum)
+	}
+	return nil
 }

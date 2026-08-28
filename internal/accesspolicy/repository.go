@@ -128,7 +128,7 @@ func (repository *Repository) SetMethodEnabled(ctx context.Context, id string, e
 			return fmt.Errorf("synchronize subscription routing state: %w", err)
 		}
 		if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state=?, transport_state='UNKNOWN', selected_node_id=NULL,
     qualified_nodes=0, required_targets_passed=0, expires_at=NULL, updated_at=?
 WHERE subscription_id=?`, pathState, now, subscriptionID.String); err != nil {

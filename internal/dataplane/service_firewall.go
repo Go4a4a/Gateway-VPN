@@ -385,8 +385,8 @@ func (backend *ServiceFirewallBackend) validate() error {
 	if backend.Modems == nil || backend.Subscriptions == nil || backend.AccessPolicy == nil || backend.Executor == nil || backend.NFT != "/usr/sbin/nft" {
 		return errors.New("fixed Ubuntu nft backend and authoritative repositories are required")
 	}
-	if backend.Routing.Modems != backend.Modems || backend.Routing.Executor == nil || len(backend.BootstrapDNS) == 0 {
-		return errors.New("service firewall and routing must share modem inventory and bootstrap DNS")
+	if backend.Routing.Uplinks == nil || backend.Routing.Executor == nil || len(backend.BootstrapDNS) == 0 {
+		return errors.New("service firewall requires canonical uplink routing and bootstrap DNS")
 	}
 	return nil
 }

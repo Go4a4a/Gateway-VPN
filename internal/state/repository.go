@@ -15,7 +15,8 @@ import (
 
 const (
 	GatewayBooting               = "BOOTING"
-	GatewayAllModemsOffline      = "ALL_MODEMS_OFFLINE"
+	GatewayAllUplinksOffline     = "ALL_UPLINKS_OFFLINE"
+	GatewayAllModemsOffline      = GatewayAllUplinksOffline // Deprecated compatibility alias.
 	GatewayNoBypassTargets       = "NO_BYPASS_TARGETS"
 	GatewayNoWorkingSubscription = "NO_WORKING_SUBSCRIPTION"
 	GatewayVerifying             = "VERIFYING"
@@ -41,9 +42,11 @@ type Repository struct {
 type Snapshot struct {
 	GatewayState               string
 	PathState                  string
+	ActiveUplinkID             string
 	ActiveModemID              string
 	ActivePathID               string
 	ActiveDirectPathID         string
+	ManagementUplinkID         string
 	ManagementModemID          string
 	ActiveSubscriptionID       string
 	ActiveNodeID               string
@@ -60,7 +63,7 @@ type Snapshot struct {
 func (snapshot Snapshot) PolicyTransitionActive() bool {
 	return snapshot.GatewayState == GatewayVerifyingPolicy && snapshot.PathState == PathActive &&
 		snapshot.PolicyTransitionGeneration > 0 && snapshot.PolicyTransitionStartedAt != "" && snapshot.PolicyTransitionDeadline != "" &&
-		snapshot.ActiveModemID != "" && snapshot.ActivePathID != "" && snapshot.ActiveDirectPathID == "" &&
+		snapshot.ActiveUplinkID != "" && snapshot.ActivePathID != "" && snapshot.ActiveDirectPathID == "" &&
 		snapshot.ActiveSubscriptionID != "" && snapshot.ActiveNodeID != "" && snapshot.ActiveMethodKind == "SUBSCRIPTION"
 }
 
@@ -69,6 +72,7 @@ type Event struct {
 	OccurredAt     string
 	Severity       string
 	Type           string
+	UplinkID       string
 	ModemID        string
 	SubscriptionID string
 	PathID         string
@@ -78,6 +82,7 @@ type Event struct {
 type EventInput struct {
 	Severity       string
 	Type           string
+	UplinkID       string
 	ModemID        string
 	SubscriptionID string
 	PathID         string
@@ -94,7 +99,7 @@ func (repository *Repository) Get(ctx context.Context) (Snapshot, error) {
 
 // PrepareStartupRecovery preserves one previously active exact tuple while
 // the boot firewall remains blocked. It accepts only a currently enabled LKG
-// method with an unchanged modem route generation. Fresh qualification is
+// method with an unchanged uplink route generation. Fresh qualification is
 // still required by Begin/Finish activation; this method merely records the
 // boot-scoped verifying intent and schedules an immediate full background
 // check after the lightweight recovery succeeds.
@@ -108,43 +113,42 @@ func (repository *Repository) PrepareStartupRecovery(ctx context.Context) (Snaps
 	if err != nil {
 		return Snapshot{}, false, err
 	}
-	if current.PathState != PathActive || current.PolicyTransitionGeneration != 0 || current.PolicyTransitionStartedAt != "" || current.PolicyTransitionDeadline != "" ||
-		(current.ActiveQualityClass != "FULL" && current.ActiveQualityClass != "LIMITED") {
+	if current.PathState != PathActive || current.PolicyTransitionGeneration != 0 || current.PolicyTransitionStartedAt != "" || current.PolicyTransitionDeadline != "" {
 		return Snapshot{}, false, store.ErrNotFound
 	}
 	switch current.ActiveMethodKind {
 	case "SUBSCRIPTION":
-		if current.ActivePathID == "" || current.ActiveDirectPathID != "" || current.ActiveModemID == "" || current.ActiveSubscriptionID == "" || current.ActiveNodeID == "" || current.ActiveMethodID == "" {
+		if (current.ActiveQualityClass != "FULL" && current.ActiveQualityClass != "LIMITED") || current.ActivePathID == "" || current.ActiveDirectPathID != "" || current.ActiveUplinkID == "" || current.ActiveSubscriptionID == "" || current.ActiveNodeID == "" || current.ActiveMethodID == "" {
 			return Snapshot{}, false, store.ErrNotFound
 		}
 		err = transaction.QueryRowContext(ctx, `
 SELECT 1
-FROM subscription_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM subscription_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN subscription_versions AS v ON v.id=s.active_version_id AND v.state='LKG'
 JOIN nodes AS n ON n.id=? AND n.version_id=v.id
 JOIN access_methods AS a ON a.id=? AND a.kind='SUBSCRIPTION' AND a.subscription_id=s.id
-WHERE p.id=? AND p.modem_id=? AND p.subscription_id=?
-  AND p.route_generation=m.route_generation
+WHERE p.id=? AND p.uplink_id=? AND p.subscription_id=?
+  AND p.route_generation=u.route_generation
   AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
-  AND a.enabled=1 AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'
+  AND a.enabled=1 AND s.enabled=1 AND u.enabled=1 AND u.state='UPLINK_READY'
   AND n.enabled=1 AND n.selection_override<>'exclude'`,
 			current.ActiveNodeID, current.ActiveMethodID, current.ActivePathID,
-			current.ActiveModemID, current.ActiveSubscriptionID).Scan(new(int))
+			current.ActiveUplinkID, current.ActiveSubscriptionID).Scan(new(int))
 	case "DIRECT":
-		if current.ActiveDirectPathID == "" || current.ActivePathID != "" || current.ActiveModemID == "" || current.ActiveSubscriptionID != "" || current.ActiveNodeID != "" || current.ActiveMethodID == "" {
+		if (current.ActiveQualityClass != "FULL" && current.ActiveQualityClass != "LIMITED" && current.ActiveQualityClass != "WHITELIST_ONLY") || current.ActiveDirectPathID == "" || current.ActivePathID != "" || current.ActiveUplinkID == "" || current.ActiveSubscriptionID != "" || current.ActiveNodeID != "" || current.ActiveMethodID == "" {
 			return Snapshot{}, false, store.ErrNotFound
 		}
 		err = transaction.QueryRowContext(ctx, `
 SELECT 1
-FROM direct_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM direct_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN access_methods AS a ON a.id=? AND a.kind='DIRECT'
-WHERE p.id=? AND p.modem_id=? AND p.route_generation=m.route_generation
+WHERE p.id=? AND p.uplink_id=? AND p.route_generation=u.route_generation
   AND p.policy_generation=COALESCE(CAST((SELECT value_json FROM settings WHERE key='next_policy_generation') AS INTEGER)-1, 0)
-  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
-			current.ActiveMethodID, current.ActiveDirectPathID, current.ActiveModemID).Scan(new(int))
+  AND a.enabled=1 AND u.enabled=1 AND u.state='UPLINK_READY'`,
+			current.ActiveMethodID, current.ActiveDirectPathID, current.ActiveUplinkID).Scan(new(int))
 	default:
 		return Snapshot{}, false, store.ErrNotFound
 	}
@@ -178,7 +182,7 @@ ON CONFLICT(path_id) DO UPDATE SET
 	} else {
 		refreshDeadline := nowTime.Add(30 * time.Second).Format(time.RFC3339Nano)
 		if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_modem_paths
+UPDATE direct_uplink_paths
 SET expires_at=CASE
         WHEN expires_at IS NOT NULL AND julianday(expires_at)>julianday(?) THEN ?
         ELSE expires_at
@@ -194,7 +198,7 @@ WHERE id=?`, refreshDeadline, refreshDeadline, now, current.ActiveDirectPathID);
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
 		Severity: "INFO", Type: "STARTUP_MINIMAL_RECOVERY_PREPARED",
-		ModemID: current.ActiveModemID, SubscriptionID: current.ActiveSubscriptionID,
+		UplinkID: current.ActiveUplinkID, SubscriptionID: current.ActiveSubscriptionID,
 		PathID: pathID, Details: map[string]any{
 			"method_kind":   current.ActiveMethodKind,
 			"quality_class": current.ActiveQualityClass,
@@ -246,19 +250,20 @@ func (repository *Repository) beginActivation(ctx context.Context, pathID, nodeI
 	now := nowTime.Format(time.RFC3339Nano)
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state=?, path_state=?, active_modem_id=?, active_path_id=?,
+SET gateway_state=?, path_state=?, active_uplink_id=?,
+    active_modem_id=(SELECT uplink_id FROM hilink_modems WHERE uplink_id=?), active_path_id=?,
     active_direct_path_id=NULL, active_subscription_id=?, active_node_id=?,
     active_method_id=?, active_method_kind='SUBSCRIPTION', active_quality_class=?,
     config_generation=config_generation+1,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
     policy_transition_deadline=NULL,
     updated_at=?
-WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.ModemID, path.ID,
+WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.UplinkID, path.UplinkID, path.ID,
 		path.SubscriptionID, path.NodeID, path.MethodID, path.QualityClass, now)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("record path activation intent: %w", err)
 	}
-	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: "PATH_ACTIVATION_STARTED", ModemID: path.ModemID, SubscriptionID: path.SubscriptionID, PathID: path.ID, Details: map[string]any{"node_id": path.NodeID, "policy_generation": expectedPolicyGeneration, "route_generation": expectedRouteGeneration}}); err != nil {
+	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: "PATH_ACTIVATION_STARTED", UplinkID: path.UplinkID, SubscriptionID: path.SubscriptionID, PathID: path.ID, Details: map[string]any{"node_id": path.NodeID, "policy_generation": expectedPolicyGeneration, "route_generation": expectedRouteGeneration}}); err != nil {
 		return Snapshot{}, false, err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -292,18 +297,18 @@ func (repository *Repository) MarkTargetDegraded(ctx context.Context, pathID, no
 	if current.PathState != PathActive || current.ActivePathID != pathID || current.ActiveNodeID != nodeID {
 		return Snapshot{}, false, store.ErrStaleGeneration
 	}
-	var modemID, subscriptionID string
+	var uplinkID, subscriptionID string
 	err = transaction.QueryRowContext(ctx, `
-SELECT p.modem_id, p.subscription_id
-FROM subscription_modem_paths AS p
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
+SELECT p.uplink_id, p.subscription_id
+FROM subscription_uplink_paths AS p
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
 WHERE p.id=? AND p.state='DEGRADED' AND p.transport_state='PASSED'
   AND p.selected_node_id=? AND p.policy_generation=? AND p.route_generation=?
   AND pn.qualification_state='BYPASS_FAILED'
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?`,
 		nodeID, pathID, nodeID, expectedPolicyGeneration, expectedRouteGeneration,
-		repository.now().UTC().Format(time.RFC3339Nano)).Scan(&modemID, &subscriptionID)
+		repository.now().UTC().Format(time.RFC3339Nano)).Scan(&uplinkID, &subscriptionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Snapshot{}, false, store.ErrStaleGeneration
 	}
@@ -319,7 +324,7 @@ WHERE singleton_id=1`, now); err != nil {
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
 		Severity: "WARNING", Type: "ACTIVE_PATH_TARGET_DEGRADED",
-		ModemID: modemID, SubscriptionID: subscriptionID, PathID: pathID,
+		UplinkID: uplinkID, SubscriptionID: subscriptionID, PathID: pathID,
 		Details: map[string]any{"node_id": nodeID, "policy_generation": expectedPolicyGeneration, "route_generation": expectedRouteGeneration},
 	}); err != nil {
 		return Snapshot{}, false, err
@@ -358,7 +363,7 @@ func (repository *Repository) RecoverTargetDegraded(ctx context.Context, pathID,
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
 		Severity: "INFO", Type: "ACTIVE_PATH_TARGET_RECOVERED",
-		ModemID: path.ModemID, SubscriptionID: path.SubscriptionID, PathID: path.ID,
+		UplinkID: path.UplinkID, SubscriptionID: path.SubscriptionID, PathID: path.ID,
 		Details: map[string]any{"node_id": path.NodeID},
 	}); err != nil {
 		return Snapshot{}, false, err
@@ -401,19 +406,20 @@ func (repository *Repository) BeginDirectActivation(ctx context.Context, pathID 
 	now := nowTime.Format(time.RFC3339Nano)
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state=?, path_state=?, active_modem_id=?, active_path_id=NULL,
+SET gateway_state=?, path_state=?, active_uplink_id=?,
+    active_modem_id=(SELECT uplink_id FROM hilink_modems WHERE uplink_id=?), active_path_id=NULL,
     active_direct_path_id=?, active_subscription_id=NULL, active_node_id=NULL,
     active_method_id=?, active_method_kind='DIRECT', active_quality_class=?,
     config_generation=config_generation+1,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
     policy_transition_deadline=NULL, updated_at=?
-WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.ModemID, path.ID,
+WHERE singleton_id=1`, GatewayVerifying, PathVerifying, path.UplinkID, path.UplinkID, path.ID,
 		path.MethodID, path.QualityClass, now)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("record direct path activation intent: %w", err)
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
-		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATION_STARTED", ModemID: path.ModemID,
+		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATION_STARTED", UplinkID: path.UplinkID,
 		PathID: path.ID, Details: map[string]any{
 			"quality_class": path.QualityClass, "policy_generation": expectedPolicyGeneration,
 			"route_generation": expectedRouteGeneration,
@@ -460,7 +466,7 @@ WHERE singleton_id=1`, GatewayActive, PathActive, path.QualityClass, now)
 		return Snapshot{}, false, fmt.Errorf("record active direct path: %w", err)
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
-		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATED", ModemID: path.ModemID,
+		Severity: "INFO", Type: "DIRECT_PATH_ACTIVATED", UplinkID: path.UplinkID,
 		PathID: path.ID, Details: map[string]any{"quality_class": path.QualityClass},
 	}); err != nil {
 		return Snapshot{}, false, err
@@ -504,7 +510,7 @@ WHERE singleton_id=1`, GatewayActive, PathActive, now)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("record active path: %w", err)
 	}
-	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: "PATH_ACTIVATED", ModemID: path.ModemID, SubscriptionID: path.SubscriptionID, PathID: path.ID, Details: map[string]any{"node_id": path.NodeID}}); err != nil {
+	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: "PATH_ACTIVATED", UplinkID: path.UplinkID, SubscriptionID: path.SubscriptionID, PathID: path.ID, Details: map[string]any{"node_id": path.NodeID}}); err != nil {
 		return Snapshot{}, false, err
 	}
 	if err := transaction.Commit(); err != nil {
@@ -530,7 +536,7 @@ func (repository *Repository) Block(ctx context.Context, gatewayState, reason st
 		return Snapshot{}, false, err
 	}
 	if current.GatewayState == gatewayState && current.PathState == PathBlocked &&
-		current.ActiveModemID == "" && current.ActivePathID == "" && current.ActiveDirectPathID == "" &&
+		current.ActiveUplinkID == "" && current.ActiveModemID == "" && current.ActivePathID == "" && current.ActiveDirectPathID == "" &&
 		current.ActiveSubscriptionID == "" && current.ActiveNodeID == "" &&
 		current.ActiveMethodID == "" && current.ActiveMethodKind == "" && current.ActiveQualityClass == "" {
 		return current, false, nil
@@ -538,7 +544,7 @@ func (repository *Repository) Block(ctx context.Context, gatewayState, reason st
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state=?, path_state=?, active_modem_id=NULL, active_path_id=NULL,
+SET gateway_state=?, path_state=?, active_uplink_id=NULL, active_modem_id=NULL, active_path_id=NULL,
     active_direct_path_id=NULL, active_subscription_id=NULL, active_node_id=NULL,
     active_method_id=NULL, active_method_kind=NULL, active_quality_class=NULL,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
@@ -589,18 +595,18 @@ func (repository *Repository) FinishPolicyVerification(ctx context.Context, expe
 	var qualityClass string
 	err = transaction.QueryRowContext(ctx, `
 SELECT p.quality_class
-FROM subscription_modem_paths AS p
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=p.selected_node_id
+FROM subscription_uplink_paths AS p
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=p.selected_node_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
-JOIN modems AS m ON m.id=p.modem_id
-WHERE p.id=? AND p.modem_id=? AND p.subscription_id=? AND p.selected_node_id=?
+JOIN uplinks AS u ON u.id=p.uplink_id
+WHERE p.id=? AND p.uplink_id=? AND p.subscription_id=? AND p.selected_node_id=?
   AND p.policy_generation=? AND p.expires_at>?
   AND ((p.state='QUALIFIED' AND p.quality_class='FULL' AND pn.qualification_state='BYPASS_QUALIFIED')
        OR (p.state='DEGRADED' AND p.quality_class='LIMITED' AND pn.qualification_state='BYPASS_LIMITED'))
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
-  AND s.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
-		current.ActivePathID, current.ActiveModemID, current.ActiveSubscriptionID, current.ActiveNodeID,
+  AND s.enabled=1 AND u.enabled=1 AND u.state='UPLINK_READY'`,
+		current.ActivePathID, current.ActiveUplinkID, current.ActiveSubscriptionID, current.ActiveNodeID,
 		expectedGeneration, formattedNow, formattedNow).Scan(&qualityClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Snapshot{}, false, store.ErrStaleGeneration
@@ -623,7 +629,7 @@ WHERE singleton_id=1 AND gateway_state=? AND path_state=?
 		return Snapshot{}, false, store.ErrStaleGeneration
 	}
 	if err := appendEventTx(ctx, transaction, formattedNow, EventInput{
-		Severity: "INFO", Type: "POLICY_VERIFIED", ModemID: current.ActiveModemID,
+		Severity: "INFO", Type: "POLICY_VERIFIED", UplinkID: current.ActiveUplinkID,
 		SubscriptionID: current.ActiveSubscriptionID, PathID: current.ActivePathID,
 		Details: map[string]any{"node_id": current.ActiveNodeID, "policy_generation": expectedGeneration},
 	}); err != nil {
@@ -655,7 +661,7 @@ func (repository *Repository) RecoverPolicyTransition(ctx context.Context) (bool
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	_, err = transaction.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state=?, path_state=?, active_modem_id=NULL, active_path_id=NULL,
+SET gateway_state=?, path_state=?, active_uplink_id=NULL, active_modem_id=NULL, active_path_id=NULL,
     active_direct_path_id=NULL, active_subscription_id=NULL, active_node_id=NULL,
     active_method_id=NULL, active_method_kind=NULL, active_quality_class=NULL,
     policy_transition_generation=NULL, policy_transition_started_at=NULL,
@@ -667,7 +673,7 @@ WHERE singleton_id=1`, GatewayBlocked, PathBlocked, now)
 	}
 	if err := appendEventTx(ctx, transaction, now, EventInput{
 		Severity: "WARNING", Type: "POLICY_VERIFICATION_INTERRUPTED",
-		ModemID: current.ActiveModemID, SubscriptionID: current.ActiveSubscriptionID, PathID: current.ActivePathID,
+		UplinkID: current.ActiveUplinkID, SubscriptionID: current.ActiveSubscriptionID, PathID: current.ActivePathID,
 		Details: map[string]any{
 			"node_id": current.ActiveNodeID, "policy_generation": current.PolicyTransitionGeneration,
 			"started_at": current.PolicyTransitionStartedAt, "deadline": current.PolicyTransitionDeadline,
@@ -682,41 +688,64 @@ WHERE singleton_id=1`, GatewayBlocked, PathBlocked, now)
 	return true, nil
 }
 
+// SetManagementModem is the bounded HiLink compatibility entry point.
 func (repository *Repository) SetManagementModem(ctx context.Context, modemID, reason string) (Snapshot, bool, error) {
+	return repository.setManagementUplink(ctx, modemID, reason, true)
+}
+
+// SetManagementUplink selects any ready canonical uplink for management traffic.
+func (repository *Repository) SetManagementUplink(ctx context.Context, uplinkID, reason string) (Snapshot, bool, error) {
+	return repository.setManagementUplink(ctx, uplinkID, reason, false)
+}
+
+func (repository *Repository) setManagementUplink(ctx context.Context, uplinkID, reason string, requireHiLink bool) (Snapshot, bool, error) {
 	if strings.TrimSpace(reason) == "" {
-		return Snapshot{}, false, errors.New("management modem reason is required")
+		return Snapshot{}, false, errors.New("management uplink reason is required")
 	}
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
-		return Snapshot{}, false, fmt.Errorf("begin management modem update: %w", err)
+		return Snapshot{}, false, fmt.Errorf("begin management uplink update: %w", err)
 	}
 	defer transaction.Rollback()
 	current, err := scanSnapshot(transaction.QueryRowContext(ctx, runtimeSelect))
 	if err != nil {
 		return Snapshot{}, false, err
 	}
-	if current.ManagementModemID == modemID {
+	if current.ManagementUplinkID == uplinkID {
 		return current, false, nil
 	}
-	if modemID != "" {
+	if uplinkID != "" {
 		var count int
-		if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM modems WHERE id=? AND enabled=1 AND state='MODEM_READY'", modemID).Scan(&count); err != nil || count != 1 {
-			return Snapshot{}, false, errors.New("management modem must be enabled and ready")
+		query := "SELECT COUNT(*) FROM uplinks WHERE id=? AND enabled=1 AND state='UPLINK_READY'"
+		if requireHiLink {
+			query = "SELECT COUNT(*) FROM uplinks AS u JOIN hilink_modems AS h ON h.uplink_id=u.id WHERE u.id=? AND u.enabled=1 AND u.state='UPLINK_READY'"
+		}
+		if err := transaction.QueryRowContext(ctx, query, uplinkID).Scan(&count); err != nil || count != 1 {
+			return Snapshot{}, false, errors.New("management uplink must be enabled and ready")
 		}
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
-	if _, err := transaction.ExecContext(ctx, "UPDATE runtime_state SET management_modem_id=?, updated_at=? WHERE singleton_id=1", nullIfEmpty(modemID), now); err != nil {
-		return Snapshot{}, false, fmt.Errorf("record management modem: %w", err)
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE runtime_state
+SET management_uplink_id=?,
+    management_modem_id=(SELECT uplink_id FROM hilink_modems WHERE uplink_id=?),
+    updated_at=?
+WHERE singleton_id=1`, nullIfEmpty(uplinkID), nullIfEmpty(uplinkID), now); err != nil {
+		return Snapshot{}, false, fmt.Errorf("record management uplink: %w", err)
 	}
-	eventType := "MANAGEMENT_MODEM_SELECTED"
-	if modemID == "" {
-		eventType = "MANAGEMENT_MODEM_CLEARED"
+	eventPrefix := "MANAGEMENT_UPLINK"
+	if requireHiLink {
+		eventPrefix = "MANAGEMENT_MODEM"
 	}
-	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: eventType, ModemID: modemID, Details: map[string]any{"previous_modem_id": current.ManagementModemID, "reason": reason}}); err != nil {
+	eventType := eventPrefix + "_SELECTED"
+	if uplinkID == "" {
+		eventType = eventPrefix + "_CLEARED"
+	}
+	if err := appendEventTx(ctx, transaction, now, EventInput{Severity: "INFO", Type: eventType, UplinkID: uplinkID, Details: map[string]any{"previous_uplink_id": current.ManagementUplinkID, "reason": reason}}); err != nil {
 		return Snapshot{}, false, err
 	}
 	if err := transaction.Commit(); err != nil {
-		return Snapshot{}, false, fmt.Errorf("commit management modem update: %w", err)
+		return Snapshot{}, false, fmt.Errorf("commit management uplink update: %w", err)
 	}
 	result, err := repository.Get(ctx)
 	return result, true, err
@@ -749,7 +778,7 @@ func (repository *Repository) ListEvents(ctx context.Context, limit int, beforeI
 		return nil, errors.New("event limit must be 1..500 and before id cannot be negative")
 	}
 	query := `
-SELECT id, occurred_at, severity, type, modem_id, subscription_id, path_id, details_json
+SELECT id, occurred_at, severity, type, uplink_id, modem_id, subscription_id, path_id, details_json
 FROM events`
 	var args []any
 	if beforeID > 0 {
@@ -766,11 +795,12 @@ FROM events`
 	var result []Event
 	for rows.Next() {
 		var event Event
-		var modemID, subscriptionID, pathID sql.NullString
-		if err := rows.Scan(&event.ID, &event.OccurredAt, &event.Severity, &event.Type, &modemID, &subscriptionID, &pathID, &event.DetailsJSON); err != nil {
+		var uplinkID, modemID, subscriptionID, pathID sql.NullString
+		if err := rows.Scan(&event.ID, &event.OccurredAt, &event.Severity, &event.Type, &uplinkID, &modemID, &subscriptionID, &pathID, &event.DetailsJSON); err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)
 		}
-		event.ModemID, event.SubscriptionID, event.PathID = modemID.String, subscriptionID.String, pathID.String
+		event.UplinkID, event.ModemID = uplinkID.String, modemID.String
+		event.SubscriptionID, event.PathID = subscriptionID.String, pathID.String
 		result = append(result, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -781,7 +811,7 @@ FROM events`
 
 type freshPath struct {
 	ID             string
-	ModemID        string
+	UplinkID       string
 	SubscriptionID string
 	NodeID         string
 	MethodID       string
@@ -791,13 +821,13 @@ type freshPath struct {
 func readFreshPath(ctx context.Context, transaction *sql.Tx, pathID, nodeID string, policyGeneration, routeGeneration int64, now time.Time) (freshPath, error) {
 	var path freshPath
 	err := transaction.QueryRowContext(ctx, `
-SELECT p.id, p.modem_id, p.subscription_id, pn.node_id, a.id, p.quality_class
-FROM subscription_modem_paths AS p
-JOIN path_nodes AS pn ON pn.path_id=p.id
+SELECT p.id, p.uplink_id, p.subscription_id, pn.node_id, a.id, p.quality_class
+FROM subscription_uplink_paths AS p
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id
 JOIN nodes AS n ON n.id=pn.node_id
 JOIN subscription_versions AS v ON v.id=n.version_id
 JOIN subscriptions AS s ON s.id=p.subscription_id AND s.active_version_id=v.id
-JOIN modems AS m ON m.id=p.modem_id
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN access_methods AS a ON a.subscription_id=s.id AND a.kind='SUBSCRIPTION'
 WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
   AND ((?='' AND pn.node_id=p.selected_node_id) OR (?<>'' AND pn.node_id=?))
@@ -807,7 +837,7 @@ WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
   AND n.enabled=1 AND s.enabled=1 AND a.enabled=1
-  AND m.enabled=1 AND m.state='MODEM_READY'`, pathID, policyGeneration, routeGeneration, nodeID, nodeID, nodeID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)).Scan(&path.ID, &path.ModemID, &path.SubscriptionID, &path.NodeID, &path.MethodID, &path.QualityClass)
+  AND u.enabled=1 AND u.state='UPLINK_READY'`, pathID, policyGeneration, routeGeneration, nodeID, nodeID, nodeID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)).Scan(&path.ID, &path.UplinkID, &path.SubscriptionID, &path.NodeID, &path.MethodID, &path.QualityClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return freshPath{}, store.ErrStaleGeneration
 	}
@@ -819,7 +849,7 @@ WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
 
 type freshDirectPath struct {
 	ID           string
-	ModemID      string
+	UplinkID     string
 	MethodID     string
 	QualityClass string
 }
@@ -827,18 +857,18 @@ type freshDirectPath struct {
 func readFreshDirectPath(ctx context.Context, transaction *sql.Tx, pathID string, policyGeneration, routeGeneration int64, now time.Time) (freshDirectPath, error) {
 	var path freshDirectPath
 	err := transaction.QueryRowContext(ctx, `
-SELECT p.id, p.modem_id, a.id, p.quality_class
-FROM direct_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+SELECT p.id, p.uplink_id, a.id, p.quality_class
+FROM direct_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN access_methods AS a ON a.id='access:direct' AND a.kind='DIRECT'
 WHERE p.id=? AND p.policy_generation=? AND p.route_generation=?
-  AND p.route_generation=m.route_generation
-  AND p.quality_class IN ('FULL', 'LIMITED')
+  AND p.route_generation=u.route_generation
+  AND p.quality_class IN ('FULL', 'LIMITED', 'WHITELIST_ONLY')
   AND p.state IN ('QUALIFIED', 'DEGRADED')
   AND julianday(p.expires_at)>julianday(?)
-  AND a.enabled=1 AND m.enabled=1 AND m.state='MODEM_READY'`,
+  AND a.enabled=1 AND u.enabled=1 AND u.state='UPLINK_READY'`,
 		pathID, policyGeneration, routeGeneration, now.Format(time.RFC3339Nano)).Scan(
-		&path.ID, &path.ModemID, &path.MethodID, &path.QualityClass,
+		&path.ID, &path.UplinkID, &path.MethodID, &path.QualityClass,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return freshDirectPath{}, store.ErrStaleGeneration
@@ -863,9 +893,20 @@ func appendEventTx(ctx context.Context, transaction *sql.Tx, occurredAt string, 
 	if len(details) > 16*1024 {
 		return errors.New("event details exceed 16 KiB")
 	}
+	uplinkID := input.UplinkID
+	if uplinkID == "" {
+		uplinkID = input.ModemID
+	}
+	modemID := input.ModemID
+	if modemID == "" && uplinkID != "" {
+		err := transaction.QueryRowContext(ctx, "SELECT uplink_id FROM hilink_modems WHERE uplink_id=?", uplinkID).Scan(&modemID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("resolve legacy modem event projection: %w", err)
+		}
+	}
 	_, err = transaction.ExecContext(ctx, `
-INSERT INTO events(occurred_at, severity, type, modem_id, subscription_id, path_id, details_json)
-VALUES (?, ?, ?, ?, ?, ?, ?)`, occurredAt, input.Severity, input.Type, nullString(input.ModemID), nullString(input.SubscriptionID), nullString(input.PathID), string(details))
+INSERT INTO events(occurred_at, severity, type, uplink_id, modem_id, subscription_id, path_id, details_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, occurredAt, input.Severity, input.Type, nullString(uplinkID), nullString(modemID), nullString(input.SubscriptionID), nullString(input.PathID), string(details))
 	if err != nil {
 		return fmt.Errorf("insert event: %w", err)
 	}
@@ -883,7 +924,7 @@ func validSeverity(value string) bool {
 
 func validBlockedGatewayState(value string) bool {
 	switch value {
-	case GatewayAllModemsOffline, GatewayNoBypassTargets, GatewayNoWorkingSubscription, GatewayBlocked:
+	case GatewayAllUplinksOffline, GatewayNoBypassTargets, GatewayNoWorkingSubscription, GatewayBlocked:
 		return true
 	default:
 		return false
@@ -898,8 +939,8 @@ func nullString(value string) any {
 }
 
 const runtimeSelect = `
-SELECT gateway_state, path_state, active_modem_id, active_path_id,
-       active_direct_path_id, management_modem_id, active_subscription_id, active_node_id,
+SELECT gateway_state, path_state, active_uplink_id, active_modem_id, active_path_id,
+       active_direct_path_id, management_uplink_id, management_modem_id, active_subscription_id, active_node_id,
        active_method_id, active_method_kind, active_quality_class,
        config_generation, policy_transition_generation,
        policy_transition_started_at, policy_transition_deadline, updated_at
@@ -911,20 +952,22 @@ type scanner interface {
 
 func scanSnapshot(row scanner) (Snapshot, error) {
 	var snapshot Snapshot
-	var modemID, pathID, directPathID, managementID, subscriptionID, nodeID sql.NullString
+	var uplinkID, modemID, pathID, directPathID, managementUplinkID, managementModemID, subscriptionID, nodeID sql.NullString
 	var methodID, methodKind, qualityClass sql.NullString
 	var transitionGeneration sql.NullInt64
 	var transitionStartedAt, transitionDeadline sql.NullString
-	err := row.Scan(&snapshot.GatewayState, &snapshot.PathState, &modemID, &pathID, &directPathID,
-		&managementID, &subscriptionID, &nodeID, &methodID, &methodKind, &qualityClass,
+	err := row.Scan(&snapshot.GatewayState, &snapshot.PathState, &uplinkID, &modemID, &pathID, &directPathID,
+		&managementUplinkID, &managementModemID, &subscriptionID, &nodeID, &methodID, &methodKind, &qualityClass,
 		&snapshot.ConfigGeneration, &transitionGeneration, &transitionStartedAt, &transitionDeadline, &snapshot.UpdatedAt)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("scan runtime state: %w", err)
 	}
+	snapshot.ActiveUplinkID = uplinkID.String
 	snapshot.ActiveModemID = modemID.String
 	snapshot.ActivePathID = pathID.String
 	snapshot.ActiveDirectPathID = directPathID.String
-	snapshot.ManagementModemID = managementID.String
+	snapshot.ManagementUplinkID = managementUplinkID.String
+	snapshot.ManagementModemID = managementModemID.String
 	snapshot.ActiveSubscriptionID = subscriptionID.String
 	snapshot.ActiveNodeID = nodeID.String
 	snapshot.ActiveMethodID = methodID.String

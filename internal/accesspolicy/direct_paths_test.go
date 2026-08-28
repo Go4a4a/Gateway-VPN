@@ -29,10 +29,10 @@ func TestDirectPathsReconcilePublishAndRejectStaleGenerations(t *testing.T) {
 	if err != nil || len(paths) != 2 {
 		t.Fatalf("List() = %+v, %v", paths, err)
 	}
-	if paths[0].ModemID != "modem-a" || paths[0].State != "UNTESTED" || paths[0].RouteGeneration != 1 {
+	if paths[0].UplinkID != "modem-a" || paths[0].State != "UNTESTED" || paths[0].RouteGeneration != 1 {
 		t.Fatalf("ready direct path = %+v", paths[0])
 	}
-	if paths[1].ModemID != "modem-b" || paths[1].State != "MODEM_OFFLINE" {
+	if paths[1].UplinkID != "modem-b" || paths[1].State != "UPLINK_OFFLINE" {
 		t.Fatalf("offline direct path = %+v", paths[1])
 	}
 
@@ -62,7 +62,7 @@ func TestDirectPathsReconcilePublishAndRejectStaleGenerations(t *testing.T) {
 		t.Fatalf("Publish(LIMITED) error = %v", err)
 	}
 	decision, err := repository.BestCandidate(ctx, true, "")
-	if err != nil || decision.Candidate.ModemID != "modem-a" || decision.Candidate.Quality != QualityFull {
+	if err != nil || decision.Candidate.UplinkID != "modem-a" || decision.Candidate.Quality != QualityFull {
 		t.Fatalf("BestCandidate() = %+v, %v", decision, err)
 	}
 
@@ -70,7 +70,7 @@ func TestDirectPathsReconcilePublishAndRejectStaleGenerations(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision, err = repository.BestCandidate(ctx, true, "")
-	if err != nil || decision.Candidate.ModemID != "modem-b" {
+	if err != nil || decision.Candidate.UplinkID != "modem-b" {
 		t.Fatalf("candidate after route generation change = %+v, %v", decision, err)
 	}
 	if err := repository.Publish(ctx, full); !errors.Is(err, store.ErrStaleGeneration) {
@@ -237,15 +237,17 @@ func seedDirectTargets(t *testing.T, ctx context.Context, database *sql.DB) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, item := range []struct {
-		id       string
-		required int
-	}{{"target-required", 1}, {"target-optional", 0}} {
+		id          string
+		required    int
+		targetClass string
+	}{{"target-required", 1, "GLOBAL_REQUIRED"}, {"target-optional", 0, "GLOBAL_OPTIONAL"}} {
 		if _, err := database.ExecContext(ctx, `
 INSERT INTO bypass_probe_targets (
     id, name, target_kind, target_value, normalized_url, enabled, required,
-    priority, timeout_seconds, success_mode, state, created_at, updated_at
-) VALUES (?, ?, 'url', ?, ?, 1, ?, ?, 5, 'any_http_response', 'UNKNOWN', ?, ?)`,
-			item.id, item.id, "https://"+item.id+".example/", "https://"+item.id+".example/", item.required, (index+1)*10, now, now); err != nil {
+	    priority, timeout_seconds, success_mode, state, created_at, updated_at,
+	    target_class
+) VALUES (?, ?, 'url', ?, ?, 1, ?, ?, 5, 'any_http_response', 'UNKNOWN', ?, ?, ?)`,
+			item.id, item.id, "https://"+item.id+".example/", "https://"+item.id+".example/", item.required, (index+1)*10, now, now, item.targetClass); err != nil {
 			t.Fatalf("insert target %s: %v", item.id, err)
 		}
 	}
@@ -269,8 +271,8 @@ func directUpdate(path DirectPath, checkedAt time.Time, quality string, score in
 		OptionalTargetsPassed: optionalPassed, OptionalTargetsTotal: 1,
 		LatencyMS: 50, CheckedAt: checkedAt, ExpiresAt: expiresAt,
 		Targets: []DirectTargetResult{
-			{TargetID: "target-required", State: requiredState, LatencyMS: 40, CheckedAt: checkedAt, ExpiresAt: expiresAt},
-			{TargetID: "target-optional", State: optionalState, LatencyMS: 50, CheckedAt: checkedAt, ExpiresAt: expiresAt},
+			{TargetID: "target-required", TargetClass: "GLOBAL_REQUIRED", State: requiredState, LatencyMS: 40, CheckedAt: checkedAt, ExpiresAt: expiresAt},
+			{TargetID: "target-optional", TargetClass: "GLOBAL_OPTIONAL", State: optionalState, LatencyMS: 50, CheckedAt: checkedAt, ExpiresAt: expiresAt},
 		},
 	}
 }

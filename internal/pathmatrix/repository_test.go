@@ -14,7 +14,45 @@ import (
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/uplink"
 )
+
+func TestReconcileIncludesEthernetUplinkWithoutLegacyModemShadow(t *testing.T) {
+	ctx, database := migratedDatabase(t)
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:ethernet", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: "abababababababababababababababababababababababababababababababab",
+		CurrentIfname:      "enp5s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "Ethernet A", NetworkInterfaceID: "netif:ethernet", AddressMode: uplink.AddressDHCP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE uplinks SET state='UPLINK_READY', observed_generation=desired_generation WHERE id=?", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedSubscriptions(t, ctx, database, "sub-a")
+	repository := NewRepository(database)
+	if err := repository.ReconcileCells(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cell, err := repository.Get(ctx, created.ID, "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell.UplinkID != created.ID || cell.UplinkType != uplink.TypeEthernet || cell.UplinkName != "Ethernet A" || cell.State != StateUntested {
+		t.Fatalf("Ethernet path cell = %+v", cell)
+	}
+	var legacyModems int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM modems WHERE id=?", created.ID).Scan(&legacyModems); err != nil || legacyModems != 0 {
+		t.Fatalf("Ethernet created a legacy modem shadow: %d, %v", legacyModems, err)
+	}
+}
 
 func TestReconcileBuildsCanonicalMatrixInPriorityOrder(t *testing.T) {
 	ctx, database := migratedDatabase(t)

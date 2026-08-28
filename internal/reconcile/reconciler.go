@@ -36,7 +36,8 @@ type Candidate struct {
 	MethodKind       string
 	QualityClass     string
 	PathID           string
-	ModemID          string
+	UplinkID         string
+	ModemID          string // Deprecated HiLink compatibility alias.
 	SubscriptionID   string
 	NodeID           string
 	PolicyGeneration int64
@@ -47,7 +48,7 @@ type Candidate struct {
 
 type Inventory interface {
 	HasRequiredTargets(context.Context) (bool, error)
-	HasReadyModems(context.Context) (bool, error)
+	HasReadyUplinks(context.Context) (bool, error)
 	FreshCandidate(context.Context, string) (Candidate, error)
 	FreshNodeCandidate(context.Context, string, string) (Candidate, error)
 	TargetDegradedCandidate(context.Context, string, string) (Candidate, error)
@@ -105,12 +106,12 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) (Result, error) {
 	if err != nil {
 		return reconciler.block(ctx, state.GatewayBlocked, "TARGET_INVENTORY_FAILED", err)
 	}
-	hasModems, err := reconciler.Inventory.HasReadyModems(ctx)
+	hasUplinks, err := reconciler.Inventory.HasReadyUplinks(ctx)
 	if err != nil {
-		return reconciler.block(ctx, state.GatewayBlocked, "MODEM_INVENTORY_FAILED", err)
+		return reconciler.block(ctx, state.GatewayBlocked, "UPLINK_INVENTORY_FAILED", err)
 	}
-	if !hasModems {
-		return reconciler.block(ctx, state.GatewayAllModemsOffline, "ALL_MODEMS_OFFLINE", nil)
+	if !hasUplinks {
+		return reconciler.block(ctx, state.GatewayAllUplinksOffline, "ALL_UPLINKS_OFFLINE", nil)
 	}
 	if reconciler.AccessPaths != nil || reconciler.AccessPolicy != nil {
 		if reconciler.AccessPaths == nil || reconciler.AccessPolicy == nil {
@@ -372,7 +373,7 @@ func observedCandidateMatches(observed Observed, snapshot state.Snapshot, candid
 func candidateFromAccess(candidate accesspolicy.Candidate) Candidate {
 	return Candidate{
 		Key: candidate.Key, MethodID: candidate.MethodID, MethodKind: candidate.MethodKind,
-		QualityClass: candidate.Quality, PathID: candidate.PathID, ModemID: candidate.ModemID,
+		QualityClass: candidate.Quality, PathID: candidate.PathID, UplinkID: candidate.UplinkID,
 		SubscriptionID: candidate.SubscriptionID, NodeID: candidate.NodeID,
 		PolicyGeneration: candidate.PolicyGeneration, RouteGeneration: candidate.RouteGeneration,
 	}
@@ -418,7 +419,7 @@ func (reconciler *Reconciler) ActivateExact(ctx context.Context, pathID, nodeID 
 	}
 	if err := reconciler.State.AppendEvent(ctx, state.EventInput{
 		Severity: "INFO", Type: "MANUAL_PATH_ACTIVATION_REQUESTED",
-		ModemID: candidate.ModemID, SubscriptionID: candidate.SubscriptionID,
+		UplinkID: candidate.UplinkID, SubscriptionID: candidate.SubscriptionID,
 		PathID: candidate.PathID, Details: map[string]any{
 			"node_id": candidate.NodeID, "policy_generation": candidate.PolicyGeneration,
 			"route_generation": candidate.RouteGeneration,
@@ -518,16 +519,16 @@ type SQLiteInventory struct {
 
 func (inventory SQLiteInventory) HasRequiredTargets(ctx context.Context) (bool, error) {
 	var count int
-	if err := inventory.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets WHERE enabled=1 AND required=1").Scan(&count); err != nil {
+	if err := inventory.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets WHERE enabled=1 AND target_class='GLOBAL_REQUIRED'").Scan(&count); err != nil {
 		return false, fmt.Errorf("count required bypass targets: %w", err)
 	}
 	return count > 0, nil
 }
 
-func (inventory SQLiteInventory) HasReadyModems(ctx context.Context) (bool, error) {
+func (inventory SQLiteInventory) HasReadyUplinks(ctx context.Context) (bool, error) {
 	var count int
-	if err := inventory.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM modems WHERE enabled=1 AND state='MODEM_READY'").Scan(&count); err != nil {
-		return false, fmt.Errorf("count ready modems: %w", err)
+	if err := inventory.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM uplinks WHERE enabled=1 AND state='UPLINK_READY'").Scan(&count); err != nil {
+		return false, fmt.Errorf("count ready uplinks: %w", err)
 	}
 	return count > 0, nil
 }
@@ -547,21 +548,21 @@ func (inventory SQLiteInventory) FreshNodeCandidate(ctx context.Context, pathID,
 	formattedNow := now().UTC().Format(time.RFC3339Nano)
 	var candidate Candidate
 	err := inventory.Database.QueryRowContext(ctx, `
-SELECT p.id, p.modem_id, p.subscription_id, pn.node_id,
+SELECT p.id, p.uplink_id, p.subscription_id, pn.node_id,
        p.policy_generation, p.route_generation
-FROM subscription_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM subscription_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
 JOIN nodes AS n ON n.id=pn.node_id AND n.enabled=1
 JOIN subscription_versions AS v ON v.id=n.version_id AND v.id=s.active_version_id
 WHERE p.id=? AND p.state='QUALIFIED' AND p.expires_at>?
-  AND m.enabled=1 AND m.state='MODEM_READY' AND s.enabled=1
+  AND u.enabled=1 AND u.state='UPLINK_READY' AND s.enabled=1
   AND pn.qualification_state='BYPASS_QUALIFIED'
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?`,
 		nodeID, pathID, formattedNow, formattedNow).Scan(
-		&candidate.PathID, &candidate.ModemID, &candidate.SubscriptionID,
+		&candidate.PathID, &candidate.UplinkID, &candidate.SubscriptionID,
 		&candidate.NodeID, &candidate.PolicyGeneration, &candidate.RouteGeneration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -584,40 +585,40 @@ func (inventory SQLiteInventory) TargetDegradedCandidate(ctx context.Context, pa
 	formattedNow := now().UTC().Format(time.RFC3339Nano)
 	var candidate Candidate
 	err := inventory.Database.QueryRowContext(ctx, `
-SELECT p.id, p.modem_id, p.subscription_id, pn.node_id,
+SELECT p.id, p.uplink_id, p.subscription_id, pn.node_id,
        p.policy_generation, p.route_generation
-FROM subscription_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM subscription_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
 JOIN nodes AS n ON n.id=pn.node_id AND n.enabled=1
 JOIN subscription_versions AS v ON v.id=n.version_id AND v.id=s.active_version_id
 WHERE p.id=? AND p.state='DEGRADED' AND p.transport_state='PASSED'
   AND p.selected_node_id=pn.node_id AND p.expires_at>?
-  AND m.enabled=1 AND m.state='MODEM_READY' AND s.enabled=1
+  AND u.enabled=1 AND u.state='UPLINK_READY' AND s.enabled=1
   AND pn.qualification_state='BYPASS_FAILED'
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?
   AND EXISTS (
       SELECT 1
       FROM bypass_probe_targets AS t
-      JOIN path_node_target_results AS r
+       JOIN uplink_path_node_target_results AS r
         ON r.path_id=p.id AND r.node_id=pn.node_id AND r.target_id=t.id
         AND r.policy_generation=p.policy_generation
         AND r.route_generation=p.route_generation AND r.expires_at>?
-      WHERE t.enabled=1 AND t.required=1 AND t.state='TARGET_SUSPECT' AND r.state<>'PASSED'
+	      WHERE t.enabled=1 AND t.target_class='GLOBAL_REQUIRED' AND t.state='TARGET_SUSPECT' AND r.state<>'PASSED'
   )
   AND NOT EXISTS (
       SELECT 1
       FROM bypass_probe_targets AS t
-      LEFT JOIN path_node_target_results AS r
+       LEFT JOIN uplink_path_node_target_results AS r
         ON r.path_id=p.id AND r.node_id=pn.node_id AND r.target_id=t.id
         AND r.policy_generation=p.policy_generation
         AND r.route_generation=p.route_generation AND r.expires_at>?
-      WHERE t.enabled=1 AND t.required=1
+	      WHERE t.enabled=1 AND t.target_class='GLOBAL_REQUIRED'
         AND (r.state IS NULL OR (r.state<>'PASSED' AND t.state<>'TARGET_SUSPECT'))
   )`, nodeID, pathID, formattedNow, formattedNow, formattedNow, formattedNow).Scan(
-		&candidate.PathID, &candidate.ModemID, &candidate.SubscriptionID,
+		&candidate.PathID, &candidate.UplinkID, &candidate.SubscriptionID,
 		&candidate.NodeID, &candidate.PolicyGeneration, &candidate.RouteGeneration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -630,7 +631,7 @@ WHERE p.id=? AND p.state='DEGRADED' AND p.transport_state='PASSED'
 }
 
 func (inventory SQLiteInventory) BestFreshCandidate(ctx context.Context) (Candidate, error) {
-	return inventory.readCandidate(ctx, " ORDER BY m.priority, s.priority, p.latency_ms, p.id LIMIT 1")
+	return inventory.readCandidate(ctx, " ORDER BY u.priority, s.priority, p.latency_ms, p.id LIMIT 1")
 }
 
 func (inventory SQLiteInventory) readCandidate(ctx context.Context, suffix string, args ...any) (Candidate, error) {
@@ -639,15 +640,15 @@ func (inventory SQLiteInventory) readCandidate(ctx context.Context, suffix strin
 		now = inventory.Now
 	}
 	query := `
-SELECT p.id, p.modem_id, p.subscription_id, p.selected_node_id,
+SELECT p.id, p.uplink_id, p.subscription_id, p.selected_node_id,
        p.policy_generation, p.route_generation
-FROM subscription_modem_paths AS p
-JOIN modems AS m ON m.id=p.modem_id
+FROM subscription_uplink_paths AS p
+JOIN uplinks AS u ON u.id=p.uplink_id
 JOIN subscriptions AS s ON s.id=p.subscription_id
 JOIN nodes AS n ON n.id=p.selected_node_id
 JOIN subscription_versions AS v ON v.id=n.version_id AND v.id=s.active_version_id
-JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=p.selected_node_id
-WHERE p.state='QUALIFIED' AND p.expires_at>? AND m.enabled=1 AND m.state='MODEM_READY'
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=p.selected_node_id
+WHERE p.state='QUALIFIED' AND p.expires_at>? AND u.enabled=1 AND u.state='UPLINK_READY'
   AND s.enabled=1 AND pn.qualification_state='BYPASS_QUALIFIED'
   AND pn.qualification_generation=p.policy_generation
   AND pn.route_generation=p.route_generation AND pn.qualification_expires_at>?`
@@ -655,7 +656,7 @@ WHERE p.state='QUALIFIED' AND p.expires_at>? AND m.enabled=1 AND m.state='MODEM_
 	queryArgs := []any{formattedNow, formattedNow}
 	queryArgs = append(queryArgs, args...)
 	var candidate Candidate
-	err := inventory.Database.QueryRowContext(ctx, query+suffix, queryArgs...).Scan(&candidate.PathID, &candidate.ModemID, &candidate.SubscriptionID, &candidate.NodeID, &candidate.PolicyGeneration, &candidate.RouteGeneration)
+	err := inventory.Database.QueryRowContext(ctx, query+suffix, queryArgs...).Scan(&candidate.PathID, &candidate.UplinkID, &candidate.SubscriptionID, &candidate.NodeID, &candidate.PolicyGeneration, &candidate.RouteGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Candidate{}, store.ErrNotFound
 	}

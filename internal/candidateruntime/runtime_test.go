@@ -21,6 +21,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/uplink"
 )
 
 type recordedApply struct {
@@ -177,7 +178,7 @@ func TestDisabledSubscriptionLKGRemainsServiceOnlyInMihomoBundle(t *testing.T) {
 	if err := fixture.subscriptions.SetEnabled(fixture.ctx, "sub-a", false); err != nil {
 		t.Fatal(err)
 	}
-	ready, err := fixture.candidateRuntime.readyModems(fixture.ctx)
+	ready, err := fixture.candidateRuntime.readyUplinks(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +197,66 @@ func TestDisabledSubscriptionLKGRemainsServiceOnlyInMihomoBundle(t *testing.T) {
 	versions, err := fixture.candidateRuntime.endpointVersionIDs(fixture.ctx, nil)
 	if err != nil || len(versions) != 1 || versions[0] != fixture.oldVersionID {
 		t.Fatalf("service-only endpoint versions = %v, %v", versions, err)
+	}
+}
+
+func TestEthernetUplinkBuildsAndQualifiesVPNPathWithoutLegacyModem(t *testing.T) {
+	fixture := newRuntimeFixture(t, map[string]bool{"modem-a": true})
+	defer fixture.database.Close()
+
+	identity := sha256.Sum256([]byte("ethernet-a"))
+	if _, err := fixture.candidateRuntime.Uplinks.ObserveInterface(fixture.ctx, uplink.InterfaceObservation{
+		ID: "nic-ethernet-a", StableIdentityKind: "permanent_mac_hash",
+		StableIdentityHash: hex.EncodeToString(identity[:]), CurrentIfname: "enp9s0",
+		CarrierState: "UP", Addresses: []string{"198.51.100.2/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := fixture.candidateRuntime.Uplinks.CreateEthernet(fixture.ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "Ethernet A", NetworkInterfaceID: "nic-ethernet-a",
+		AddressMode: uplink.AddressDHCP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.database.ExecContext(fixture.ctx, `
+UPDATE uplinks
+SET state='UPLINK_READY', observed_generation=desired_generation,
+	    route_generation=1,
+    last_seen_at=?, stable_since=?, updated_at=?
+WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	var legacyModemCount int
+	if err := fixture.database.QueryRowContext(fixture.ctx, "SELECT COUNT(*) FROM modems WHERE id=?", created.ID).Scan(&legacyModemCount); err != nil || legacyModemCount != 0 {
+		t.Fatalf("Ethernet created a legacy modem row: count=%d err=%v", legacyModemCount, err)
+	}
+	if err := fixture.paths.ReconcileCells(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	cell, err := fixture.paths.Get(fixture.ctx, created.ID, "sub-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cell.UplinkID != created.ID || cell.UplinkType != uplink.TypeEthernet || cell.ModemID != "" {
+		t.Fatalf("Ethernet path identity = %+v", cell)
+	}
+	fixture.candidateRuntime.Prober = modemScopedProber{passing: map[string]bool{created.ID: true}}
+	operation, err := fixture.candidateRuntime.QualifyPath(fixture.ctx, cell.ID)
+	if err != nil || operation.Result.State != health.CellQualified || operation.Result.ModemID != created.ID {
+		t.Fatalf("QualifyPath(Ethernet) = %+v, %v", operation, err)
+	}
+	stored, err := fixture.paths.GetByID(fixture.ctx, cell.ID)
+	if err != nil || stored.State != pathmatrix.StateQualified || stored.SelectedNodeID == "" || stored.ModemID != "" {
+		t.Fatalf("stored Ethernet VPN path = %+v, %v", stored, err)
+	}
+	if len(fixture.controller.applies) == 0 {
+		t.Fatal("Ethernet qualification did not apply a Mihomo generation")
+	}
+	bundle := fixture.controller.applies[len(fixture.controller.applies)-1].Bundle
+	generated, exists := findGeneratedPath(bundle.Paths, created.ID, "sub-a")
+	if !exists || generated.UplinkID != created.ID || !strings.Contains(string(bundle.Main), "interface-name: enp9s0") {
+		t.Fatalf("Ethernet Mihomo path = %+v\n%s", generated, bundle.Main)
 	}
 }
 
@@ -392,7 +453,7 @@ func TestExactNodeProbeIsDiagnosticAndQualificationPublishesFreshEvidence(t *tes
 		t.Fatalf("ProbeNode() = %+v restores=%v current=%s err=%v", probe, fixture.controller.restores, fixture.controller.current, err)
 	}
 	var evidence int
-	if err := fixture.database.QueryRowContext(fixture.ctx, "SELECT COUNT(*) FROM path_nodes WHERE path_id=?", cell.ID).Scan(&evidence); err != nil || evidence != 0 {
+	if err := fixture.database.QueryRowContext(fixture.ctx, "SELECT COUNT(*) FROM uplink_path_nodes WHERE path_id=?", cell.ID).Scan(&evidence); err != nil || evidence != 0 {
 		t.Fatalf("diagnostic evidence count = %d, %v", evidence, err)
 	}
 	qualified, err := fixture.candidateRuntime.QualifyNode(fixture.ctx, cell.ID, nodeID)
@@ -531,7 +592,7 @@ func newRuntimeFixture(t *testing.T, passing map[string]bool) runtimeFixture {
 	runtime := &Runtime{
 		Subscriptions:  subscriptions,
 		Versions:       versions,
-		Modems:         modems,
+		Uplinks:        uplink.NewRepository(database, 1101, 0x1101),
 		Targets:        targets,
 		Paths:          paths,
 		Preferences:    accesspolicy.NewPreferenceRepository(database),
@@ -579,7 +640,7 @@ func assertEvidenceCount(t *testing.T, database *sql.DB, versionID string, expec
 	var count int
 	if err := database.QueryRow(`
 SELECT COUNT(*)
-FROM path_nodes AS pn
+FROM uplink_path_nodes AS pn
 JOIN nodes AS n ON n.id=pn.node_id
 WHERE n.version_id=?`, versionID).Scan(&count); err != nil {
 		t.Fatal(err)

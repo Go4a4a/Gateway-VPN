@@ -33,6 +33,7 @@ import (
 	"gateway-vpn/internal/candidateruntime"
 	"gateway-vpn/internal/db"
 	"gateway-vpn/internal/diagnostics"
+	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/health"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modem"
@@ -44,12 +45,19 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/webapi"
 )
 
 const previewPassword = "gateway-vpn-preview-only"
 
 type previewRefresher struct{}
+
+type previewDirectProbe struct{}
+
+func (previewDirectProbe) ProbeAllNow(context.Context) (directprobe.CycleResult, error) {
+	return directprobe.CycleResult{Due: 5, Probed: 5, Published: 5, Errors: map[string]string{}}, nil
+}
 
 func (previewRefresher) RefreshOne(_ context.Context, subscriptionID string, _ bool) (subscription.RefreshResult, error) {
 	return subscription.RefreshResult{SubscriptionID: subscriptionID, VersionID: "preview-version"}, nil
@@ -364,6 +372,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		}
 	}
 	modems := modem.NewRepository(database, 1101, 0x1101)
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
 	subscriptions := subscription.NewRepository(database)
 	paths := pathmatrix.NewRepository(database)
 	targets := bypass.NewRepository(database)
@@ -372,6 +381,23 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		return err
 	}
 	if err := seed(ctx, database, modems, subscriptions, paths, targets, secretRoot); err != nil {
+		return err
+	}
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:preview:ethernet", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("e", 64), PermanentMAC: "02:00:00:12:34:56",
+		TopologyPath: "pci-0000:03:00.0", CurrentIfname: "enp3s0", Driver: "igc",
+		Vendor: "Intel", Model: "I225-V", CarrierState: "DOWN", Addresses: []string{},
+	}); err != nil {
+		return err
+	}
+	if _, err := uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-preview", Name: "Резервный Ethernet", NetworkInterfaceID: "netif:preview:ethernet",
+		AddressMode: uplink.AddressDHCP, MTU: 1500,
+	}); err != nil {
+		return err
+	}
+	if err := paths.ReconcileCells(ctx); err != nil {
 		return err
 	}
 	previewNow := time.Now().UTC()
@@ -384,7 +410,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		return err
 	}
 	for _, path := range allDirectPaths {
-		if path.ModemID != "modem-a" {
+		if path.UplinkID != "modem-a" {
 			continue
 		}
 		if err := directPaths.Publish(ctx, accesspolicy.DirectResultUpdate{
@@ -465,8 +491,9 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	operationRepository := operations.NewRepository(database)
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
-		Modems: modems, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
+		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
 		DirectPaths:         directPaths,
+		DirectPathProbe:     previewDirectProbe{},
 		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,
 		BootIDReader: func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }, SubscriptionSecretRoot: secretRoot,
 		SubscriptionPayloadRoot: payloadRoot, ModemRuntime: previewRuntime{},

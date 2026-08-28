@@ -34,6 +34,7 @@ import (
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/candidateruntime"
 	"gateway-vpn/internal/diagnostics"
+	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/hostboot"
@@ -49,6 +50,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
@@ -63,6 +65,7 @@ type Dependencies struct {
 	Auth                    auth.Service
 	State                   *state.Repository
 	Modems                  *modem.Repository
+	Uplinks                 *uplink.Repository
 	Discoveries             *hilink.DiscoveryRegistry
 	WireGuardRuntime        *wireguardpkg.RuntimeStore
 	WireGuardConfigPath     string
@@ -70,6 +73,7 @@ type Dependencies struct {
 	ModemRuntime            ModemRuntime
 	ModemReconcile          func(context.Context) (hilink.CycleResult, error)
 	ModemPathProbe          ModemPathProber
+	DirectPathProbe         DirectPathProber
 	PathOperations          PathOperator
 	PathActivator           ManualPathActivator
 	Subscriptions           *subscription.Repository
@@ -193,6 +197,10 @@ type ModemPathProber interface {
 	RequalifyModem(context.Context, string) (candidateruntime.RequalificationResult, error)
 }
 
+type DirectPathProber interface {
+	ProbeAllNow(context.Context) (directprobe.CycleResult, error)
+}
+
 type PathOperator interface {
 	ProbeNode(context.Context, string, string) (candidateruntime.PathOperationResult, error)
 	QualifyNode(context.Context, string, string) (candidateruntime.PathOperationResult, error)
@@ -274,6 +282,8 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("DELETE /api/v1/access-methods/direct-only", server.protected(http.HandlerFunc(server.disableTemporaryDirectOnly)))
 	mux.Handle("GET /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.accessPolicySettings)))
 	mux.Handle("PUT /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.updateAccessPolicySettings)))
+	mux.Handle("GET /api/v1/uplinks", server.protected(http.HandlerFunc(server.uplinks)))
+	mux.Handle("GET /api/v1/network/interfaces", server.protected(http.HandlerFunc(server.networkInterfaces)))
 	mux.Handle("GET /api/v1/modems", server.protected(http.HandlerFunc(server.modems)))
 	mux.Handle("PUT /api/v1/modems/priorities", server.protected(http.HandlerFunc(server.reorderModems)))
 	mux.Handle("PATCH /api/v1/modems/{id}", server.protected(http.HandlerFunc(server.updateModem)))
@@ -582,10 +592,12 @@ func (server *Server) gatewayStatus(writer http.ResponseWriter, request *http.Re
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"gateway_state": snapshot.GatewayState, "path_state": snapshot.PathState,
-		"active_modem_id": snapshot.ActiveModemID, "active_path_id": snapshot.ActivePathID,
+		"active_uplink_id": snapshot.ActiveUplinkID,
+		"active_modem_id":  snapshot.ActiveModemID, "active_path_id": snapshot.ActivePathID,
 		"active_direct_path_id": snapshot.ActiveDirectPathID,
 		"active_method_id":      snapshot.ActiveMethodID, "active_method_kind": snapshot.ActiveMethodKind,
 		"active_quality_class":   snapshot.ActiveQualityClass,
+		"management_uplink_id":   snapshot.ManagementUplinkID,
 		"management_modem_id":    snapshot.ManagementModemID,
 		"active_subscription_id": snapshot.ActiveSubscriptionID, "active_node_id": snapshot.ActiveNodeID,
 		"config_generation":            snapshot.ConfigGeneration,
@@ -970,6 +982,162 @@ func (server *Server) convergeAccessPolicy(ctx context.Context) string {
 	return "COMPLETE"
 }
 
+type uplinkReadItem struct {
+	ID                          string         `json:"id"`
+	Number                      int64          `json:"number"`
+	Type                        string         `json:"type"`
+	Name                        string         `json:"name"`
+	Enabled                     bool           `json:"enabled"`
+	Priority                    int64          `json:"priority"`
+	NetworkInterfaceID          string         `json:"network_interface_id"`
+	InterfaceName               string         `json:"interface_name"`
+	AddressMode                 string         `json:"address_mode"`
+	IPv4CIDR                    string         `json:"ipv4_cidr"`
+	Gateway                     string         `json:"gateway"`
+	DNS                         []string       `json:"dns"`
+	MTU                         int64          `json:"mtu"`
+	RoutingTableID              int64          `json:"routing_table_id"`
+	Fwmark                      int64          `json:"fwmark"`
+	RouteGeneration             int64          `json:"route_generation"`
+	DesiredGeneration           int64          `json:"desired_generation"`
+	ObservedGeneration          int64          `json:"observed_generation"`
+	State                       string         `json:"state"`
+	LastSeenAt                  string         `json:"last_seen_at"`
+	StableSince                 string         `json:"stable_since"`
+	OperatorLabel               string         `json:"operator_label,omitempty"`
+	ObservedOperator            string         `json:"observed_operator,omitempty"`
+	ModemState                  string         `json:"modem_state,omitempty"`
+	TelemetryState              string         `json:"telemetry_state,omitempty"`
+	ManagementReachabilityState string         `json:"management_reachability_state,omitempty"`
+	Paths                       []pathReadItem `json:"paths"`
+}
+
+type networkInterfaceRoleReadItem struct {
+	Role               string `json:"role"`
+	UplinkID           string `json:"uplink_id,omitempty"`
+	DesiredGeneration  int64  `json:"desired_generation"`
+	ObservedGeneration int64  `json:"observed_generation"`
+	State              string `json:"state"`
+}
+
+type networkInterfaceReadItem struct {
+	ID               string                         `json:"id"`
+	IdentityKind     string                         `json:"identity_kind"`
+	MaskedMAC        string                         `json:"masked_mac"`
+	TopologyPath     string                         `json:"topology_path"`
+	InterfaceName    string                         `json:"interface_name"`
+	Driver           string                         `json:"driver"`
+	Vendor           string                         `json:"vendor"`
+	Model            string                         `json:"model"`
+	CarrierState     string                         `json:"carrier_state"`
+	Addresses        []string                       `json:"addresses"`
+	ObservedAt       string                         `json:"observed_at"`
+	ReplacementForID string                         `json:"replacement_for_interface_id"`
+	Roles            []networkInterfaceRoleReadItem `json:"roles"`
+}
+
+func (server *Server) uplinks(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Инвентарь физических выходов не подключён")
+		return
+	}
+	stored, err := server.dependencies.Uplinks.List(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	paths, err := server.readAccessPaths(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	pathsByUplink := make(map[string][]pathReadItem, len(stored))
+	for _, path := range paths {
+		pathsByUplink[path.UplinkID] = append(pathsByUplink[path.UplinkID], path)
+	}
+	result := make([]uplinkReadItem, 0, len(stored))
+	for _, item := range stored {
+		var dns []string
+		if err := json.Unmarshal([]byte(item.DNSJSON), &dns); err != nil {
+			writeInternalError(writer, fmt.Errorf("decode DNS for uplink %s: %w", item.ID, err))
+			return
+		}
+		view := uplinkReadItem{
+			ID: item.ID, Number: item.DisplayNumber, Type: item.Type, Name: item.Name,
+			Enabled: item.Enabled, Priority: item.Priority,
+			NetworkInterfaceID: item.NetworkInterfaceID, InterfaceName: item.CurrentIfname,
+			AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway,
+			DNS: dns, MTU: item.MTU, RoutingTableID: item.RoutingTableID, Fwmark: item.Fwmark,
+			RouteGeneration: item.RouteGeneration, DesiredGeneration: item.DesiredGeneration,
+			ObservedGeneration: item.ObservedGeneration, State: item.State,
+			LastSeenAt: item.LastSeenAt, StableSince: item.StableSince,
+			Paths: pathsByUplink[item.ID],
+		}
+		if item.Type == uplink.TypeHiLink {
+			details, err := server.dependencies.Uplinks.GetHiLink(request.Context(), item.ID)
+			if err != nil {
+				writeInternalError(writer, err)
+				return
+			}
+			view.OperatorLabel = details.OperatorLabel
+			view.ObservedOperator = details.ObservedOperator
+			view.ModemState = details.ModemState
+			view.TelemetryState = details.TelemetryState
+			view.ManagementReachabilityState = details.ManagementReachabilityState
+		}
+		result = append(result, view)
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func (server *Server) networkInterfaces(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Инвентарь сетевых интерфейсов не подключён")
+		return
+	}
+	stored, err := server.dependencies.Uplinks.ListInterfaces(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	result := make([]networkInterfaceReadItem, 0, len(stored))
+	for _, item := range stored {
+		var addresses []string
+		if err := json.Unmarshal([]byte(item.AddressesJSON), &addresses); err != nil {
+			writeInternalError(writer, fmt.Errorf("decode addresses for network interface %s: %w", item.ID, err))
+			return
+		}
+		roles := make([]networkInterfaceRoleReadItem, 0, len(item.Roles))
+		for _, role := range item.Roles {
+			roles = append(roles, networkInterfaceRoleReadItem{
+				Role: role.Role, UplinkID: role.UplinkID, DesiredGeneration: role.DesiredGeneration,
+				ObservedGeneration: role.ObservedGeneration, State: role.State,
+			})
+		}
+		result = append(result, networkInterfaceReadItem{
+			ID: item.ID, IdentityKind: item.StableIdentityKind, MaskedMAC: maskMAC(item.PermanentMAC),
+			TopologyPath: item.TopologyPath, InterfaceName: item.CurrentIfname,
+			Driver: item.Driver, Vendor: item.Vendor, Model: item.Model,
+			CarrierState: item.CarrierState, Addresses: addresses, ObservedAt: item.ObservedAt,
+			ReplacementForID: item.ReplacementForID, Roles: roles,
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func maskMAC(value string) string {
+	hardware, err := net.ParseMAC(strings.TrimSpace(value))
+	if err != nil || len(hardware) < 6 {
+		return ""
+	}
+	normalized := hardware.String()
+	parts := strings.Split(normalized, ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	return "xx:xx:xx:" + strings.Join(parts[3:], ":")
+}
+
 func (server *Server) modems(writer http.ResponseWriter, request *http.Request) {
 	items, err := server.dependencies.Modems.List(request.Context())
 	if err != nil {
@@ -1109,7 +1277,7 @@ func (server *Server) setModemEnabled(writer http.ResponseWriter, request *http.
 			writeInternalError(writer, snapshotErr)
 			return
 		}
-		if snapshot.ActiveModemID == id {
+		if snapshot.ActiveUplinkID == id {
 			if err := server.dependencies.ModemRuntime.BlockPath(request.Context()); err != nil {
 				writeError(writer, http.StatusBadGateway, "PATH_BLOCK_FAILED", "Не удалось безопасно закрыть активный путь")
 				return
@@ -1488,7 +1656,7 @@ func (server *Server) requalifyReadyModems(ctx context.Context) string {
 	}
 	activeModemID := ""
 	if snapshot, snapshotErr := server.dependencies.State.Get(ctx); snapshotErr == nil && snapshot.PolicyTransitionActive() {
-		activeModemID = snapshot.ActiveModemID
+		activeModemID = snapshot.ActiveUplinkID
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].ID == activeModemID && items[j].ID != activeModemID
@@ -1876,7 +2044,8 @@ func (server *Server) activatePath(writer http.ResponseWriter, request *http.Req
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"action": result.Action, "path_id": result.Candidate.PathID,
-		"node_id": result.Candidate.NodeID, "modem_id": result.Candidate.ModemID,
+		"node_id": result.Candidate.NodeID, "uplink_id": result.Candidate.UplinkID,
+		"modem_id":          result.Candidate.ModemID,
 		"subscription_id":   result.Candidate.SubscriptionID,
 		"policy_generation": result.Candidate.PolicyGeneration,
 		"route_generation":  result.Candidate.RouteGeneration,
@@ -2002,6 +2171,7 @@ type targetInput struct {
 	Value                 string `json:"value"`
 	Enabled               bool   `json:"enabled"`
 	Required              bool   `json:"required"`
+	TargetClass           string `json:"target_class"`
 	TimeoutSeconds        int64  `json:"timeout_seconds"`
 	SuccessMode           string `json:"success_mode"`
 	ExpectedStatus        string `json:"expected_status"`
@@ -2014,7 +2184,7 @@ func (server *Server) createTarget(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	created, err := server.dependencies.Targets.Create(request.Context(), bypass.CreateInput{ID: newID("target"), Name: input.Name, Kind: input.Kind, Value: input.Value, Required: input.Required, Timeout: time.Duration(input.TimeoutSeconds) * time.Second, SuccessMode: input.SuccessMode, ExpectedStatus: input.ExpectedStatus, ExpectedBodySubstring: input.ExpectedBodySubstring})
+	created, err := server.dependencies.Targets.Create(request.Context(), bypass.CreateInput{ID: newID("target"), Name: input.Name, Kind: input.Kind, Value: input.Value, Required: input.Required, TargetClass: input.TargetClass, Timeout: time.Duration(input.TimeoutSeconds) * time.Second, SuccessMode: input.SuccessMode, ExpectedStatus: input.ExpectedStatus, ExpectedBodySubstring: input.ExpectedBodySubstring})
 	if err != nil {
 		writeDomainError(writer, err)
 		return
@@ -2028,7 +2198,7 @@ func (server *Server) updateTarget(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	err := server.dependencies.Targets.Update(request.Context(), request.PathValue("id"), bypass.UpdateInput{Name: input.Name, Kind: input.Kind, Value: input.Value, Enabled: input.Enabled, Required: input.Required, Timeout: time.Duration(input.TimeoutSeconds) * time.Second, SuccessMode: input.SuccessMode, ExpectedStatus: input.ExpectedStatus, ExpectedBodySubstring: input.ExpectedBodySubstring, AllowNoRequired: confirmsNoRequiredTargets(request)})
+	err := server.dependencies.Targets.Update(request.Context(), request.PathValue("id"), bypass.UpdateInput{Name: input.Name, Kind: input.Kind, Value: input.Value, Enabled: input.Enabled, Required: input.Required, TargetClass: input.TargetClass, Timeout: time.Duration(input.TimeoutSeconds) * time.Second, SuccessMode: input.SuccessMode, ExpectedStatus: input.ExpectedStatus, ExpectedBodySubstring: input.ExpectedBodySubstring, AllowNoRequired: confirmsNoRequiredTargets(request)})
 	if err != nil {
 		writeDomainError(writer, err)
 		return
@@ -2070,9 +2240,33 @@ func (server *Server) probeTarget(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusConflict, "TARGET_DISABLED", "Сначала включите сервер проверки")
 		return
 	}
+	if target.TargetClass == bypass.TargetClassServiceEndpoint {
+		writeError(writer, http.StatusConflict, "SERVICE_TARGET_SCOPE", "Служебная цель проверяется подсистемой обновлений и не определяет пользовательский доступ в Internet")
+		return
+	}
+	if server.dependencies.DirectPathProbe == nil {
+		writeError(writer, http.StatusNotImplemented, "DIRECT_PROBE_NOT_AVAILABLE", "Прямая проверка физических выходов не подключена")
+		return
+	}
+	direct, err := server.dependencies.DirectPathProbe.ProbeAllNow(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "DIRECT_PROBE_FAILED", "Прямая проверка не завершена; ранее подтверждённое состояние сохранено")
+		return
+	}
+	vpnQualification := "NOT_APPLICABLE"
+	scope := "DIRECT_UPLINKS"
+	if target.TargetClass == bypass.TargetClassGlobalRequired || target.TargetClass == bypass.TargetClassGlobalOptional {
+		vpnQualification = server.requalifyReadyModems(request.Context())
+		scope = "DIRECT_AND_VPN_ELIGIBLE_PATHS"
+	}
 	writeJSON(writer, http.StatusAccepted, map[string]any{
-		"target_id": target.ID, "scope": "ALL_ELIGIBLE_PATHS",
-		"qualification": server.requalifyReadyModems(request.Context()),
+		"target_id": target.ID, "target_class": target.TargetClass, "scope": scope,
+		"direct_probe": map[string]any{
+			"eligible": direct.Due, "probed": direct.Probed, "published": direct.Published,
+			"deferred_by_budget": direct.Deferred,
+		},
+		"vpn_qualification": vpnQualification,
+		"convergence":       server.convergeAccessPolicy(request.Context()),
 	})
 }
 

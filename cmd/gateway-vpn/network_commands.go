@@ -29,6 +29,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
+	"gateway-vpn/internal/uplink"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -81,12 +82,13 @@ func runNetworkBroker(args []string) int {
 	defer listener.Close()
 	executor := platformexec.OSExecutor{}
 	modemRepository := modem.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart)
+	uplinkRepository := uplink.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart)
 	firewallBackend := &dataplane.FirewallBackend{
-		Database: database, Modems: modemRepository, Executor: executor, NFT: "/usr/sbin/nft",
+		Database: database, Uplinks: uplinkRepository, Executor: executor, NFT: "/usr/sbin/nft",
 		TUNName: configuration.Mihomo.TunName, LANName: configuration.Network.LANInterface,
 	}
 	routingBackend := dataplane.RoutingBackend{
-		Modems:            modemRepository,
+		Uplinks:           uplinkRepository,
 		Executor:          executor,
 		IP:                "/usr/sbin/ip",
 		LANPrefix:         configuration.Network.LANAddress,
@@ -99,7 +101,7 @@ func runNetworkBroker(args []string) int {
 	firewallBackend.Routing = &routingBackend
 	serviceBackend := dataplane.ServiceFirewallBackend{
 		Routing:       routingBackend,
-		Modems:        routingBackend.Modems,
+		Modems:        modemRepository,
 		Subscriptions: subscription.NewRepository(database),
 		Targets:       bypass.NewRepository(database),
 		Executor:      executor,
@@ -110,7 +112,7 @@ func runNetworkBroker(args []string) int {
 		AccessPolicy:  accesspolicy.NewRepository(database),
 	}
 	wireGuardBackend := &dataplane.WireGuardBackend{
-		Modems: routingBackend.Modems, States: state.NewRepository(database),
+		Modems: modemRepository, States: state.NewRepository(database),
 		Runtime: wireguardpkg.RuntimeStore{Database: database}, Endpoints: &serviceBackend,
 		Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg",
 		ConfigPath: filepath.Join(configuration.System.StateDir, "secrets", "wireguard.yaml"),

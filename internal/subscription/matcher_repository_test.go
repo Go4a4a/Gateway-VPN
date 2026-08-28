@@ -20,8 +20,8 @@ func TestMatcherChangesInvalidateMatrixPolicy(t *testing.T) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.ExecContext(ctx, `
-INSERT INTO subscription_modem_paths (
-    id, modem_id, subscription_id, state, transport_state,
+INSERT INTO subscription_uplink_paths (
+    id, uplink_id, subscription_id, state, transport_state,
     policy_generation, route_generation, created_at, updated_at
 ) VALUES ('path-a', 'modem-a', 'sub-a', 'UNTESTED', 'UNKNOWN', 0, 0, ?, ?)`, now, now); err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ INSERT INTO subscription_modem_paths (
 	}
 	var generation int64
 	var state string
-	if err := database.QueryRowContext(ctx, "SELECT policy_generation, state FROM subscription_modem_paths WHERE id='path-a'").Scan(&generation, &state); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT policy_generation, state FROM subscription_uplink_paths WHERE id='path-a'").Scan(&generation, &state); err != nil {
 		t.Fatal(err)
 	}
 	if generation != 1 || state != "STALE" {
@@ -50,7 +50,7 @@ INSERT INTO subscription_modem_paths (
 	if err := repository.Update(ctx, created.ID, MatcherUpdateInput{Pattern: "carrier", Type: MatcherSubstring, Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.QueryRowContext(ctx, "SELECT policy_generation FROM subscription_modem_paths WHERE id='path-a'").Scan(&generation); err != nil {
+	if err := database.QueryRowContext(ctx, "SELECT policy_generation FROM subscription_uplink_paths WHERE id='path-a'").Scan(&generation); err != nil {
 		t.Fatal(err)
 	}
 	if generation != 3 {

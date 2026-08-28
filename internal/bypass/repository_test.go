@@ -134,6 +134,34 @@ func TestTargetPolicyValidationAndLastRequiredConfirmationAreAtomic(t *testing.T
 	}
 }
 
+func TestTargetClassesSeparateGlobalWhitelistAndServicePolicies(t *testing.T) {
+	ctx, database := migratedDatabase(t)
+	repository := NewRepository(database)
+	whitelist, err := repository.Create(ctx, CreateInput{
+		ID: "whitelist", Name: "Operator whitelist", Kind: KindDomain,
+		Value: "yandex.example", TargetClass: TargetClassWhitelistIndicator,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil || whitelist.TargetClass != TargetClassWhitelistIndicator || whitelist.Required {
+		t.Fatalf("Create(whitelist) = %+v, %v", whitelist, err)
+	}
+	service, err := repository.Create(ctx, CreateInput{
+		ID: "service", Name: "Subscription source", Kind: KindDomain,
+		Value: "updates.example", TargetClass: TargetClassServiceEndpoint,
+		Timeout: 5 * time.Second,
+	})
+	if err != nil || service.TargetClass != TargetClassServiceEndpoint || service.Required {
+		t.Fatalf("Create(service) = %+v, %v", service, err)
+	}
+	if _, err := repository.Create(ctx, CreateInput{
+		ID: "invalid-whitelist", Name: "Invalid", Kind: KindDomain,
+		Value: "invalid.example", Required: true, TargetClass: TargetClassWhitelistIndicator,
+		Timeout: 5 * time.Second,
+	}); err == nil {
+		t.Fatal("Create() accepted a required whitelist indicator")
+	}
+}
+
 func migratedDatabase(t *testing.T) (context.Context, *sql.DB) {
 	t.Helper()
 	ctx := context.Background()

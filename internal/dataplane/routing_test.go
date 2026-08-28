@@ -10,6 +10,7 @@ import (
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/uplink"
 )
 
 const (
@@ -140,7 +141,7 @@ func TestRoutingBackendLookupFailureClosesGate(t *testing.T) {
 	}
 }
 
-func readyRoutingModem(t *testing.T) (*modem.Repository, func()) {
+func readyRoutingModem(t *testing.T) (*uplink.Repository, func()) {
 	t.Helper()
 	ctx := context.Background()
 	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
@@ -161,12 +162,12 @@ func readyRoutingModem(t *testing.T) (*modem.Repository, func()) {
 		database.Close()
 		t.Fatal(err)
 	}
-	return repository, func() { _ = database.Close() }
+	return uplink.NewRepository(database, 1101, 0x1101), func() { _ = database.Close() }
 }
 
-func testRoutingBackend(repository *modem.Repository, executor platformexec.Executor, gate PathBlocker) RoutingBackend {
+func testRoutingBackend(repository *uplink.Repository, executor platformexec.Executor, gate PathBlocker) RoutingBackend {
 	return RoutingBackend{
-		Modems: repository, Executor: executor, IP: "/usr/sbin/ip",
+		Uplinks: repository, Executor: executor, IP: "/usr/sbin/ip",
 		LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101, Gate: gate,
 	}

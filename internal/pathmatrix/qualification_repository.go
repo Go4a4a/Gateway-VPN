@@ -77,7 +77,7 @@ func (repository *Repository) StoreQualification(ctx context.Context, snapshot Q
 	var subscriptionID, activeVersionID string
 	err = transaction.QueryRowContext(ctx, `
 SELECT p.policy_generation, p.route_generation, p.subscription_id, COALESCE(s.active_version_id, '')
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN subscriptions AS s ON s.id=p.subscription_id
 WHERE p.id=?`, snapshot.PathID).Scan(&policyGeneration, &routeGeneration, &subscriptionID, &activeVersionID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -105,7 +105,7 @@ WHERE n.id=? AND v.id=? AND v.subscription_id=?`, node.NodeID, activeVersionID, 
 			return fmt.Errorf("node %s does not belong to the active subscription version", node.NodeID)
 		}
 	}
-	if _, err := transaction.ExecContext(ctx, "DELETE FROM path_nodes WHERE path_id=?", snapshot.PathID); err != nil {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM uplink_path_nodes WHERE path_id=?", snapshot.PathID); err != nil {
 		return fmt.Errorf("clear previous path node evidence: %w", err)
 	}
 	checkedAt := snapshot.CheckedAt.UTC().Format(time.RFC3339Nano)
@@ -118,7 +118,7 @@ WHERE n.id=? AND v.id=? AND v.subscription_id=?`, node.NodeID, activeVersionID, 
 			lastFailure = checkedAt
 		}
 		_, err := transaction.ExecContext(ctx, `
-INSERT INTO path_nodes (
+INSERT INTO uplink_path_nodes (
     path_id, node_id, qualification_state, qualification_generation,
     route_generation, qualification_expires_at, latency_ms,
     last_success_at, last_failure_at, failure_code
@@ -128,7 +128,7 @@ INSERT INTO path_nodes (
 		}
 		for _, target := range node.Targets {
 			_, err := transaction.ExecContext(ctx, `
-INSERT INTO path_node_target_results (
+INSERT INTO uplink_path_node_target_results (
     path_id, node_id, target_id, state, latency_ms, http_status,
     error_code, checked_at, expires_at, policy_generation, route_generation
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.PathID, node.NodeID, target.TargetID, target.State, nullIfZero(target.LatencyMS), nullIfZero(int64(target.HTTPStatus)), nullIfEmpty(target.ErrorCode), checkedAt, expiresAt, snapshot.ExpectedPolicyGeneration, snapshot.ExpectedRouteGeneration)
@@ -152,7 +152,7 @@ INSERT INTO path_node_target_results (
 		functionalScore = snapshot.FunctionalScore
 	}
 	result, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
     optional_targets_passed=?, optional_targets_total=?,
@@ -195,7 +195,7 @@ func (repository *Repository) StoreNodeQualification(ctx context.Context, snapsh
 	var subscriptionID, activeVersionID string
 	err = transaction.QueryRowContext(ctx, `
 SELECT p.policy_generation, p.route_generation, p.subscription_id, COALESCE(s.active_version_id, '')
-FROM subscription_modem_paths AS p
+FROM subscription_uplink_paths AS p
 JOIN subscriptions AS s ON s.id=p.subscription_id
 WHERE p.id=?`, snapshot.PathID).Scan(&policyGeneration, &routeGeneration, &subscriptionID, &activeVersionID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -218,7 +218,7 @@ WHERE n.id=? AND n.enabled=1 AND v.id=? AND v.subscription_id=?`, snapshot.Node.
 	if validNode != 1 {
 		return Cell{}, errors.New("node does not belong to the enabled active subscription candidate set")
 	}
-	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets WHERE enabled=1 AND required=1").Scan(&requiredTargets); err != nil {
+	if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets WHERE enabled=1 AND target_class='GLOBAL_REQUIRED'").Scan(&requiredTargets); err != nil {
 		return Cell{}, fmt.Errorf("count current required targets: %w", err)
 	}
 	if requiredTargets != snapshot.RequiredTargetsTotal {
@@ -233,7 +233,7 @@ WHERE n.id=? AND n.enabled=1 AND v.id=? AND v.subscription_id=?`, snapshot.Node.
 		lastFailure = checkedAt
 	}
 	if _, err := transaction.ExecContext(ctx, `
-INSERT INTO path_nodes (
+INSERT INTO uplink_path_nodes (
     path_id, node_id, qualification_state, qualification_generation,
     route_generation, qualification_expires_at, latency_ms,
     last_success_at, last_failure_at, failure_code
@@ -244,15 +244,15 @@ ON CONFLICT(path_id, node_id) DO UPDATE SET
     route_generation=excluded.route_generation,
     qualification_expires_at=excluded.qualification_expires_at,
     latency_ms=excluded.latency_ms,
-    last_success_at=COALESCE(excluded.last_success_at, path_nodes.last_success_at),
-    last_failure_at=COALESCE(excluded.last_failure_at, path_nodes.last_failure_at),
+    last_success_at=COALESCE(excluded.last_success_at, uplink_path_nodes.last_success_at),
+    last_failure_at=COALESCE(excluded.last_failure_at, uplink_path_nodes.last_failure_at),
     failure_code=excluded.failure_code`, snapshot.PathID, snapshot.Node.NodeID,
 		snapshot.Node.State, snapshot.ExpectedPolicyGeneration, snapshot.ExpectedRouteGeneration,
 		expiresAt, nullIfZero(snapshot.Node.LatencyMS), lastSuccess, lastFailure,
 		nullIfEmpty(snapshot.Node.ErrorCode)); err != nil {
 		return Cell{}, fmt.Errorf("upsert exact path node evidence: %w", err)
 	}
-	if _, err := transaction.ExecContext(ctx, "DELETE FROM path_node_target_results WHERE path_id=? AND node_id=?", snapshot.PathID, snapshot.Node.NodeID); err != nil {
+	if _, err := transaction.ExecContext(ctx, "DELETE FROM uplink_path_node_target_results WHERE path_id=? AND node_id=?", snapshot.PathID, snapshot.Node.NodeID); err != nil {
 		return Cell{}, fmt.Errorf("clear exact node target evidence: %w", err)
 	}
 	seenTargets := make(map[string]struct{}, len(snapshot.Node.Targets))
@@ -265,7 +265,7 @@ ON CONFLICT(path_id, node_id) DO UPDATE SET
 		}
 		seenTargets[target.TargetID] = struct{}{}
 		if _, err := transaction.ExecContext(ctx, `
-INSERT INTO path_node_target_results (
+INSERT INTO uplink_path_node_target_results (
     path_id, node_id, target_id, state, latency_ms, http_status,
     error_code, checked_at, expires_at, policy_generation, route_generation
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.PathID, snapshot.Node.NodeID,
@@ -281,10 +281,10 @@ INSERT INTO path_node_target_results (
 	err = transaction.QueryRowContext(ctx, `
 SELECT pn.node_id, pn.latency_ms, pn.qualification_expires_at,
        COALESCE(pn.last_success_at, pn.last_failure_at)
-FROM path_nodes AS pn
+FROM uplink_path_nodes AS pn
 JOIN nodes AS n ON n.id=pn.node_id AND n.enabled=1
 JOIN subscriptions AS s ON s.active_version_id=n.version_id
-JOIN subscription_modem_paths AS p ON p.id=pn.path_id AND p.subscription_id=s.id
+JOIN subscription_uplink_paths AS p ON p.id=pn.path_id AND p.subscription_id=s.id
 WHERE pn.path_id=? AND pn.qualification_state='BYPASS_QUALIFIED'
   AND pn.qualification_generation=? AND pn.route_generation=?
   AND pn.qualification_expires_at>?
@@ -298,14 +298,14 @@ LIMIT 1`, snapshot.PathID, snapshot.ExpectedPolicyGeneration, snapshot.ExpectedR
 SELECT
     SUM(CASE WHEN pn.qualification_state='BYPASS_QUALIFIED' THEN 1 ELSE 0 END),
     SUM(CASE WHEN pn.qualification_state='BYPASS_QUALIFIED' OR EXISTS (
-        SELECT 1 FROM path_node_target_results AS r
+        SELECT 1 FROM uplink_path_node_target_results AS r
         WHERE r.path_id=pn.path_id AND r.node_id=pn.node_id
           AND r.policy_generation=? AND r.route_generation=? AND r.expires_at>?
     ) THEN 1 ELSE 0 END)
-FROM path_nodes AS pn
+FROM uplink_path_nodes AS pn
 JOIN nodes AS n ON n.id=pn.node_id AND n.enabled=1
 JOIN subscriptions AS s ON s.active_version_id=n.version_id
-JOIN subscription_modem_paths AS p ON p.id=pn.path_id AND p.subscription_id=s.id
+JOIN subscription_uplink_paths AS p ON p.id=pn.path_id AND p.subscription_id=s.id
 WHERE pn.path_id=? AND pn.qualification_generation=? AND pn.route_generation=?
   AND pn.qualification_expires_at>?`, snapshot.ExpectedPolicyGeneration,
 		snapshot.ExpectedRouteGeneration, checkedAt, snapshot.PathID,
@@ -330,7 +330,7 @@ WHERE pn.path_id=? AND pn.qualification_generation=? AND pn.route_generation=?
 		functionalScore = requiredPassed * 1000
 	}
 	result, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state=?, transport_state=?, selected_node_id=?, candidate_nodes=?,
     qualified_nodes=?, required_targets_passed=?, required_targets_total=?,
     quality_class=?, functional_score=?, latency_ms=?, last_checked_at=?, expires_at=?, updated_at=?
@@ -375,21 +375,21 @@ func (repository *Repository) InvalidateVersionEvidence(ctx context.Context, sub
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_modem_paths
+UPDATE subscription_uplink_paths
 SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
     candidate_nodes=0, qualified_nodes=0, required_targets_passed=0,
     required_targets_total=0, latency_ms=NULL, last_checked_at=NULL,
     expires_at=NULL, updated_at=?
 WHERE subscription_id=? AND id IN (
     SELECT pn.path_id
-    FROM path_nodes AS pn
+    FROM uplink_path_nodes AS pn
     JOIN nodes AS n ON n.id=pn.node_id
     WHERE n.version_id=?
 )`, now, subscriptionID, versionID); err != nil {
 		return fmt.Errorf("stale paths for invalidated qualification version: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
-DELETE FROM path_nodes
+DELETE FROM uplink_path_nodes
 WHERE node_id IN (SELECT id FROM nodes WHERE version_id=?)`, versionID); err != nil {
 		return fmt.Errorf("delete invalidated qualification evidence: %w", err)
 	}

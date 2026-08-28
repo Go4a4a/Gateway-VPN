@@ -323,7 +323,7 @@ func TestUnifiedReconcilerUsesDirectWithoutMihomoThenFailsOverWithHold(t *testin
 		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 9,
 		CheckedAt: now, ExpiresAt: now.Add(time.Hour),
-		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", State: "PASSED", LatencyMS: 9, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 9, HTTPStatus: 204, CheckedAt: now, ExpiresAt: now.Add(time.Hour)}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ WHERE singleton_id=1`); err != nil {
 		t.Fatalf("stable direct = %+v activations=%+v err=%v", result, actuator.activations, err)
 	}
 
-	if _, err := database.ExecContext(ctx, "UPDATE direct_modem_paths SET expires_at=? WHERE id=?", now.Add(-time.Second).Format(time.RFC3339Nano), direct.ID); err != nil {
+	if _, err := database.ExecContext(ctx, "UPDATE direct_uplink_paths SET expires_at=? WHERE id=?", now.Add(-time.Second).Format(time.RFC3339Nano), direct.ID); err != nil {
 		t.Fatal(err)
 	}
 	observer.observed.MihomoReady, observer.observed.TUNReady = true, true
@@ -485,5 +485,5 @@ INSERT INTO bypass_probe_targets (
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return ctx, database, Candidate{PathID: cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: "node-a", PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration}
+	return ctx, database, Candidate{PathID: cell.ID, UplinkID: "modem-a", SubscriptionID: "sub-a", NodeID: "node-a", PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration}
 }

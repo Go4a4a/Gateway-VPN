@@ -33,11 +33,14 @@ type Input struct {
 	LANInterface       string
 	ProviderDirectory  string
 	BootstrapDNS       []string
-	Modems             []Modem
-	Subscriptions      []Subscription
+	Uplinks            []Uplink
+	// Modems is a bounded source-compatibility alias for pre-uplink callers.
+	// New runtime code must populate Uplinks and leave Modems empty.
+	Modems        []Modem
+	Subscriptions []Subscription
 }
 
-type Modem struct {
+type Uplink struct {
 	ID            string
 	Priority      int64
 	InterfaceName string
@@ -45,6 +48,10 @@ type Modem struct {
 	Enabled       bool
 	Online        bool
 }
+
+// Modem remains an alias so old fixtures and external configuration builders
+// can be migrated without creating a second runtime model.
+type Modem = Uplink
 
 type Subscription struct {
 	ID                string
@@ -56,6 +63,8 @@ type Subscription struct {
 }
 
 type Path struct {
+	UplinkID string
+	// ModemID is a bounded compatibility projection. UplinkID is authoritative.
 	ModemID           string
 	SubscriptionID    string
 	RuntimeKey        string
@@ -83,17 +92,17 @@ type PathNames struct {
 // StablePathNames returns the deterministic names used by a normal active
 // modem × subscription path. Candidate shadow paths intentionally use a
 // different runtime key and are not returned by this helper.
-func StablePathNames(modemID, subscriptionID string) (PathNames, error) {
-	if strings.TrimSpace(modemID) == "" || strings.TrimSpace(subscriptionID) == "" {
-		return PathNames{}, errors.New("modem and subscription ids are required")
+func StablePathNames(uplinkID, subscriptionID string) (PathNames, error) {
+	if strings.TrimSpace(uplinkID) == "" || strings.TrimSpace(subscriptionID) == "" {
+		return PathNames{}, errors.New("uplink and subscription ids are required")
 	}
-	modemKey := shortID(modemID)
+	uplinkKey := shortID(uplinkID)
 	subscriptionKey := shortID(subscriptionID)
 	return PathNames{
-		ProviderName:   "provider-" + modemKey + "-" + subscriptionKey,
-		GroupName:      "path-" + modemKey + "-" + subscriptionKey,
-		ProbeGroupName: "probe-path-" + modemKey + "-" + subscriptionKey,
-		NodePrefix:     modemKey + "/" + subscriptionKey + "/",
+		ProviderName:   "provider-" + uplinkKey + "-" + subscriptionKey,
+		GroupName:      "path-" + uplinkKey + "-" + subscriptionKey,
+		ProbeGroupName: "probe-path-" + uplinkKey + "-" + subscriptionKey,
+		NodePrefix:     uplinkKey + "/" + subscriptionKey + "/",
 	}, nil
 }
 
@@ -101,8 +110,8 @@ func Generate(input Input) (Bundle, error) {
 	if err := validateInput(input); err != nil {
 		return Bundle{}, err
 	}
-	modems := append([]Modem(nil), input.Modems...)
-	sort.SliceStable(modems, func(i, j int) bool { return modems[i].Priority < modems[j].Priority })
+	uplinks := effectiveUplinks(input)
+	sort.SliceStable(uplinks, func(i, j int) bool { return uplinks[i].Priority < uplinks[j].Priority })
 	subscriptions := append([]Subscription(nil), input.Subscriptions...)
 	sort.SliceStable(subscriptions, func(i, j int) bool { return subscriptions[i].Priority < subscriptions[j].Priority })
 
@@ -146,8 +155,8 @@ func Generate(input Input) (Bundle, error) {
 	activeChoices := []string{"REJECT"}
 	probeChoices := make([]string, 0)
 	generatedProxies := 0
-	for _, modem := range modems {
-		if !modem.Enabled || !modem.Online {
+	for _, currentUplink := range uplinks {
+		if !currentUplink.Enabled || !currentUplink.Online {
 			continue
 		}
 		for _, currentSubscription := range subscriptions {
@@ -158,14 +167,14 @@ func Generate(input Input) (Bundle, error) {
 			if generatedProxies > MaxGeneratedProxies {
 				return Bundle{}, fmt.Errorf("generated proxy count exceeds hard limit %d", MaxGeneratedProxies)
 			}
-			modemKey := shortID(modem.ID)
+			uplinkKey := shortID(currentUplink.ID)
 			runtimeKey := currentSubscription.RuntimeKey
 			if runtimeKey == "" {
 				runtimeKey = currentSubscription.ID
 			}
 			subscriptionKey := shortID(runtimeKey)
-			providerName := "provider-" + modemKey + "-" + subscriptionKey
-			groupName := "path-" + modemKey + "-" + subscriptionKey
+			providerName := "provider-" + uplinkKey + "-" + subscriptionKey
+			groupName := "path-" + uplinkKey + "-" + subscriptionKey
 			probeGroupName := "probe-" + groupName
 			providerFile := path.Join(input.ProviderDirectory, providerName+".yaml")
 			configuration.ProxyProviders[providerName] = providerConfig{
@@ -173,9 +182,9 @@ func Generate(input Input) (Bundle, error) {
 				Path:        providerFile,
 				HealthCheck: providerHealthCheck{Enable: false},
 				Override: providerOverride{
-					AdditionalPrefix: modemKey + "/" + subscriptionKey + "/",
-					InterfaceName:    modem.InterfaceName,
-					RoutingMark:      modem.Fwmark,
+					AdditionalPrefix: uplinkKey + "/" + subscriptionKey + "/",
+					InterfaceName:    currentUplink.InterfaceName,
+					RoutingMark:      currentUplink.Fwmark,
 				},
 			}
 			providerPayload := struct {
@@ -195,11 +204,11 @@ func Generate(input Input) (Bundle, error) {
 			if !currentSubscription.QualificationOnly {
 				activeChoices = append(activeChoices, groupName)
 			}
-			bundle.Paths = append(bundle.Paths, Path{ModemID: modem.ID, SubscriptionID: currentSubscription.ID, RuntimeKey: runtimeKey, ProviderName: providerName, ProviderFile: providerFile, GroupName: groupName, ProbeGroupName: probeGroupName, NodePrefix: modemKey + "/" + subscriptionKey + "/", QualificationOnly: currentSubscription.QualificationOnly})
+			bundle.Paths = append(bundle.Paths, Path{UplinkID: currentUplink.ID, ModemID: currentUplink.ID, SubscriptionID: currentSubscription.ID, RuntimeKey: runtimeKey, ProviderName: providerName, ProviderFile: providerFile, GroupName: groupName, ProbeGroupName: probeGroupName, NodePrefix: uplinkKey + "/" + subscriptionKey + "/", QualificationOnly: currentSubscription.QualificationOnly})
 		}
 	}
 	if len(bundle.Paths) == 0 {
-		return Bundle{}, errors.New("no enabled online modem/subscription path can be generated")
+		return Bundle{}, errors.New("no enabled ready uplink/subscription path can be generated")
 	}
 	configuration.ProxyGroups = append(configuration.ProxyGroups, proxyGroup{Name: ActiveGroupName, Type: "select", Proxies: activeChoices})
 	configuration.ProxyGroups = append(configuration.ProxyGroups, proxyGroup{Name: ProbeGroupName, Type: "select", Proxies: probeChoices})
@@ -236,15 +245,18 @@ func validateInput(input Input) error {
 	if len(input.BootstrapDNS) == 0 {
 		return errors.New("at least one bootstrap DNS server is required")
 	}
-	seenModems := make(map[string]struct{})
-	for _, modem := range input.Modems {
-		if modem.ID == "" || !validInterfaceName(modem.InterfaceName) || modem.Fwmark == 0 {
-			return errors.New("Mihomo modem id, interface, and fwmark are required")
+	if len(input.Uplinks) != 0 && len(input.Modems) != 0 {
+		return errors.New("Mihomo input cannot contain both canonical uplinks and legacy modems")
+	}
+	seenUplinks := make(map[string]struct{})
+	for _, currentUplink := range effectiveUplinks(input) {
+		if currentUplink.ID == "" || !validInterfaceName(currentUplink.InterfaceName) || currentUplink.Fwmark == 0 {
+			return errors.New("Mihomo uplink id, interface, and fwmark are required")
 		}
-		if _, exists := seenModems[modem.ID]; exists {
-			return fmt.Errorf("duplicate Mihomo modem id %q", modem.ID)
+		if _, exists := seenUplinks[currentUplink.ID]; exists {
+			return fmt.Errorf("duplicate Mihomo uplink id %q", currentUplink.ID)
 		}
-		seenModems[modem.ID] = struct{}{}
+		seenUplinks[currentUplink.ID] = struct{}{}
 	}
 	seenRuntimeKeys := make(map[string]struct{})
 	activeSubscriptions := make(map[string]struct{})
@@ -268,6 +280,13 @@ func validateInput(input Input) error {
 		}
 	}
 	return nil
+}
+
+func effectiveUplinks(input Input) []Uplink {
+	if len(input.Uplinks) != 0 {
+		return append([]Uplink(nil), input.Uplinks...)
+	}
+	return append([]Uplink(nil), input.Modems...)
 }
 
 func shortID(value string) string {

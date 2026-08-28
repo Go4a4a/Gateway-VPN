@@ -194,12 +194,12 @@ func TestStartupRecoveryUsesOnlyBoundedTransportProbe(t *testing.T) {
 	defer fixture.database.Close()
 	var nodeID string
 	if err := fixture.database.QueryRowContext(fixture.ctx, `
-SELECT selected_node_id FROM subscription_modem_paths WHERE id=?`, fixture.cell.ID).Scan(&nodeID); err != nil {
+SELECT selected_node_id FROM subscription_uplink_paths WHERE id=?`, fixture.cell.ID).Scan(&nodeID); err != nil {
 		t.Fatal(err)
 	}
 	candidate := reconcile.Candidate{
 		MethodKind: accesspolicy.MethodSubscription, QualityClass: accesspolicy.QualityFull,
-		PathID: fixture.cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
+		PathID: fixture.cell.ID, UplinkID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
 		PolicyGeneration: fixture.cell.PolicyGeneration, RouteGeneration: fixture.cell.RouteGeneration,
 		ConfigGeneration: 1, StartupRecovery: true,
 	}
@@ -266,7 +266,7 @@ LIMIT 1`).Scan(&nodeID); err != nil {
 	}
 	candidate := reconcile.Candidate{
 		MethodKind: accesspolicy.MethodSubscription, QualityClass: accesspolicy.QualityLimited,
-		PathID: cell.ID, ModemID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
+		PathID: cell.ID, UplinkID: "modem-a", SubscriptionID: "sub-a", NodeID: nodeID,
 		PolicyGeneration: cell.PolicyGeneration, RouteGeneration: cell.RouteGeneration,
 		ConfigGeneration: intent.ConfigGeneration,
 	}

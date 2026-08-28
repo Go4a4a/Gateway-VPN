@@ -283,17 +283,17 @@ ORDER BY s.enabled DESC, s.priority, s.display_number`)
 
 func (repository *NodeRepository) nodeModemStatuses(ctx context.Context, node ActiveNode) ([]NodeModemStatus, error) {
 	rows, err := repository.database.QueryContext(ctx, `
-SELECT COALESCE(p.id, ''), m.id, m.display_number, m.name,
+SELECT COALESCE(p.id, ''), u.id, u.display_number, u.name,
        COALESCE(p.state, 'UNTESTED'), COALESCE(pn.qualification_state, 'UNTESTED'),
        COALESCE(pn.latency_ms, 0), COALESCE(pn.failure_code, ''),
        COALESCE(pn.qualification_expires_at, ''),
        COALESCE(p.policy_generation, 0), COALESCE(p.route_generation, 0),
        COALESCE(pn.qualification_generation, 0), COALESCE(pn.route_generation, 0)
-FROM modems AS m
-LEFT JOIN subscription_modem_paths AS p
-       ON p.modem_id=m.id AND p.subscription_id=?
-LEFT JOIN path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
-ORDER BY m.enabled DESC, m.priority, m.display_number`, node.SubscriptionID, node.ID)
+FROM uplinks AS u
+LEFT JOIN subscription_uplink_paths AS p
+       ON p.uplink_id=u.id AND p.subscription_id=?
+LEFT JOIN uplink_path_nodes AS pn ON pn.path_id=p.id AND pn.node_id=?
+ORDER BY u.enabled DESC, u.priority, u.display_number`, node.SubscriptionID, node.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list node modem statuses: %w", err)
 	}
@@ -306,7 +306,7 @@ ORDER BY m.enabled DESC, m.priority, m.display_number`, node.SubscriptionID, nod
 		if err := rows.Scan(&item.PathID, &item.ModemID, &item.ModemNumber, &item.ModemName, &item.PathState, &item.QualificationState, &item.LatencyMS, &item.FailureCode, &item.ExpiresAt, &pathPolicyGeneration, &pathRouteGeneration, &evidencePolicyGeneration, &evidenceRouteGeneration); err != nil {
 			return nil, err
 		}
-		if item.PathState == "MODEM_OFFLINE" || item.PathState == "MODEM_DISABLED" || item.PathState == "SUBSCRIPTION_DISABLED" {
+		if item.PathState == "UPLINK_OFFLINE" || item.PathState == "UPLINK_DISABLED" || item.PathState == "SUBSCRIPTION_DISABLED" {
 			item.QualificationState = item.PathState
 		} else if item.ExpiresAt != "" {
 			expires, parseErr := time.Parse(time.RFC3339Nano, item.ExpiresAt)

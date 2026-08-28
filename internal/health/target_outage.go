@@ -91,14 +91,14 @@ func (evaluator TargetOutageEvaluator) evaluate(ctx context.Context, targetID st
 		return assessment, nil
 	}
 	rows, err := transaction.QueryContext(ctx, `
-SELECT p.modem_id, p.subscription_id,
+SELECT p.uplink_id, p.subscription_id,
        MAX(CASE WHEN r.state='PASSED' THEN 1 ELSE 0 END) AS any_passed
-FROM path_node_target_results AS r
-JOIN subscription_modem_paths AS p ON p.id=r.path_id
+FROM uplink_path_node_target_results AS r
+JOIN subscription_uplink_paths AS p ON p.id=r.path_id
 WHERE r.target_id=? AND r.expires_at>?
   AND r.policy_generation=p.policy_generation
   AND r.route_generation=p.route_generation
-GROUP BY p.modem_id, p.subscription_id`, targetID, now().UTC().Format(time.RFC3339Nano))
+GROUP BY p.uplink_id, p.subscription_id`, targetID, now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return TargetAssessment{}, fmt.Errorf("read target path observations: %w", err)
 	}

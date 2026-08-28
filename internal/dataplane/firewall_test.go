@@ -13,6 +13,8 @@ import (
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/firewall"
 	"gateway-vpn/internal/platformexec"
+	statepkg "gateway-vpn/internal/state"
+	"gateway-vpn/internal/uplink"
 )
 
 type firewallExecutor struct {
@@ -160,13 +162,13 @@ func TestFirewallBackendAuthorizesDirectPathOnlyFromFreshRuntimeIntent(t *testin
 		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 100,
 		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 11,
 		CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(2 * time.Minute),
-		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", State: "PASSED", LatencyMS: 11, HTTPStatus: 204, CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(2 * time.Minute)}},
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "target-a", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 11, HTTPStatus: 204, CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(2 * time.Minute)}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.ExecContext(ctx, `
 UPDATE runtime_state
-SET gateway_state='VERIFYING', path_state='PATH_VERIFYING', active_modem_id='modem-a',
+SET gateway_state='VERIFYING', path_state='PATH_VERIFYING', active_uplink_id='modem-a', active_modem_id='modem-a',
     active_path_id=NULL, active_direct_path_id='direct:path:modem-a',
     active_subscription_id=NULL, active_node_id=NULL,
     active_method_id='access:direct', active_method_kind='DIRECT', active_quality_class='FULL',
@@ -181,7 +183,7 @@ WHERE singleton_id=1`); err != nil {
 	routing := &fakeRoutingSynchronizer{}
 	executor := &firewallExecutor{}
 	backend := FirewallBackend{
-		Database: database, Modems: modems, Routing: routing, Executor: executor,
+		Database: database, Uplinks: uplink.NewRepository(database, 1101, 0x1101), Routing: routing, Executor: executor,
 		NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "enp2s0",
 	}
 	if err := backend.ActivateDirectPath(ctx, "modem-a", currentModem.RouteGeneration); err != nil {
@@ -195,11 +197,81 @@ WHERE singleton_id=1`); err != nil {
 		t.Fatal("ActivateDirectPath(stale route generation) error = nil")
 	}
 	before := len(executor.requests)
-	if _, err := database.ExecContext(ctx, "UPDATE direct_modem_paths SET expires_at='2000-01-01T00:00:00Z' WHERE id=?", path.ID); err != nil {
+	if _, err := database.ExecContext(ctx, "UPDATE direct_uplink_paths SET expires_at='2000-01-01T00:00:00Z' WHERE id=?", path.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.ActivateDirectPath(ctx, "modem-a", currentModem.RouteGeneration); err == nil || len(executor.requests) != before {
 		t.Fatalf("ActivateDirectPath(expired evidence) error/requests = %v/%d, before %d", err, len(executor.requests), before)
+	}
+}
+
+func TestFirewallBackendActivatesEthernetDirectPathWithoutModemProjection(t *testing.T) {
+	ctx := context.Background()
+	database, _, _, closeDatabase := serviceRepositories(t)
+	defer closeDatabase()
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "nic-ethernet-direct", StableIdentityKind: "permanent_mac_hash",
+		StableIdentityHash: strings.Repeat("a", 64), CurrentIfname: "enp9s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-direct", Name: "Ethernet direct", NetworkInterfaceID: "nic-ethernet-direct",
+		AddressMode: uplink.AddressDHCP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE uplinks SET state='UPLINK_READY', observed_generation=desired_generation, route_generation=1 WHERE id=?", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	currentUplink, err := uplinks.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := bypass.NewRepository(database)
+	if _, err := targets.Create(ctx, bypass.CreateInput{ID: "ethernet-target", Name: "Required target", Kind: bypass.KindDomain, Value: "ethernet.example", Required: true, Timeout: 5 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	paths := accesspolicy.NewDirectPathRepository(database)
+	if err := paths.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	path, err := paths.Get(ctx, "direct:path:"+created.ID)
+	if err != nil || path.UplinkType != uplink.TypeEthernet {
+		t.Fatalf("Ethernet direct path = %+v, %v", path, err)
+	}
+	checkedAt := time.Now().UTC()
+	if err := paths.Publish(ctx, accesspolicy.DirectResultUpdate{
+		PathID: path.ID, ExpectedPolicyGeneration: path.PolicyGeneration, ExpectedRouteGeneration: path.RouteGeneration,
+		TransportState: "PASSED", QualityClass: accesspolicy.QualityFull, FunctionalScore: 1000,
+		RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, LatencyMS: 8,
+		CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(2 * time.Minute),
+		Targets: []accesspolicy.DirectTargetResult{{TargetID: "ethernet-target", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 8, HTTPStatus: 204, CheckedAt: checkedAt, ExpiresAt: checkedAt.Add(2 * time.Minute)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	intent, changed, err := statepkg.NewRepository(database).BeginDirectActivation(ctx, path.ID, path.PolicyGeneration, path.RouteGeneration)
+	if err != nil || !changed || intent.ActiveUplinkID != created.ID || intent.ActiveModemID != "" {
+		t.Fatalf("Ethernet activation intent = %+v/%v/%v", intent, changed, err)
+	}
+	routing := &fakeRoutingSynchronizer{}
+	executor := &firewallExecutor{}
+	backend := FirewallBackend{
+		Database: database, Uplinks: uplinks, Routing: routing, Executor: executor,
+		NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "enp2s0",
+	}
+	if err := backend.ActivateDirectPath(ctx, created.ID, currentUplink.RouteGeneration); err != nil {
+		t.Fatalf("ActivateDirectPath(Ethernet) error = %v", err)
+	}
+	want := PathState{
+		Active: true, Mode: PathModeDirect, Generation: uint32(intent.ConfigGeneration),
+		DirectInterface: "enp9s0", DirectMark: uint32(currentUplink.Fwmark),
+		RouteGeneration: uint32(currentUplink.RouteGeneration),
+	}
+	if executor.state != want || routing.calls != 1 {
+		t.Fatalf("Ethernet direct firewall state/routing = %+v/%d, want %+v/1", executor.state, routing.calls, want)
 	}
 }
 
