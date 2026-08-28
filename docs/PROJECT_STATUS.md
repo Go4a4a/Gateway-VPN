@@ -289,6 +289,18 @@ Unified-access successor локально достиг install-ready: data-plane
 
 ## Журнал разработки
 
+### Сессия 085 — exact-source offline publisher verification — 2026-08-28
+
+**Граница полномочий:** отдельного разрешения на создание/push release tag и GitHub draft ещё нет, поэтому GitHub и локальные tags не изменялись. Проверка выполнялась только над существующим signed candidate; production `.gvkey` не читался и не монтировался.
+
+**Повторная custody-проверка:** рабочее дерево чистое; diff от signed source commit `57239401732c18822729499656801b994d627477` до текущего `main` содержит только `docs/PROJECT_STATUS.md`. В read-only volume две независимые сборки по-прежнему имеют одинаковые `artifacts.sha256`, `artifacts.meta` и побайтно одинаковый `dist`; build1 содержит ровно `10` publisher assets. Повторно подтверждены SHA-256: Gateway `c4ff94175081de8f6869d14ce3e001faab9517e096eb6fd37651cbb7e9794093`, VPS `58c337301c267725b6bdde1efdd53700245c97a6ab24b730474601f0aa0be809`, bootstrap `aa76dccb62719cea4b4fbf33ecd7f4c3b6cfd9cacf14e82c49cb99bf50b47deb`, deploy `4e91bba7fd32c6c3efec8de1f2f902786c05d6814cf667a6fec92265998dd134`, channel `b978f1973866be6f07ebfc32f6ff2089e987cdc75116700165e54b31467dcd00`.
+
+**Exact-source gate:** отдельный container работал с `--network none`, read-only root/source/signed bundle/module cache, без capabilities и с `no-new-privileges`. Source получен через `git archive` exact commit, verifier собран один раз в disposable RAM-only workspace и затем независимо проверил: Gateway release `47` файлов, VPS release `17` файлов и channel `validation` с `4` artifacts. Во всех трёх результатах signer равен `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`; итог — `EXACT_SOURCE_OFFLINE_VERIFIER_PASS`.
+
+**Неуспешные диагностические запуски:** первая bundle-команда была перехвачена PowerShell из-за `$(...)` внутри double-quoted Linux command и не выполнила assertions; повтор с literal quoting прошёл. Первые три exact-source containers остановились до product verification из-за неверного default `GOPATH` при read-only root, недостаточного 64 MiB Go work directory и Docker tmpfs `noexec`. Финальный запуск использовал явные `GOPATH`, `GOTMPDIR`, 2 GiB RAM workspace и `exec`; ни один промежуточный запуск не изменял source, bundle или host network.
+
+**Следующий шаг:** требуется отдельное явное разрешение пользователя на создание и push exact tag `v0.1.0-successor.5723940` и GitHub draft Release. Draft не публиковать автоматически; после создания повторно сверить remote tag, полный asset list, hashes/signatures и repository immutability перед ручной публикацией.
+
 ### Сессия 084 — High mode и read-only pre-publication audit — 2026-08-28
 
 **Режим:** пользователь явно подтвердил возврат `xhigh → High` после завершения signed fresh-install/kernel gate; работа продолжена с install-ready состояния без повторения уже пройденных Docker checks.
