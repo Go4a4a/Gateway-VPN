@@ -309,11 +309,13 @@ Unified-access successor локально достиг install-ready: data-plane
 
 **Проверено:** full `go test ./... -count=1`, `go vet ./...`, четыре CGO-free Linux/amd64 builds, Node/shell syntax и `git diff --check` — PASS. Disposable Ubuntu 24.04 `systemd-analyze verify` принял все Gateway/VPS units и no-wait drop-in. Штатные `update-grub` и `grub-script-check` успешно сгенерировали/проверили hidden, menu и rollback конфигурации; из-за Docker overlay storage использован детерминированный test-only `grub-probe`, поэтому реальный disk/UEFI NVRAM остаётся bare-metal gate.
 
-**Первый exact CI и исправление:** GitHub Actions run `33170851364` для `fc8f542` прошёл format, но Linux-only `TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand` обнаружил, что `gateway-vpnctl channel-install-command` ещё не объявлял/передавал два новых обязательных automation flags. Windows suite не мог увидеть этот тест, потому что release private-key CLI намеренно Linux-only. CLI получил typed flags, early validation и передачу в generator; точный упавший test, полный `go test -race ./...` и `go vet ./...` прошли в disposable `golang:1.26.7-bookworm`. Первый run сохраняется как failed evidence, новый exact CI ожидает fix commit.
+**Первый exact CI и исправление:** GitHub Actions run `33170851364` для `fc8f542` прошёл format, но Linux-only `TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand` обнаружил, что `gateway-vpnctl channel-install-command` ещё не объявлял/передавал два новых обязательных automation flags. Windows suite не мог увидеть этот тест, потому что release private-key CLI намеренно Linux-only. CLI получил typed flags, early validation и передачу в generator; точный упавший test, полный `go test -race ./...` и `go vet ./...` прошли в disposable `golang:1.26.7-bookworm`. Первый run сохраняется как failed evidence.
 
-**Release boundary:** immutable public `v0.1.0-successor.5723940` не менялся и не содержит эту доработку. Текущий worktree ещё не commit/push/exact-CI и не подписан production key.
+**Exact CI исправления:** commit `6b1b51bb4b4be568e50139926903f952856cfaad` отправлен в `origin/main`; GitHub Actions run `33171987634` завершился `success`. Отдельно прошли `Go, packaging and syntax gates` и `Linux nftables fail-closed gate`. Это подтверждает полный контракт мастера установки, обязательную передачу boot/GRUB policies и неизменность fail-closed data plane.
 
-**Следующий шаг:** commit/push successor, дождаться exact CI, затем собрать disposable-signed clean bundle и повторить fresh Ubuntu/systemd install, idempotency, forced rollback и reboot. Новый production tag/Release требует отдельного разрешения пользователя.
+**Release boundary:** immutable public `v0.1.0-successor.5723940` не менялся и не содержит эту доработку. Successor зафиксирован и exact-CI проверен, но ещё не подписан production key и не опубликован отдельным tag/Release.
+
+**Следующий шаг:** собрать disposable-signed clean successor и повторить fresh Ubuntu 24.04/systemd install, no-network boot, idempotency, forced rollback, GRUB apply/rollback и reboot. Новый production tag/Release требует отдельного разрешения пользователя.
 
 ### Сессия 087 — immutable public Release и GitHub attestation — 2026-08-28
 
