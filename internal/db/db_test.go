@@ -3,11 +3,16 @@ package db
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
+
+	"gateway-vpn/migrations"
 )
 
 func TestEnsureExactModeSkipsUnneededChmod(t *testing.T) {
@@ -116,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 16 {
+	if err != nil || version != 17 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -140,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 16 {
+	if err != nil || latest != 17 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -194,6 +199,25 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"users",
 		"login_attempts",
 		"logging_runtime",
+		"network_interfaces",
+		"interface_role_assignments",
+		"uplinks",
+		"hilink_modems",
+		"legacy_modem_uplink_map",
+		"subscription_uplink_paths",
+		"uplink_path_nodes",
+		"uplink_path_node_target_results",
+		"direct_uplink_paths",
+		"direct_uplink_path_target_results",
+		"wireguard_ingress_servers",
+		"wireguard_ingress_peers",
+		"wireguard_ingress_peer_routes",
+		"wireguard_ingress_runtime",
+		"wireguard_ingress_peer_runtime",
+		"modem_recovery_policy",
+		"modem_recovery_runtime",
+		"modem_recovery_attempts",
+		"log_export_policy",
 	}
 	for _, table := range wantTables {
 		var count int
@@ -209,8 +233,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 16 {
-		t.Fatalf("SchemaVersion() = %d, want 16", version)
+	if version != 17 {
+		t.Fatalf("SchemaVersion() = %d, want 17", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -254,9 +278,237 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 16 {
-		t.Fatalf("migration count = %d, want 16", count)
+	if count != 17 {
+		t.Fatalf("migration count = %d, want 17", count)
 	}
+}
+
+func TestMigration17PreservesHiLinkPathsAndRuntimeIdentity(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	legacyFS := migrationsThrough(t, 16)
+	if err := migrateFS(ctx, database, legacyFS); err != nil {
+		t.Fatalf("migrate legacy schema: %v", err)
+	}
+	now := "2026-08-28T12:00:00Z"
+	statements := []string{
+		`INSERT INTO modems (
+            id, display_number, name, operator_label, identity_kind, identity_hash,
+            enabled, priority, interface_name, management_cidr, gateway, dns_json,
+            routing_table_id, fwmark, route_generation, state, telemetry_state,
+            management_reachability_state, created_at, updated_at
+        ) VALUES (
+            'modem-a', 1, 'Operator A', 'A', 'USB_SERIAL', 'identity-a',
+            1, 10, 'enx-a', '192.168.8.2/24', '192.168.8.1', '["192.168.8.1"]',
+            1101, 4353, 7, 'MODEM_READY', 'AVAILABLE', 'REACHABLE', '` + now + `', '` + now + `'
+        )`,
+		`INSERT INTO subscriptions (
+            id, display_number, name, source_type, enabled, priority, auto_refresh,
+            refresh_interval_seconds, fallback_when_named_candidates_fail, status,
+            created_at, updated_at
+        ) VALUES ('sub-a', 1, 'Bypass', 'url', 1, 10, 1, 3600, 0, 'ONLINE', '` + now + `', '` + now + `')`,
+		`INSERT INTO access_methods (
+            id, kind, subscription_id, enabled, priority, immutable, created_at, updated_at
+        ) VALUES ('access:subscription:sub-a', 'SUBSCRIPTION', 'sub-a', 1, 20, 0, '` + now + `', '` + now + `')`,
+		`INSERT INTO subscription_versions (
+            id, subscription_id, content_sha256, nodes_total, state, created_at, activated_at
+        ) VALUES ('version-a', 'sub-a', 'sha-a', 1, 'LKG', '` + now + `', '` + now + `')`,
+		`UPDATE subscriptions SET active_version_id='version-a' WHERE id='sub-a'`,
+		`INSERT INTO nodes (
+            id, version_id, external_name, normalized_name, fingerprint, proxy_type, enabled,
+		    selection_override, candidate_source, matched_matcher_id
+        ) VALUES ('node-a', 'version-a', 'LTE A', 'lte a', 'fingerprint-a', 'vless', 1, 'auto', 'MATCHER', NULL)`,
+		`INSERT INTO bypass_probe_targets (
+            id, name, target_kind, target_value, normalized_url, enabled, required,
+            priority, timeout_seconds, success_mode, state, created_at, updated_at
+        ) VALUES ('target-a', 'Global', 'url', 'https://example.com/', 'https://example.com/', 1, 1, 10, 8, 'any_http_response', 'NORMAL', '` + now + `', '` + now + `')`,
+		`INSERT INTO subscription_modem_paths (
+            id, modem_id, subscription_id, state, transport_state, selected_node_id,
+            candidate_nodes, qualified_nodes, required_targets_passed, required_targets_total,
+            quality_class, functional_score, policy_generation, route_generation,
+            last_checked_at, expires_at, created_at, updated_at
+        ) VALUES (
+            'path:modem-a:sub-a', 'modem-a', 'sub-a', 'QUALIFIED', 'PASSED', 'node-a',
+            1, 1, 1, 1, 'FULL', 1000, 4, 7, '` + now + `', '2026-08-28T12:15:00Z', '` + now + `', '` + now + `'
+        )`,
+		`INSERT INTO path_nodes (
+            path_id, node_id, qualification_state, qualification_generation,
+            route_generation, qualification_expires_at, latency_ms, last_success_at
+        ) VALUES ('path:modem-a:sub-a', 'node-a', 'BYPASS_QUALIFIED', 4, 7, '2026-08-28T12:15:00Z', 42, '` + now + `')`,
+		`INSERT INTO path_node_target_results (
+            path_id, node_id, target_id, state, latency_ms, http_status, checked_at,
+            expires_at, policy_generation, route_generation
+        ) VALUES ('path:modem-a:sub-a', 'node-a', 'target-a', 'PASSED', 42, 200, '` + now + `', '2026-08-28T12:15:00Z', 4, 7)`,
+		`INSERT INTO direct_modem_paths (
+            id, modem_id, state, transport_state, quality_class, functional_score,
+            required_targets_passed, required_targets_total, policy_generation,
+            route_generation, last_checked_at, expires_at, created_at, updated_at
+        ) VALUES ('direct:path:modem-a', 'modem-a', 'FAILED', 'PASSED', 'FAILED', 0, 0, 1, 4, 7, '` + now + `', '2026-08-28T12:15:00Z', '` + now + `', '` + now + `')`,
+		`INSERT INTO direct_path_target_results (
+            path_id, target_id, state, latency_ms, http_status, checked_at, expires_at,
+            policy_generation, route_generation
+        ) VALUES ('direct:path:modem-a', 'target-a', 'FAILED', 50, 503, '` + now + `', '2026-08-28T12:15:00Z', 4, 7)`,
+		`UPDATE runtime_state SET
+            gateway_state='ACTIVE', path_state='PATH_ACTIVE', active_modem_id='modem-a',
+            active_path_id='path:modem-a:sub-a', active_method_id='access:subscription:sub-a',
+            active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
+            active_subscription_id='sub-a', active_node_id='node-a', management_modem_id='modem-a'
+        WHERE singleton_id=1`,
+	}
+	for _, statement := range statements {
+		if _, err := database.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("prepare legacy fixture: %v\n%s", err, statement)
+		}
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate to schema 17: %v", err)
+	}
+	var uplinkType, uplinkState, modemState, interfaceName string
+	var routeGeneration int64
+	if err := database.QueryRowContext(ctx, `
+SELECT u.type, u.state, h.modem_state, n.current_ifname, u.route_generation
+FROM uplinks AS u
+JOIN hilink_modems AS h ON h.uplink_id=u.id
+JOIN network_interfaces AS n ON n.id=u.network_interface_id
+WHERE u.id='modem-a'`).Scan(&uplinkType, &uplinkState, &modemState, &interfaceName, &routeGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if uplinkType != "HILINK" || uplinkState != "UPLINK_READY" || modemState != "MODEM_READY" || interfaceName != "enx-a" || routeGeneration != 7 {
+		t.Fatalf("migrated uplink = %s/%s/%s/%s/%d", uplinkType, uplinkState, modemState, interfaceName, routeGeneration)
+	}
+	var pathID, nodeID, targetClass, activeUplink, managementUplink string
+	if err := database.QueryRowContext(ctx, `
+SELECT p.id, pn.node_id, r.target_class, s.active_uplink_id, s.management_uplink_id
+FROM subscription_uplink_paths AS p
+JOIN uplink_path_nodes AS pn ON pn.path_id=p.id
+JOIN uplink_path_node_target_results AS nr ON nr.path_id=pn.path_id AND nr.node_id=pn.node_id
+JOIN direct_uplink_path_target_results AS r ON r.target_id=nr.target_id
+JOIN runtime_state AS s ON s.singleton_id=1
+WHERE p.uplink_id='modem-a'`).Scan(&pathID, &nodeID, &targetClass, &activeUplink, &managementUplink); err != nil {
+		t.Fatal(err)
+	}
+	if pathID != "path:modem-a:sub-a" || nodeID != "node-a" || targetClass != "GLOBAL_REQUIRED" || activeUplink != "modem-a" || managementUplink != "modem-a" {
+		t.Fatalf("preserved identities = %s/%s/%s/%s/%s", pathID, nodeID, targetClass, activeUplink, managementUplink)
+	}
+	if err := ForeignKeyCheck(ctx, database); err != nil {
+		t.Fatalf("foreign key check after migration: %v", err)
+	}
+}
+
+func TestMigration17CompatibilityBridgeMirrorsLegacyWritesAtomically(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-08-28T13:00:00Z"
+	statements := []string{
+		`INSERT INTO modems (
+            id, display_number, name, identity_kind, identity_hash, enabled, priority,
+            routing_table_id, fwmark, route_generation, state, telemetry_state,
+            management_reachability_state, created_at, updated_at
+        ) VALUES (
+            'modem-bridge', 1, 'Bridge modem', 'USB_SERIAL',
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            1, 10, 1101, 4353, 0, 'MODEM_CONFIGURED_OFFLINE', 'UNKNOWN', 'UNTESTED', '` + now + `', '` + now + `'
+        )`,
+		`UPDATE modems SET interface_name='enx-bridge', management_cidr='192.168.9.2/24',
+            gateway='192.168.9.1', dns_json='["192.168.9.1"]', route_generation=2,
+            state='MODEM_READY', updated_at='2026-08-28T13:01:00Z'
+        WHERE id='modem-bridge'`,
+		`INSERT INTO subscriptions (
+            id, display_number, name, source_type, enabled, priority, auto_refresh,
+            refresh_interval_seconds, fallback_when_named_candidates_fail, status,
+            created_at, updated_at
+        ) VALUES ('sub-bridge', 1, 'Bridge subscription', 'url', 1, 10, 1, 3600, 0, 'ONLINE', '` + now + `', '` + now + `')`,
+		`INSERT INTO subscription_modem_paths (
+            id, modem_id, subscription_id, state, transport_state, candidate_nodes,
+            qualified_nodes, required_targets_passed, required_targets_total,
+            quality_class, functional_score, policy_generation, route_generation,
+            created_at, updated_at
+        ) VALUES (
+            'path:bridge', 'modem-bridge', 'sub-bridge', 'FAILED', 'FAILED', 1, 0,
+            0, 1, 'FAILED', 0, 3, 2, '` + now + `', '` + now + `'
+        )`,
+		`UPDATE subscription_modem_paths SET state='MODEM_OFFLINE', updated_at='2026-08-28T13:02:00Z' WHERE id='path:bridge'`,
+		`UPDATE runtime_state SET active_modem_id='modem-bridge', management_modem_id='modem-bridge' WHERE singleton_id=1`,
+	}
+	for _, statement := range statements {
+		if _, err := database.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("legacy compatibility write: %v\n%s", err, statement)
+		}
+	}
+	var uplinkState, interfaceName, pathState, activeUplink, managementUplink string
+	var routeGeneration int64
+	if err := database.QueryRowContext(ctx, `
+SELECT u.state, n.current_ifname, u.route_generation, p.state,
+       r.active_uplink_id, r.management_uplink_id
+FROM uplinks AS u
+JOIN network_interfaces AS n ON n.id=u.network_interface_id
+JOIN subscription_uplink_paths AS p ON p.uplink_id=u.id
+JOIN runtime_state AS r ON r.singleton_id=1
+WHERE u.id='modem-bridge'`).Scan(
+		&uplinkState, &interfaceName, &routeGeneration, &pathState,
+		&activeUplink, &managementUplink); err != nil {
+		t.Fatal(err)
+	}
+	if uplinkState != "UPLINK_READY" || interfaceName != "enx-bridge" || routeGeneration != 2 || pathState != "UPLINK_OFFLINE" || activeUplink != "modem-bridge" || managementUplink != "modem-bridge" {
+		t.Fatalf("compatibility projection = %s/%s/%d/%s/%s/%s", uplinkState, interfaceName, routeGeneration, pathState, activeUplink, managementUplink)
+	}
+	if _, err := database.ExecContext(ctx, "DELETE FROM modems WHERE id='modem-bridge'"); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"uplinks", "hilink_modems", "subscription_uplink_paths"} {
+		var count int
+		if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE "+map[string]string{
+			"uplinks": "id", "hilink_modems": "uplink_id", "subscription_uplink_paths": "uplink_id",
+		}[table]+"='modem-bridge'").Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s rows after legacy delete = %d, %v", table, count, err)
+		}
+	}
+	if err := ForeignKeyCheck(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func migrationsThrough(t *testing.T, maximum int64) fs.FS {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := fstest.MapFS{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		version, err := migrationVersion(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version > maximum {
+			continue
+		}
+		content, err := fs.ReadFile(migrations.Files, entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[entry.Name()] = &fstest.MapFile{Data: content}
+	}
+	return result
+}
+
+func migrationVersion(name string) (int64, error) {
+	prefix := strings.SplitN(name, "_", 2)[0]
+	return strconv.ParseInt(prefix, 10, 64)
 }
 
 func TestMigrationRollsBackPartialDDL(t *testing.T) {

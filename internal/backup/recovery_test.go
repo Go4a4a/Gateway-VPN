@@ -54,7 +54,7 @@ func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testi
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 16 {
+	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 17 {
 		t.Fatalf("recovery result = %+v", result)
 	}
 	preserved, err := os.ReadFile(filepath.Join(stateDirectory, "recovery", "quarantine", result.QuarantineID, "state.db"))
@@ -156,7 +156,7 @@ func TestOpenManagedCreatesFreshSchemaWithoutPretendingItWasRecovery(t *testing.
 		t.Fatalf("fresh managed recovery = %+v", managed.Recovery)
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 16 {
+	if err != nil || version != 17 {
 		t.Fatalf("managed schema = %d, %v", version, err)
 	}
 	if err := databasepkg.IntegrityCheck(ctx, managed.Database); err != nil {
@@ -182,6 +182,49 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		"DROP TRIGGER bypass_targets_generic_class_update",
+		"DROP TRIGGER runtime_state_generic_update",
+		"DROP TRIGGER direct_path_target_results_generic_delete",
+		"DROP TRIGGER direct_path_target_results_generic_update",
+		"DROP TRIGGER direct_path_target_results_generic_insert",
+		"DROP TRIGGER direct_modem_paths_generic_delete",
+		"DROP TRIGGER direct_modem_paths_generic_update",
+		"DROP TRIGGER direct_modem_paths_generic_insert",
+		"DROP TRIGGER path_node_target_results_generic_delete",
+		"DROP TRIGGER path_node_target_results_generic_update",
+		"DROP TRIGGER path_node_target_results_generic_insert",
+		"DROP TRIGGER path_nodes_generic_delete",
+		"DROP TRIGGER path_nodes_generic_update",
+		"DROP TRIGGER path_nodes_generic_insert",
+		"DROP TRIGGER subscription_modem_paths_generic_delete",
+		"DROP TRIGGER subscription_modem_paths_generic_update",
+		"DROP TRIGGER subscription_modem_paths_generic_insert",
+		"DROP TRIGGER modems_generic_delete",
+		"DROP TRIGGER modems_generic_update",
+		"DROP TRIGGER modems_generic_insert",
+		"ALTER TABLE runtime_state DROP COLUMN management_uplink_id",
+		"ALTER TABLE runtime_state DROP COLUMN active_uplink_id",
+		"DROP TABLE log_export_policy",
+		"DROP TABLE modem_recovery_attempts",
+		"DROP TABLE modem_recovery_runtime",
+		"DROP TABLE modem_recovery_policy",
+		"DROP TABLE wireguard_ingress_peer_runtime",
+		"DROP TABLE wireguard_ingress_peer_routes",
+		"DROP TABLE wireguard_ingress_peers",
+		"DROP TABLE wireguard_ingress_runtime",
+		"DROP TABLE wireguard_ingress_servers",
+		"DROP TABLE direct_uplink_path_target_results",
+		"DROP TABLE direct_uplink_paths",
+		"DROP TABLE uplink_path_node_target_results",
+		"DROP TABLE uplink_path_nodes",
+		"DROP TABLE subscription_uplink_paths",
+		"DROP TABLE interface_role_assignments",
+		"DROP TABLE legacy_modem_uplink_map",
+		"DROP TABLE hilink_modems",
+		"DROP TABLE uplinks",
+		"DROP TABLE network_interfaces",
+		"ALTER TABLE bypass_probe_targets DROP COLUMN target_class",
+		"DELETE FROM schema_migrations WHERE version=17",
 		"ALTER TABLE runtime_state DROP COLUMN active_direct_path_id",
 		"DELETE FROM schema_migrations WHERE version=16",
 		"DELETE FROM schema_migrations WHERE version=15",
@@ -224,7 +267,7 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal("pre-migration snapshot id is empty")
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 16 {
+	if err != nil || version != 17 {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	items, err := managed.Backups.List(ctx, true)

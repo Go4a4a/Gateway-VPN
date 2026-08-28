@@ -56,8 +56,9 @@ Gateway VPN — домашний IPv4-шлюз, который:
 ### 1.2 Что входит в MVP
 
 - несколько одновременно подключённых HiLink USB-Ethernet модемов с приоритетами;
+- один или несколько Ethernet-uplink в дополнение к HiLink либо вместо них; DHCP и статический IPv4 поддерживаются, PPPoE не входит в проект;
 - hot-plug/hot-unplug, сохранение offline-модемов в конфигурации и автоматическое возвращение после reconnect;
-- независимая проверка каждой пары `модем × подписка`;
+- независимая проверка каждой пары `uplink × способ доступа`, где uplink имеет тип `HILINK` или `ETHERNET`;
 - IPv4 data plane;
 - Keenetic, подключённый WAN-портом к Gateway;
 - один процесс Mihomo;
@@ -76,8 +77,13 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - idempotent install/update/uninstall scripts;
 - backup, restore и diagnostic bundle.
 - круглосуточный self-health supervisor с настраиваемой через Web UI безопасной лестницей восстановления и защитой от restart/reboot loop.
+- отдельные direct-only индикаторы белых списков, не смешиваемые с проверкой полноценного Internet через VPN;
+- опциональный входящий WireGuard-сервер `wg-ingress` с полным управлением peers/клиентами через Web UI, включая однокарточную схему через Keenetic;
+- тематические представления журналов в Web UI и redacted plain-text exports для скачивания штатным OpenSSH/SFTP.
 
 Рабочая топология — `1..N` adopted HiLink-модемов. Один модем является полностью поддерживаемой штатной конфигурацией: список modem priority состоит из одного элемента, межмодемный failover не выполняется, а при disconnect единственного uplink Gateway остаётся `PATH_BLOCKED` до его стабильного reconnect либо добавления другого модема. При двух, пяти или большем числе модемов используется та же модель без специального «двухмодемного» режима; каждый модем имеет собственные identity, priority, management subnet, route table, fwmark, health и ячейки `modem × subscription`. Web UI не задаёт искусственный предел количества записей, но фактический hard limit определяется уникальностью подсетей, USB-питанием и hardware-profile limits для размера Mihomo config и probe matrix. Требование иметь минимум два модема относится только к стендовой проверке multi-modem failover и не является минимальным требованием для обычной установки.
+
+Successor-модель обобщает это правило до `1..N` enabled uplinks. HiLink остаётся специализированным uplink с USB identity, telemetry и recovery, Ethernet — uplink со stable NIC identity, DHCP/static IPv4 и собственным gateway. Наличие только одного uplink само по себе ничего не блокирует: Gateway перебирает через него direct и все разрешённые VPN-методы, использует лучший `FULL`, а при его отсутствии — лучший разрешённый `LIMITED/WHITELIST_ONLY`. Пользовательский Internet отсутствует только когда через единственный физический uplink не осталось ни одного пригодного пути; Web UI/SSH/SFTP и recovery продолжают работать через management/LAN.
 
 ### 1.3 Что не входит в MVP
 
@@ -238,6 +244,7 @@ Management plane имеет отдельное исключение в firewall 
 | HiLink modem #1 | определяется DHCP; например `192.168.8.0/24` | Operator A ↔ Gateway |
 | HiLink modem #2 | определяется DHCP; например `192.168.9.0/24` | Operator B ↔ Gateway |
 | HiLink modem #N | отдельная уникальная подсеть | Operator N ↔ Gateway |
+| Ethernet uplink #N | DHCP или static IPv4; отдельная непересекающаяся подсеть | upstream router/ONT ↔ Gateway |
 | Gateway transit LAN | `192.168.200.0/24` | Gateway ↔ Keenetic WAN |
 | Gateway transit IP | `192.168.200.1/24` | DHCP gateway и DNS |
 | Keenetic WAN | DHCP reservation, например `192.168.200.2` | WAN Keenetic |
@@ -246,6 +253,7 @@ Management plane имеет отдельное исключение в firewall 
 | VPS WireGuard | `10.80.0.1/24` | management router |
 | Gateway WireGuard | `10.80.0.2/32` | удалённое управление |
 | Admin peers | `10.80.0.10/32` и далее | ПК/телефон администратора |
+| WireGuard ingress | выбираемая private IPv4 subnet, например `10.90.0.0/24` | Keenetic/clients → Gateway data plane |
 
 Подсети не должны пересекаться. Адрес и subnet каждого HiLink считаются обнаруживаемыми параметрами, а не константами. Совпадающие management-подсети не исправляются метриками или priority: конфликтующий модем помещается в quarantine до изменения его подсети.
 
@@ -256,34 +264,36 @@ Management plane имеет отдельное исключение в firewall 
 | Роль | Пример | Определение |
 |---|---|---|
 | `uplink_hilink_<id>` | `enx001e...` | stable modem ID + USB parent + DHCP gateway |
+| `uplink_ethernet_<id>` | `enp3s0` | stable NIC identity + explicit adopted uplink record |
 | `lan_keenetic` | `gateway-vpn-lan` | owned Linux bridge; один или несколько явно подтверждённых физических Ethernet members |
 | `tun_mihomo` | `gateway-vpn-tun` | фиксированное имя в Mihomo |
 | `wg_management` | `wg-mgmt` | фиксированное имя |
+| `wg_ingress` | `wg-ingress` | отдельный optional server для пользовательского/роутерного трафика |
 
 ### 4.3 Multi-uplink policy routing
 
-Каждый enabled modem получает независимый routing context:
+Каждый enabled uplink получает независимый routing context:
 
 ```text
-modem priority 10 → fwmark 0x1101 → table 1101 → default via modem_1 gateway
-modem priority 20 → fwmark 0x1102 → table 1102 → default via modem_2 gateway
-modem priority 30 → fwmark 0x1103 → table 1103 → default via modem_3 gateway
+uplink priority 10 → fwmark 0x1101 → table 1101 → default via Ethernet/router
+uplink priority 20 → fwmark 0x1102 → table 1102 → default via HiLink modem_1
+uplink priority 30 → fwmark 0x1103 → table 1103 → default via HiLink modem_2
 ```
 
 Правила:
 
-- DHCP lease каждого модема не устанавливает default route в main table;
-- Modem Manager создаёт link route и default route только в выделенной table;
-- table ID и fwmark стабильны для `modem_id`, а не для текущего имени интерфейса;
-- исходящие proxy sockets получают `interface-name` и `routing-mark` нужного модема;
-- DNS bootstrap для proxy hostname выполняется в контексте того же модема;
-- приложение проверяет `ip route get <proxy-ip> mark <modem-mark>` до квалификации path;
-- ECMP, bonding и load balancing между модемами не используются;
+- DHCP lease каждого uplink не устанавливает default route в main table;
+- Uplink Manager создаёт link route и default route только в выделенной table;
+- table ID и fwmark стабильны для `uplink_id`, а не для текущего имени интерфейса;
+- исходящие proxy sockets получают `interface-name` и `routing-mark` нужного uplink;
+- DNS bootstrap для proxy hostname выполняется в контексте того же uplink;
+- приложение проверяет `ip route get <proxy-ip> mark <uplink-mark>` до квалификации path;
+- ECMP, bonding и load balancing между uplinks не используются;
 - в каждый момент пользовательский трафик имеет один активный path tuple;
-- subnet conflict с другим модемом/LAN/WireGuard переводит модем в `MODEM_SUBNET_CONFLICT`;
+- subnet conflict с другим uplink/LAN/WireGuard переводит запись в `UPLINK_SUBNET_CONFLICT`; HiLink дополнительно показывает `MODEM_SUBNET_CONFLICT` в специализированном представлении;
 - одинаковые management-подсети через per-modem network namespaces рассматриваются после MVP.
 
-Default ranking путей лексикографический: сначала `modem.priority`, затем `subscription.priority`, затем стабильность/latency node. Следовательно, сначала проверяются другие qualified nodes и subscriptions на предпочтительном модеме, затем следующий модем. В будущем допускается альтернативная policy `subscription-first`, но она не входит в MVP.
+Default ranking путей сначала сравнивает функциональность `FULL > LIMITED/WHITELIST_ONLY > FAILED`, затем `access_method.priority`, `uplink.priority`, preferred node rank, стабильность и latency. Поэтому `FULL` всегда выигрывает у ограниченного пути независимо от priority, а среди одинаково функциональных вариантов действует явно заданный пользователем порядок.
 
 ### 4.4 Keenetic
 
@@ -301,6 +311,23 @@ Default ranking путей лексикографический: сначала 
 Gateway видит пользовательский трафик как трафик WAN-адреса Keenetic. Учёт по отдельным домашним устройствам в MVP невозможен и не заявляется.
 
 Keenetic может оставить link-local IPv6 или ULA внутри домашней LAN, если они не дают глобального IPv6 default route. Критерий безопасности — отсутствие глобального IPv6 prefix и выхода в интернет, а не обязательное исчезновение локального IPv6 со всех домашних устройств.
+
+### 4.5 Поддерживаемые ingress/uplink-профили
+
+Установщик и Web UI используют роли, а не предполагают одну фиксированную разводку:
+
+1. **Ethernet LAN → HiLink uplink:** Keenetic WAN получает DHCP от `gateway-vpn-lan`, пользовательский трафик приходит обычной маршрутизацией, Internet предоставляет один или несколько HiLink.
+2. **Ethernet LAN → Ethernet uplink:** одна или несколько карт образуют LAN/management bridge, отдельная карта получает DHCP/static IPv4 от upstream router и служит transport для direct/VPN.
+3. **Однокарточный WireGuard:** одна Ethernet-карта одновременно предоставляет management, принимает outer UDP `wg-ingress` от Keenetic и выпускает direct/VPN outer connections обратно через тот же Keenetic. Пользовательский ingress при этом является виртуальным `wg-ingress`, а не неразличимым plain-LAN hairpin.
+4. **Смешанный:** `wg-ingress` или Ethernet LAN принимает трафик, а набор uplinks включает Ethernet и любое поддерживаемое количество HiLink.
+
+Обычная physical NIC не назначается одновременно member-ом LAN bridge и Ethernet uplink. Исключение — однокарточный WireGuard-профиль: физическая карта имеет shared `MANAGEMENT + WG_ENDPOINT + ETHERNET_UPLINK` role, а пользовательский plaintext входит только через `wg-ingress`. Сам Gateway, UDP endpoint, proxy/DNS/subscription/VPS service flows обязательно исключаются из возвращающей политики Keenetic; preflight проверяет маршрут к upstream gateway, отдельные marks и отсутствие route recursion.
+
+### 4.6 Stable identity, назначение и замена сетевой карты
+
+Physical NIC inventory хранит permanent MAC, PCI/USB topology, driver, model/vendor, текущий ifname, carrier и addresses. Пользователь назначает роли через мастер/Web UI; случайное Linux-имя не является durable identity. Исчезнувшая карта остаётся `CONFIGURED_OFFLINE`, а операция **«Заменить сетевую карту»** атомарно переносит роль и настройки на явно выбранную unused NIC.
+
+Перед replacement/apply отображаются точные последствия, выполняются conflict/loop/management reachability checks и создаётся LKG snapshot. Изменение подтверждается из нового management path; без подтверждения отдельный root helper откатывает persistent/runtime network state. SSH/SFTP никогда не открываются на dedicated uplink, но разрешены на выбранных management/LAN ports и, отдельной policy, через `wg-mgmt`.
 
 ---
 
@@ -379,6 +406,12 @@ Recovery ladder выполняется независимо для каждог�
 
 Для шагов 4–5 обязательны cooldown, event log и ручная кнопка восстановления.
 
+Recovery не запускается из-за недоступности глобальных targets, VPN nodes либо HiLink telemetry при исправных carrier/DHCP/gateway. Состояние `WHITELIST_ONLY` является свойством direct path и означает ограничение оператора, а не аппаратную неисправность модема.
+
+Каждый автоматический recovery step получает durable per-modem attempt budget, minimum failure duration, deadline, cooldown и generation. Выполнение сериализуется с hot-plug/replacement; disconnect во время действия завершает его как `DEVICE_REMOVED`, а новый USB identity никогда не наследует reset старого modem без явного match. После DHCP/API/mobile-session/USB действия маршруты остаются закрытыми до нового lease, увеличения `route_generation` и fresh path qualification.
+
+Controlled USB recovery выполняется только параметрическим root broker по сохранённой и повторно сверенной sysfs identity: сначала driver unbind/bind, затем поддерживаемый USBDEVFS reset, а реальный port power-cycle — только если обнаружен hub с индивидуальным управлением портом и policy явно разрешена. Произвольный sysfs path из Web/API root broker не принимает. При исчерпании budget модем становится `MODEM_ERROR/RECOVERY_SUPPRESSED`, остальные uplinks продолжают работу, а полный host reboot не запускается из-за одного внешнего modem outage.
+
 ### 5.5 Конфигурация
 
 ```yaml
@@ -399,6 +432,9 @@ modems:
     reconnect_after_seconds: 90
     usb_reset_after_seconds: 300
     usb_reset_cooldown_seconds: 900
+    max_usb_resets_per_window: 3
+    usb_reset_window_seconds: 3600
+    allow_hub_port_power_cycle: false
 ```
 
 Mutable modem records, priorities, operator labels, identity и secret refs находятся в SQLite. HiLink password каждого модема хранится отдельным secret file. HiLink API является firmware-dependent: отказ API не останавливает конкретный uplink, если DHCP и transport исправны.
@@ -647,6 +683,14 @@ Regex mode использует Go `regexp` с RE2-семантикой и ли�
 
 Пользователь может через Web UI добавить, изменить, выключить, удалить и переупорядочить любое практическое количество сайтов/доменов. Малый фиксированный лимит бизнес-логикой не задаётся; scheduler ограничивает только параллелизм и частоту запросов.
 
+Targets разделены на непересекающиеся классы:
+
+- `GLOBAL_REQUIRED` и `GLOBAL_OPTIONAL` проверяют полноценность direct и каждого exact VPN path;
+- `WHITELIST_INDICATOR` проверяется **только напрямую** через конкретный uplink и никогда не входит в VPN qualification;
+- `SERVICE_ENDPOINT` создаётся системой для subscription source, proxy endpoint, VPS/update и отображает служебную достижимость, но не объявляет пользовательский Internet полным.
+
+Успех одного `WHITELIST_INDICATOR` не означает полный Internet. Direct path получает `WHITELIST_ONLY`, только когда stable threshold подтверждает настоящий HTTPS response хотя бы одного enabled indicator, а несколько независимых global required targets не проходят. Если часть global targets проходит, используется общее состояние `LIMITED`; если global required policy полностью выполнена — `FULL` независимо от indicator results. Captive portal/операторский redirect отклоняется strict expected status/body/certificate-host validation.
+
 ```yaml
 probe_target:
   id: uuid
@@ -661,6 +705,7 @@ probe_target:
   success_mode: any_http_response
   expected_status: ""       # optional: 200-399, 204, 200/302
   expected_body_substring: "" # optional
+  class: global_required      # global_required | global_optional | whitelist_indicator
 ```
 
 Правила:
@@ -674,6 +719,9 @@ probe_target:
 - должен существовать хотя бы один enabled required target; иначе состояние `NO_BYPASS_TARGETS`, автоматическая активация запрещена;
 - URL targets проходят ту же нормализацию, timeout, size limit и SSRF-защиту, что subscription URLs;
 - credentials в probe URL запрещены.
+- whitelist indicator не отправляется через VPN node даже при ручной проверке; UI явно показывает `Проверяется только напрямую`;
+- изменение class/priority/URL/expected response повышает policy generation и делает старые direct/VPN results stale;
+- состояние `WHITELIST_ONLY` разрешается как временный пользовательский direct path только когда immutable direct method включён; его отключение не запрещает отдельный service-refresh fallback.
 
 ### 7.7 Квалификация и выбор узла
 
@@ -839,15 +887,15 @@ PATH_DEGRADED
 
 | Уровень | Пример проверки | Влияние |
 |---|---|---|
-| Modem USB link | interface/carrier конкретного modem | recovery этого modem |
-| Modem HiLink | DHCP, gateway, Web/API, registration | modem state |
-| Modem whitelist transport | разрешённые endpoints через modem mark/table | eligibility modem paths |
+| Physical uplink | interface/carrier конкретного uplink | eligibility и recovery этого uplink |
+| Modem HiLink | USB identity, DHCP, gateway, Web/API, registration | специализированный modem state |
+| Direct whitelist transport | indicators напрямую через uplink mark/table | `WHITELIST_ONLY` evidence |
 | Mihomo process | PID, API, TUN, config version | restart/rollback |
-| Path node transport | конкретный proxy через конкретный modem | path-node eligibility |
-| Path node bypass | modem × subscription × node × required targets | `BYPASS_QUALIFIED` |
-| Modem/subscription cell | хотя бы один qualified path node | path matrix status |
-| Probe target | результат через независимые modems/subscriptions | target outage suppression |
-| Direct modem path | required/optional targets напрямую через modem mark/table | FULL/LIMITED/FAILED |
+| Path node transport | конкретный proxy через конкретный uplink | path-node eligibility |
+| Path node bypass | uplink × subscription × node × required targets | `BYPASS_QUALIFIED` |
+| Uplink/subscription cell | хотя бы один qualified path node | path matrix status |
+| Probe target | результат через независимые uplinks/subscriptions | target outage suppression |
+| Direct uplink path | required/optional targets напрямую через uplink mark/table | FULL/LIMITED/WHITELIST_ONLY/FAILED |
 | Global access | required/optional targets через active method | PATH_ACTIVE/FULL/LIMITED |
 | Management | latest WireGuard handshake | alert only |
 
@@ -859,8 +907,8 @@ ICMP ping не является основной проверкой proxy node. 
 - targets выполняются в пользовательском порядке priority;
 - ожидаемый HTTP status/body применяется, если настроен; иначе достаточно валидного HTTP response;
 - timeout и latency записываются отдельно;
-- VPN probes выполняются строго через конкретный proxy и modem mark/table;
-- direct probes выполняются как полноценная qualification отдельно через каждый modem mark/table;
+- VPN probes выполняются строго через конкретный proxy и uplink mark/table;
+- direct probes выполняются как полноценная qualification отдельно через каждый uplink mark/table;
 - интервалы имеют jitter;
 - standby checks выполняются реже и с ограничением concurrency;
 - scheduler ограничивает concurrency, per-target rate и общий probe traffic budget;
@@ -872,26 +920,26 @@ ICMP ping не является основной проверкой proxy node. 
 ```yaml
 probe_budget:
   max_concurrency: 4
-  max_concurrency_per_modem: 2
+  max_concurrency_per_uplink: 2
   max_requests_per_minute: 30
   active_target_interval_seconds: 60
   standby_target_ttl_seconds: 900
   max_response_body_bytes: 65536
-  daily_soft_limit_mb_per_modem: 25
+  daily_soft_limit_mb_per_uplink: 25
   active_and_failover_reserve_percent: 30
 ```
 
-При исчерпании soft budget конкретного модема откладываются его standby requalification probes и получают состояние `DEFERRED_BUDGET`, а не `FAILED`. Проверки active path и кандидата на failover используют зарезервированную долю; после её исчерпания critical probes могут превысить soft limit с отдельным warning event, потому что budget не должен отключать контроль active path. `max_requests_per_minute`, global/per-modem concurrency и response-size limit остаются hard limits. UI показывает requests/bytes отдельно по модемам, overage, отложенные probes и прогноз времени полной матрицы. Изменение budget не меняет прошлые health results.
+При исчерпании soft budget конкретного uplink откладываются его standby requalification probes и получают состояние `DEFERRED_BUDGET`, а не `FAILED`. Проверки active path и кандидата на failover используют зарезервированную долю; после её исчерпания critical probes могут превысить soft limit с отдельным warning event, потому что budget не должен отключать контроль active path. `max_requests_per_minute`, global/per-uplink concurrency и response-size limit остаются hard limits. UI показывает requests/bytes отдельно по uplinks, overage, отложенные probes и прогноз времени полной матрицы. Изменение budget не меняет прошлые health results.
 
-Если один required target одновременно перестал работать через текущий path и несколько независимых комбинаций разных модемов/подписок, он получает `TARGET_SUSPECT`. Такой общий сбой не запускает бесконечное переключение paths: текущий путь остаётся `DEGRADED_TARGET`, остальные targets продолжают проверяться, а UI показывает отдельную проблему сайта. Target автоматически возвращается в normal policy только после success threshold либо ручного подтверждения. Если независимых путей недостаточно, применяется строгая политика и target не подавляется автоматически.
+Если один required target одновременно перестал работать через текущий path и несколько независимых комбинаций разных uplinks/подписок, он получает `TARGET_SUSPECT`. Такой общий сбой не запускает бесконечное переключение paths: текущий путь остаётся `DEGRADED_TARGET`, остальные targets продолжают проверяться, а UI показывает отдельную проблему сайта. Target автоматически возвращается в normal policy только после success threshold либо ручного подтверждения. Если независимых путей недостаточно, применяется строгая политика и target не подавляется автоматически.
 
-### 9.3 Матрица modem × subscription
+### 9.3 Матрица uplink × subscription
 
 Каждая ячейка является одной сущностью и содержит:
 
 ```yaml
 path_cell:
-  modem_id: modem-a
+  uplink_id: uplink-a
   subscription_id: sub-1
   state: qualified
   transport_state: passed
@@ -910,8 +958,8 @@ path_cell:
 Состояния ячейки:
 
 ```text
-MODEM_OFFLINE
-MODEM_DISABLED
+UPLINK_OFFLINE
+UPLINK_DISABLED
 SUBNET_CONFLICT
 SUBSCRIPTION_DISABLED
 UNTESTED
@@ -925,7 +973,7 @@ DEFERRED_BUDGET
 
 Семантика результата:
 
-- `QUALIFIED` — хотя бы одна candidate node через этот modem прошла proxy transport и все enabled `required` targets текущей policy generation;
+- `QUALIFIED` — хотя бы одна candidate node через этот uplink прошла proxy transport и все enabled `required` targets текущей policy generation;
 - `DEGRADED` — активный transport ещё работает, но часть optional checks failed либо идёт подтверждение подозрительного общего target outage;
 - `FAILED` — проверка завершена и ни одна candidate node не удовлетворяет required policy;
 - `STALE` — исторический успех существует, но TTL/policy/route generation изменились; для нового переключения он запрещён;
@@ -935,11 +983,11 @@ DEFERRED_BUDGET
 
 Матрица показывается в двух представлениях без дублирования данных:
 
-- **Subscriptions → Modems:** для выбранной подписки видны статусы через каждый modem;
-- **Modems → Subscriptions:** для выбранного modem видны статусы каждой подписки;
+- **Subscriptions → Uplinks:** для выбранной подписки видны статусы через каждый uplink, а HiLink показывает дополнительные modem telemetry/recovery fields;
+- **Uplinks/Modems → Subscriptions:** для выбранного uplink видны статусы каждой подписки;
 - **Path Matrix:** общая таблица, фильтры и принудительная перепроверка ячейки.
 
-Для `Прямого интернета` существует параллельная строка modem paths с теми же policy/route generation, freshness и target results, но без subscription/node. Поэтому статус direct также независим для каждого оператора: один модем может быть `FULL`, другой `LIMITED`, третий `FAILED`.
+Для `Прямого интернета` существует параллельная строка uplink paths с теми же policy/route generation, freshness и target results, но без subscription/node. Поэтому статус direct независим для каждого физического выхода: один uplink может быть `FULL`, другой `LIMITED/WHITELIST_ONLY`, третий `FAILED`.
 
 ### 9.3.1 Единый список методов и ranking
 
@@ -957,7 +1005,7 @@ DEFERRED_BUDGET
 FULL
 → среди LIMITED максимальный functional score
 → priority метода
-→ priority модема
+→ priority uplink
 → preferred rank VPN-сервера
 → сохранить текущий путь при полном равенстве
 ```
@@ -970,7 +1018,7 @@ FULL
 
 ```text
 BOOTING
-  → ALL_MODEMS_OFFLINE
+  → ALL_UPLINKS_OFFLINE
   → NO_BYPASS_TARGETS
   → NO_WORKING_ACCESS_METHOD
   → VERIFYING
@@ -988,13 +1036,13 @@ Desired state хранится в SQLite. Observed state восстанавли�
 
 ### 9.5 Разделение причин отказа
 
-- `ACTIVE_MODEM_DOWN`: немедленно исключить все его paths и выбрать qualified path другого modem;
-- `MODEM_DOWN`: не переключать подписки внутри offline modem; восстанавливать только этот HiLink;
-- `ALL_MODEMS_OFFLINE`: PATH_BLOCKED, но desired state и priorities сохраняются;
+- `ACTIVE_UPLINK_DOWN`: немедленно исключить все его paths и выбрать qualified path другого uplink;
+- `UPLINK_DOWN`: не переключать подписки внутри offline uplink; для HiLink запускать только bounded recovery этого модема;
+- `ALL_UPLINKS_OFFLINE`: PATH_BLOCKED, но desired state и priorities сохраняются;
 - `MIHOMO_DOWN`: перезапустить Mihomo с LKG;
-- `ACTIVE_DIRECT_DOWN`: выбрать другой FULL/LIMITED direct modem либо qualified VPN method;
-- `ACTIVE_NODE_DOWN`: выбрать другой qualified node той же modem/subscription cell;
-- `ACTIVE_CELL_DOWN`: выбрать следующую subscription на том же modem, затем следующий modem;
+- `ACTIVE_DIRECT_DOWN`: выбрать другой FULL/LIMITED/WHITELIST_ONLY direct uplink либо qualified VPN method;
+- `ACTIVE_NODE_DOWN`: выбрать другой qualified node той же uplink/subscription cell;
+- `ACTIVE_CELL_DOWN`: выбрать следующую subscription на том же uplink, затем следующий uplink;
 - `ACTIVE_SUBSCRIPTION_DOWN`: агрегированный UI status; решение принимается по path cells, а не глобально;
 - `REQUIRED_TARGET_DOWN`: подтвердить через другие узлы; различить node failure и `TARGET_SUSPECT`;
 - `NO_BYPASS_TARGETS`: оставить PATH_BLOCKED и запросить настройку targets;
@@ -1006,13 +1054,13 @@ Desired state хранится в SQLite. Observed state восстанавли�
 
 1. подтвердить отказ несколькими последовательными probes; hard link/DHCP/route loss подтверждения не ждёт;
 2. построить snapshot всех fresh direct и VPN candidates;
-3. выбрать лучший quality class, затем применить method/modem/node priorities;
+3. выбрать лучший quality class, затем применить method/uplink/node priorities;
 4. для VPN сохранить текущий healthy node, если новый candidate не лучше по quality/priority после hysteresis;
 5. перепроверить candidate tuple без открытия пользовательского LAN path;
 6. атомарно закрыть прежнюю generation и применить TUN selection либо direct mark/interface/SNAT;
 7. повторить end-to-end probe через фактический активный метод;
 8. разрешить новые LAN flows только для этой generation;
-9. записать event с method/modem/subscription/node before/after и объяснением ranking;
+9. записать event с method/uplink/subscription/node before/after и объяснением ranking;
 10. при ошибке исключить candidate на текущий retry cycle и попробовать следующий;
 11. если кандидатов нет — quarantine `PATH_BLOCKED`, не создавая неуправляемый direct route.
 
@@ -1170,6 +1218,24 @@ PersistentKeepalive = 25
 - соответствующий `AllowedIPs` только у Gateway peer на VPS;
 - правила forwarding без доступа к data plane;
 - проверка обратного маршрута и отсутствия конфликтов подсетей.
+
+### 10.6 Входящий WireGuard `wg-ingress`
+
+`wg-ingress` является отдельным optional data-plane server и не переиспользует keys, subnet, port или policy management-интерфейса `wg-mgmt`. Он принимает пользовательский трафик от Keenetic, отдельного router peer либо device peers и передаёт его в тот же unified selector `uplink × access method`.
+
+Поддерживаются профили peer:
+
+- `DEVICE` — один tunnel IPv4 и full/split-tunnel client configuration;
+- `ROUTER_NAT` — несколько устройств за роутером представлены одним tunnel address;
+- `ROUTER_ROUTED` — за peer объявлены явные непересекающиеся IPv4 subnets, а Gateway сохраняет исходные client addresses.
+
+Web UI имеет отдельную вкладку **«WireGuard-клиенты»**: server enable/listen interface/UDP port/subnet/MTU/DNS/endpoint, server public key и rotation; client add/edit/enable/disable/revoke/delete, stable address allocation, public key, AllowedIPs/behind-subnets, keepalive, last handshake, masked endpoint, RX/TX, health, audit и фильтр журнала. Готовый standard `.conf`, QR и copyable fields доступны для managed client; пользователь также может добавить собственный public key.
+
+В режиме managed keypair client private key хранится только отдельным root-owned `0600` secret file, никогда не в SQLite/log/diagnostic bundle, и повторная выдача требует свежей password re-authentication и audit event. В режиме external key Gateway хранит только public key и не может повторно выдать private-key-ready config. Revoke удаляет peer из active generation до ответа API; key rotation атомарно заменяет peer и отзывает прежний public key.
+
+Peer по умолчанию получает policy **«Автоматический общий путь»**. Дополнительно разрешены bounded profiles: только выбранные access methods, VPN-only без direct fallback, разрешение/запрет `WHITELIST_ONLY`, либо block при отсутствии подходящего пути. Arbitrary nft/ip commands и произвольные marks из Web UI не принимаются.
+
+Однокарточный режим официально поддерживается: outer `wg-ingress` UDP приходит через shared Ethernet, decapsulated traffic классифицируется по `iifname=wg-ingress`, а Mihomo proxy sockets/direct SNAT выходят через тот же physical uplink с другим mark/conntrack generation. Firewall принимает listen port только на явно выбранных interfaces; по умолчанию это local Ethernet, публичная WAN exposure является отдельной default-off policy. Endpoint, собственный address Gateway и service/proxy flows обязаны обходить возвращающую WireGuard policy Keenetic. Apply отклоняется при route recursion, overlapping peer AllowedIPs, duplicate address/public key, management subnet overlap или отсутствии гарантированного return path.
 
 ---
 
@@ -1483,16 +1549,16 @@ CREATE TABLE settings (
 );
 ```
 
-`nodes` хранит только subscription-level identity и классификацию кандидата. Health/latency/qualification не хранятся глобально в `nodes`: они принадлежат `path_nodes`, потому что одна node может быть доступна через modem A и недоступна через modem B. Аналогично target result всегда привязан к `path_id + node_id + target_id`.
+`nodes` хранит только subscription-level identity и классификацию кандидата. Health/latency/qualification не хранятся глобально в `nodes`: в исходной схеме они принадлежат `path_nodes`, потому что одна node может быть доступна через uplink A и недоступна через uplink B. Аналогично target result всегда привязан к `path_id + node_id + target_id`.
 
-`subscription_modem_paths` — единственный источник текущего состояния матрицы для API и всех UI-представлений. Приложение дополнительно валидирует, что `selected_node_id` относится к active version соответствующей subscription. Все foreign keys и индексы проверяются migration tests; удаление modem/subscription каскадно удаляет только производные path results, но операция Forget/Delete до commit создаёт audit event и требует подтверждения.
+До successor migration `subscription_modem_paths` является единственным источником текущего состояния матрицы. После атомарного переноса единственным writable source становится `subscription_uplink_paths`; legacy modem-specific таблицы остаются read-only только на ограниченное окно совместимости и затем удаляются отдельной проверенной migration. Приложение дополнительно валидирует, что `selected_node_id` относится к active version соответствующей subscription. Все foreign keys и индексы проверяются migration tests; удаление uplink/subscription каскадно удаляет только производные path results, но операция Forget/Delete до commit создаёт audit event и требует подтверждения.
 
 ### 12.2.1 Расширение для unified access policy
 
 Историческая базовая схема выше расширяется только последовательными migration, без переписывания применённых файлов:
 
 - `access_methods` — единый ordered list: immutable `DIRECT` и одна `SUBSCRIPTION`-строка на подписку; `enabled/priority` относятся к user routing, а не к auto-refresh;
-- `direct_modem_paths` — независимая qualification каждого direct modem path, quality class, functional score, policy/route generations и freshness;
+- `direct_modem_paths` — историческая до-successor таблица независимой qualification direct modem path; successor переносит её в `direct_uplink_paths` с сохранением path ID;
 - `direct_path_target_results` — target evidence для direct без фиктивной subscription/node;
 - `subscription_node_preferences` — durable `AUTO/INCLUDE/EXCLUDE`, preferred rank и пользовательская метка по `(subscription_id, fingerprint)`, переживающие смену immutable version;
 - `access_policy` — singleton с startup gate, failure/recovery/cooldown intervals, ranking generation и разрешением service direct refresh;
@@ -1502,6 +1568,22 @@ CREATE TABLE settings (
 `runtime_state` получает `active_method_id`, `active_method_kind` и `active_quality_class`. Для VPN прежние subscription/node fields заполнены; для direct они `NULL`. Compatibility code не трактует `NULL` subscription как разрешение direct: method kind, modem, route generation и firewall generation проверяются вместе.
 
 Functional score и selection explanation являются server-side данными одной policy generation. `FULL` не кодируется искусственным максимальным latency; quality class сравнивается до score. Старые direct/VPN результаты после target, route или ranking policy change становятся `STALE` и не используются для новой активации.
+
+### 12.2.2 Successor migration: generic uplinks и WireGuard ingress
+
+Новая миграция не переименовывает существующие таблицы «на месте» с потерей доказуемости. Она создаёт generic source of truth и атомарно переносит каждый `modems.id` в `uplinks.id` типа `HILINK`. На ограниченное migration window database-owned compatibility bridge принимает только записи ещё не перенесённых HiLink-компонентов и в той же SQLite transaction проецирует их в generic tables; отдельного legacy UI/API и обратной синхронизации generic→legacy нет. После переноса всех readers/writers bridge и legacy tables удаляются следующей проверенной migration.
+
+- `network_interfaces` — stable hardware identity, observed ifname/model/driver/carrier/address и replacement history;
+- `interface_role_assignments` — `LAN_MEMBER`, `MANAGEMENT`, `ETHERNET_UPLINK`, `WG_ENDPOINT`, explicit shared one-arm profile и desired/observed generation;
+- `uplinks` — type `HILINK|ETHERNET`, display number/name, enabled/priority, NIC/modem reference, DHCP/static config, route table/fwmark, state/generations;
+- `hilink_modems` — USB/API/operator/telemetry/recovery fields по FK `uplink_id`, без дублирования priority/routes;
+- `subscription_uplink_paths` и `direct_uplink_paths` принимают все новые writes вместо modem-specific path tables; связанные generic node/target evidence tables также переносятся с сохранением прежних path IDs;
+- target results содержат class и exact `uplink_id/path/node/policy_generation/route_generation` evidence;
+- `wireguard_ingress_servers`, `wireguard_ingress_peers`, `wireguard_ingress_peer_routes` и `wireguard_ingress_runtime` хранят только non-secret configuration/status; private keys находятся в secret files;
+- `modem_recovery_policy`, `modem_recovery_runtime` и `modem_recovery_attempts` сохраняют cooldown/budget/generation/outcome независимо от process restart;
+- `log_export_policy` хранит retention/rotation/category enable state, но не произвольные filesystem paths.
+
+Runtime active tuple получает `active_uplink_id`; legacy `active_modem_id` читается только при migration и затем не является источником выбора. Существующие path IDs сохраняются без изменения, а отдельная migration map фиксирует соответствие legacy modem ID и нового uplink ID, чтобы events/history и LKG не стали указывать на другую комбинацию. Перед migration создаётся SQLite Online Backup; downgrade использует pre-migration snapshot, а не обратное преобразование generic schema.
 
 ### 12.3 Retention
 
@@ -1589,6 +1671,17 @@ POST   /api/v1/modems/{id}/recover
 POST   /api/v1/modems/{id}/probe
 POST   /api/v1/modems/{id}/replace-identity
 
+GET    /api/v1/network/interfaces
+GET    /api/v1/uplinks
+POST   /api/v1/uplinks/ethernet
+GET    /api/v1/uplinks/{id}
+PATCH  /api/v1/uplinks/{id}
+DELETE /api/v1/uplinks/{id}
+PUT    /api/v1/uplinks/priorities
+POST   /api/v1/uplinks/{id}/probe
+POST   /api/v1/network/interfaces/{id}/replace
+POST   /api/v1/network/roles/preview
+
 GET    /api/v1/subscriptions
 POST   /api/v1/subscriptions
 GET    /api/v1/subscriptions/{id}
@@ -1626,11 +1719,25 @@ DELETE /api/v1/bypass-targets/{id}
 PUT    /api/v1/bypass-targets/priorities
 POST   /api/v1/bypass-targets/{id}/probe
 
+GET    /api/v1/wireguard-ingress
+PUT    /api/v1/wireguard-ingress
+GET    /api/v1/wireguard-ingress/peers
+POST   /api/v1/wireguard-ingress/peers
+PATCH  /api/v1/wireguard-ingress/peers/{id}
+DELETE /api/v1/wireguard-ingress/peers/{id}
+POST   /api/v1/wireguard-ingress/peers/{id}/rotate
+POST   /api/v1/wireguard-ingress/peers/{id}/probe
+POST   /api/v1/wireguard-ingress/peers/{id}/reauth
+GET    /api/v1/wireguard-ingress/peers/{id}/config
+GET    /api/v1/wireguard-ingress/peers/{id}/qrcode
+
 GET    /api/v1/health
 GET    /api/v1/health/history
 GET    /api/v1/health/supervisor
 POST   /api/v1/health/supervisor/recover
 GET    /api/v1/events
+GET    /api/v1/logs
+GET    /api/v1/logs/export
 GET    /api/v1/operations
 GET    /api/v1/operations/{id}
 DELETE /api/v1/operations/completed
@@ -1655,7 +1762,7 @@ POST   /api/v1/system/restore
 POST   /api/v1/system/reboot
 ```
 
-`GET /paths/matrix` является каноническим read model для Dashboard, **Модемы**, **Подписки** и **Матрица путей**. Ответ содержит direct modem paths и одну запись на пару `modem_id × subscription_id`, выбранную node, quality/functional score, свежесть результата и объяснимый reason code. Frontend не вычисляет health или ranking самостоятельно.
+`GET /paths/matrix` является каноническим read model для Dashboard, **Выходы в интернет**, **Модемы**, **Подписки** и **Матрица путей**. Ответ содержит direct uplink paths и одну запись на пару `uplink_id × subscription_id`, выбранную node, quality/functional score, свежесть результата и объяснимый reason code. Frontend не вычисляет health или ranking самостоятельно. Legacy modem routes являются alias на HiLink uplink и не образуют вторую матрицу.
 
 Ручная активация path разрешена только при свежем `QUALIFIED` в текущих `policy_generation` и `route_generation`. Emergency override является отдельной привилегированной операцией с предупреждением, TTL, audit event и не разрешает direct path. Reorder modem/subscription priorities атомарен: сервер принимает полный упорядоченный список IDs и проверяет его на дубликаты/пропуски. Изменение порядка обновляет ranking generation, но не инвалидирует свежие probe results и не обрывает текущий path; новый порядок применяется при следующем failover, явной активации или штатном failback после hysteresis.
 
@@ -1663,19 +1770,25 @@ POST   /api/v1/system/reboot
 
 Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах:
 
-1. **Обзор:** Gateway state, active tuple `метод → модем → [подписка → node]`, quality, причина последнего переключения, WireGuard, traffic и основные предупреждения.
+1. **Обзор:** Gateway state, active tuple `метод → uplink → [подписка → node]`, quality, причина последнего переключения, WireGuard, traffic и основные предупреждения.
 2. **Способы доступа:** единый ordered list `Прямой интернет + подписки`, enable/priority, текущий выбор, FULL/LIMITED explanation, startup gate и временный direct-only mode.
-3. **Модемы:** discovery/adoption, CRUD, enable, номер/priority, operator, hot-plug state, recovery, direct status и статусы всех подписок через выбранный модем.
-4. **Подписки:** CRUD, refresh/LKG, masked URL, candidate counts, раскрываемые server policies и статусы подписки через каждый модем.
-5. **Матрица путей:** direct и полная таблица `модем × подписка`, фильтры, freshness, выбранная node, quality, score, latency, reason code, manual probe/activate.
-6. **Серверы проверки доступа:** ordered targets с CRUD, required/optional, weight, timeout, условием успеха, interval и priority.
-7. **Правила отбора серверов:** ordered node-name matchers, preview по подпискам и fallback policy.
-8. **VPN-серверы:** исходное имя, подписка, `AUTO/INCLUDE/EXCLUDE`, preferred rank, candidate source, matched rule и раскрываемая матрица результатов по модемам/targets.
-9. **Состояние и операции:** persistent scrolling operation panel, modem/path/target health, stages, timeline, target outages, probe budget и объяснение failover; completed entries можно очистить.
-10. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
-11. **Удалённый доступ:** VPS peer, выбранный management-модем, handshake и admin peers.
-12. **Сеть:** transit LAN, DHCP/DNS, обнаруженные интерфейсы, routing tables/marks read-only и safe apply.
-13. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
+3. **Выходы в интернет:** единый ordered list Ethernet/HiLink uplinks, enable/priority, DHCP/static IPv4, exact interface/gateway, direct/VPN matrix, safe replacement и reason текущего выбора.
+4. **Модемы:** HiLink-specialized discovery/adoption, CRUD, operator/telemetry, hot-plug, recovery ladder, direct status и статусы всех подписок через выбранный модем.
+5. **Подписки:** CRUD, refresh/LKG, masked URL, candidate counts, раскрываемые server policies и статусы подписки через каждый uplink.
+6. **Матрица путей:** direct и полная таблица `uplink × подписка`, фильтры, freshness, выбранная node, quality, score, latency, reason code, manual probe/activate.
+7. **Серверы проверки доступа:** отдельные группы `Полноценный интернет`, `Сайты белого списка — только напрямую` и read-only service endpoints; ordered CRUD, required/optional, timeout, условие успеха, interval и priority.
+8. **Правила отбора серверов:** ordered node-name matchers, preview по подпискам и fallback policy.
+9. **VPN-серверы:** исходное имя, подписка, `AUTO/INCLUDE/EXCLUDE`, preferred rank, candidate source, matched rule и раскрываемая матрица результатов по uplinks/targets.
+10. **Состояние и операции:** persistent scrolling operation panel, uplink/path/target health, stages, timeline, target outages, probe budget и объяснение failover; completed entries можно очистить.
+11. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
+12. **WireGuard-клиенты:** `wg-ingress` server, peers, managed/external keys, standard configs/QR, policies, handshake/RX/TX и per-peer log.
+13. **Удалённое управление:** VPS peer, выбранный management-uplink, handshake и admin peers `wg-mgmt`.
+14. **Сеть и интерфейсы:** physical inventory, понятные ingress/management/uplink roles, topology profile, transit LAN, DHCP/DNS, replacement, routing tables/marks read-only и safe apply.
+15. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle и отдельная карточка **Самоконтроль 24/7** с component health, recovery history, bounded watchdog settings и предупреждением для optional reboot.
+
+Каждая настройка имеет видимое понятное название, короткое inline-объяснение и help trigger. На desktop подсказка появляется после bounded hover delay, при keyboard focus — немедленно, на touch — по нажатию `?`; hover не является единственным способом получить описание. Help сообщает назначение, рекомендуемое значение и причину, prerequisites, точные последствия, возможность потери управления/Internet, restart/requalification, rollback и пример. Обычный режим скрывает CIDR/fwmark/table/AllowedIPs за **«Дополнительными сведениями»**, advanced mode всё равно принимает только typed validated values, а не arbitrary commands.
+
+Перед сохранением risky settings Web UI показывает mutation/impact preview: какие роли/addresses/firewall/routes/services изменятся, ожидаемое краткое прерывание, confirmation path и deadline rollback. Dashboard и каждая detail card имеют **«Почему выбран этот путь»**, **«Открыть журнал объекта»** и конкретный recovery next step. Термин `PATH_BLOCKED` остаётся внутренним; пользователь видит **«Нет доступного интернет-канала»** с причиной и состоянием продолжающейся диагностики.
 
 Operation panel показывает стадии `QUEUED → ROUTE_SELECTED → DNS → TLS → HTTP → IMPORT → VALIDATE → QUALIFY → ACTIVATE → COMPLETE/FAILED`, timestamps и безопасные reason codes. Backend error text, URL credentials и proxy secrets не отображаются. Ручная кнопка немедленно возвращает operation ID; обновление страницы не теряет статус.
 
@@ -1779,7 +1892,7 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 ### 16.1 Логирование
 
 - приложение пишет structured logs в journald;
-- типы: `system`, `modem`, `path`, `subscription`, `mihomo`, `health`, `failover`, `firewall`, `wireguard`, `auth`;
+- типы: `system`, `uplink`, `modem`, `path/access`, `subscription/node`, `mihomo`, `network/firewall/dns/dhcp`, `wireguard-management`, `wireguard-ingress`, `watchdog/recovery`, `update/backup`, `auth/audit`;
 - повторяющиеся health failures агрегируются;
 - ни одно поле не содержит credentials или полный URL подписки;
 - log level изменяется без рестарта;
@@ -1796,6 +1909,29 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - payload подписки, полный Mihomo config и packet contents не являются debug-логами; они доступны только через отдельные уже sanitized diagnostics;
 - изменение logging settings создаёт audit event с old/new metadata без секретов и применяется без restart;
 - Web UI предоставляет фильтры по времени, severity, category, modem/subscription/path и correlation ID, но читает journald через ограниченный server-side API с pagination/rate limit, а не произвольный journal query.
+
+Web UI показывает один canonical stream в тематических вкладках **Все**, **Модемы**, **Подписки и VPN-серверы**, **Доступ и переключения**, **VPN/Mihomo**, **Сеть**, **WireGuard/VPS**, **Watchdog**, **Обновления/backup** и **Безопасность/audit**. Фильтр конкретного uplink/modem/subscription/node/peer/operation доступен как deep link из соответствующей карточки. Очистка UI-селекции не удаляет audit; удаление eligible operational history подчиняется retention и отдельному подтверждению.
+
+Journald остаётся единственным authoritative журналом. Bounded exporter создаёт redacted human-readable snapshots/rotated archives только по фиксированному owned пути:
+
+```text
+/var/log/gateway-vpn/
+├── current/
+│   ├── all.log
+│   ├── modems.log
+│   ├── subscriptions.log
+│   ├── access.log
+│   ├── vpn-mihomo.log
+│   ├── network.log
+│   ├── wireguard-vps.log
+│   ├── watchdog.log
+│   ├── updates.log
+│   └── security-audit.log
+├── archive/
+└── diagnostics/
+```
+
+Files создаются atomic rename, имеют bounded size/age/disk budget и независимо проходят второй redaction pass. Они не являются новым источником recovery или UI state. Стандартный OpenSSH/SFTP остаётся без отдельного SFTP daemon/account: пользователь входит тем же Ubuntu SSH account через management/LAN либо разрешённый `wg-mgmt` и скачивает эти файлы. Installer проверяет, что выбранный административный account имеет read-only group access; WebUI password с Linux/SFTP password не объединяется. TCP/22 и SFTP никогда не открываются на dedicated uplink/HiLink.
 
 ### 16.2 События
 
@@ -1901,7 +2037,7 @@ gateway-vpn/
 - мастер использует единый human-readable contract для **каждого** компонента установки: показывает обнаруженное состояние, понятное назначение компонента, рекомендуемый вариант с причиной, остальные безопасные варианты, последствия каждого выбора, возможность позднего изменения и точный список будущих host mutations; термин без расшифровки (`CIDR`, `DHCP`, `GRUB`, `PATH_BLOCKED`, `wait-online`, `fwmark` и т. п.) не может быть единственным объяснением;
 - все компоненты делятся на три явно названные группы: **«Нужно выбрать сейчас»**, **«Будет настроено автоматически для безопасности»** и **«Можно изменить после установки в WebUI»**. Обязательные security invariants не маскируются как пользовательский выбор, но мастер объясняет, что и зачем будет сделано; необязательные policy decisions всегда имеют `Рекомендуется`, `Сохранить текущую настройку` и безопасную отмену;
 - Enter принимает только показанный рекомендуемый вариант; номер/значение проверяется повторно, `q` отменяет установку без persistent mutation. Перед apply мастер печатает исчерпывающую сводку, предупреждает о временной потере сети/перезагрузке, если применимо, и требует точный token `INSTALL`;
-- первоначально мастер обязан одинаково покрывать: проверку release/signature, support matrix ОС/CPU/bootloader/filesystem, зависимости, выбор одного или нескольких LAN-портов, transit subnet, DHCP/DNS для WAN Keenetic, SSH через owned LAN bridge, IPv4 forwarding/IPv6 block, boot firewall/startup policy, динамические HiLink-модемы, `networkd-wait-online`, GRUB, systemd services/watchdog/logging, backup/rollback и итоговую readiness-проверку; параметры, которые меняются только после установки, перечисляются с путём к соответствующей вкладке WebUI;
+- первоначально мастер обязан одинаково покрывать: проверку release/signature, support matrix ОС/CPU/bootloader/filesystem, зависимости, понятный topology profile, назначение одного или нескольких LAN/management ports, Ethernet uplinks либо HiLink-only выход, shared one-card WireGuard profile, transit/uplink/WireGuard subnets, DHCP/static IPv4, DHCP/DNS для WAN Keenetic, SSH/SFTP через management, IPv4 forwarding/IPv6 block, boot firewall/startup policy, динамические HiLink-модемы, optional `wg-ingress`, `networkd-wait-online`, GRUB, systemd services/watchdog/log exports, backup/rollback и итоговую readiness-проверку; параметры, которые меняются только после установки, перечисляются с путём к соответствующей вкладке WebUI;
 - проверяет ОС, kernel features, TUN, nftables, WireGuard и свободные подсети;
 - обнаруживает конфликт UFW/firewalld/NetworkManager configuration;
 - не делает безусловный full system upgrade;
@@ -1912,6 +2048,9 @@ gateway-vpn/
 - проверяет подписанные artifacts;
 - release-команда не содержит имя интерфейса или подсеть конкретного компьютера;
 - в интерактивном режиме на целевом Gateway показывает все обнаруженные интерфейсы с номером, типом, link/carrier state, IPv4-адресами и признаком default route, после чего требует явного подтверждения одного или нескольких физических LAN/management Ethernet ports;
+- отдельным шагом показывает роли `Приём пользовательского трафика`, `Управление`, `Выход в интернет`, `Общий Ethernet для однокарточного WireGuard`, `HiLink` и `Не использовать`; для каждой роли объясняет направление пакета и рекомендуемый вариант по выбранной topology;
+- Ethernet uplink выбирается только из safe unused NIC, затем мастер предлагает DHCP либо static IPv4/gateway/DNS; PPPoE отсутствует во всех prompts/config/API;
+- one-card WireGuard выбирается явно, печатает обязательное исключение самого Gateway из возвращающей Keenetic policy и до apply выполняет route-recursion preview;
 - выбранные порты объединяются в owned bridge `gateway-vpn-lan`; один адрес, DHCP/DNS, WebUI, SSH и routed LAN policy назначаются bridge, а не повторяются на каждом порту;
 - loopback, non-Ethernet, Huawei USB/HiLink по udev metadata, интерфейс с уже настроенным IPv4 (management/uplink/modem risk), интерфейс текущего default route и доступный из `SSH_CONNECTION` интерфейс активной management-сессии не могут быть выбраны; мастер предлагает все оставшиеся safe Ethernet ports, но пользователь подтверждает или меняет набор; повторная установка использует verified update/idempotent automation path, а не clean-host wizard;
 - `openssh-server` проверяется как managed dependency; если его нет, package загружается до firewall mutation, но устанавливается/запускается только после durable marker и `PATH_BLOCKED`; installer проверяет IPv4 wildcard TCP/22, а rollback/uninstall восстанавливает прежние enabled/active states (установленный OS package, как и прочие dependencies, не удаляется);
@@ -2063,6 +2202,8 @@ Linux network namespaces моделируют:
 - удаление owned nftables table и случайный `nft flush ruleset` с quarantine/recovery;
 - failover/failback;
 - direct FULL выигрывает у VPN LIMITED, а VPN FULL выигрывает у direct LIMITED независимо от priority;
+- direct `WHITELIST_ONLY` определяется только direct-only indicators при failed independent global targets; indicators никогда не отправляются через VPN и не вызывают modem recovery;
+- при отсутствии FULL лучший разрешённый LIMITED/WHITELIST_ONLY продолжает user service, а background probes находят FULL без изменения active path во время проверки;
 - при двух одинаково функциональных candidates применяются method/modem/node priorities, затем sticky tie;
 - direct qualification выполняется независимо через каждый ready modem и не использует main-table default route;
 - temporary direct-only mode исключает VPN из user ranking, сохраняет service refresh и сбрасывается после нового boot ID;
@@ -2076,6 +2217,14 @@ Linux network namespaces моделируют:
 - пересечение HiLink subnets помещает только конфликтующий modem в `MODEM_SUBNET_CONFLICT`;
 - reorder modem/subscription priority меняет ranking, но не инвалидирует fresh qualification и не обрывает active path вне правил failback/manual activation;
 - packet capture на каждом modem подтверждает соответствие `interface-name`, fwmark и routing table выбранной path cell;
+- mixed Ethernet/HiLink uplinks имеют независимые DHCP/static routes, fwmarks/tables и ranking; Ethernet lease также не создаёт main-table default;
+- safe NIC replacement переносит role/LKG на новую stable identity, а timeout/reboot откатывает прежний persistent/runtime state;
+- single-NIC `wg-ingress` fixture доказывает `Keenetic → WG → TUN/direct → та же NIC → upstream` без route recursion и plaintext leak;
+- WireGuard ingress peer CRUD/disable/revoke/key rotation/config/QR, duplicate AllowedIPs/subnet/key rejection и reboot persistence проходят с реальным `wg` parser;
+- managed client private key отсутствует в DB/log/API list/diagnostics и возвращается только после re-auth; external-key peer никогда не выдаёт private key;
+- modem recovery ladder различает external whitelist/VPN outage и carrier/DHCP/device hang, соблюдает durable budgets/cooldown и принимает только повторно verified fixed sysfs identity;
+- log tabs возвращают одну canonical event identity, а SFTP exports совпадают по фильтру, проходят redaction, rotation/disk budget и не открывают TCP/22 на uplinks;
+- keyboard/touch/hover help и impact preview существуют для всех mutable network/WireGuard/watchdog/logging settings; color не является единственным индикатором;
 - подписка с `обход`/`LTE`/whitelist names: проверяются только совпавшие candidates;
 - подписка без совпадений: проверяются все enabled nodes;
 - named candidates существуют, но failed: остальные не используются при default policy;
@@ -2114,6 +2263,9 @@ Linux network namespaces моделируют:
 - смена IP VPS/DNS response;
 - длительный UDP/QUIC traffic;
 - MTU/fragmentation test.
+- Ethernet uplink DHCP/static, link loss/replacement и mixed failover с HiLink;
+- однокарточный `wg-ingress` с реальным Keenetic policy и packet capture обоих направлений;
+- driver unbind/bind и USB reset Huawei с проверкой cooldown/budget; hub port power-cycle тестируется только на фактически поддерживающем per-port power оборудовании;
 
 ### 18.4 Failure matrix
 
@@ -2377,6 +2529,12 @@ Fixtures не содержат production credentials, настоящие subscr
 26. `AUTO/INCLUDE/EXCLUDE`, preferred node order и sticky selection переживают subscription refresh по stable fingerprint; EXCLUDE никогда не используется.
 27. scheduled/manual refresh имеет durable operation status, single-flight, retry/backoff/Retry-After и route fallback до direct без изменения пользовательского active path.
 28. startup blocking ON/OFF и boot-scoped direct-only mode проходят reboot/netns tests; ни один вариант не отключает firewall или quarantine при повреждённом state.
+29. HiLink и Ethernet являются равноправными uplinks: matrix, priorities, routing generations, mixed failover/failback и interface replacement используют один canonical read/write model без modem-only fallback.
+30. direct-only whitelist indicators создают объяснимый `WHITELIST_ONLY`, никогда не квалифицируют VPN и не превращают operator restriction в modem hardware recovery.
+31. реальный modem recovery выполняет bounded DHCP/API/mobile-session/USB ladder, переживает restart, прекращается после budget и не перезагружает host из-за внешнего outage.
+32. `wg-ingress` полностью управляется через authenticated Web UI/API; managed/external peers, config/QR, revoke/rotation, one-card mode, per-peer policy и leak/loop tests проходят.
+33. Web UI имеет понятные роли, help для mouse/keyboard/touch, impact preview и safe rollback; технические термины не являются единственным объяснением mutable setting.
+34. canonical journald stream имеет тематические Web UI tabs и bounded redacted `/var/log/gateway-vpn` exports, доступные штатным SFTP только через management paths.
 
 ---
 
