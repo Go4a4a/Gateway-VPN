@@ -663,6 +663,26 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 	}
 }
 
+func TestGatewayInstallerUsesLiteralFileComparisonsForOwnedPolicies(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{
+		"cp cmp",
+		"cmp -s -- /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf",
+		"cmp -s -- /etc/systemd/network/05-gateway-vpn-lan.netdev",
+		"cmp -s -- /etc/default/grub.d/90-gateway-vpn.cfg",
+		"cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf",
+		"cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv6.conf",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer lacks literal owned-policy comparison %q", required)
+		}
+	}
+	if strings.Contains(installer, `== $(cat`) {
+		t.Fatal("Gateway installer compares file content as a Bash glob pattern")
+	}
+}
+
 func TestFirewallGuardIsIndependentPrivilegedQuarantineService(t *testing.T) {
 	root := repositoryRoot(t)
 	guard := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-firewall-guard.service"))

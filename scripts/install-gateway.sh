@@ -122,7 +122,7 @@ RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN release currently requires x86_64" >&2; exit 1; }
-for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp; do
+for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
@@ -345,15 +345,15 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/05-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ -f "$installed_asset" && ! -L "$installed_asset" ]] || { echo "Installed Gateway asset is missing or unsafe: $installed_asset" >&2; exit 1; }
   done
-  [[ $(cat /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf) == $(cat "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf") ]] || { echo "Installed Gateway IPv4 forwarding policy differs from the signed release" >&2; exit 1; }
-  [[ $(cat /etc/sysctl.d/90-gateway-vpn-ipv6.conf) == $(cat "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv6.conf") ]] || { echo "Installed Gateway IPv6 policy differs from the signed release" >&2; exit 1; }
+  cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf" || { echo "Installed Gateway IPv4 forwarding policy differs from the signed release" >&2; exit 1; }
+  cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv6.conf "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv6.conf" || { echo "Installed Gateway IPv6 policy differs from the signed release" >&2; exit 1; }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] || { echo "Gateway IPv4 forwarding is not active" >&2; exit 1; }
   [[ -x /usr/libexec/gateway-vpn-install-recovery ]] || { echo "Installed Gateway recovery helper is not executable" >&2; exit 1; }
   EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
   [[ $(stat -c '%u:%g:%a' /etc/systemd/network/05-gateway-vpn-lan.network) == "0:0:644" ]] || { echo "Persistent Gateway LAN policy ownership or mode is invalid" >&2; exit 1; }
   [[ $(cat /etc/systemd/network/05-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Existing persistent Gateway LAN policy differs from the requested interface/CIDR" >&2; exit 1; }
   if ((${#LAN_MEMBER_NAMES[@]})); then
-    [[ -f /etc/systemd/network/05-gateway-vpn-lan.netdev && ! -L /etc/systemd/network/05-gateway-vpn-lan.netdev && $(cat /etc/systemd/network/05-gateway-vpn-lan.netdev) == $(cat "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.netdev") ]] || { echo "Existing Gateway LAN bridge definition differs" >&2; exit 1; }
+    [[ -f /etc/systemd/network/05-gateway-vpn-lan.netdev && ! -L /etc/systemd/network/05-gateway-vpn-lan.netdev ]] && cmp -s -- /etc/systemd/network/05-gateway-vpn-lan.netdev "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.netdev" || { echo "Existing Gateway LAN bridge definition differs" >&2; exit 1; }
     mapfile -t INSTALLED_MEMBER_FILES < <(find /etc/systemd/network -maxdepth 1 -type f -name '06-gateway-vpn-lan-*.network' -print | sort)
     ((${#INSTALLED_MEMBER_FILES[@]} == ${#LAN_MEMBER_NAMES[@]})) || { echo "Existing Gateway LAN bridge member count differs" >&2; exit 1; }
     for member in "${LAN_MEMBER_NAMES[@]}"; do
@@ -376,7 +376,7 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway GRUB policy differs; explicit reconfiguration is required" >&2; exit 1; }
   if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
     [[ -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Installed Gateway boot-network policy is missing or unsafe" >&2; exit 1; }
-    [[ $(cat /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf) == $(cat "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf") ]] || { echo "Installed Gateway boot-network policy differs" >&2; exit 1; }
+    cmp -s -- /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" || { echo "Installed Gateway boot-network policy differs" >&2; exit 1; }
   else
     [[ ! -e /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Unexpected Gateway boot-network policy exists" >&2; exit 1; }
   fi
@@ -385,7 +385,7 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
     [[ ! -e "$GRUB_DROPIN" && ! -L "$GRUB_DROPIN" ]] || { echo "Unexpected Gateway GRUB policy exists" >&2; exit 1; }
   else
     GRUB_SOURCE="$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg"
-    [[ -f "$GRUB_DROPIN" && ! -L "$GRUB_DROPIN" && $(cat "$GRUB_DROPIN") == $(cat "$GRUB_SOURCE") ]] || { echo "Installed Gateway GRUB policy differs" >&2; exit 1; }
+    [[ -f "$GRUB_DROPIN" && ! -L "$GRUB_DROPIN" ]] && cmp -s -- "$GRUB_DROPIN" "$GRUB_SOURCE" || { echo "Installed Gateway GRUB policy differs" >&2; exit 1; }
     grub-script-check /boot/grub/grub.cfg >/dev/null || { echo "Installed generated GRUB configuration is invalid" >&2; exit 1; }
   fi
   if ((ENABLE_DHCP)); then
@@ -681,12 +681,12 @@ EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN
 [[ $(cat /etc/systemd/network/05-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
   [[ -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Installed non-blocking boot-network policy is missing" >&2; exit 1; }
-  [[ $(cat /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf) == $(cat "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf") ]] || { echo "Installed non-blocking boot-network policy verification failed" >&2; exit 1; }
+  cmp -s -- /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" || { echo "Installed non-blocking boot-network policy verification failed" >&2; exit 1; }
 fi
 if [[ "$GRUB_POLICY" != keep ]]; then
   GRUB_SOURCE="$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg"
   [[ -f /etc/default/grub.d/90-gateway-vpn.cfg && ! -L /etc/default/grub.d/90-gateway-vpn.cfg ]] || { echo "Installed GRUB policy is missing" >&2; exit 1; }
-  [[ $(cat /etc/default/grub.d/90-gateway-vpn.cfg) == $(cat "$GRUB_SOURCE") ]] || { echo "Installed GRUB policy verification failed" >&2; exit 1; }
+  cmp -s -- /etc/default/grub.d/90-gateway-vpn.cfg "$GRUB_SOURCE" || { echo "Installed GRUB policy verification failed" >&2; exit 1; }
   grub-script-check /boot/grub/grub.cfg >/dev/null || { echo "Generated GRUB configuration failed validation after installation" >&2; exit 1; }
 fi
 if ((${#LAN_MEMBER_NAMES[@]})); then

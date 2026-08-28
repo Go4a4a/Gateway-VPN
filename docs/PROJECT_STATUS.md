@@ -286,6 +286,7 @@ Unified-access successor локально достиг install-ready: data-plane
 | DEV-164 | 2026-08-28 | Перед повторными update health/rollback/recovery starts сбрасывать start-limit только у фиксированного набора owned firewall/guard/runtime units после установки `PATH_BLOCKED`; реальные start/health ошибки не маскировать | Systemd считает даже успешные oneshot starts: несколько штатных quiesce/activation/rollback cycles блокировали firewall, затем network-recovery, хотя сами команды были корректны. Scoped `reset-failed` не открывает data path и не касается чужих units |
 | DEV-165 | 2026-08-28 | Сокращение 24-часового update stability window допускается только source-only release-gate helper с двойным подтверждением, exact update ID и состоянием `STABILIZING`; результат доказывает finalizer mechanics, но никогда не доказывает реальную 24-часовую стабильность | Ожидание суток не нужно для проверки atomic recovery pointer/checksum/terminal state, однако искусственное время нельзя смешивать с endurance evidence или production acceptance |
 | DEV-166 | 2026-08-28 | Startup-policy integration выполняется четырьмя отдельными process phases над persistent SQLite и одним isolated kernel namespace; production `firewall-boot`, `FirewallBackend` и `RoutingBackend` являются actuator-ами, а изменяемый boot ID моделирует host boundary | Domain tests не доказывают соответствие DB intent фактическим nft sets/policy route. Раздельные процессы выявляют ложное manufacture-reboot, а новый boot обязан закрыть kernel до control recovery и не создавать unmarked default route |
+| DEV-167 | 2026-08-28 | Все проверки побайтного равенства owned host-policy файлов в installer выполнять через `cmp -s --`, а не через `[[ value == $(cat file) ]]`; наличие `cmp` входит в ранний host preflight | Правая часть `==` внутри Bash `[[ ]]` без кавычек является glob pattern. Поэтому корректный systemd drop-in, начинающийся с `[Service]`, и bridge netdev с `[NetDev]` ложно отвергались после успешной установки и вызывали безопасный rollback |
 
 ## Журнал разработки
 
@@ -313,9 +314,13 @@ Unified-access successor локально достиг install-ready: data-plane
 
 **Exact CI исправления:** commit `6b1b51bb4b4be568e50139926903f952856cfaad` отправлен в `origin/main`; GitHub Actions run `33171987634` завершился `success`. Отдельно прошли `Go, packaging and syntax gates` и `Linux nftables fail-closed gate`. Это подтверждает полный контракт мастера установки, обязательную передачу boot/GRUB policies и неизменность fail-closed data plane.
 
+**Journal CI:** следующий docs-only commit `678420ce8177912839af821d520198a25ba55db9` также прошёл exact GitHub Actions run `33172397680`: Go/packaging и Linux nftables jobs завершились `success`.
+
+**Signed fresh-install defect и исправление:** exact `678420c` дважды offline собран с disposable signer `8231e4d382968a21611e59310a315f5b2f8f9010783abae17fe9cdd0dcf22af0`; все файлы двух `dist` совпали побайтно. Fresh Ubuntu 24.04 dry-run и dependency plan не сделали mutation, apply установил dependencies, PATH_BLOCKED, GRUB policy и management runtime, но финальная проверка ложно отвергла побайтно одинаковый wait-online drop-in. Transaction штатно откатила release, services, owned policy и GRUB. Причина — Bash glob semantics у `[[ left == $(cat right) ]]` для `[Service]`; тем же дефектом была затронута idempotency-проверка `[NetDev]`. Все file-to-file проверки заменены на `cmp -s --`, `cmp` добавлен в preflight, а packaging test запрещает прежний класс сравнения. Focused и full Linux `go test -race`, `go vet`, shell syntax и `git diff --check` прошли.
+
 **Release boundary:** immutable public `v0.1.0-successor.5723940` не менялся и не содержит эту доработку. Successor зафиксирован и exact-CI проверен, но ещё не подписан production key и не опубликован отдельным tag/Release.
 
-**Следующий шаг:** собрать disposable-signed clean successor и повторить fresh Ubuntu 24.04/systemd install, no-network boot, idempotency, forced rollback, GRUB apply/rollback и reboot. Новый production tag/Release требует отдельного разрешения пользователя.
+**Следующий шаг:** commit/push literal-compare fix, дождаться exact CI, собрать новый disposable-signed successor и с нуля повторить Ubuntu 24.04/systemd install, no-network boot, idempotency, forced rollback, GRUB apply/rollback и reboot. Новый production tag/Release требует отдельного разрешения пользователя.
 
 ### Сессия 087 — immutable public Release и GitHub attestation — 2026-08-28
 
