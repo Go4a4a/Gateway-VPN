@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_IMMUTABLE_RELEASE / ATTESTATION_VERIFIED / CLEAN_BEFORE_JOURNAL_COMMIT` | `origin/main` содержит docs-only draft evidence commit `65e5a2f0a7942e00c369d48addcfd678ad72f1ab`, exact CI `33151261049` — `success`. Tag `v0.1.0-successor.5723940^{}` равен `57239401732c18822729499656801b994d627477`; public immutable Release `378316577` имеет verified GitHub attestation и `10/10` independently verified assets |
+| Репозиторий | `PUBLIC_IMMUTABLE_RELEASE / ATTESTATION_VERIFIED / EXACT_CI_PASS` | `origin/main` содержит release-attestation journal commit `c776f04290160feb23761a2d06888064709d3822`, exact CI `33152806661` — `success`. Tag `v0.1.0-successor.5723940^{}` равен `57239401732c18822729499656801b994d627477`; public immutable Release `378316577` имеет verified GitHub attestation и `10/10` independently verified assets |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `5723940_FRESH_DOCKER_SYSTEMD_PASS / HARDWARE_PENDING` | Exact signed successor прошёл clean dependency gate, apply, strict idempotency, persistent `lan0`, HTTPS/SSH/DNS/DHCP, DB/config ownership, recovery markers, tracked validator и новый PID 1; реальный bare-metal host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `LOCAL_REMOTE_SIGNED_AND_PUBLIC_RELEASE_GATE_PASS` | Full Windows suite/vet, Linux cross-compile, exact remote race/build/netns/systemd run `33130137658`, latest docs-only exact run `33151261049`, local exact signed fresh-install/new-PID1/kernel gates и public Release attestation проходят |
+| Автоматические тесты | `LOCAL_REMOTE_SIGNED_AND_PUBLIC_RELEASE_GATE_PASS` | Full Windows suite/vet, Linux cross-compile, exact remote race/build/netns/systemd run `33130137658`, release-attestation exact run `33152806661`, local exact signed fresh-install/new-PID1/kernel gates и public Release attestation проходят |
 
 ## Матрица доказательств Definition of Done
 
@@ -299,9 +299,9 @@ Unified-access successor локально достиг install-ready: data-plane
 
 **Диагностика и очистка:** первый canary официального CLI корректно остановился до verification с требованием `gh auth login`; это отсутствие локальной CLI-сессии после предыдущей очистки, а не ошибка Release. После нового device login token не выводился и использовался только из изолированного CLI credential context. По завершении выполнен `gh auth logout`, unauthenticated status подтверждён, portable CLI, скачанные public assets и временный auth/config каталог удалены. Production `.gvkey` не читался, не перемещался, не удалялся и не монтировался; сохранённые signed build/signer/module-cache volumes не изменялись.
 
-**External evidence:** latest pre-publication journal commit `65e5a2f0a7942e00c369d48addcfd678ad72f1ab` прошёл exact GitHub Actions run `33151261049` со статусом `success`. Этот docs-only journal update должен получить отдельный exact CI после push; immutable tag и Release assets при этом не изменяются.
+**External evidence:** release-attestation journal commit `c776f04290160feb23761a2d06888064709d3822` отправлен в `origin/main` и прошёл exact GitHub Actions run `33152806661` со статусом `success`. Go/packaging/race/vet, Linux nftables fail-closed, startup-policy, multi-port LAN SSH и Ubuntu 24.04 systemd gates завершились успешно. Immutable tag и Release assets не изменялись.
 
-**Следующий шаг:** commit/push только этого journal update и дождаться exact terminal CI. Затем перейти к интерактивной one-command установке на физический Ubuntu 24.04 Gateway и реальный VPS Ubuntu 20.04+ по `docs/OPERATIONS.md`; hardware, реальный HiLink/Keenetic packet path и 24/72-часовые endurance остаются обязательными внешними gates и пока не считаются выполненными.
+**Следующий шаг:** перейти к интерактивной one-command установке на физический Ubuntu 24.04 Gateway и реальный VPS Ubuntu 20.04+ по `docs/OPERATIONS.md`; hardware, реальный HiLink/Keenetic packet path и 24/72-часовые endurance остаются обязательными внешними gates и пока не считаются выполненными.
 
 ### Сессия 086 — exact tag и verified GitHub draft — 2026-08-28
 
