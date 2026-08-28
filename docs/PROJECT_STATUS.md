@@ -20,7 +20,7 @@
 ## Режим работы Codex
 
 - штатный уровень мышления для разработки — `High / Высокий`;
-- текущий явно подтверждённый пользователем уровень — `xhigh / Очень высокий`; он сохраняется до другого явно подтверждённого переключения;
+- текущий явно подтверждённый пользователем уровень — `High / Высокий`; возврат с `xhigh` подтверждён после завершения signed fresh-install/kernel release-gate;
 - обязательный протокол повышения и возврата уровня хранится в корневом `AGENTS.md`;
 - сообщение Codex о рекомендуемом уровне не является переключением;
 - перед любым повышением или понижением Codex обязан остановить проектную работу, сообщить уровень и причину и дождаться явного подтверждения переключения;
@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_MAIN / CLEAN_BEFORE_JOURNAL_COMMIT` | Код и воспроизводимый evidence commit `0dd18dd736a8e716d5bdc6ae66a1acd111471869` находятся в `origin/main`; exact CI run `33130137658` завершён `success`. Текущая запись install-ready является docs-only изменением; tag/release не создавались |
+| Репозиторий | `PUBLIC_MAIN / CLEAN_BEFORE_JOURNAL_COMMIT` | Install-ready evidence commit `1385ec6708dc02500a79964b0a488ce28f297116` находится в `origin/main`; exact CI run `33134875700` завершён `success`. Текущая pre-publication запись является docs-only изменением; tag/release не создавались |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `5723940_FRESH_DOCKER_SYSTEMD_PASS / HARDWARE_PENDING` | Exact signed successor прошёл clean dependency gate, apply, strict idempotency, persistent `lan0`, HTTPS/SSH/DNS/DHCP, DB/config ownership, recovery markers, tracked validator и новый PID 1; реальный bare-metal host ещё не проверен |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -288,6 +288,20 @@ Unified-access successor локально достиг install-ready: data-plane
 | DEV-166 | 2026-08-28 | Startup-policy integration выполняется четырьмя отдельными process phases над persistent SQLite и одним isolated kernel namespace; production `firewall-boot`, `FirewallBackend` и `RoutingBackend` являются actuator-ами, а изменяемый boot ID моделирует host boundary | Domain tests не доказывают соответствие DB intent фактическим nft sets/policy route. Раздельные процессы выявляют ложное manufacture-reboot, а новый boot обязан закрыть kernel до control recovery и не создавать unmarked default route |
 
 ## Журнал разработки
+
+### Сессия 084 — High mode и read-only pre-publication audit — 2026-08-28
+
+**Режим:** пользователь явно подтвердил возврат `xhigh → High` после завершения signed fresh-install/kernel gate; работа продолжена с install-ready состояния без повторения уже пройденных Docker checks.
+
+**GitHub namespace:** публичный `Go4a4a/Gateway-VPN` активен, default branch — `main`; exact tag `v0.1.0-successor.5723940` и соответствующий GitHub Release/draft отсутствуют. Никаких внешних записей, tag, draft или asset upload в этой сессии не выполнялось.
+
+**Fixed asset gate:** read-only build1 содержит ровно все `10` обязательных publisher assets как regular non-symlink files: Gateway/VPS archives, bootstrap, deploy, deploy SPDX/in-toto, `channel-validation.json/.sig`, `update-signing.pub` и universal interactive Gateway command. Published hashes повторно совпали: Gateway `c4ff9417…`, VPS `58c33730…`, bootstrap `aa76dccb…`, deploy `4e91bba7…`, channel `b978f197…`; command закрепляет signer `8231e4d3…`, source `57239401732c18822729499656801b994d627477` и не содержит конкретного NIC/CIDR/DHCP выбора.
+
+**Важный publication contract:** immutable release tag обязан указывать ровно на signed source commit `57239401732c18822729499656801b994d627477`, а не на более новый docs-only `main` commit. `create-github-release-draft.sh` должен запускаться из отдельного clean checkout exact tag, повторно verify Gateway/VPS/channel и только затем создавать `--draft --verify-tag`. Текущая Windows shell не содержит `gh`/`GH_TOKEN`; browser login не считается неинтерактивным publisher credential и не извлекается автоматически.
+
+**Hardware handoff:** `docs/OPERATIONS.md` уже содержит обязательные H1/H2 topology, exact identity/install, modem/subscription matrix, bounded sensitive PCAP, IPv4/DNS/IPv6 leak gate, failure matrix, VPS/WireGuard, traffic accounting, 24h/72h и обезличенную таблицу результата. Gate начинается только после versioned immutable GitHub Release; локальный disposable bundle на физический Gateway не переносится.
+
+**Следующий шаг:** требуется отдельное явное разрешение пользователя на создание и push exact tag и GitHub draft Release. Публикация draft остаётся отдельным ручным действием после проверки repository release immutability и полного списка assets.
 
 ### Сессия 083 — exact signed fresh install, новый PID 1 и kernel acceptance — 2026-08-28
 
