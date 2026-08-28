@@ -376,6 +376,7 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 		"permissions:\n  contents: read", "runs-on: ubuntu-24.04", "go test -race ./... -count=1",
 		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh", "test/release-gate/*.sh",
 		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
+		"startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test",
 		"persist-credentials: false",
 	} {
 		if !strings.Contains(workflow, required) {
@@ -680,6 +681,25 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 	}
 	if strings.Contains(harness, "| grep -q") {
 		t.Fatal("firewall netns harness uses grep -q under pipefail and can fail on upstream SIGPIPE")
+	}
+}
+
+func TestStartupPolicyNetNSHarnessCoversBootRestartAndDirectIsolation(t *testing.T) {
+	root := repositoryRoot(t)
+	harness := read(t, filepath.Join(root, "test", "netns", "startup_policy.sh"))
+	for _, required := range []string{
+		"GATEWAY_VPN_STARTUP_POLICY_INTEGRATION=1",
+		"gated-boot", "ungated-activate", "same-boot-restart", "next-gated-boot",
+		"firewall-boot --config", "PATH_BLOCKED",
+		"ip route get 1.1.1.1 mark 0x1101", "ip route get 1.1.1.1 >/dev/null",
+		"useradd --system --no-create-home --shell /usr/sbin/nologin",
+	} {
+		if !strings.Contains(harness, required) {
+			t.Errorf("startup policy netns harness missing %q", required)
+		}
+	}
+	if strings.Contains(harness, "| grep -q") {
+		t.Fatal("startup policy netns harness uses grep -q under pipefail and can fail on upstream SIGPIPE")
 	}
 }
 

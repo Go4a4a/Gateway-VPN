@@ -87,8 +87,11 @@ jobs:
           set -euo pipefail
           go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
           go test -c -o /tmp/gateway-vpn-dataplane-test ./internal/dataplane
+          go test -c -o /tmp/gateway-vpn-app-test ./internal/app
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
+      - name: Prove startup policy across boot and process boundaries
+        run: sudo ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
       - name: Prove multi-port LAN bridge SSH and uplink isolation
         run: sudo ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04
