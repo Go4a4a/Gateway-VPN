@@ -323,6 +323,41 @@ func (manager *Manager) LatestValid(ctx context.Context) (Snapshot, error) {
 	return items[0], nil
 }
 
+// ReadOnlyLatest returns the newest structurally valid snapshot of one kind
+// without creating directories, changing permissions or opening SQLite. It is
+// intended for the privileged watchdog's observation-only cycle.
+func ReadOnlyLatest(ctx context.Context, root string, kind Kind) (Snapshot, error) {
+	if !filepath.IsAbs(root) || !validKind(kind) {
+		return Snapshot{}, errors.New("absolute snapshot root and valid kind are required")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return Snapshot{}, errors.New("snapshot root is unavailable or unsafe")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return Snapshot{}, errors.New("read snapshot root failed")
+	}
+	manager := Manager{Root: root, MaximumDBBytes: DefaultMaximumDatabaseSize}
+	var latest Snapshot
+	for _, entry := range entries {
+		if !entry.IsDir() || !snapshotIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		item, readErr := manager.readSnapshot(ctx, filepath.Join(root, entry.Name()), false)
+		if readErr != nil || item.Manifest.Kind != kind {
+			continue
+		}
+		if latest.Manifest.CreatedAt == "" || item.Manifest.CreatedAt > latest.Manifest.CreatedAt {
+			latest = item
+		}
+	}
+	if latest.Manifest.CreatedAt == "" {
+		return Snapshot{}, errors.New("no matching database snapshot is available")
+	}
+	return latest, nil
+}
+
 func (manager *Manager) Verify(ctx context.Context, snapshot Snapshot) error {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()

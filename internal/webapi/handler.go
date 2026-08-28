@@ -2843,26 +2843,41 @@ func (server *Server) watchdogSettings(writer http.ResponseWriter, request *http
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"policy": policy,
-		"limits": map[string]int{
-			"check_interval_seconds_min":        watchdog.MinimumCheckIntervalSeconds,
-			"check_interval_seconds_max":        watchdog.MaximumCheckIntervalSeconds,
-			"failure_threshold_min":             watchdog.MinimumFailureThreshold,
-			"failure_threshold_max":             watchdog.MaximumFailureThreshold,
-			"success_threshold_min":             watchdog.MinimumSuccessThreshold,
-			"success_threshold_max":             watchdog.MaximumSuccessThreshold,
-			"restart_cooldown_seconds_min":      watchdog.MinimumRestartCooldown,
-			"restart_cooldown_seconds_max":      watchdog.MaximumRestartCooldown,
-			"max_restarts_per_component_min":    watchdog.MinimumRestartBudget,
-			"max_restarts_per_component_max":    watchdog.MaximumRestartBudget,
-			"restart_window_seconds_min":        watchdog.MinimumRestartWindow,
-			"restart_window_seconds_max":        watchdog.MaximumRestartWindow,
-			"reboot_after_critical_seconds_min": watchdog.MinimumRebootCritical,
-			"reboot_after_critical_seconds_max": watchdog.MaximumRebootCritical,
-			"max_reboots_per_24h_min":           watchdog.MinimumRebootBudget,
-			"max_reboots_per_24h_max":           watchdog.MaximumRebootBudget,
-			"reboot_grace_seconds_min":          watchdog.MinimumRebootGrace,
-			"reboot_grace_seconds_max":          watchdog.MaximumRebootGrace,
+		"limits": map[string]any{
+			"check_interval_seconds_min":            watchdog.MinimumCheckIntervalSeconds,
+			"check_interval_seconds_max":            watchdog.MaximumCheckIntervalSeconds,
+			"failure_threshold_min":                 watchdog.MinimumFailureThreshold,
+			"failure_threshold_max":                 watchdog.MaximumFailureThreshold,
+			"success_threshold_min":                 watchdog.MinimumSuccessThreshold,
+			"success_threshold_max":                 watchdog.MaximumSuccessThreshold,
+			"restart_cooldown_seconds_min":          watchdog.MinimumRestartCooldown,
+			"restart_cooldown_seconds_max":          watchdog.MaximumRestartCooldown,
+			"max_restarts_per_component_min":        watchdog.MinimumRestartBudget,
+			"max_restarts_per_component_max":        watchdog.MaximumRestartBudget,
+			"restart_window_seconds_min":            watchdog.MinimumRestartWindow,
+			"restart_window_seconds_max":            watchdog.MaximumRestartWindow,
+			"reboot_after_critical_seconds_min":     watchdog.MinimumRebootCritical,
+			"reboot_after_critical_seconds_max":     watchdog.MaximumRebootCritical,
+			"max_reboots_per_24h_min":               watchdog.MinimumRebootBudget,
+			"max_reboots_per_24h_max":               watchdog.MaximumRebootBudget,
+			"reboot_grace_seconds_min":              watchdog.MinimumRebootGrace,
+			"reboot_grace_seconds_max":              watchdog.MaximumRebootGrace,
+			"worker_stale_seconds_min":              watchdog.MinimumWorkerStaleSeconds,
+			"worker_stale_seconds_max":              watchdog.MaximumWorkerStaleSeconds,
+			"wireguard_handshake_stale_seconds_min": watchdog.MinimumWGHandshakeStale,
+			"wireguard_handshake_stale_seconds_max": watchdog.MaximumWGHandshakeStale,
+			"backup_max_age_hours_min":              watchdog.MinimumBackupMaxAgeHours,
+			"backup_max_age_hours_max":              watchdog.MaximumBackupMaxAgeHours,
+			"database_wal_max_bytes_min":            watchdog.MinimumDatabaseWALBytes,
+			"database_wal_max_bytes_max":            watchdog.MaximumDatabaseWALBytes,
+			"minimum_disk_free_bytes_min":           watchdog.MinimumDiskFreeBytesFloor,
+			"minimum_disk_free_bytes_max":           watchdog.MaximumDiskFreeBytesFloor,
+			"minimum_memory_available_bytes_min":    watchdog.MinimumMemoryBytesFloor,
+			"minimum_memory_available_bytes_max":    watchdog.MaximumMemoryBytesFloor,
+			"minimum_resource_percent_min":          watchdog.MinimumResourcePercent,
+			"minimum_resource_percent_max":          watchdog.MaximumResourcePercent,
 		},
+		"components": watchdogComponentSettings(),
 		"invariants": map[string]any{
 			"host_reboot_default":             false,
 			"external_outage_can_reboot":      false,
@@ -2898,6 +2913,24 @@ func (server *Server) watchdogStatus(writer http.ResponseWriter, request *http.R
 		"runtime_state": "AVAILABLE", "effective_policy": policy,
 		"status": status, "components": status.Components,
 	})
+}
+
+func watchdogComponentSettings() []map[string]any {
+	result := make([]map[string]any, 0)
+	for _, spec := range watchdog.ComponentSpecs() {
+		modes := []string{watchdog.RecoveryModeMonitorOnly}
+		if spec.Reconcileable {
+			modes = append(modes, watchdog.RecoveryModeReconcile)
+		}
+		if spec.Restartable {
+			modes = append(modes, watchdog.RecoveryModeRestart)
+		}
+		result = append(result, map[string]any{
+			"id": spec.ID, "label": spec.Label, "allowed_recovery_modes": modes,
+			"reboot_eligible": spec.RebootEligible,
+		})
+	}
+	return result
 }
 
 func (server *Server) systemPowerCapabilities(writer http.ResponseWriter, request *http.Request) {
@@ -3730,19 +3763,28 @@ func (server *Server) updateWatchdogSettings(writer http.ResponseWriter, request
 		return
 	}
 	var input struct {
-		Enabled                    bool `json:"enabled"`
-		CheckIntervalSeconds       int  `json:"check_interval_seconds"`
-		FailureThreshold           int  `json:"failure_threshold"`
-		SuccessThreshold           int  `json:"success_threshold"`
-		ReconcileEnabled           bool `json:"reconcile_enabled"`
-		ComponentRestartEnabled    bool `json:"component_restart_enabled"`
-		RestartCooldownSeconds     int  `json:"restart_cooldown_seconds"`
-		MaxRestartsPerComponent    int  `json:"max_restarts_per_component"`
-		RestartWindowSeconds       int  `json:"restart_window_seconds"`
-		HostRebootEnabled          bool `json:"host_reboot_enabled"`
-		RebootAfterCriticalSeconds int  `json:"reboot_after_critical_seconds"`
-		MaxRebootsPer24h           int  `json:"max_reboots_per_24h"`
-		RebootGraceSeconds         int  `json:"reboot_grace_seconds"`
+		Enabled                        bool              `json:"enabled"`
+		CheckIntervalSeconds           int               `json:"check_interval_seconds"`
+		FailureThreshold               int               `json:"failure_threshold"`
+		SuccessThreshold               int               `json:"success_threshold"`
+		ReconcileEnabled               bool              `json:"reconcile_enabled"`
+		ComponentRestartEnabled        bool              `json:"component_restart_enabled"`
+		RestartCooldownSeconds         int               `json:"restart_cooldown_seconds"`
+		MaxRestartsPerComponent        int               `json:"max_restarts_per_component"`
+		RestartWindowSeconds           int               `json:"restart_window_seconds"`
+		HostRebootEnabled              bool              `json:"host_reboot_enabled"`
+		RebootAfterCriticalSeconds     int               `json:"reboot_after_critical_seconds"`
+		MaxRebootsPer24h               int               `json:"max_reboots_per_24h"`
+		RebootGraceSeconds             int               `json:"reboot_grace_seconds"`
+		WorkerStaleSeconds             int               `json:"worker_stale_seconds"`
+		WireGuardHandshakeStaleSeconds int               `json:"wireguard_handshake_stale_seconds"`
+		BackupMaxAgeHours              int               `json:"backup_max_age_hours"`
+		DatabaseWALMaxBytes            int64             `json:"database_wal_max_bytes"`
+		MinimumDiskFreeBytes           int64             `json:"minimum_disk_free_bytes"`
+		MinimumDiskFreePercent         int               `json:"minimum_disk_free_percent"`
+		MinimumMemoryAvailableBytes    int64             `json:"minimum_memory_available_bytes"`
+		MinimumMemoryAvailablePercent  int               `json:"minimum_memory_available_percent"`
+		ComponentRecoveryModes         map[string]string `json:"component_recovery_modes"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
@@ -3756,6 +3798,13 @@ func (server *Server) updateWatchdogSettings(writer http.ResponseWriter, request
 		MaxRestartsPerComponent: input.MaxRestartsPerComponent, RestartWindowSeconds: input.RestartWindowSeconds,
 		HostRebootEnabled: input.HostRebootEnabled, RebootAfterCriticalSeconds: input.RebootAfterCriticalSeconds,
 		MaxRebootsPer24h: input.MaxRebootsPer24h, RebootGraceSeconds: input.RebootGraceSeconds,
+		WorkerStaleSeconds:             input.WorkerStaleSeconds,
+		WireGuardHandshakeStaleSeconds: input.WireGuardHandshakeStaleSeconds,
+		BackupMaxAgeHours:              input.BackupMaxAgeHours, DatabaseWALMaxBytes: input.DatabaseWALMaxBytes,
+		MinimumDiskFreeBytes: input.MinimumDiskFreeBytes, MinimumDiskFreePercent: input.MinimumDiskFreePercent,
+		MinimumMemoryAvailableBytes:   input.MinimumMemoryAvailableBytes,
+		MinimumMemoryAvailablePercent: input.MinimumMemoryAvailablePercent,
+		ComponentRecoveryModes:        input.ComponentRecoveryModes,
 	})
 	if err != nil {
 		writeDomainError(writer, err)

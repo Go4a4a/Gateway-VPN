@@ -9,14 +9,42 @@ import (
 	"time"
 )
 
+const (
+	WorkerSubscriptionRefresh = "subscription-refresh"
+	WorkerDataPlaneReconcile  = "data-plane-reconcile"
+	WorkerModemReconcile      = "modem-reconcile"
+	WorkerEthernetReconcile   = "ethernet-reconcile"
+	WorkerPathHealth          = "path-health"
+	WorkerDirectHealth        = "direct-health"
+	WorkerLoggingSync         = "logging-sync"
+	WorkerDatabaseBackup      = "database-backup"
+	WorkerRetention           = "retention"
+	WorkerTrafficAccounting   = "traffic-accounting"
+)
+
+var fixedWorkerIDs = map[string]struct{}{
+	WorkerSubscriptionRefresh: {}, WorkerDataPlaneReconcile: {},
+	WorkerModemReconcile: {}, WorkerEthernetReconcile: {},
+	WorkerPathHealth: {}, WorkerDirectHealth: {}, WorkerLoggingSync: {},
+	WorkerDatabaseBackup: {}, WorkerRetention: {}, WorkerTrafficAccounting: {},
+}
+
+type WorkerProgress struct {
+	LastProgressAt        string `json:"last_progress_at"`
+	MaximumSilenceSeconds int    `json:"maximum_silence_seconds"`
+	Critical              bool   `json:"critical"`
+}
+
 type ControlHeartbeat struct {
-	SchemaVersion    int    `json:"schema_version"`
-	PID              int    `json:"pid"`
-	ProcessStartedAt string `json:"process_started_at"`
-	WrittenAt        string `json:"written_at"`
-	DatabaseOK       bool   `json:"database_ok"`
-	WorkersOK        bool   `json:"workers_ok"`
-	ReconcileLastAt  string `json:"reconcile_last_at,omitempty"`
+	SchemaVersion    int                       `json:"schema_version"`
+	PID              int                       `json:"pid"`
+	ProcessStartedAt string                    `json:"process_started_at"`
+	WrittenAt        string                    `json:"written_at"`
+	DatabaseOK       bool                      `json:"database_ok"`
+	WorkersOK        bool                      `json:"workers_ok"`
+	APIServing       bool                      `json:"api_serving"`
+	ReconcileLastAt  string                    `json:"reconcile_last_at,omitempty"`
+	Workers          map[string]WorkerProgress `json:"workers"`
 }
 
 type HeartbeatFile struct {
@@ -61,8 +89,8 @@ func (file HeartbeatFile) Read(now time.Time, maximumAge time.Duration) (Control
 }
 
 func (heartbeat ControlHeartbeat) Validate() error {
-	if heartbeat.SchemaVersion != 1 || heartbeat.PID <= 0 || !heartbeat.DatabaseOK || !heartbeat.WorkersOK {
-		return errors.New("complete healthy control heartbeat is required")
+	if heartbeat.SchemaVersion != 2 || heartbeat.PID <= 0 {
+		return errors.New("control heartbeat identity is invalid")
 	}
 	started, err := time.Parse(time.RFC3339Nano, heartbeat.ProcessStartedAt)
 	if err != nil {
@@ -76,6 +104,18 @@ func (heartbeat ControlHeartbeat) Validate() error {
 		reconciled, err := time.Parse(time.RFC3339Nano, heartbeat.ReconcileLastAt)
 		if err != nil || reconciled.Before(started) || reconciled.After(written.Add(5*time.Second)) {
 			return errors.New("control reconciliation timestamp is invalid")
+		}
+	}
+	if len(heartbeat.Workers) == 0 || len(heartbeat.Workers) > len(fixedWorkerIDs) {
+		return errors.New("control worker heartbeat set is invalid")
+	}
+	for id, progress := range heartbeat.Workers {
+		if _, exists := fixedWorkerIDs[id]; !exists || progress.MaximumSilenceSeconds < 5 || progress.MaximumSilenceSeconds > 172800 {
+			return errors.New("control worker heartbeat contains an invalid worker")
+		}
+		last, err := time.Parse(time.RFC3339Nano, progress.LastProgressAt)
+		if err != nil || last.Before(started) || last.After(written.Add(5*time.Second)) {
+			return errors.New("control worker progress timestamp is invalid")
 		}
 	}
 	return nil

@@ -11,7 +11,7 @@ import (
 	"syscall"
 )
 
-func systemResourceHealth(databasePath string) (bool, string, map[string]any) {
+func systemResourceHealth(databasePath string, policy Policy) (bool, string, map[string]any) {
 	details := map[string]any{}
 	var filesystem syscall.Statfs_t
 	if err := syscall.Statfs(filepath.Dir(databasePath), &filesystem); err != nil {
@@ -21,7 +21,7 @@ func systemResourceHealth(databasePath string) (bool, string, map[string]any) {
 	total := int64(filesystem.Blocks) * int64(filesystem.Bsize)
 	details["disk_available_bytes"] = available
 	details["disk_total_bytes"] = total
-	if available < 256<<20 || total > 0 && available*100/total < 5 {
+	if available < policy.MinimumDiskFreeBytes || total > 0 && available*100/total < int64(policy.MinimumDiskFreePercent) {
 		return false, "DISK_PRESSURE", details
 	}
 	memory, err := readKeyValues("/proc/meminfo")
@@ -31,7 +31,7 @@ func systemResourceHealth(databasePath string) (bool, string, map[string]any) {
 	memoryAvailable, memoryTotal := memory["MemAvailable"]*1024, memory["MemTotal"]*1024
 	details["memory_available_bytes"] = memoryAvailable
 	details["memory_total_bytes"] = memoryTotal
-	if memoryAvailable < 128<<20 || memoryTotal > 0 && memoryAvailable*100/memoryTotal < 5 {
+	if memoryAvailable < policy.MinimumMemoryAvailableBytes || memoryTotal > 0 && memoryAvailable*100/memoryTotal < int64(policy.MinimumMemoryAvailablePercent) {
 		return false, "MEMORY_PRESSURE", details
 	}
 	fileNR, err := os.ReadFile("/proc/sys/fs/file-nr")

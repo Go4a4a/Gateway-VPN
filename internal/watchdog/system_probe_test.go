@@ -79,13 +79,21 @@ func TestSystemProbeRejectsUnknownComponentAndMutablePrivilegedPath(t *testing.T
 
 func TestSystemProbeRestartMatrixIsFixedAndComplete(t *testing.T) {
 	want := map[string][]string{
-		ComponentControl:         {"gateway-vpn.service"},
-		ComponentSQLite:          {"gateway-vpn.service"},
-		ComponentFirewallGuard:   {"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service"},
-		ComponentFirewallRuleset: {"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service"},
-		ComponentNetworkBroker:   {"gateway-vpn-network-broker.service"},
-		ComponentDNSMasq:         {"gateway-vpn-dnsmasq.service"},
-		ComponentMihomo:          {"gateway-vpn-mihomo.service"},
+		ComponentControl:          {"gateway-vpn.service"},
+		ComponentSQLite:           {"gateway-vpn.service"},
+		ComponentFirewallGuard:    {"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service"},
+		ComponentFirewallRuleset:  {"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service"},
+		ComponentNetworkBroker:    {"gateway-vpn-network-broker.service"},
+		ComponentNetworkd:         {"systemd-networkd.service"},
+		ComponentDNSMasq:          {"gateway-vpn-dnsmasq.service"},
+		ComponentSSH:              {"ssh.service"},
+		ComponentMihomo:           {"gateway-vpn-mihomo.service"},
+		ComponentWireGuardMgmt:    {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
+		ComponentWireGuardIngress: {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
+		ComponentPolicyRouting:    {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
+		ComponentWorkerRuntime:    {"gateway-vpn.service"},
+		ComponentConvergence:      {"gateway-vpn.service"},
+		ComponentBackup:           {"gateway-vpn.service"},
 	}
 	for componentID, units := range want {
 		t.Run(componentID, func(t *testing.T) {
@@ -150,9 +158,10 @@ func TestHeartbeatFileRoundTripAndStaleness(t *testing.T) {
 	file := HeartbeatFile{Path: filepath.Join(directory, "control.json")}
 	now := time.Date(2026, 8, 26, 21, 0, 0, 0, time.UTC)
 	heartbeat := ControlHeartbeat{
-		SchemaVersion: 1, PID: 42, ProcessStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
-		WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true,
+		SchemaVersion: 2, PID: 42, ProcessStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true, APIServing: true,
 		ReconcileLastAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+		Workers:         map[string]WorkerProgress{WorkerDataPlaneReconcile: {LastProgressAt: now.Add(-time.Second).Format(time.RFC3339Nano), MaximumSilenceSeconds: 30, Critical: true}},
 	}
 	if err := file.Write(heartbeat); err != nil {
 		t.Fatal(err)
@@ -183,10 +192,13 @@ func TestWatchdogStatusFreshnessRejectsStaleRuntimeFile(t *testing.T) {
 
 func fixedTestSystemProbe(executor platformexec.Executor) *SystemProbe {
 	return &SystemProbe{
-		Executor: executor, Systemctl: "/usr/bin/systemctl", NFT: "/usr/sbin/nft", IP: "/usr/sbin/ip",
+		Executor: executor, Systemctl: "/usr/bin/systemctl", NFT: "/usr/sbin/nft", IP: "/usr/sbin/ip", WG: "/usr/bin/wg",
+		SSHD: "/usr/sbin/sshd", SS: "/usr/bin/ss",
 		GatewayBinary: "/opt/gateway-vpn/current/bin/gateway-vpn", ConfigPath: "/etc/gateway-vpn/config.yaml",
 		DatabasePath: "/var/lib/gateway-vpn/state.db", HeartbeatPath: "/run/gateway-vpn-watchdog/control.json",
 		MihomoConfigPath: "/var/lib/gateway-vpn/mihomo/active/config.yaml", MihomoTUN: "gateway-vpn-tun",
+		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml", LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
+		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
 	}
 }

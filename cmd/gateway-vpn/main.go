@@ -133,6 +133,7 @@ func runFirewallGuard(args []string) int {
 	ruleset, err := firewall.RenderBootBlocked(firewall.BootConfig{
 		LANInterface: configuration.Network.LANInterface, TUNInterface: configuration.Mihomo.TunName,
 		WireGuardInterface: "wg-mgmt", APIPort: uint16(port), WireGuardListenPort: 51821,
+		DisableSSHManagement: configuration.Network.DisableSSHManagement,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "render guarded firewall: %v\n", err)
@@ -185,6 +186,7 @@ func runFirewallBoot(args []string) int {
 	ruleset, err := firewall.RenderBootBlocked(firewall.BootConfig{
 		LANInterface: configuration.Network.LANInterface, TUNInterface: configuration.Mihomo.TunName,
 		WireGuardInterface: "wg-mgmt", APIPort: uint16(port), WireGuardListenPort: 51821,
+		DisableSSHManagement: configuration.Network.DisableSSHManagement,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "render boot firewall: %v\n", err)

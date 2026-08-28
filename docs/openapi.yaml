@@ -1253,6 +1253,15 @@ components:
         - restart_cooldown_seconds
         - max_restarts_per_component
         - restart_window_seconds
+        - worker_stale_seconds
+        - wireguard_handshake_stale_seconds
+        - backup_max_age_hours
+        - database_wal_max_bytes
+        - minimum_disk_free_bytes
+        - minimum_disk_free_percent
+        - minimum_memory_available_bytes
+        - minimum_memory_available_percent
+        - component_recovery_modes
         - host_reboot_enabled
         - reboot_after_critical_seconds
         - max_reboots_per_24h
@@ -1267,6 +1276,19 @@ components:
         restart_cooldown_seconds: {type: integer, minimum: 5, maximum: 3600}
         max_restarts_per_component: {type: integer, minimum: 1, maximum: 20}
         restart_window_seconds: {type: integer, minimum: 60, maximum: 86400}
+        worker_stale_seconds: {type: integer, minimum: 30, maximum: 900}
+        wireguard_handshake_stale_seconds: {type: integer, minimum: 60, maximum: 3600}
+        backup_max_age_hours: {type: integer, minimum: 24, maximum: 168}
+        database_wal_max_bytes: {type: integer, format: int64, minimum: 67108864, maximum: 4294967296}
+        minimum_disk_free_bytes: {type: integer, format: int64, minimum: 134217728, maximum: 17179869184}
+        minimum_disk_free_percent: {type: integer, minimum: 1, maximum: 25}
+        minimum_memory_available_bytes: {type: integer, format: int64, minimum: 67108864, maximum: 8589934592}
+        minimum_memory_available_percent: {type: integer, minimum: 1, maximum: 25}
+        component_recovery_modes:
+          type: object
+          minProperties: 16
+          maxProperties: 16
+          additionalProperties: {type: string, enum: [MONITOR_ONLY, RECONCILE, RESTART]}
         host_reboot_enabled: {type: boolean, default: false}
         reboot_after_critical_seconds: {type: integer, minimum: 300, maximum: 86400}
         max_reboots_per_24h: {type: integer, minimum: 1, maximum: 3}

@@ -117,6 +117,24 @@ func TestBootRulesetAccountsEveryAllowedDirectServiceDirection(t *testing.T) {
 	}
 }
 
+func TestBootRulesetCanDisableOnlyTheLANSSHExposure(t *testing.T) {
+	ruleset, err := RenderBootBlocked(BootConfig{
+		LANInterface: "gateway-vpn-lan", TUNInterface: "gateway-vpn-tun", WireGuardInterface: "wg-mgmt",
+		APIPort: 8443, WireGuardListenPort: 51821, DisableSSHManagement: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ruleset.Text, "tcp dport 22") || strings.Contains(ruleset.Text, "LAN SSH") {
+		t.Fatalf("disabled SSH is still exposed:\n%s", ruleset.Text)
+	}
+	for _, required := range []string{`iifname "gateway-vpn-lan" tcp dport 8443 accept`, `iifname "wg-mgmt" tcp dport 8443 accept`, `gateway-vpn PATH_BLOCKED`} {
+		if !strings.Contains(ruleset.Text, required) {
+			t.Errorf("disabled SSH changed unrelated firewall contract: missing %q", required)
+		}
+	}
+}
+
 func TestValidateAndLoadIsDryByDefaultAndChecksBeforeLoad(t *testing.T) {
 	ruleset, err := RenderBootBlocked(BootConfig{LANInterface: "enp2s0", TUNInterface: "gateway-vpn-tun", WireGuardInterface: "wg-mgmt", APIPort: 8443, WireGuardListenPort: 51821})
 	if err != nil {

@@ -75,6 +75,7 @@ type GatewayOptions struct {
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
+	DisableSSH              bool
 	BootNetworkPolicy       string
 	GRUBPolicy              string
 	Apply                   bool
@@ -132,6 +133,9 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	}
 	if options.EnableDHCP {
 		arguments = append(arguments, "--enable-dhcp")
+	}
+	if options.DisableSSH {
+		arguments = append(arguments, "--disable-ssh")
 	}
 	if options.InstallDependencies {
 		arguments = append(arguments, "--install-dependencies")

@@ -125,7 +125,23 @@ Appliance-вариант boot-network устанавливает только ow
 
 GRUB policy хранится только в owned `/etc/default/grub.d/90-gateway-vpn.cfg`; `/etc/default/grub` не перезаписывается. После изменения выполняются `update-grub` и `grub-script-check`. Recovery/uninstall удаляют owned drop-in и заново генерируют валидный `grub.cfg`. Даже при скрытом меню остаётся короткое окно `Esc` (UEFI) либо `Shift` (Legacy BIOS) для ручного recovery.
 
-OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. Installer требует IPv4 wildcard listener TCP/22, а nftables принимает новые SSH connections только с `gateway-vpn-lan`. На HiLink/uplink TCP/22 не открывается. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
+OpenSSH/SFTP — отдельный понятный шаг interactive wizard. Мастер показывает, установлен ли `openssh-server`, включён и запущен ли `ssh.service`, объясняет, что SFTP является частью OpenSSH, и рекомендует **Да**. `Enter` принимает рекомендацию; **Нет** означает, что installer не устанавливает/не включает OpenSSH и не создаёт TCP/22 rule. Automation также использует default-on; явный отказ передаётся только `--disable-ssh` и сохраняется как `network.disable_ssh_management: true` плюс `lan_ssh_enabled: false` в install report.
+
+При включённом выборе OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. До изменения service выполняется `sshd -t`, затем `systemctl enable --now ssh.service`, повторная проверка enabled/active и IPv4 wildcard listener TCP/22. nftables принимает новые SSH connections только с `gateway-vpn-lan`, поэтому один owned bridge делает SSH/SFTP доступными через любой выбранный LAN member, но не через отдельный Ethernet uplink/HiLink. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
+
+После установки используйте Ubuntu account, уже разрешённый политикой OpenSSH:
+
+```bash
+ssh <ubuntu-user>@<LAN-IP-Gateway>
+sftp <ubuntu-user>@<LAN-IP-Gateway>
+sudo sshd -t
+sudo systemctl is-enabled ssh.service
+sudo systemctl is-active ssh.service
+sudo ss -H -ltn 'sport = :22'
+sudo nft list chain inet gateway_vpn input
+```
+
+Ожидается ровно одно owned разрешение вида `iifname "gateway-vpn-lan" tcp dport 22 accept`; правило на uplink является security defect. Если SSH/SFTP сознательно выключен, TCP/22 rule не должно быть вовсе, а watchdog показывает компонент как `NOT_APPLICABLE`.
 
 Owned LAN networkd policies используют точные ранние имена `05-gateway-vpn-lan.*` и `06-gateway-vpn-lan-<port>.network`, чтобы выбранные interfaces не были перехвачены более поздними generated `10-netplan-*` matches после reboot. Installer не удаляет и не переписывает netplan; только явно выбранные dedicated ports получают более точную owned policy.
 
@@ -549,7 +565,9 @@ sudo journalctl --namespace=gateway-vpn -u gateway-vpn.service --since=-15min
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** отдельно показываются локальное состояние процессов/SQLite/firewall, доступность глобального Интернета, active maintenance и durable restart/reboot budgets. Потеря модемов, операторов, подписок, targets, VPS или всего внешнего Интернета отображается как connectivity outage и сама по себе никогда не запускает restart либо reboot.
 
-Safe-default policy проверяет фиксированный allowlist компонентов каждые 15 секунд, требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает systemd crash restart, fail-closed firewall guard и audit.
+Safe-default policy проверяет фиксированный allowlist из 16 компонентов каждые 15 секунд: WebUI/API/control, SQLite, firewall guard/ruleset, broker/networkd, DNS/DHCP, optional SSH/SFTP, Mihomo/TUN, WireGuard management/ingress, policy routing, background workers, desired/observed convergence, verified backup/WAL и host resources. Она требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает read-only monitoring, systemd crash restart, fail-closed firewall guard и audit.
+
+Во вкладке **Система и безопасность → Самоконтроль 24/7** для каждого fixed component выбирается только допустимый `Только наблюдать`, `Reconcile без restart` или `Reconcile и bounded restart`. WebUI не принимает имя unit, executable, interface, route или command. Отдельно настраиваются worker-stale, WireGuard-handshake, backup-age, SQLite-WAL, disk и memory thresholds. Resource pressure отображается, но не делает host reboot допустимым. Старый WireGuard handshake при корректных interface/address/peer/fwmark/routes классифицируется как внешний outage и подавляет локальные recovery/reboot действия.
 
 Host reboot по умолчанию выключен. Его включение требует отдельного подтверждения в WebUI; даже после включения нужны непрерывный локальный critical failure не менее 15 минут, исчерпанная безопасная локальная recovery ladder, повторный `PATH_BLOCKED`, 60-секундный grace и свободный durable budget (по умолчанию один reboot за 24 часа). История записывается и fsync-ится до privileged action, не очищается restart-ом supervisor или изменением settings и блокирует reboot loop. Disk/memory/FD pressure, maintenance transaction и внешний outage не являются reboot-eligible причинами.
 
@@ -569,7 +587,11 @@ sudo systemctl show gateway-vpn-watchdog.service gateway-vpn.service -p ActiveSt
 sudo stat -c '%U:%G:%a %y %n' /run/gateway-vpn-watchdog/status.json /run/gateway-vpn-watchdog/control.json
 sudo journalctl --namespace=gateway-vpn -u gateway-vpn-watchdog.service -u gateway-vpn.service
 sudo nft list table inet gateway_vpn
+sudo ip -N -json -4 route show 10.80.0.0/24
+sudo wg show wg-mgmt fwmark
 ```
+
+При настроенном management WireGuard первый route должен содержать `dst=10.80.0.0/24`, `dev=wg-mgmt`, numeric protocol `186`. Ubuntu 24.04 `ip -N -json` может кодировать protocol/table как JSON-строки; это штатная форма и текущий watchdog принимает её строго как decimal integer. Route mismatch является локальной ошибкой; отсутствие свежего handshake при совпавшем локальном contour — внешней.
 
 Не удаляйте вручную `/var/lib/gateway-vpn-privileged/watchdog`: там находится root-only история budget. Перед плановым обслуживанием используйте штатные install/update/restore/network-apply units; supervisor распознаёт их как maintenance и не конкурирует с транзакцией.
 

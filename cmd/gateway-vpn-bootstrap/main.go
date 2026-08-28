@@ -55,6 +55,7 @@ func run(args []string) int {
 	lanInterface := flags.String("lan-interface", "", "explicit Ethernet interface connected to Keenetic WAN")
 	lanAddress := flags.String("lan-address", "", "explicit Gateway transit LAN IPv4 CIDR; defaults to 192.168.200.1/24 in automation mode")
 	enableDHCP := flags.Bool("enable-dhcp", false, "enable transit DHCP after validation")
+	disableSSH := flags.Bool("disable-ssh", false, "do not install/manage OpenSSH or open TCP/22 in the Gateway LAN firewall")
 	installDependencies := flags.Bool("install-dependencies", false, "install missing managed Gateway packages after dependency-plan validation")
 	bootNetworkPolicy := flags.String("boot-network-policy", "", "boot network policy: gateway-nonblocking or keep")
 	grubPolicy := flags.String("grub-policy", "", "GRUB policy: automatic-hidden, menu-5s, or keep")
@@ -65,8 +66,8 @@ func run(args []string) int {
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return 2
 	}
-	if *interactive && (*lanInterface != "" || *lanAddress != "" || *enableDHCP || *installDependencies || *bootNetworkPolicy != "" || *grubPolicy != "" || *dependencyPreflightOnly || *apply || *jsonOutput) {
-		fmt.Fprintln(os.Stderr, "--interactive chooses LAN, DHCP, dependencies, boot-network, GRUB, and apply confirmation itself; explicit installation policy flags are not allowed")
+	if *interactive && (*lanInterface != "" || *lanAddress != "" || *enableDHCP || *disableSSH || *installDependencies || *bootNetworkPolicy != "" || *grubPolicy != "" || *dependencyPreflightOnly || *apply || *jsonOutput) {
+		fmt.Fprintln(os.Stderr, "--interactive chooses LAN, DHCP, SSH/SFTP, dependencies, boot-network, GRUB, and apply confirmation itself; explicit installation policy flags are not allowed")
 		return 2
 	}
 	if !*interactive && *managementPeer != "" {
@@ -122,6 +123,7 @@ func run(args []string) int {
 		*lanInterface = selection.LANInterface
 		*lanAddress = selection.LANAddress
 		*enableDHCP = selection.EnableDHCP
+		*disableSSH = !selection.EnableSSH
 		*installDependencies = selection.InstallDependencies
 		*bootNetworkPolicy = string(selection.BootNetworkPolicy)
 		*grubPolicy = string(selection.GRUBPolicy)
@@ -144,7 +146,7 @@ func run(args []string) int {
 	installer := bootstrapinstall.Installer{Runner: bootstrapinstall.OSRunner{}, Bash: "/usr/bin/bash"}
 	options := bootstrapinstall.GatewayOptions{
 		LANInterface: *lanInterface, LANMembers: selection.LANMembers, LANAddress: *lanAddress, InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP,
-		BootNetworkPolicy: *bootNetworkPolicy, GRUBPolicy: *grubPolicy, Apply: *apply, DependencyPreflightOnly: *dependencyPreflightOnly,
+		DisableSSH: *disableSSH, BootNetworkPolicy: *bootNetworkPolicy, GRUBPolicy: *grubPolicy, Apply: *apply, DependencyPreflightOnly: *dependencyPreflightOnly,
 	}
 	if *interactive {
 		dryRun := options

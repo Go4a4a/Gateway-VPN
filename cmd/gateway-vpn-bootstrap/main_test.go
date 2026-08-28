@@ -7,6 +7,7 @@ func TestInteractiveModeRejectsBuildTimeHardwareAndApplyPolicy(t *testing.T) {
 		{"install-gateway", "--interactive", "--lan-interface", "enp2s0"},
 		{"install-gateway", "--interactive", "--lan-address", "192.168.200.1/24"},
 		{"install-gateway", "--interactive", "--enable-dhcp"},
+		{"install-gateway", "--interactive", "--disable-ssh"},
 		{"install-gateway", "--interactive", "--install-dependencies"},
 		{"install-gateway", "--interactive", "--apply"},
 		{"install-gateway", "--interactive", "--json"},

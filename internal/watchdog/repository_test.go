@@ -34,6 +34,10 @@ func TestRepositoryDefaultsUpdateAndAudit(t *testing.T) {
 		MaxRestartsPerComponent: 4, RestartWindowSeconds: 1200,
 		HostRebootEnabled: true, RebootAfterCriticalSeconds: 1200,
 		MaxRebootsPer24h: 1, RebootGraceSeconds: 90,
+		WorkerStaleSeconds: 120, WireGuardHandshakeStaleSeconds: 180,
+		BackupMaxAgeHours: 36, DatabaseWALMaxBytes: 256 << 20,
+		MinimumDiskFreeBytes: 512 << 20, MinimumDiskFreePercent: 5,
+		MinimumMemoryAvailableBytes: 128 << 20, MinimumMemoryAvailablePercent: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +60,10 @@ func TestPolicyRejectsUnboundedValues(t *testing.T) {
 		ReconcileEnabled: true, ComponentRestartEnabled: true, RestartCooldownSeconds: 30,
 		MaxRestartsPerComponent: 5, RestartWindowSeconds: 900,
 		RebootAfterCriticalSeconds: 900, MaxRebootsPer24h: 1, RebootGraceSeconds: 60,
+		WorkerStaleSeconds: 120, WireGuardHandshakeStaleSeconds: 180,
+		BackupMaxAgeHours: 36, DatabaseWALMaxBytes: 256 << 20,
+		MinimumDiskFreeBytes: 512 << 20, MinimumDiskFreePercent: 5,
+		MinimumMemoryAvailableBytes: 128 << 20, MinimumMemoryAvailablePercent: 5,
 	}
 	if _, err := NormalizeUpdate(input, time.Now()); err != nil {
 		t.Fatalf("safe policy rejected: %v", err)
@@ -63,5 +71,19 @@ func TestPolicyRejectsUnboundedValues(t *testing.T) {
 	input.CheckIntervalSeconds = 1
 	if _, err := NormalizeUpdate(input, time.Now()); err == nil {
 		t.Fatal("unbounded check interval accepted")
+	}
+}
+
+func TestPolicyRejectsUnknownComponentRecoveryMode(t *testing.T) {
+	policy := DefaultPolicy()
+	delete(policy.ComponentRecoveryModes, ComponentResources)
+	policy.ComponentRecoveryModes["ssh.service"] = RecoveryModeRestart
+	if err := policy.Validate(); err == nil {
+		t.Fatal("arbitrary component recovery mode accepted")
+	}
+	policy = DefaultPolicy()
+	policy.ComponentRecoveryModes[ComponentResources] = RecoveryModeRestart
+	if err := policy.Validate(); err == nil {
+		t.Fatal("restart mode accepted for monitor-only resources")
 	}
 }

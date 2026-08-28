@@ -138,6 +138,7 @@ func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, tr
 	ruleset, err := firewall.RenderBootBlocked(firewall.BootConfig{
 		LANInterface: manifest.InterfaceName, TUNInterface: configuration.Mihomo.TunName,
 		WireGuardInterface: "wg-mgmt", APIPort: apiPort, WireGuardListenPort: 51821,
+		DisableSSHManagement: configuration.Network.DisableSSHManagement,
 	})
 	if err != nil {
 		return err

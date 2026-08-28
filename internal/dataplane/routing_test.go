@@ -127,6 +127,23 @@ func TestRoutingBackendNoopStillVerifiesMarkedLookupWithoutClosingGate(t *testin
 	}
 }
 
+func TestRoutingBackendReadOnlyCheckCannotMutate(t *testing.T) {
+	repository, closeDatabase := readyRoutingModem(t)
+	defer closeDatabase()
+	executor := &routingExecutor{beforeRules: desiredRulesJSON, beforeRoutes: desiredRoutesJSON}
+	backend := testRoutingBackend(repository, executor, nil)
+	result, err := backend.CheckRouting(context.Background())
+	if err != nil || result.ReadyUplinks != 1 || result.Rules != 1 || result.Routes != 2 {
+		t.Fatalf("CheckRouting() = %+v, %v", result, err)
+	}
+	for _, request := range executor.requests {
+		arguments := strings.Join(request.Arguments, " ")
+		if strings.Contains(arguments, " replace ") || strings.Contains(arguments, " del ") || strings.Contains(arguments, " add ") {
+			t.Fatalf("read-only routing check attempted mutation: %s %s", request.Executable, arguments)
+		}
+	}
+}
+
 func TestRoutingBackendLookupFailureClosesGate(t *testing.T) {
 	repository, closeDatabase := readyRoutingModem(t)
 	defer closeDatabase()

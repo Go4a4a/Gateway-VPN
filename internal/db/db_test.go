@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 21 {
+	if err != nil || version != 22 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 21 {
+	if err != nil || latest != 22 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -233,8 +233,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 21 {
-		t.Fatalf("SchemaVersion() = %d, want 21", version)
+	if version != 22 {
+		t.Fatalf("SchemaVersion() = %d, want 22", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -278,8 +278,47 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 21 {
-		t.Fatalf("migration count = %d, want 21", count)
+	if count != 22 {
+		t.Fatalf("migration count = %d, want 22", count)
+	}
+}
+
+func TestMigration22PreservesExistingWatchdogChoicesAndAddsFixedContour(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 21)); err != nil {
+		t.Fatalf("migrate schema 21: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+UPDATE settings
+SET value_json=json_set(value_json, '$.check_interval_seconds', 42, '$.host_reboot_enabled', 1)
+WHERE key='watchdog'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate schema 22: %v", err)
+	}
+	var schema, interval, reboot int
+	var componentModesType string
+	if err := database.QueryRowContext(ctx, `
+SELECT
+  json_extract(value_json, '$.schema_version'),
+  json_extract(value_json, '$.check_interval_seconds'),
+  json_extract(value_json, '$.host_reboot_enabled'),
+  json_type(value_json, '$.component_recovery_modes')
+FROM settings WHERE key='watchdog'`).Scan(&schema, &interval, &reboot, &componentModesType); err != nil {
+		t.Fatal(err)
+	}
+	var modeCount int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
+		t.Fatal(err)
+	}
+	if schema != 2 || interval != 42 || reboot != 1 || modeCount != 16 || componentModesType != "object" {
+		t.Fatalf("migrated watchdog = schema:%d interval:%d reboot:%d modes:%d type:%s", schema, interval, reboot, modeCount, componentModesType)
 	}
 }
 

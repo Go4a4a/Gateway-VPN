@@ -46,6 +46,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/uplink"
+	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
 )
 
@@ -95,6 +96,37 @@ type previewRuntime struct{}
 func (previewRuntime) BlockPath(context.Context) error     { return nil }
 func (previewRuntime) SyncRouting(context.Context) error   { return nil }
 func (previewRuntime) SyncWireGuard(context.Context) error { return nil }
+
+type previewWatchdogStatus struct{}
+
+func (previewWatchdogStatus) Read() (watchdog.Status, error) {
+	now := time.Now().UTC()
+	components := make([]watchdog.ComponentStatus, 0, len(watchdog.ComponentSpecs()))
+	for _, spec := range watchdog.ComponentSpecs() {
+		item := watchdog.ComponentStatus{
+			ID: spec.ID, Label: spec.Label, State: watchdog.ComponentHealthy, Applicable: true,
+			ConsecutiveSuccesses: 8, LastSuccessAt: now.Add(-5 * time.Second).Format(time.RFC3339Nano),
+			Details: map[string]any{"preview": true},
+		}
+		if spec.ID == watchdog.ComponentWireGuardMgmt {
+			item.State = watchdog.ComponentDegraded
+			item.Classification = watchdog.ClassificationExternal
+			item.ErrorCode = "WG_VPS_HANDSHAKE_STALE"
+			item.ConsecutiveFailures = 2
+			item.ConsecutiveSuccesses = 0
+			item.LastFailureAt = now.Add(-10 * time.Second).Format(time.RFC3339Nano)
+			item.RecoverySuppressed = true
+			item.SuppressionReason = "EXTERNAL_CONNECTIVITY_FAILURE"
+		}
+		components = append(components, item)
+	}
+	return watchdog.Status{
+		SchemaVersion: 1, SupervisorStartedAt: now.Add(-6 * time.Hour).Format(time.RFC3339Nano),
+		ObservedAt: now.Format(time.RFC3339Nano), OverallState: watchdog.OverallRecoverySuppressed,
+		ConnectivityState: "LIMITED", ConnectivityClass: watchdog.ClassificationExternal,
+		PolicySource: "DATABASE", Components: components,
+	}, nil
+}
 
 type previewRestore struct {
 	mutex     sync.Mutex
@@ -419,8 +451,8 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 			RequiredTargetsPassed: 1, RequiredTargetsTotal: 1, OptionalTargetsPassed: 1, OptionalTargetsTotal: 1,
 			LatencyMS: 47, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute),
 			Targets: []accesspolicy.DirectTargetResult{
-				{TargetID: "target-required", State: "PASSED", LatencyMS: 21, HTTPStatus: 204, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
-				{TargetID: "target-optional", State: "PASSED", LatencyMS: 26, HTTPStatus: 200, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
+				{TargetID: "target-required", TargetClass: "GLOBAL_REQUIRED", State: "PASSED", LatencyMS: 21, HTTPStatus: 204, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
+				{TargetID: "target-optional", TargetClass: "GLOBAL_OPTIONAL", State: "PASSED", LatencyMS: 26, HTTPStatus: 200, CheckedAt: previewNow, ExpiresAt: previewNow.Add(5 * time.Minute)},
 			},
 		}); err != nil {
 			return err
@@ -489,6 +521,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		updates.operation = previewUpdateOperation(previewNow, 42<<20)
 	}
 	operationRepository := operations.NewRepository(database)
+	watchdogRepository := &watchdog.Repository{Database: database}
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
@@ -499,7 +532,8 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		SubscriptionPayloadRoot: payloadRoot, ModemRuntime: previewRuntime{},
 		PathOperations: previewPathOperations{}, PathActivator: previewPathActivator{},
 		PeriodicHealth: periodicHealth, PeriodicHealthConfig: candidateruntime.DefaultPeriodicConfig(), ProbeBudget: probeScheduler,
-		Logging: loggingController,
+		Logging:  loggingController,
+		Watchdog: watchdogRepository, WatchdogStatus: previewWatchdogStatus{},
 		Journal: previewJournal{}, Diagnostics: previewDiagnostics{}, Backups: backupManager, PortableBackups: portableBackups,
 		Restores: restores, RestoreApply: previewRestoreApply{}, Updates: updates, UpdateApply: previewUpdateApply{status: networkapply.UpdateTransactionStatus{
 			Exists: true, UpdateID: "update-20260824T210000Z-fedcba9876543210fedcba98", State: "FINALIZED",

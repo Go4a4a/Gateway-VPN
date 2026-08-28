@@ -30,7 +30,7 @@ func TestUpdateEngineAppliesSignedCandidateAndFinalizesAfterWindow(t *testing.T)
 		t.Fatalf("recovery target = %q", target)
 	}
 	journal, exists, err := fixture.engine.Store.LoadActive()
-	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 21 || journal.NewSchemaVersion != 21 || journal.CandidateDBSHA256 == "" {
+	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 22 || journal.NewSchemaVersion != 22 || journal.CandidateDBSHA256 == "" {
 		t.Fatalf("active journal = %+v,%v,%v", journal, exists, err)
 	}
 	if _, exists, err := fixture.stager.Status(); err != nil || exists {
@@ -72,7 +72,7 @@ func TestUpdateEngineHealthFailureRestoresOldBinaryAndSnapshot(t *testing.T) {
 
 func TestUpdateEngineRejectsDifferentExistingArtifactWithSameVersion(t *testing.T) {
 	fixture := newEngineFixture(t)
-	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 21)
+	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 22)
 	if err := os.WriteFile(filepath.Join(otherRoot, "bin", "gateway-vpn"), []byte("different signed candidate"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -343,10 +343,10 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	if err := os.WriteFile(configPath, []byte(testBootstrapConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 21)
+	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 22)
 	keyPath := writePublicKeyFixture(t, stateDir, publicKey)
 	policy := fixturePolicy(publicKey)
-	policy.CurrentSchemaVersion = 21
+	policy.CurrentSchemaVersion = 22
 	newReleaseMetadata, err := ReadReleaseMetadata(newRelease)
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +363,7 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		t.Fatal(err)
 	}
 	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn")
-	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 21)
+	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 22)
 	oldRoot := filepath.Join(releaseRoot, "releases", "v1.1.0")
 	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
 		t.Fatal(err)

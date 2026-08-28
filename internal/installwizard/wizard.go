@@ -50,6 +50,7 @@ type Selection struct {
 	LANMembers          []string
 	LANAddress          string
 	EnableDHCP          bool
+	EnableSSH           bool
 	InstallDependencies bool
 	BootNetworkPolicy   BootNetworkPolicy
 	GRUBPolicy          GRUBPolicy
@@ -181,14 +182,23 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 		return Selection{}, err
 	}
 	fmt.Fprintln(session.output)
-	fmt.Fprintln(session.output, "5. Ожидание сети при загрузке Ubuntu")
+	fmt.Fprintln(session.output, "5. Удалённое управление SSH/SFTP")
+	fmt.Fprintln(session.output, "Рекомендуется включить штатный OpenSSH: через него можно администрировать Ubuntu и скачивать диагностические файлы по SFTP.")
+	fmt.Fprintln(session.output, "Установщик проверит пакет, конфигурацию sshd, автозапуск, активность и TCP/22. Firewall откроет SSH только через выбранный management/LAN-мост, но не через модемы или Ethernet-uplink.")
+	fmt.Fprintln(session.output, "Существующие пользователи, ключи и парольная политика OpenSSH сохраняются; Gateway VPN не включает root login и не создаёт общий SSH-пароль.")
+	enableSSH, err := session.yesNo("Включить штатный SSH/SFTP для управления Gateway?", true)
+	if err != nil {
+		return Selection{}, err
+	}
+	fmt.Fprintln(session.output)
+	fmt.Fprintln(session.output, "6. Ожидание сети при загрузке Ubuntu")
 	fmt.Fprintln(session.output, "HiLink и Ethernet могут быть отключены, медленно запускаться или временно зависнуть. Gateway должен загрузиться и открыть управление независимо от них.")
 	bootNetworkPolicy, err := session.chooseBootNetworkPolicy()
 	if err != nil {
 		return Selection{}, err
 	}
 	fmt.Fprintln(session.output)
-	fmt.Fprintln(session.output, "6. Меню загрузчика GRUB")
+	fmt.Fprintln(session.output, "7. Меню загрузчика GRUB")
 	fmt.Fprintf(session.output, "Обнаружено: %s; режим прошивки: %s. %s\n", boot.bootloader, boot.firmware, boot.detail)
 	grubPolicy, err := session.chooseGRUBPolicy(boot)
 	if err != nil {
@@ -197,7 +207,7 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 	session.printAutomaticPolicy()
 	return Selection{
 		LANInterface: LANInterface, LANMembers: interfaceNames(selected), LANAddress: lanAddress,
-		EnableDHCP: enableDHCP, InstallDependencies: installDependencies,
+		EnableDHCP: enableDHCP, EnableSSH: enableSSH, InstallDependencies: installDependencies,
 		BootNetworkPolicy: bootNetworkPolicy, GRUBPolicy: grubPolicy,
 	}, nil
 }
@@ -213,12 +223,17 @@ func (session *Session) ConfirmApply(version, preflight string, selection Select
 	fmt.Fprintf(session.output, "  Физические Ethernet-порты:       %s\n", strings.Join(selection.LANMembers, ", "))
 	fmt.Fprintf(session.output, "  Адрес Gateway для Keenetic:      %s\n", selection.LANAddress)
 	fmt.Fprintf(session.output, "  Автонастройка Keenetic (DHCP):   %s\n", yesNoText(selection.EnableDHCP))
+	fmt.Fprintf(session.output, "  Удалённое управление SSH/SFTP:  %s\n", yesNoText(selection.EnableSSH))
 	fmt.Fprintf(session.output, "  Недостающие пакеты:              %s\n", allowDenyText(selection.InstallDependencies))
 	fmt.Fprintf(session.output, "  Ожидание внешней сети при boot:  %s\n", bootNetworkPolicyText(selection.BootNetworkPolicy))
 	fmt.Fprintf(session.output, "  Меню GRUB:                       %s\n", grubPolicyText(selection.GRUBPolicy))
 	fmt.Fprintf(session.output, "  Read-only preflight:             %s\n", preflight)
 	fmt.Fprintln(session.output)
-	fmt.Fprintln(session.output, "Автоматически будут настроены: fail-closed firewall, IPv4 forwarding, блокировка IPv6, SSH/WebUI только через LAN, systemd/watchdog, журналирование, recovery и rollback.")
+	if selection.EnableSSH {
+		fmt.Fprintln(session.output, "Автоматически будут настроены: fail-closed firewall, IPv4 forwarding, блокировка IPv6, SSH/SFTP и WebUI только через LAN, systemd/watchdog, журналирование, recovery и rollback.")
+	} else {
+		fmt.Fprintln(session.output, "Автоматически будут настроены: fail-closed firewall, IPv4 forwarding, блокировка IPv6, WebUI через LAN, systemd/watchdog, журналирование, recovery и rollback. SSH/SFTP останется вне управления Gateway VPN и TCP/22 не будет открыт его firewall.")
+	}
 	fmt.Fprintln(session.output, "Других скрытых аппаратных или сетевых решений нет: выбранные выше пункты и этот автоматический список составляют полный first-install contract.")
 	fmt.Fprintln(session.output)
 	fmt.Fprintln(session.output, "ЧТО ИМЕННО ИЗМЕНИТСЯ ПОСЛЕ INSTALL")

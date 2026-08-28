@@ -19,9 +19,10 @@ type SystemConfig struct {
 }
 
 type NetworkConfig struct {
-	LANInterface string `yaml:"lan_interface"`
-	LANAddress   string `yaml:"lan_address"`
-	IPv6Mode     string `yaml:"ipv6_mode"`
+	LANInterface         string `yaml:"lan_interface"`
+	LANAddress           string `yaml:"lan_address"`
+	IPv6Mode             string `yaml:"ipv6_mode"`
+	DisableSSHManagement bool   `yaml:"disable_ssh_management"`
 }
 
 type ModemDiscoveryConfig struct {
@@ -61,9 +62,10 @@ func Default() Config {
 			LogLevel: "INFO",
 		},
 		Network: NetworkConfig{
-			LANInterface: "enp2s0",
-			LANAddress:   "192.168.200.1/24",
-			IPv6Mode:     "disabled",
+			LANInterface:         "enp2s0",
+			LANAddress:           "192.168.200.1/24",
+			IPv6Mode:             "disabled",
+			DisableSSHManagement: false,
 		},
 		Modems: ModemDiscoveryConfig{
 			Type:                           "hilink",

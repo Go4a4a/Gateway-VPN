@@ -20,11 +20,12 @@ const (
 )
 
 type BootConfig struct {
-	LANInterface        string
-	TUNInterface        string
-	WireGuardInterface  string
-	APIPort             uint16
-	WireGuardListenPort uint16
+	LANInterface         string
+	TUNInterface         string
+	WireGuardInterface   string
+	APIPort              uint16
+	WireGuardListenPort  uint16
+	DisableSSHManagement bool
 }
 
 type Ruleset struct {
@@ -38,6 +39,11 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	}
 	if config.APIPort == 0 || config.WireGuardListenPort == 0 {
 		return Ruleset{}, errors.New("firewall ports must be non-zero")
+	}
+
+	sshRule := ""
+	if !config.DisableSSHManagement {
+		sshRule = fmt.Sprintf("        iifname %s tcp dport 22 accept comment \"gateway-vpn LAN SSH\"\n", nftString(config.LANInterface))
 	}
 
 	text := fmt.Sprintf(`table inet %s {
@@ -144,8 +150,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         iifname %s udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
         iifname %s tcp dport %d accept comment "gateway-vpn LAN API"
-        iifname %s tcp dport 22 accept comment "gateway-vpn LAN SSH"
-        iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
+%s        iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
 
@@ -194,7 +199,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		config.APIPort,
-		nftString(config.LANInterface),
+		sshRule,
 		nftString(config.WireGuardInterface),
 		config.APIPort,
 		nftString(config.LANInterface),

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +85,8 @@ type Runtime struct {
 	reconcileNow          chan struct{}
 	processStartedAt      time.Time
 	lastReconcileUnixNano atomic.Int64
+	apiServing            atomic.Bool
+	workerProgress        *workerProgressTracker
 }
 
 type brokerHostDiagnostics struct {
@@ -93,6 +96,80 @@ type brokerHostDiagnostics struct {
 type runtimeWorkerExit struct {
 	name string
 	err  error
+}
+
+type workerProgressValue struct {
+	lastProgressUnixNano int64
+	maximumSilence       time.Duration
+	critical             bool
+}
+
+type workerProgressTracker struct {
+	mutex sync.RWMutex
+	items map[string]workerProgressValue
+}
+
+func newWorkerProgressTracker() *workerProgressTracker {
+	return &workerProgressTracker{items: make(map[string]workerProgressValue)}
+}
+
+func (tracker *workerProgressTracker) register(name string, maximumSilence time.Duration, critical bool) {
+	if tracker == nil || maximumSilence <= 0 {
+		return
+	}
+	tracker.mutex.Lock()
+	tracker.items[name] = workerProgressValue{lastProgressUnixNano: time.Now().UTC().UnixNano(), maximumSilence: maximumSilence, critical: critical}
+	tracker.mutex.Unlock()
+}
+
+func (tracker *workerProgressTracker) mark(name string) {
+	if tracker == nil {
+		return
+	}
+	tracker.mutex.Lock()
+	item, exists := tracker.items[name]
+	if exists {
+		item.lastProgressUnixNano = time.Now().UTC().UnixNano()
+		tracker.items[name] = item
+	}
+	tracker.mutex.Unlock()
+}
+
+func (tracker *workerProgressTracker) snapshot(now time.Time) (map[string]watchdog.WorkerProgress, bool) {
+	if tracker == nil {
+		return map[string]watchdog.WorkerProgress{}, false
+	}
+	tracker.mutex.RLock()
+	defer tracker.mutex.RUnlock()
+	result := make(map[string]watchdog.WorkerProgress, len(tracker.items))
+	healthy := len(tracker.items) != 0
+	for name, item := range tracker.items {
+		last := time.Unix(0, item.lastProgressUnixNano).UTC()
+		result[name] = watchdog.WorkerProgress{LastProgressAt: last.Format(time.RFC3339Nano), MaximumSilenceSeconds: int(item.maximumSilence / time.Second), Critical: item.critical}
+		if item.critical && now.Sub(last) > item.maximumSilence {
+			healthy = false
+		}
+	}
+	return result, healthy
+}
+
+func workerWatchdogSpec(name string) (time.Duration, bool) {
+	switch name {
+	case watchdog.WorkerSubscriptionRefresh:
+		return 2 * time.Minute, true
+	case watchdog.WorkerDataPlaneReconcile, watchdog.WorkerModemReconcile, watchdog.WorkerEthernetReconcile, watchdog.WorkerPathHealth, watchdog.WorkerDirectHealth:
+		return 30 * time.Second, true
+	case watchdog.WorkerLoggingSync:
+		return 3 * time.Minute, false
+	case watchdog.WorkerDatabaseBackup:
+		return 8 * time.Hour, false
+	case watchdog.WorkerRetention:
+		return 20 * time.Minute, false
+	case watchdog.WorkerTrafficAccounting:
+		return 2 * time.Minute, false
+	default:
+		return 0, false
+	}
 }
 
 func (provider brokerHostDiagnostics) Collect(ctx context.Context) (diagnostics.HostSnapshot, error) {
@@ -177,10 +254,13 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	routingLogger := logger.With("component", loggingpkg.ComponentRoutingFirewall)
 	wireGuardLogger := logger.With("component", loggingpkg.ComponentWireGuard)
 	trafficLogger := logger.With("component", loggingpkg.ComponentTraffic)
+	workerProgress := newWorkerProgressTracker()
 	dataPlane.RefreshWorker.OnError = func(subscriptionID string, err error) {
 		subscriptionLogger.Warn("scheduled subscription refresh failed", "subscription_id", subscriptionID, "error", err)
 	}
+	dataPlane.RefreshWorker.OnCycle = func() { workerProgress.mark(watchdog.WorkerSubscriptionRefresh) }
 	dataPlane.ModemRunner.OnCycle = func(result hilink.CycleResult) {
+		workerProgress.mark(watchdog.WorkerModemReconcile)
 		dataPlane.Discoveries.Replace(result.Matches)
 		recoveryRunner.Submit(modemrecovery.ObservationBatch{Healthy: append([]string(nil), result.PhysicallyHealthyModems...), Failures: cloneStringMap(result.PhysicalFailures)})
 		if len(result.ReadyModems) != 0 || len(result.OfflineModems) != 0 || len(result.ConflictModems) != 0 || len(result.Errors) != 0 {
@@ -191,6 +271,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		modemLogger.Warn("HiLink modem reconciliation failed", "error", err)
 	}
 	dataPlane.EthernetRunner.OnCycle = func(result ethernet.CycleResult) {
+		workerProgress.mark(watchdog.WorkerEthernetReconcile)
 		if len(result.ReadyUplinks) != 0 || len(result.OfflineUplinks) != 0 || len(result.ConflictUplinks) != 0 || len(result.RouteChanges) != 0 || len(result.Errors) != 0 {
 			routingLogger.Info("Ethernet uplink inventory reconciled", "ready", result.ReadyUplinks, "offline", result.OfflineUplinks, "conflicts", len(result.ConflictUplinks), "route_changes", result.RouteChanges, "errors", len(result.Errors))
 		}
@@ -199,6 +280,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		routingLogger.Warn("Ethernet uplink reconciliation failed", "error", err)
 	}
 	dataPlane.HealthRunner.OnCycle = func(result candidateruntime.PeriodicCycleResult) {
+		workerProgress.mark(watchdog.WorkerPathHealth)
 		if result.Probed != 0 || result.Deferred != 0 || result.Published != 0 || len(result.Errors) != 0 {
 			healthLogger.Info("periodic path health cycle completed", "due", result.Due, "probed", result.Probed, "deferred", result.Deferred, "published", result.Published, "outage_suppressed", result.OutageSuppressed, "errors", len(result.Errors))
 		}
@@ -207,6 +289,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		healthLogger.Warn("periodic path health cycle failed", "error", err)
 	}
 	dataPlane.DirectRunner.OnCycle = func(result directprobe.CycleResult) {
+		workerProgress.mark(watchdog.WorkerDirectHealth)
 		if result.Probed != 0 || result.Deferred != 0 || result.Published != 0 || len(result.Errors) != 0 {
 			healthLogger.Info("periodic direct Internet health cycle completed", "due", result.Due, "probed", result.Probed, "deferred", result.Deferred, "published", result.Published, "errors", len(result.Errors))
 		}
@@ -221,7 +304,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	trafficRunner := &traffic.Runner{
 		Collector: traffic.Collector{Database: database}, Authoritative: networkBroker, Mihomo: dataPlane.MihomoClient,
 		Interval: traffic.DefaultCheckpointInterval, SessionID: trafficSessionID, SessionStartedAt: time.Now().UTC(),
-		OnError: func(err error) { trafficLogger.Warn("authoritative traffic checkpoint failed", "error", err) },
+		OnError:      func(err error) { trafficLogger.Warn("authoritative traffic checkpoint failed", "error", err) },
+		OnCheckpoint: func() { workerProgress.mark(watchdog.WorkerTrafficAccounting) },
 	}
 	loggingController.OnError = func(err error) {
 		systemLogger.Warn("logging debug expiry persistence failed", "error", err)
@@ -315,7 +399,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC(), workerProgress: workerProgress}, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -404,6 +488,9 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	workerDone := make(chan runtimeWorkerExit, 16)
 	workers := 0
 	startWorker := func(name string, run func(context.Context) error) {
+		if maximumSilence, critical := workerWatchdogSpec(name); maximumSilence > 0 {
+			application.workerProgress.register(name, maximumSilence, critical)
+		}
 		workers++
 		go func() { workerDone <- runtimeWorkerExit{name: name, err: run(workerContext)} }()
 	}
@@ -454,8 +541,10 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- serveHTTPS(workerContext, application.Config.API.Listen, application.Config.API.TLSCert, application.Config.API.TLSKey, application.API, application.logger, func() {
+			application.apiServing.Store(true)
 			_ = watchdog.NotifySystemd("READY=1")
 		})
+		application.apiServing.Store(false)
 	}()
 	backgroundErrors := []error{}
 	serveCollected := false
@@ -498,6 +587,7 @@ func (application *Runtime) runBackupLoop(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		snapshot, created, err := application.Backups.EnsureDaily(ctx)
+		application.workerProgress.mark(watchdog.WorkerDatabaseBackup)
 		if err != nil && ctx.Err() == nil {
 			application.logger.Warn("daily verified database snapshot failed", "error", err)
 		} else if created {
@@ -521,6 +611,7 @@ func (application *Runtime) runLoggingSyncLoop(ctx context.Context) error {
 		if err := application.LoggingSync.SyncLogging(ctx); err != nil && ctx.Err() == nil {
 			application.logger.Warn("journald retention synchronization failed", "error", err)
 		}
+		application.workerProgress.mark(watchdog.WorkerLoggingSync)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -547,6 +638,7 @@ func (application *Runtime) runReconcileLoop(ctx context.Context) error {
 			application.logger.Warn("data-plane reconciliation failed", "error", err)
 		}
 		application.lastReconcileUnixNano.Store(time.Now().UTC().UnixNano())
+		application.workerProgress.mark(watchdog.WorkerDataPlaneReconcile)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -566,16 +658,19 @@ func (application *Runtime) runWatchdogHeartbeatLoop(ctx context.Context) error 
 		databaseOK := application.Database.PingContext(pingContext) == nil
 		cancel()
 		lastReconcileNano := application.lastReconcileUnixNano.Load()
-		workersOK := lastReconcileNano > 0 && now.Sub(time.Unix(0, lastReconcileNano)) <= 90*time.Second
-		if databaseOK && workersOK {
-			heartbeat := watchdog.ControlHeartbeat{
-				SchemaVersion: 1, PID: os.Getpid(), ProcessStartedAt: application.processStartedAt.Format(time.RFC3339Nano),
-				WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true,
-				ReconcileLastAt: time.Unix(0, lastReconcileNano).UTC().Format(time.RFC3339Nano),
-			}
-			if err := file.Write(heartbeat); err != nil && ctx.Err() == nil {
-				application.logger.Warn("publish control watchdog heartbeat failed", "error", err)
-			}
+		workers, workersOK := application.workerProgress.snapshot(now)
+		heartbeat := watchdog.ControlHeartbeat{
+			SchemaVersion: 2, PID: os.Getpid(), ProcessStartedAt: application.processStartedAt.Format(time.RFC3339Nano),
+			WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: databaseOK, WorkersOK: workersOK,
+			APIServing: application.apiServing.Load(), Workers: workers,
+		}
+		if lastReconcileNano > 0 {
+			heartbeat.ReconcileLastAt = time.Unix(0, lastReconcileNano).UTC().Format(time.RFC3339Nano)
+		}
+		if err := file.Write(heartbeat); err != nil && ctx.Err() == nil {
+			application.logger.Warn("publish control watchdog heartbeat failed", "error", err)
+		}
+		if databaseOK && workersOK && heartbeat.APIServing {
 			_ = watchdog.NotifySystemd("WATCHDOG=1")
 		}
 		select {

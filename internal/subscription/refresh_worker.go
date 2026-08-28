@@ -16,6 +16,7 @@ type RefreshWorker struct {
 	Subscriptions *Repository
 	Interval      time.Duration
 	OnError       func(string, error)
+	OnCycle       func()
 }
 
 func (worker *RefreshWorker) Run(ctx context.Context) error {
@@ -29,7 +30,7 @@ func (worker *RefreshWorker) Run(ctx context.Context) error {
 	if interval < time.Second || interval > 10*time.Minute {
 		return errors.New("subscription refresh worker interval must be between one second and ten minutes")
 	}
-	worker.runOnce(ctx)
+	worker.runCycle(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -37,8 +38,15 @@ func (worker *RefreshWorker) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			worker.runOnce(ctx)
+			worker.runCycle(ctx)
 		}
+	}
+}
+
+func (worker *RefreshWorker) runCycle(ctx context.Context) {
+	worker.runOnce(ctx)
+	if worker.OnCycle != nil {
+		worker.OnCycle()
 	}
 }
 

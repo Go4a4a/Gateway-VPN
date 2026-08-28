@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	configpkg "gateway-vpn/internal/config"
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/firewall"
 	"gateway-vpn/internal/platformexec"
@@ -19,18 +21,28 @@ const (
 	unitFirewall      = "gateway-vpn-firewall.service"
 	unitFirewallGuard = "gateway-vpn-firewall-guard.service"
 	unitBroker        = "gateway-vpn-network-broker.service"
+	unitNetworkd      = "systemd-networkd.service"
 	unitDNSMasq       = "gateway-vpn-dnsmasq.service"
+	unitSSH           = "ssh.service"
 	unitMihomo        = "gateway-vpn-mihomo.service"
 )
 
 var restartUnits = map[string][]string{
-	ComponentControl:         {unitControl},
-	ComponentSQLite:          {unitControl},
-	ComponentFirewallGuard:   {unitFirewall, unitFirewallGuard},
-	ComponentFirewallRuleset: {unitFirewall, unitFirewallGuard},
-	ComponentNetworkBroker:   {unitBroker},
-	ComponentDNSMasq:         {unitDNSMasq},
-	ComponentMihomo:          {unitMihomo},
+	ComponentControl:          {unitControl},
+	ComponentSQLite:           {unitControl},
+	ComponentFirewallGuard:    {unitFirewall, unitFirewallGuard},
+	ComponentFirewallRuleset:  {unitFirewall, unitFirewallGuard},
+	ComponentNetworkBroker:    {unitBroker},
+	ComponentNetworkd:         {unitNetworkd},
+	ComponentDNSMasq:          {unitDNSMasq},
+	ComponentSSH:              {unitSSH},
+	ComponentMihomo:           {unitMihomo},
+	ComponentWireGuardMgmt:    {unitBroker, unitControl},
+	ComponentWireGuardIngress: {unitBroker, unitControl},
+	ComponentPolicyRouting:    {unitBroker, unitControl},
+	ComponentWorkerRuntime:    {unitControl},
+	ComponentConvergence:      {unitControl},
+	ComponentBackup:           {unitControl},
 }
 
 var maintenanceUnits = []struct {
@@ -66,26 +78,38 @@ func MaintenanceUnits() []MaintenanceUnit {
 }
 
 type SystemProbe struct {
-	Executor          platformexec.Executor
-	Systemctl         string
-	NFT               string
-	IP                string
-	GatewayBinary     string
-	ConfigPath        string
-	DatabasePath      string
-	HeartbeatPath     string
-	MihomoConfigPath  string
-	MihomoTUN         string
-	InstallMarkerPath string
-	Now               func() time.Time
+	Executor            platformexec.Executor
+	Systemctl           string
+	NFT                 string
+	IP                  string
+	WG                  string
+	SSHD                string
+	SS                  string
+	GatewayBinary       string
+	ConfigPath          string
+	DatabasePath        string
+	HeartbeatPath       string
+	MihomoConfigPath    string
+	MihomoTUN           string
+	WireGuardConfigPath string
+	LANPrefix           string
+	WireGuardPrefix     string
+	BootstrapDNS        []string
+	RoutingTableStart   uint32
+	FwmarkStart         uint32
+	InstallMarkerPath   string
+	Now                 func() time.Time
 
 	quickCheckMutex sync.Mutex
 	lastQuickCheck  time.Time
 	quickCheckError error
 }
 
-func (probe *SystemProbe) Snapshot(ctx context.Context) (ProbeSnapshot, error) {
+func (probe *SystemProbe) Snapshot(ctx context.Context, policy Policy) (ProbeSnapshot, error) {
 	if err := probe.validate(); err != nil {
+		return ProbeSnapshot{}, err
+	}
+	if err := policy.Validate(); err != nil {
 		return ProbeSnapshot{}, err
 	}
 	now := probe.now()
@@ -102,8 +126,8 @@ func (probe *SystemProbe) Snapshot(ctx context.Context) (ProbeSnapshot, error) {
 		controlCode = "CONTROL_UNIT_INACTIVE"
 	} else if heartbeatErr != nil {
 		controlCode = "CONTROL_HEARTBEAT_STALE"
-	} else if heartbeat.ReconcileLastAt == "" {
-		controlHealthy, controlCode = false, "RECONCILE_HEARTBEAT_MISSING"
+	} else if !heartbeat.APIServing {
+		controlHealthy, controlCode = false, "MANAGEMENT_API_NOT_SERVING"
 	}
 	items := []Observation{
 		{ComponentID: ComponentControl, Applicable: true, Healthy: controlHealthy, ErrorCode: controlCode},
@@ -111,13 +135,25 @@ func (probe *SystemProbe) Snapshot(ctx context.Context) (ProbeSnapshot, error) {
 		{ComponentID: ComponentFirewallGuard, Applicable: true, Healthy: probe.unitActive(ctx, unitFirewallGuard), ErrorCode: "FIREWALL_GUARD_INACTIVE"},
 		{ComponentID: ComponentFirewallRuleset, Applicable: true, Healthy: probe.firewallHealthy(ctx), ErrorCode: "FIREWALL_RULESET_INVALID"},
 		{ComponentID: ComponentNetworkBroker, Applicable: true, Healthy: probe.unitActive(ctx, unitBroker), ErrorCode: "NETWORK_BROKER_INACTIVE"},
+		{ComponentID: ComponentNetworkd, Applicable: true, Healthy: probe.unitActive(ctx, unitNetworkd), ErrorCode: "NETWORKD_INACTIVE"},
 	}
 	dnsApplicable := regularFileExists("/etc/gateway-vpn/dnsmasq.conf")
 	items = append(items, Observation{ComponentID: ComponentDNSMasq, Applicable: dnsApplicable, Healthy: !dnsApplicable || probe.unitActive(ctx, unitDNSMasq), ErrorCode: "DNSMASQ_INACTIVE"})
+	items = append(items, probe.sshManagementHealth(ctx))
 	mihomoApplicable := pathExists(probe.MihomoConfigPath)
 	mihomoHealthy := !mihomoApplicable || probe.unitActive(ctx, unitMihomo) && probe.tunHealthy(ctx)
 	items = append(items, Observation{ComponentID: ComponentMihomo, Applicable: mihomoApplicable, Healthy: mihomoHealthy, ErrorCode: "MIHOMO_OR_TUN_UNAVAILABLE"})
-	resourceHealthy, resourceCode, details := systemResourceHealth(probe.DatabasePath)
+	items = append(items, probe.wireGuardManagementHealth(ctx, now, policy))
+	items = append(items, probe.wireGuardIngressHealth(ctx))
+	routingHealthy, routingCode, routingDetails := probe.policyRoutingHealth(ctx)
+	items = append(items, Observation{ComponentID: ComponentPolicyRouting, Applicable: true, Healthy: routingHealthy, ErrorCode: routingCode, Details: routingDetails})
+	workerHealthy, workerCode, workerDetails := workerRuntimeHealth(heartbeat, heartbeatErr, now, policy)
+	items = append(items, Observation{ComponentID: ComponentWorkerRuntime, Applicable: true, Healthy: workerHealthy, ErrorCode: workerCode, Details: workerDetails})
+	convergenceHealthy, convergenceCode, convergenceDetails := probe.convergenceHealth(ctx, now, policy)
+	items = append(items, Observation{ComponentID: ComponentConvergence, Applicable: true, Healthy: convergenceHealthy, ErrorCode: convergenceCode, Details: convergenceDetails})
+	backupHealthy, backupCode, backupDetails := probe.databaseBackupHealth(ctx, now, policy)
+	items = append(items, Observation{ComponentID: ComponentBackup, Applicable: true, Healthy: backupHealthy, ErrorCode: backupCode, Details: backupDetails})
+	resourceHealthy, resourceCode, details := systemResourceHealth(probe.DatabasePath, policy)
 	items = append(items, Observation{ComponentID: ComponentResources, Applicable: true, Healthy: resourceHealthy, ErrorCode: resourceCode, Details: details})
 	for index := range items {
 		if items[index].Healthy {
@@ -261,8 +297,83 @@ func (probe *SystemProbe) unitActive(ctx context.Context, unit string) bool {
 	return err == nil
 }
 
+func (probe *SystemProbe) unitEnabled(ctx context.Context, unit string) bool {
+	if !fixedUnit(unit) {
+		return false
+	}
+	_, err := probe.Executor.Run(ctx, platformexec.Request{Executable: probe.Systemctl, Arguments: []string{"is-enabled", "--quiet", unit}, MaxOutputBytes: 16 << 10})
+	return err == nil
+}
+
+func (probe *SystemProbe) sshManagementHealth(ctx context.Context) Observation {
+	configuration, err := configpkg.Load(probe.ConfigPath)
+	if err != nil {
+		return Observation{ComponentID: ComponentSSH, Applicable: true, ErrorCode: "SSH_POLICY_UNAVAILABLE", Details: map[string]any{}}
+	}
+	return probe.sshManagementHealthForConfig(ctx, configuration)
+}
+
+func (probe *SystemProbe) sshManagementHealthForConfig(ctx context.Context, configuration configpkg.Config) Observation {
+	observation := Observation{ComponentID: ComponentSSH, Applicable: true, Details: map[string]any{}}
+	observation.Applicable = !configuration.Network.DisableSSHManagement
+	if !observation.Applicable {
+		observation.Healthy = true
+		return observation
+	}
+	if !probe.unitEnabled(ctx, unitSSH) {
+		observation.ErrorCode = "SSH_UNIT_DISABLED"
+		return observation
+	}
+	if !probe.unitActive(ctx, unitSSH) {
+		observation.ErrorCode = "SSH_SFTP_INACTIVE"
+		return observation
+	}
+	if _, err := probe.fixedOutput(ctx, probe.SSHD, "-t"); err != nil {
+		observation.ErrorCode = "SSH_CONFIG_INVALID"
+		return observation
+	}
+	listeners, err := probe.fixedOutput(ctx, probe.SS, "-H", "-ltn", "sport = :22")
+	if err != nil || !ipv4WildcardSSHListener(listeners) {
+		observation.ErrorCode = "SSH_IPV4_LISTENER_MISSING"
+		return observation
+	}
+	if !probe.sshFirewallScopeHealthy(ctx, configuration.Network.LANInterface) {
+		observation.ErrorCode = "SSH_FIREWALL_SCOPE_INVALID"
+		return observation
+	}
+	observation.Healthy = true
+	return observation
+}
+
+func (probe *SystemProbe) sshFirewallScopeHealthy(ctx context.Context, lanInterface string) bool {
+	result, err := probe.Executor.Run(ctx, platformexec.Request{Executable: probe.NFT, Arguments: []string{"list", "chain", "inet", firewall.TableName, "input"}, MaxOutputBytes: 256 << 10})
+	if err != nil {
+		return false
+	}
+	expected := "iifname " + strconv.Quote(lanInterface) + " tcp dport 22 accept"
+	count := 0
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		if strings.Contains(line, "tcp dport 22") {
+			count++
+			if !strings.Contains(line, expected) || !strings.Contains(line, `comment "gateway-vpn LAN SSH"`) {
+				return false
+			}
+		}
+	}
+	return count == 1
+}
+
+func ipv4WildcardSSHListener(output string) bool {
+	for _, field := range strings.Fields(output) {
+		if field == "0.0.0.0:22" || field == "*:22" {
+			return true
+		}
+	}
+	return false
+}
+
 func fixedUnit(unit string) bool {
-	for _, expected := range []string{unitControl, unitFirewall, unitFirewallGuard, unitBroker, unitDNSMasq, unitMihomo} {
+	for _, expected := range []string{unitControl, unitFirewall, unitFirewallGuard, unitBroker, unitNetworkd, unitDNSMasq, unitSSH, unitMihomo} {
 		if unit == expected {
 			return true
 		}
@@ -283,7 +394,7 @@ func (probe *SystemProbe) run(ctx context.Context, executable string, arguments 
 }
 
 func (probe *SystemProbe) validate() error {
-	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 {
+	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.WG != "/usr/bin/wg" || probe.SSHD != "/usr/sbin/sshd" || probe.SS != "/usr/bin/ss" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.WireGuardConfigPath != "/etc/gateway-vpn/wireguard.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 || probe.LANPrefix == "" || probe.WireGuardPrefix != "10.80.0.0/24" || len(probe.BootstrapDNS) == 0 || probe.RoutingTableStart < 256 || probe.FwmarkStart == 0 {
 		return errors.New("complete fixed system watchdog probe configuration is required")
 	}
 	return nil

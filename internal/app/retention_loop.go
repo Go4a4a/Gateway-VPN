@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"gateway-vpn/internal/watchdog"
 )
 
 const (
@@ -29,6 +31,7 @@ func (application *Runtime) runRetentionLoop(ctx context.Context) error {
 	}
 	for {
 		result, err := application.Retention.CleanBatch(ctx)
+		application.workerProgress.mark(watchdog.WorkerRetention)
 		if ctx.Err() != nil {
 			return nil
 		}

@@ -132,9 +132,12 @@ func TestUpdateRuntimeRequiresFreshWatchdogAndControlEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	heartbeat := watchdog.ControlHeartbeat{
-		SchemaVersion: 1, PID: 42, ProcessStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
-		WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true,
+		SchemaVersion: 2, PID: 42, ProcessStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+		WrittenAt: now.Format(time.RFC3339Nano), DatabaseOK: true, WorkersOK: true, APIServing: true,
 		ReconcileLastAt: now.Add(-time.Second).Format(time.RFC3339Nano),
+		Workers: map[string]watchdog.WorkerProgress{
+			watchdog.WorkerDataPlaneReconcile: {LastProgressAt: now.Add(-time.Second).Format(time.RFC3339Nano), MaximumSilenceSeconds: 30, Critical: true},
+		},
 	}
 	if err := (watchdog.HeartbeatFile{Path: heartbeatPath}).Write(heartbeat); err != nil {
 		t.Fatal(err)

@@ -41,7 +41,9 @@ type fakeProbe struct {
 	failClosedError error
 }
 
-func (probe *fakeProbe) Snapshot(context.Context) (ProbeSnapshot, error) { return probe.snapshot, nil }
+func (probe *fakeProbe) Snapshot(context.Context, Policy) (ProbeSnapshot, error) {
+	return probe.snapshot, nil
+}
 func (probe *fakeProbe) Reconcile(_ context.Context, id string) error {
 	probe.reconciles = append(probe.reconciles, id)
 	probe.actions = append(probe.actions, "reconcile:"+id)
@@ -76,6 +78,57 @@ func TestExternalOutageNeverTriggersRecovery(t *testing.T) {
 	}
 	if status.value.OverallState != OverallHealthy || status.value.ConnectivityClass != ClassificationExternal {
 		t.Fatalf("status = %+v", status.value)
+	}
+}
+
+func TestExternalWireGuardFailureNeverTriggersLocalRecovery(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	policy.FailureThreshold = 1
+	snapshot := healthySnapshot(now, "AVAILABLE")
+	for index := range snapshot.Components {
+		if snapshot.Components[index].ComponentID == ComponentWireGuardMgmt {
+			snapshot.Components[index].Healthy = false
+			snapshot.Components[index].Classification = ClassificationExternal
+			snapshot.Components[index].ErrorCode = "WG_VPS_HANDSHAKE_STALE"
+		}
+	}
+	probe := &fakeProbe{snapshot: snapshot}
+	status := &memoryStatus{}
+	supervisor := testSupervisor(policy, probe, status, now, &memoryHistory{value: NewDurableHistory()})
+	for cycle := 0; cycle < 3; cycle++ {
+		probe.snapshot.ObservedAt = now.Add(time.Duration(cycle) * policy.CheckInterval())
+		supervisor.Now = func() time.Time { return probe.snapshot.ObservedAt }
+		if _, err := supervisor.Tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(probe.reconciles) != 0 || len(probe.restarts) != 0 || probe.failClosed != 0 || probe.reboots != 0 {
+		t.Fatalf("external WireGuard failure caused recovery: %+v", probe)
+	}
+	component := findComponent(t, status.value, ComponentWireGuardMgmt)
+	if component.State != ComponentDegraded || component.Classification != ClassificationExternal || component.SuppressionReason != "EXTERNAL_OUTAGE_NO_LOCAL_RECOVERY" {
+		t.Fatalf("external WireGuard status = %+v", component)
+	}
+}
+
+func TestPerComponentMonitorOnlyModeSuppressesMutation(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	policy := DefaultPolicy()
+	policy.FailureThreshold = 1
+	policy.ComponentRecoveryModes[ComponentSSH] = RecoveryModeMonitorOnly
+	probe := &fakeProbe{snapshot: failedSnapshot(now, ComponentSSH)}
+	status := &memoryStatus{}
+	supervisor := testSupervisor(policy, probe, status, now, &memoryHistory{value: NewDurableHistory()})
+	if _, err := supervisor.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.reconciles) != 0 || len(probe.restarts) != 0 || probe.failClosed != 0 {
+		t.Fatalf("monitor-only component mutated host: %+v", probe)
+	}
+	component := findComponent(t, status.value, ComponentSSH)
+	if component.SuppressionReason != "COMPONENT_MONITOR_ONLY" {
+		t.Fatalf("monitor-only status = %+v", component)
 	}
 }
 

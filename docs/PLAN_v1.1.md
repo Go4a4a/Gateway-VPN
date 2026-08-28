@@ -8,6 +8,7 @@
 **Проверяемые Ubuntu VPS profiles:** 20.04, 22.04, 24.04 и 26.04 LTS; 20.04 допускается только с активным Ubuntu Pro/ESM и актуальными security updates
 **Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
 **Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
+**Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 16 компонентов с per-component recovery mode и отдельной классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
 
 ---
 
@@ -1102,6 +1103,8 @@ Failback или переход на восстановившийся более 
 - `EXTERNAL_CONNECTIVITY_FAILURE`: все модемы offline, mobile registration отсутствует, подписки/узлы/targets либо VPS недоступны при исправном локальном control plane;
 - `MAINTENANCE_TRANSACTION`: install/update/restore/safe network apply выполняется или восстанавливается.
 
+Фиксированный signed contour включает: WebUI/API и control plane; SQLite; firewall guard и целостность owned ruleset; privileged network broker; `systemd-networkd`; LAN DNS/DHCP; OpenSSH/SFTP, если он включён; Mihomo/TUN; WireGuard management; optional WireGuard ingress; policy routing; критические фоновые workers; convergence desired/observed generations; verified SQLite backup и WAL; disk/memory/file-descriptor resources. Для WireGuard проверяются interface/address/peer/fwmark, owned management и endpoint routes, generation state и свежесть handshake. Старый handshake при исправном локальном интерфейсе/маршрутах является `EXTERNAL_CONNECTIVITY_FAILURE`, а не основанием для restart.
+
 Лестница автоматического восстановления строго ограничена и журналируется:
 
 1. повторить локальную проверку с failure threshold и jitter;
@@ -1128,13 +1131,38 @@ watchdog:
   restart_cooldown_seconds: 30
   max_restarts_per_component: 5
   restart_window_seconds: 900
+  worker_stale_seconds: 120
+  wireguard_handshake_stale_seconds: 180
+  backup_max_age_hours: 36
+  database_wal_max_bytes: 268435456
+  minimum_disk_free_bytes: 536870912
+  minimum_disk_free_percent: 5
+  minimum_memory_available_bytes: 134217728
+  minimum_memory_available_percent: 5
+  component_recovery_modes:
+    control_plane: RESTART
+    sqlite: RESTART
+    firewall_guard: RESTART
+    firewall_ruleset: RESTART
+    network_broker: RESTART
+    systemd_networkd: RESTART
+    dnsmasq: RESTART
+    openssh_sftp: RESTART
+    mihomo: RESTART
+    wireguard_management: RESTART
+    wireguard_ingress: RESTART
+    policy_routing: RESTART
+    worker_runtime: RESTART
+    configuration_convergence: RESTART
+    database_backup: RESTART
+    resources: MONITOR_ONLY
   host_reboot_enabled: false
   reboot_after_critical_seconds: 900
   max_reboots_per_24h: 1
   reboot_grace_seconds: 60
 ```
 
-Настройка не разрешает arbitrary unit/command. Список компонентов, порядок restart, fixed executable/systemd unit names и признаки critical failure зашиты в signed release. Изменение policy не сбрасывает durable restart/reboot history. Web UI показывает effective policy, состояние каждого компонента, last success/failure/recovery, число попыток и причину suppression. Все автоматические actions попадают в events/journald и diagnostic bundle без secrets.
+Для каждого компонента выбирается только один поддерживаемый режим: `MONITOR_ONLY`, `RECONCILE` или `RESTART`; WebUI не может добавить unit, executable, interface, route либо command. Список компонентов, допустимые для каждого режима действия, порядок restart, fixed executable/systemd unit names и признаки critical failure зашиты в signed release. Изменение policy не сбрасывает durable restart/reboot history. Web UI показывает effective policy, состояние каждого компонента, last success/failure/recovery, число попыток и причину suppression. Все автоматические actions попадают в events/journald и diagnostic bundle без secrets.
 
 ---
 
@@ -1165,6 +1193,8 @@ PersistentKeepalive = 25
 ```
 
 WireGuard management использует собственный выбор uplink и не привязан к active VPN path. Для каждого online modem отдельно хранится `management_reachability_state`: `UNTESTED`, `PROBING`, `REACHABLE`, `BLOCKED` или `STALE`. По умолчанию выбирается modem с наименьшим значением priority среди `MODEM_READY`, для которых VPS endpoint подтверждён; если подтверждённых ещё нет, candidates пробуются последовательно по priority. Для IP-адреса VPS создаётся modem-specific host route в table выбранного модема; endpoint исключается из Mihomo TUN и пользовательского traffic accounting.
+
+Поскольку Gateway имеет `Address = 10.80.0.2/32`, controller отдельно и идемпотентно владеет маршрутом `10.80.0.0/24 dev wg-mgmt protocol 186`. Watchdog требует его точного наличия; route не выводится через active subscription или modem table и удаляется вместе с managed WireGuard contour.
 
 При disconnect management-модема контроллер:
 
@@ -2063,7 +2093,8 @@ gateway-vpn/
 - one-card WireGuard выбирается явно, печатает обязательное исключение самого Gateway из возвращающей Keenetic policy и до apply выполняет route-recursion preview;
 - выбранные порты объединяются в owned bridge `gateway-vpn-lan`; один адрес, DHCP/DNS, WebUI, SSH и routed LAN policy назначаются bridge, а не повторяются на каждом порту;
 - loopback, non-Ethernet, Huawei USB/HiLink по udev metadata, интерфейс с уже настроенным IPv4 (management/uplink/modem risk), интерфейс текущего default route и доступный из `SSH_CONNECTION` интерфейс активной management-сессии не могут быть выбраны; мастер предлагает все оставшиеся safe Ethernet ports, но пользователь подтверждает или меняет набор; повторная установка использует verified update/idempotent automation path, а не clean-host wizard;
-- `openssh-server` проверяется как managed dependency; если его нет, package загружается до firewall mutation, но устанавливается/запускается только после durable marker и `PATH_BLOCKED`; installer проверяет IPv4 wildcard TCP/22, а rollback/uninstall восстанавливает прежние enabled/active states (установленный OS package, как и прочие dependencies, не удаляется);
+- отдельный интерактивный шаг показывает текущие состояния package/`ssh.service`, объясняет назначение SSH/SFTP и рекомендует включение; `Enter` принимает `Да`, оператор может явно выбрать `Нет`, а automation сохраняет безопасный default-on и имеет явный `--disable-ssh` opt-out;
+- при включённом выборе `openssh-server` проверяется как managed dependency; если его нет, package загружается до firewall mutation, но устанавливается/запускается только после durable marker и `PATH_BLOCKED`; installer выполняет `sshd -t`, `systemctl enable --now ssh.service`, требует enabled/active и IPv4 wildcard TCP/22, после чего nftables разрешает TCP/22 только через owned management bridge/LAN; при opt-out package/service не меняются, правило TCP/22 отсутствует, config/report сохраняют выбор, а rollback/uninstall восстанавливает прежние enabled/active states (установленный OS package, как и прочие dependencies, не удаляется);
 - предлагает первый свободный private transit CIDR, разрешает ввести другой `/16../30` и до установки проверяет его против всех host addresses/routes, HiLink management networks и `10.80.0.0/24`;
 - отдельно спрашивает про DHCP и установку отсутствующих зависимостей; DHCP требует `/24`;
 - предлагает boot-network policy: рекомендуемый appliance-вариант не ждёт carrier, DHCP или Internet ни от одного Ethernet/HiLink uplink, заменяет запуск штатного `systemd-networkd-wait-online` owned success-no-wait drop-in и запускает Gateway control plane независимо от `network-online.target`; вариант `Сохранить Ubuntu` не меняет host wait-online policy и явно предупреждает о возможной задержке 90–120 секунд;

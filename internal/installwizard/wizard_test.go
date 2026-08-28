@@ -37,7 +37,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 	}
 	// First select the addressed HiLink and the default-route NIC, then the
 	// unused Ethernet intended for Keenetic WAN.
-	input := strings.NewReader("4\n2\n\n\n\n\n\n\n")
+	input := strings.NewReader("4\n2\n\n\n\n\n\n\n\n")
 	output := new(bytes.Buffer)
 	session, err := NewSession(executor, input, output)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.InstallDependencies || selection.BootNetworkPolicy != BootNetworkNonBlocking || selection.GRUBPolicy != GRUBAutomatic {
+	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.EnableSSH || !selection.InstallDependencies || selection.BootNetworkPolicy != BootNetworkNonBlocking || selection.GRUBPolicy != GRUBAutomatic {
 		t.Fatalf("selection = %+v", selection)
 	}
 	for _, expected := range []string{"eno1", "enp2s0", "enp3s0", "enxhilink", "enxhilink2", "текущий выход Ubuntu", "Huawei USB/HiLink", "НУЖНО ВЫБРАТЬ СЕЙЧАС", "БУДЕТ НАСТРОЕНО АВТОМАТИЧЕСКИ", "МОЖНО ИЗМЕНИТЬ ПОСЛЕ УСТАНОВКИ", "без Ethernet carrier"} {
@@ -63,7 +63,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 
 func TestInteractiveSelectionValidatesCustomCIDRAndDHCPPrefix(t *testing.T) {
 	executor := cleanWizardExecutor()
-	input := strings.NewReader("2\n\n10.42.0.1/16\n10.42.0.1/24\nno\n2\n3\n")
+	input := strings.NewReader("2\n\n10.42.0.1/16\n10.42.0.1/24\nno\nno\n2\n3\n")
 	output := new(bytes.Buffer)
 	session, _ := NewSession(executor, input, output)
 	session.inspectBoot = configurableGRUB
@@ -71,7 +71,7 @@ func TestInteractiveSelectionValidatesCustomCIDRAndDHCPPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || !selection.EnableDHCP || selection.BootNetworkPolicy != BootNetworkKeep || selection.GRUBPolicy != GRUBKeep {
+	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || selection.EnableSSH || !selection.EnableDHCP || selection.BootNetworkPolicy != BootNetworkKeep || selection.GRUBPolicy != GRUBKeep {
 		t.Fatalf("selection = %+v", selection)
 	}
 	if !strings.Contains(output.String(), "требует подсеть /24") {
@@ -115,7 +115,7 @@ func TestInteractiveCancellationAndExactFinalConfirmation(t *testing.T) {
 }
 
 func TestUnknownBootloaderIsPreservedWithoutUnsafePrompt(t *testing.T) {
-	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n"), new(bytes.Buffer))
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n"), new(bytes.Buffer))
 	session.inspectBoot = func() bootObservation {
 		return bootObservation{bootloader: "неизвестный", firmware: "UEFI", detail: "нет подтверждённого GRUB"}
 	}
@@ -130,7 +130,7 @@ func TestUnknownBootloaderIsPreservedWithoutUnsafePrompt(t *testing.T) {
 
 func TestWindowsBootEntryMakesVisibleBoundedMenuTheRecommendation(t *testing.T) {
 	output := new(bytes.Buffer)
-	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n"), output)
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n\n"), output)
 	session.inspectBoot = func() bootObservation {
 		return bootObservation{bootloader: "GRUB", configurable: true, firmware: "UEFI", detail: "Windows detected", windowsEntry: true}
 	}

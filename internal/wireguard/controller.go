@@ -45,6 +45,13 @@ func RenderConfigure(config Config, ipExecutable, wgExecutable string) ([]Operat
 			Request:     platformexec.Request{Executable: ipExecutable, Arguments: []string{"-4", "address", "replace", config.Address, "dev", config.InterfaceName}},
 		},
 		{
+			Description: "install WireGuard management subnet route",
+			Request: platformexec.Request{Executable: ipExecutable, Arguments: []string{
+				"-4", "route", "replace", config.AllowedIPs[0], "dev", config.InterfaceName,
+				"protocol", strconv.Itoa(routing.OwnedProtocol),
+			}},
+		},
+		{
 			Description: "bring WireGuard management interface up",
 			Request:     platformexec.Request{Executable: ipExecutable, Arguments: []string{"link", "set", "dev", config.InterfaceName, "up"}},
 		},

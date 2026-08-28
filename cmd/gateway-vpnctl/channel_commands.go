@@ -170,13 +170,14 @@ func runChannelInstallCommand(args []string) int {
 	bootNetworkPolicy := flags.String("boot-network-policy", "", "automation boot-network policy: gateway-nonblocking or keep")
 	grubPolicy := flags.String("grub-policy", "", "automation GRUB policy: automatic-hidden, menu-5s, or keep")
 	enableDHCP := flags.Bool("enable-dhcp", false, "include opt-in transit DHCP")
+	disableSSH := flags.Bool("disable-ssh", false, "do not install/manage OpenSSH or open TCP/22 on the Gateway management LAN")
 	installDependencies := flags.Bool("install-dependencies", false, "install missing managed Gateway packages after dependency-plan validation")
 	apply := flags.Bool("apply", false, "include installation after read-only preflight")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" || *repository == "" {
 		return 2
 	}
 	if *interactive {
-		if *lanInterface != "" || *lanAddress != "" || *bootNetworkPolicy != "" || *grubPolicy != "" || *enableDHCP || *installDependencies || *apply {
+		if *lanInterface != "" || *lanAddress != "" || *bootNetworkPolicy != "" || *grubPolicy != "" || *enableDHCP || *disableSSH || *installDependencies || *apply {
 			fmt.Fprintln(os.Stderr, "--interactive cannot be combined with target-specific LAN, boot, dependency, DHCP, or apply flags")
 			return 2
 		}
@@ -207,7 +208,7 @@ func runChannelInstallCommand(args []string) int {
 		Repository: *repository, ReleaseTag: tag, ManifestSHA256: digest,
 		SignerKeySHA256: fingerprint, Interactive: *interactive, LANInterface: *lanInterface, LANAddress: *lanAddress,
 		BootNetworkPolicy: *bootNetworkPolicy, GRUBPolicy: *grubPolicy,
-		InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP, Apply: *apply,
+		InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP, DisableSSH: *disableSSH, Apply: *apply,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate exact Gateway install command: %v\n", err)

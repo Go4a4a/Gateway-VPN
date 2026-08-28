@@ -9,6 +9,7 @@ APPLY=0
 INSTALL_DEPENDENCIES=0
 DEPENDENCY_PREFLIGHT_ONLY=0
 ENABLE_DHCP=0
+ENABLE_SSH=1
 RELEASE_DIR=""
 TRUSTED_UPDATE_KEY=""
 RELEASE_VERSION=""
@@ -19,7 +20,7 @@ BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
 
 usage() {
-  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply]"
+  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--apply]"
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
@@ -56,6 +57,7 @@ while (($#)); do
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
     --dependency-preflight-only) DEPENDENCY_PREFLIGHT_ONLY=1; shift ;;
     --enable-dhcp) ENABLE_DHCP=1; shift ;;
+    --disable-ssh) ENABLE_SSH=0; shift ;;
     --apply) APPLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -154,6 +156,7 @@ if ! getent ahostsv4 github.com >/dev/null; then
      grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
@@ -198,7 +201,17 @@ if ((APPLY && ORPHAN_MARKER_TEMP)); then
   echo "Removed harmless pre-transaction Gateway marker artifact"
 fi
 
-REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq-base openssh-server)
+REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps dnsmasq-base)
+if ((ENABLE_SSH)); then
+  REQUIRED_PACKAGES+=(openssh-server)
+fi
+SSH_PACKAGE_INSTALLED=0
+[[ $(dpkg-query -W -f='${db:Status-Abbrev}' openssh-server 2>/dev/null || true) == "ii " ]] && SSH_PACKAGE_INSTALLED=1
+SSH_UNIT_ENABLED=0
+systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_UNIT_ENABLED=1
+SSH_UNIT_ACTIVE=0
+systemctl is-active --quiet ssh.service 2>/dev/null && SSH_UNIT_ACTIVE=1
+echo "SSH/SFTP requested: $([[ $ENABLE_SSH == 1 ]] && echo yes || echo no); openssh-server installed: $SSH_PACKAGE_INSTALLED; ssh.service enabled: $SSH_UNIT_ENABLED; active: $SSH_UNIT_ACTIVE"
 MISSING_PACKAGES=()
 MISSING_EARLY_PACKAGES=()
 MISSING_LATE_PACKAGES=()
@@ -293,6 +306,16 @@ fi
 for command in ip nft wg sysctl dnsmasq modprobe ss; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
+if ((ENABLE_SSH && SSH_PACKAGE_INSTALLED)); then
+  [[ -x /usr/sbin/sshd ]] || { echo "OpenSSH was requested but /usr/sbin/sshd is unavailable" >&2; exit 1; }
+  /usr/sbin/sshd -t || { echo "Existing OpenSSH configuration is invalid; fix it before Gateway installation" >&2; exit 1; }
+  if ((SSH_UNIT_ACTIVE)); then
+    ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Active OpenSSH must listen on IPv4 wildcard TCP/22 so every selected management LAN port remains usable" >&2; exit 1; }
+  elif ss -H -ltn "sport = :22" | grep -q .; then
+    echo "TCP/22 is already occupied while ssh.service is inactive" >&2
+    exit 1
+  fi
+fi
 [[ -d /sys/module/wireguard ]] || modprobe -n wireguard >/dev/null 2>&1 || { echo "Kernel WireGuard support is unavailable" >&2; exit 1; }
 systemctl is-active --quiet systemd-networkd.service || { echo "Gateway VPN requires active systemd-networkd" >&2; exit 1; }
 [[ -c /dev/net/tun ]] || { echo "/dev/net/tun is unavailable" >&2; exit 1; }
@@ -373,6 +396,8 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN member set differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway SSH/SFTP policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fxq "  disable_ssh_management: $([[ $ENABLE_SSH == 1 ]] && echo false || echo true)" /etc/gateway-vpn/config.yaml || { echo "Existing Gateway runtime SSH/SFTP policy differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway boot-network policy differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway GRUB policy differs; explicit reconfiguration is required" >&2; exit 1; }
   if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
@@ -448,6 +473,7 @@ echo "Release destination: $DEST"
 echo "LAN: $LAN_INTERFACE / $LAN_ADDRESS"
 echo "LAN physical members: ${LAN_MEMBERS:-direct-interface mode}"
 echo "DHCP enable requested: $ENABLE_DHCP"
+echo "SSH/SFTP management requested: $ENABLE_SSH"
 echo "Boot network policy: $BOOT_NETWORK_POLICY"
 echo "GRUB policy: $GRUB_POLICY"
 if ((EXISTING)); then
@@ -470,8 +496,12 @@ if ((EXISTING)); then
   fi
   nft list table inet gateway_vpn >/dev/null
   ss -H -ltn "sport = :8443" | awk '{print $4}' | grep -Fxq "$LAN_IP:8443"
-  systemctl is-active --quiet ssh.service
-  ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$'
+  if ((ENABLE_SSH)); then
+    systemctl is-enabled --quiet ssh.service
+    systemctl is-active --quiet ssh.service
+    /usr/sbin/sshd -t
+    ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$'
+  fi
   echo "Gateway VPN $RELEASE_VERSION is already installed with the requested immutable release and LAN policy."
   exit 0
 fi
@@ -542,10 +572,20 @@ systemd-sysusers /usr/lib/sysusers.d/gateway-vpn.conf
 install -D -m 0644 "$ROOT_DIR/packaging/tmpfiles.d/gateway-vpn.conf" /usr/lib/tmpfiles.d/gateway-vpn.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/gateway-vpn.conf
 install -d -m 0750 -o root -g gateway-vpn /etc/gateway-vpn/nftables
-sed "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" "$ROOT_DIR/packaging/nftables/boot.nft.in" >/etc/gateway-vpn/nftables/boot.nft
+SSH_NFT_RULE=""
+if ((ENABLE_SSH)); then
+  SSH_NFT_RULE="        iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\""
+fi
+sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__SSH_RULE__|$SSH_NFT_RULE|g" "$ROOT_DIR/packaging/nftables/boot.nft.in" >/etc/gateway-vpn/nftables/boot.nft
 chown root:gateway-vpn /etc/gateway-vpn/nftables/boot.nft
 chmod 0640 /etc/gateway-vpn/nftables/boot.nft
 nft --check --file /etc/gateway-vpn/nftables/boot.nft
+if ((ENABLE_SSH)); then
+  grep -Fq "iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"" /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway SSH firewall rule is not scoped to the selected management LAN" >&2; exit 1; }
+  [[ $(grep -Ec 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft) == 1 ]] || { echo "Gateway firewall must contain exactly one LAN-scoped SSH rule" >&2; exit 1; }
+else
+  ! grep -Eq 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway firewall unexpectedly exposes SSH while SSH/SFTP management is disabled" >&2; exit 1; }
+fi
 nft --file /etc/gateway-vpn/nftables/boot.nft
 nft list table inet gateway_vpn >/dev/null
 if ((${#MISSING_LATE_PACKAGES[@]})); then
@@ -557,9 +597,14 @@ if ((${#MISSING_LATE_PACKAGES[@]})); then
   done
   apt-get check >/dev/null
 fi
-systemctl enable --now ssh.service
-systemctl is-active --quiet ssh.service || { echo "OpenSSH service did not become active" >&2; exit 1; }
-ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "OpenSSH must listen on IPv4 wildcard TCP/22 for all selected LAN ports" >&2; exit 1; }
+if ((ENABLE_SSH)); then
+  [[ -x /usr/sbin/sshd ]] || { echo "OpenSSH server binary is unavailable after dependency installation" >&2; exit 1; }
+  /usr/sbin/sshd -t || { echo "OpenSSH configuration validation failed; ssh.service was not changed" >&2; exit 1; }
+  systemctl enable --now ssh.service
+  systemctl is-enabled --quiet ssh.service || { echo "OpenSSH service did not become enabled" >&2; exit 1; }
+  systemctl is-active --quiet ssh.service || { echo "OpenSSH service did not become active" >&2; exit 1; }
+  ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "OpenSSH must listen on IPv4 wildcard TCP/22 for all selected LAN ports" >&2; exit 1; }
+fi
 sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in" >/etc/systemd/network/05-gateway-vpn-lan.network
 chmod 0644 /etc/systemd/network/05-gateway-vpn-lan.network
 if ((${#LAN_MEMBER_NAMES[@]})); then
@@ -607,7 +652,7 @@ done < <(find "$RELEASE_DIR" -type f -print0 | sort -z)
 "$DEST/bin/gateway-vpnctl" release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn/update-signing.pub --current-version 0.0.0 --current-schema 1
 
 if [[ ! -e /etc/gateway-vpn/config.yaml ]]; then
-  sed -E -e "s|^([[:space:]]*)lan_interface:.*|\1lan_interface: $LAN_INTERFACE|" -e "s|192.168.200.1/24|$LAN_ADDRESS|g" -e "s|192.168.200.1|$LAN_IP|g" "$ROOT_DIR/config.example.yaml" >/etc/gateway-vpn/config.yaml
+  sed -E -e "s|^([[:space:]]*)lan_interface:.*|\1lan_interface: $LAN_INTERFACE|" -e "s|192.168.200.1/24|$LAN_ADDRESS|g" -e "s|192.168.200.1|$LAN_IP|g" -e "s|disable_ssh_management: false|disable_ssh_management: $([[ $ENABLE_SSH == 1 ]] && echo false || echo true)|" "$ROOT_DIR/config.example.yaml" >/etc/gateway-vpn/config.yaml
   chown root:gateway-vpn /etc/gateway-vpn/config.yaml
   chmod 0640 /etc/gateway-vpn/config.yaml
 fi
@@ -698,10 +743,14 @@ if ((${#LAN_MEMBER_NAMES[@]})); then
     ip -o link show dev "$member" | grep -Fq "master $LAN_INTERFACE" || { echo "Installed Gateway LAN member is not attached: $member" >&2; exit 1; }
   done
 fi
-systemctl is-active --quiet ssh.service || { echo "Installed Gateway SSH management service is not active" >&2; exit 1; }
-ss -H -ltn "sport = :22" | grep -q . || { echo "Installed Gateway SSH management service is not listening" >&2; exit 1; }
+if ((ENABLE_SSH)); then
+  /usr/sbin/sshd -t || { echo "Installed OpenSSH configuration is invalid" >&2; exit 1; }
+  systemctl is-enabled --quiet ssh.service || { echo "Installed Gateway SSH management service is not enabled" >&2; exit 1; }
+  systemctl is-active --quiet ssh.service || { echo "Installed Gateway SSH management service is not active" >&2; exit 1; }
+  ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Installed Gateway SSH management service is not listening on IPv4 wildcard TCP/22" >&2; exit 1; }
+fi
 [[ -d /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || false
-printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": true,\n  "boot_network_policy": "%s",\n  "grub_policy": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >/var/lib/gateway-vpn/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": %s,\n  "boot_network_policy": "%s",\n  "grub_policy": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" "$([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >/var/lib/gateway-vpn/install-report.json
 chmod 0600 /var/lib/gateway-vpn/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)
@@ -720,5 +769,12 @@ fi
 trap - ERR INT TERM
 rm -f /run/gateway-vpn-install-authorized || echo "Warning: installation completed but the ephemeral service-start authorization could not be removed" >&2
 echo "Installed Gateway VPN $RELEASE_VERSION. Mihomo starts only after a validated active generation exists; DHCP remains opt-in."
+echo "WebUI: https://$LAN_IP:8443"
+if ((ENABLE_SSH)); then
+  echo "SSH: ssh <ubuntu-user>@$LAN_IP"
+  echo "SFTP uses the same host, Ubuntu user and TCP/22: sftp <ubuntu-user>@$LAN_IP"
+else
+  echo "SSH/SFTP management was intentionally disabled; WebUI remains available on the management LAN."
+fi
 cleanup_temp_files
 trap - EXIT

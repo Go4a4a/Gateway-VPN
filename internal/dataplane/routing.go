@@ -39,34 +39,21 @@ type RoutingBackend struct {
 	Gate              PathBlocker
 }
 
+type RoutingCheckResult struct {
+	ReadyUplinks int
+	Rules        int
+	Routes       int
+}
+
 func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 	if err := backend.validate(); err != nil {
 		return err
 	}
-	stored, err := backend.Uplinks.List(ctx)
+	desired, readyUplinks, err := backend.desiredPlan(ctx)
 	if err != nil {
-		return fmt.Errorf("read authoritative uplink inventory: %w", err)
+		return err
 	}
-	inputs := make([]networkplan.ModemInput, 0, len(stored))
-	for _, item := range stored {
-		if err := backend.validateAllocation(item); err != nil {
-			return err
-		}
-		if !item.Enabled || item.State != uplink.StateReady {
-			continue
-		}
-		inputs = append(inputs, networkplan.ModemInput{
-			ID: item.ID, Priority: item.Priority, InterfaceName: item.CurrentIfname,
-			ManagementPrefix: item.IPv4CIDR, Gateway: item.Gateway,
-			RoutingTableID: uint32(item.RoutingTableID), Fwmark: uint32(item.Fwmark),
-		})
-	}
-	desired, err := networkplan.Build(networkplan.Input{
-		LANPrefix: backend.LANPrefix, WireGuardPrefix: backend.WireGuardPrefix, Modems: inputs,
-	})
-	if err != nil {
-		return fmt.Errorf("build authoritative uplink routing plan: %w", err)
-	}
+	_ = readyUplinks
 	current, err := backend.observe(ctx)
 	if err != nil {
 		return errors.Join(err, backend.Gate.BlockPath(context.WithoutCancel(ctx)))
@@ -99,9 +86,71 @@ func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 	return backend.verifyLookups(ctx, desired)
 }
 
+// CheckRouting performs the same authoritative comparison and marked lookup
+// verification as SyncRouting, but cannot mutate routes or open a data path.
+func (backend RoutingBackend) CheckRouting(ctx context.Context) (RoutingCheckResult, error) {
+	if err := backend.validateReadOnly(); err != nil {
+		return RoutingCheckResult{}, err
+	}
+	desired, readyUplinks, err := backend.desiredPlan(ctx)
+	if err != nil {
+		return RoutingCheckResult{}, err
+	}
+	current, err := backend.observe(ctx)
+	if err != nil {
+		return RoutingCheckResult{}, err
+	}
+	result := RoutingCheckResult{ReadyUplinks: readyUplinks, Rules: len(current.rules), Routes: len(current.routes)}
+	if !current.matches(desired) {
+		return result, errors.New("observed policy routing differs from authoritative uplink plan")
+	}
+	if err := backend.verifyLookups(ctx, desired); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (backend RoutingBackend) desiredPlan(ctx context.Context) (networkplan.Plan, int, error) {
+	stored, err := backend.Uplinks.List(ctx)
+	if err != nil {
+		return networkplan.Plan{}, 0, fmt.Errorf("read authoritative uplink inventory: %w", err)
+	}
+	inputs := make([]networkplan.ModemInput, 0, len(stored))
+	for _, item := range stored {
+		if err := backend.validateAllocation(item); err != nil {
+			return networkplan.Plan{}, 0, err
+		}
+		if !item.Enabled || item.State != uplink.StateReady {
+			continue
+		}
+		inputs = append(inputs, networkplan.ModemInput{
+			ID: item.ID, Priority: item.Priority, InterfaceName: item.CurrentIfname,
+			ManagementPrefix: item.IPv4CIDR, Gateway: item.Gateway,
+			RoutingTableID: uint32(item.RoutingTableID), Fwmark: uint32(item.Fwmark),
+		})
+	}
+	desired, err := networkplan.Build(networkplan.Input{
+		LANPrefix: backend.LANPrefix, WireGuardPrefix: backend.WireGuardPrefix, Modems: inputs,
+	})
+	if err != nil {
+		return networkplan.Plan{}, 0, fmt.Errorf("build authoritative uplink routing plan: %w", err)
+	}
+	return desired, len(inputs), nil
+}
+
 func (backend RoutingBackend) validate() error {
-	if backend.Uplinks == nil || backend.Executor == nil || backend.Gate == nil || backend.IP != "/usr/sbin/ip" {
+	if err := backend.validateReadOnly(); err != nil {
+		return err
+	}
+	if backend.Gate == nil {
 		return errors.New("fixed Ubuntu iproute2 backend, uplink inventory, and path blocker are required")
+	}
+	return nil
+}
+
+func (backend RoutingBackend) validateReadOnly() error {
+	if backend.Uplinks == nil || backend.Executor == nil || backend.IP != "/usr/sbin/ip" {
+		return errors.New("fixed Ubuntu iproute2 backend and uplink inventory are required")
 	}
 	if backend.RoutingTableStart < 256 || backend.FwmarkStart == 0 {
 		return errors.New("valid modem routing allocation ranges are required")

@@ -22,6 +22,14 @@ func TestConfigAndUplinkSwitchAreManagementScopedAndOrdered(t *testing.T) {
 	if err != nil || !strings.Contains(string(content), "AllowedIPs = 10.80.0.0/24") || strings.Contains(string(content), "192.168.") {
 		t.Fatalf("RenderSyncConf() = %s, %v", content, err)
 	}
+	configure, err := RenderConfigure(configuration, "/usr/sbin/ip", "/usr/bin/wg")
+	if err != nil || len(configure) != 5 {
+		t.Fatalf("RenderConfigure() = %+v, %v", configure, err)
+	}
+	managementRoute := strings.Join(configure[3].Request.Arguments, " ")
+	if managementRoute != "-4 route replace 10.80.0.0/24 dev wg-mgmt protocol 186" {
+		t.Fatalf("management route operation = %q", managementRoute)
+	}
 	previous := modem.Modem{ID: "m1", InterfaceName: "enxm1", Gateway: "192.168.8.1", RoutingTableID: 1101, Fwmark: 0x1101}
 	next := modem.Modem{ID: "m2", InterfaceName: "enxm2", Gateway: "192.168.9.1", RoutingTableID: 1102, Fwmark: 0x1102}
 	operations, err := RenderUplinkSwitch("wg-mgmt", netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("203.0.113.10"), &previous, next, "/usr/sbin/ip", "/usr/bin/wg")

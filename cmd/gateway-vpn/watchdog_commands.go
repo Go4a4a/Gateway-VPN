@@ -54,10 +54,15 @@ func runWatchdog(args []string) int {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With("component", "watchdog")
 	probe := &watchdog.SystemProbe{
-		Executor: platformexec.OSExecutor{}, Systemctl: "/usr/bin/systemctl", NFT: "/usr/sbin/nft", IP: "/usr/sbin/ip",
+		Executor: platformexec.OSExecutor{}, Systemctl: "/usr/bin/systemctl", NFT: "/usr/sbin/nft", IP: "/usr/sbin/ip", WG: "/usr/bin/wg",
+		SSHD: "/usr/sbin/sshd", SS: "/usr/bin/ss",
 		GatewayBinary: "/opt/gateway-vpn/current/bin/gateway-vpn", ConfigPath: *configPath,
 		DatabasePath: configuration.System.Database, HeartbeatPath: defaultControlHeartbeat,
 		MihomoConfigPath: "/var/lib/gateway-vpn/mihomo/active/config.yaml", MihomoTUN: configuration.Mihomo.TunName,
+		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml",
+		LANPrefix:           configuration.Network.LANAddress, WireGuardPrefix: "10.80.0.0/24",
+		BootstrapDNS:      configuration.Mihomo.BootstrapDNS,
+		RoutingTableStart: configuration.Modems.RoutingTableStart, FwmarkStart: configuration.Modems.FwmarkStart,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
 	}
 	supervisor := &watchdog.Supervisor{

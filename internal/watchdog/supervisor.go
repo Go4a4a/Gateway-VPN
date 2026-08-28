@@ -14,7 +14,7 @@ type PolicyReader interface {
 }
 
 type Prober interface {
-	Snapshot(context.Context) (ProbeSnapshot, error)
+	Snapshot(context.Context, Policy) (ProbeSnapshot, error)
 	Reconcile(context.Context, string) error
 	FailClosed(context.Context) error
 	Restart(context.Context, string) error
@@ -124,7 +124,7 @@ func (supervisor *Supervisor) Tick(ctx context.Context) (time.Duration, error) {
 		supervisor.logger().Warn("watchdog policy read failed; retaining last-known safe policy", "error", err)
 	}
 	supervisor.durable.Prune(now, supervisor.policy)
-	snapshot, probeErr := supervisor.Probe.Snapshot(ctx)
+	snapshot, probeErr := supervisor.Probe.Snapshot(ctx, supervisor.policy)
 	if probeErr != nil {
 		policyError = mergeCode(policyError, "LOCAL_PROBE_FAILED")
 		snapshot = missingProbeSnapshot(now)
@@ -149,7 +149,7 @@ func (supervisor *Supervisor) Tick(ctx context.Context) (time.Duration, error) {
 		status, changed := supervisor.evaluateComponent(ctx, spec, observation, snapshot, now)
 		historyChanged = historyChanged || changed
 		statuses = append(statuses, status)
-		if status.State == ComponentFailed && spec.RebootEligible {
+		if status.State == ComponentFailed && spec.RebootEligible && supervisor.policy.RecoveryMode(spec.ID) == RecoveryModeRestart {
 			criticalEligible = append(criticalEligible, spec.ID)
 		}
 	}
@@ -223,6 +223,21 @@ func (supervisor *Supervisor) evaluateComponent(ctx context.Context, spec Compon
 		status.State = ComponentHealthy
 		return supervisor.componentStatus(status, runtimeState, now), changed
 	}
+	if observation.Classification == ClassificationExternal {
+		runtimeState.failures = 0
+		runtimeState.successes = 0
+		runtimeState.reconciled = false
+		if _, exists := supervisor.durable.CriticalSince[spec.ID]; exists {
+			delete(supervisor.durable.CriticalSince, spec.ID)
+			changed = true
+		}
+		status.State = ComponentDegraded
+		status.Classification = ClassificationExternal
+		status.ErrorCode = safeCode(observation.ErrorCode)
+		status.RecoverySuppressed = true
+		status.SuppressionReason = "EXTERNAL_OUTAGE_NO_LOCAL_RECOVERY"
+		return supervisor.componentStatus(status, runtimeState, now), changed
+	}
 	runtimeState.failures++
 	runtimeState.successes = 0
 	runtimeState.lastFailure = now.Format(time.RFC3339Nano)
@@ -245,7 +260,12 @@ func (supervisor *Supervisor) evaluateComponent(ctx context.Context, spec Compon
 		status.RecoverySuppressed, status.SuppressionReason = true, "WATCHDOG_DISABLED"
 		return supervisor.componentStatus(status, runtimeState, now), changed
 	}
-	if supervisor.policy.ReconcileEnabled && !runtimeState.reconciled {
+	recoveryMode := supervisor.policy.RecoveryMode(spec.ID)
+	if recoveryMode == RecoveryModeMonitorOnly {
+		status.RecoverySuppressed, status.SuppressionReason = true, "COMPONENT_MONITOR_ONLY"
+		return supervisor.componentStatus(status, runtimeState, now), changed
+	}
+	if supervisor.policy.ReconcileEnabled && spec.Reconcileable && !runtimeState.reconciled {
 		runtimeState.reconciled = true
 		runtimeState.lastAction = "RECONCILE"
 		runtimeState.lastRecovery = now.Format(time.RFC3339Nano)
@@ -256,9 +276,11 @@ func (supervisor *Supervisor) evaluateComponent(ctx context.Context, spec Compon
 		}
 		return supervisor.componentStatus(status, runtimeState, now), changed
 	}
-	if !spec.Restartable || !supervisor.policy.ComponentRestartEnabled {
+	if recoveryMode != RecoveryModeRestart || !spec.Restartable || !supervisor.policy.ComponentRestartEnabled {
 		status.RecoverySuppressed = true
-		if !spec.Restartable {
+		if recoveryMode == RecoveryModeReconcile {
+			status.SuppressionReason = "COMPONENT_RECONCILE_ONLY"
+		} else if !spec.Restartable {
 			status.SuppressionReason = "COMPONENT_NOT_RESTARTABLE"
 		} else {
 			status.SuppressionReason = "COMPONENT_RESTART_DISABLED"

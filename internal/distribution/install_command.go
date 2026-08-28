@@ -31,6 +31,7 @@ type GatewayInstallCommandOptions struct {
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
+	DisableSSH              bool
 	BootNetworkPolicy       string
 	GRUBPolicy              string
 	Apply                   bool
@@ -89,7 +90,7 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		return "", errors.New("safe GitHub release inputs are required")
 	}
 	if options.Interactive {
-		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
+		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.DisableSSH || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
 			return "", errors.New("interactive Gateway command must defer all host policy choices and confirmation to the target terminal")
 		}
 	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) || !validBootNetworkPolicy(options.BootNetworkPolicy) || !validGRUBPolicy(options.GRUBPolicy) {
@@ -130,6 +131,9 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	parts = append(parts, installCommand)
 	if options.EnableDHCP {
 		parts[len(parts)-1] += " --enable-dhcp"
+	}
+	if options.DisableSSH {
+		parts[len(parts)-1] += " --disable-ssh"
 	}
 	if options.InstallDependencies {
 		parts[len(parts)-1] += " --install-dependencies"

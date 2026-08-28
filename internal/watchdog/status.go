@@ -12,14 +12,22 @@ import (
 )
 
 const (
-	ComponentControl         = "control_plane"
-	ComponentSQLite          = "sqlite"
-	ComponentFirewallGuard   = "firewall_guard"
-	ComponentFirewallRuleset = "firewall_ruleset"
-	ComponentNetworkBroker   = "network_broker"
-	ComponentDNSMasq         = "dnsmasq"
-	ComponentMihomo          = "mihomo"
-	ComponentResources       = "resources"
+	ComponentControl          = "control_plane"
+	ComponentSQLite           = "sqlite"
+	ComponentFirewallGuard    = "firewall_guard"
+	ComponentFirewallRuleset  = "firewall_ruleset"
+	ComponentNetworkBroker    = "network_broker"
+	ComponentNetworkd         = "systemd_networkd"
+	ComponentDNSMasq          = "dnsmasq"
+	ComponentSSH              = "openssh_sftp"
+	ComponentMihomo           = "mihomo"
+	ComponentWireGuardMgmt    = "wireguard_management"
+	ComponentWireGuardIngress = "wireguard_ingress"
+	ComponentPolicyRouting    = "policy_routing"
+	ComponentWorkerRuntime    = "worker_runtime"
+	ComponentConvergence      = "configuration_convergence"
+	ComponentBackup           = "database_backup"
+	ComponentResources        = "resources"
 
 	ComponentHealthy       = "HEALTHY"
 	ComponentDegraded      = "DEGRADED"
@@ -39,19 +47,28 @@ const (
 type ComponentSpec struct {
 	ID             string
 	Label          string
+	Reconcileable  bool
 	Restartable    bool
 	RebootEligible bool
 }
 
 var fixedComponentSpecs = []ComponentSpec{
-	{ID: ComponentControl, Label: "Control plane", Restartable: true, RebootEligible: true},
-	{ID: ComponentSQLite, Label: "SQLite", Restartable: true, RebootEligible: false},
-	{ID: ComponentFirewallGuard, Label: "Firewall guard", Restartable: true, RebootEligible: true},
-	{ID: ComponentFirewallRuleset, Label: "Firewall ruleset", Restartable: true, RebootEligible: true},
-	{ID: ComponentNetworkBroker, Label: "Network broker", Restartable: true, RebootEligible: true},
-	{ID: ComponentDNSMasq, Label: "LAN DNS/DHCP", Restartable: true, RebootEligible: true},
-	{ID: ComponentMihomo, Label: "Mihomo/TUN", Restartable: true, RebootEligible: true},
-	{ID: ComponentResources, Label: "Host resources", Restartable: false, RebootEligible: false},
+	{ID: ComponentControl, Label: "WebUI/API и control plane", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentSQLite, Label: "SQLite", Reconcileable: true, Restartable: true},
+	{ID: ComponentFirewallGuard, Label: "Firewall guard", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentFirewallRuleset, Label: "Правила firewall", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentNetworkBroker, Label: "Привилегированный network broker", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentNetworkd, Label: "Сетевые интерфейсы systemd-networkd", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentDNSMasq, Label: "LAN DNS/DHCP", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentSSH, Label: "SSH/SFTP", Reconcileable: true, Restartable: true},
+	{ID: ComponentMihomo, Label: "Mihomo/TUN", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentWireGuardMgmt, Label: "WireGuard удалённого управления", Reconcileable: true, Restartable: true},
+	{ID: ComponentWireGuardIngress, Label: "WireGuard входящего трафика", Reconcileable: true, Restartable: true},
+	{ID: ComponentPolicyRouting, Label: "Policy routing физических выходов", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentWorkerRuntime, Label: "Фоновые циклы и планировщики", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentConvergence, Label: "Согласование настроек и runtime", Reconcileable: true, Restartable: true, RebootEligible: true},
+	{ID: ComponentBackup, Label: "Проверенные резервные копии SQLite", Reconcileable: true, Restartable: true},
+	{ID: ComponentResources, Label: "Диск, память и file descriptors"},
 }
 
 func ComponentSpecs() []ComponentSpec {
@@ -68,11 +85,12 @@ func validComponentID(id string) bool {
 }
 
 type Observation struct {
-	ComponentID string
-	Applicable  bool
-	Healthy     bool
-	ErrorCode   string
-	Details     map[string]any
+	ComponentID    string
+	Applicable     bool
+	Healthy        bool
+	Classification string
+	ErrorCode      string
+	Details        map[string]any
 }
 
 type ProbeSnapshot struct {

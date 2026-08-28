@@ -29,6 +29,7 @@ type Runner struct {
 	SessionStartedAt time.Time
 	Now              func() time.Time
 	OnError          func(error)
+	OnCheckpoint     func()
 }
 
 func NewSessionID() (string, error) {
@@ -50,6 +51,9 @@ func (runner *Runner) Run(ctx context.Context) error {
 	run := func(checkpointContext context.Context) {
 		if _, err := runner.Checkpoint(checkpointContext); err != nil && checkpointContext.Err() == nil && runner.OnError != nil {
 			runner.OnError(err)
+		}
+		if runner.OnCheckpoint != nil {
+			runner.OnCheckpoint()
 		}
 	}
 	run(ctx)

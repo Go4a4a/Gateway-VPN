@@ -147,4 +147,32 @@ probe_lan_port "$CLIENT_B"
 wait "$SERVER_PID"
 SERVER_PID=
 
-echo "PASS: one bridge IPv4 and the production firewall allowed TCP/22 through both LAN members while blocking the uplink"
+sed 's/disable_ssh_management: false/disable_ssh_management: true/' "$WORK/config.yaml" >"$WORK/config-no-ssh.yaml"
+ip netns exec "$GW" "$BINARY" firewall-boot --config "$WORK/config-no-ssh.yaml" --apply
+if ip netns exec "$GW" nft list chain inet gateway_vpn input | grep -q 'tcp dport 22'; then
+  echo "TCP/22 firewall rule remained after explicit SSH/SFTP disable" >&2
+  exit 1
+fi
+ip netns exec "$GW" python3 -c 'import socket
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 22))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    c.close()' >"$WORK/disabled-server.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  ip netns exec "$GW" ss -H -ltn 'sport = :22' | grep -q . && break
+  sleep 0.05
+done
+for namespace in "$CLIENT_A" "$CLIENT_B" "$UPLINK"; do
+  target=192.168.200.1
+  [[ $namespace != "$UPLINK" ]] || target=192.168.8.2
+  if timeout 1 ip netns exec "$namespace" bash -c "exec 3<>/dev/tcp/$target/22"; then
+    echo "TCP/22 remained reachable after explicit SSH/SFTP disable from $namespace" >&2
+    exit 1
+  fi
+done
+
+echo "PASS: one bridge IPv4 allowed TCP/22 through both LAN members, blocked the uplink, and explicit SSH disable removed all TCP/22 exposure"

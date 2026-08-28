@@ -71,14 +71,14 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	command, err := GatewayInstallCommand(manifest, GatewayInstallCommandOptions{
 		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,
 		SignerKeySHA256: fingerprint, LANInterface: "enp2s0", LANAddress: "192.168.200.1/24",
-		InstallDependencies: true, EnableDHCP: true, Apply: true,
+		InstallDependencies: true, EnableDHCP: true, DisableSSH: true, Apply: true,
 		BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "automatic-hidden",
 		NonInteractiveRoot: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{bootstrap.SHA256, manifestDigest, fingerprint, "channel-stable.json", "channel-stable.sig", "update-signing.pub", "--source-commit " + manifest.SourceCommit, "--install-dependencies", "--enable-dhcp", "--boot-network-policy gateway-nonblocking", "--grub-policy automatic-hidden", "--apply"} {
+	for _, required := range []string{bootstrap.SHA256, manifestDigest, fingerprint, "channel-stable.json", "channel-stable.sig", "update-signing.pub", "--source-commit " + manifest.SourceCommit, "--install-dependencies", "--enable-dhcp", "--disable-ssh", "--boot-network-policy gateway-nonblocking", "--grub-policy automatic-hidden", "--apply"} {
 		if !strings.Contains(command, required) {
 			t.Errorf("generated command missing %q", required)
 		}

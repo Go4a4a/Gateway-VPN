@@ -647,7 +647,7 @@ func TestWatchdogAPIUsesBoundedAuditedPolicyAndSecretFreeStatus(t *testing.T) {
 		t.Fatalf("get watchdog settings = %d %s", getResponse.Code, getResponse.Body.String())
 	}
 
-	payload := `{"enabled":true,"check_interval_seconds":20,"failure_threshold":4,"success_threshold":2,"reconcile_enabled":true,"component_restart_enabled":true,"restart_cooldown_seconds":45,"max_restarts_per_component":4,"restart_window_seconds":1200,"host_reboot_enabled":true,"reboot_after_critical_seconds":1200,"max_reboots_per_24h":1,"reboot_grace_seconds":90}`
+	payload := `{"enabled":true,"check_interval_seconds":20,"failure_threshold":4,"success_threshold":2,"reconcile_enabled":true,"component_restart_enabled":true,"restart_cooldown_seconds":45,"max_restarts_per_component":4,"restart_window_seconds":1200,"host_reboot_enabled":true,"reboot_after_critical_seconds":1200,"max_reboots_per_24h":1,"reboot_grace_seconds":90,"worker_stale_seconds":120,"wireguard_handshake_stale_seconds":180,"backup_max_age_hours":36,"database_wal_max_bytes":268435456,"minimum_disk_free_bytes":536870912,"minimum_disk_free_percent":5,"minimum_memory_available_bytes":134217728,"minimum_memory_available_percent":5}`
 	withoutCSRF := httptest.NewRequest(http.MethodPut, "/api/v1/settings/watchdog", strings.NewReader(payload))
 	withoutCSRF.AddCookie(cookie)
 	withoutCSRFResponse := httptest.NewRecorder()
