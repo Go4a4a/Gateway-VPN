@@ -26,6 +26,7 @@ import (
 	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/diagnostics"
 	"gateway-vpn/internal/directprobe"
+	"gateway-vpn/internal/ethernet"
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
@@ -63,6 +64,7 @@ type Runtime struct {
 	Routing               interface{ SyncRouting(context.Context) error }
 	WireGuard             interface{ SyncWireGuard(context.Context) error }
 	ModemRunner           *hilink.Runner
+	EthernetRunner        *ethernet.Runner
 	ModemRecovery         *modemrecovery.Runner
 	HealthRunner          *candidateruntime.PeriodicRunner
 	DirectRunner          *directprobe.Runner
@@ -188,6 +190,14 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	dataPlane.ModemRunner.OnError = func(err error) {
 		modemLogger.Warn("HiLink modem reconciliation failed", "error", err)
 	}
+	dataPlane.EthernetRunner.OnCycle = func(result ethernet.CycleResult) {
+		if len(result.ReadyUplinks) != 0 || len(result.OfflineUplinks) != 0 || len(result.ConflictUplinks) != 0 || len(result.RouteChanges) != 0 || len(result.Errors) != 0 {
+			routingLogger.Info("Ethernet uplink inventory reconciled", "ready", result.ReadyUplinks, "offline", result.OfflineUplinks, "conflicts", len(result.ConflictUplinks), "route_changes", result.RouteChanges, "errors", len(result.Errors))
+		}
+	}
+	dataPlane.EthernetRunner.OnError = func(err error) {
+		routingLogger.Warn("Ethernet uplink reconciliation failed", "error", err)
+	}
 	dataPlane.HealthRunner.OnCycle = func(result candidateruntime.PeriodicCycleResult) {
 		if result.Probed != 0 || result.Deferred != 0 || result.Published != 0 || len(result.Errors) != 0 {
 			healthLogger.Info("periodic path health cycle completed", "due", result.Due, "probed", result.Probed, "deferred", result.Deferred, "published", result.Published, "outage_suppressed", result.OutageSuppressed, "errors", len(result.Errors))
@@ -305,7 +315,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -412,6 +422,9 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.ModemRunner != nil {
 		startWorker("modem-reconcile", application.ModemRunner.Run)
+	}
+	if application.EthernetRunner != nil {
+		startWorker("ethernet-reconcile", application.EthernetRunner.Run)
 	}
 	if application.ModemRecovery != nil {
 		startWorker("modem-recovery", application.ModemRecovery.Run)
@@ -522,7 +535,7 @@ func (application *Runtime) runReconcileLoop(ctx context.Context) error {
 	for {
 		if application.Routing != nil {
 			if err := application.Routing.SyncRouting(ctx); err != nil && ctx.Err() == nil {
-				application.routingLogger.Warn("modem routing synchronization failed", "error", err)
+				application.routingLogger.Warn("uplink routing synchronization failed", "error", err)
 			}
 		}
 		if application.WireGuard != nil {

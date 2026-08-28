@@ -229,9 +229,9 @@ func (backend UbuntuBackend) Apply(ctx context.Context, manifest Manifest, trans
 	return backend.systemctl(ctx, "restart", "gateway-vpn.service")
 }
 
-func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, _ string) error {
+func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, transactionDirectory string) error {
 	if manifest.SchemaVersion == ManifestSchema {
-		return backend.commitEthernet(ctx, manifest)
+		return backend.commitEthernet(ctx, manifest, transactionDirectory)
 	}
 	if err := backend.validate(); err != nil {
 		return err

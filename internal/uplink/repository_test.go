@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	databasepkg "gateway-vpn/internal/db"
+	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/store"
 )
 
@@ -225,6 +227,112 @@ func TestUpdateEthernetConfigurationUsesGenerationAndInvalidatesOwnedPaths(t *te
 	})
 	if !errors.Is(err, store.ErrStaleGeneration) {
 		t.Fatalf("stale update error = %v", err)
+	}
+}
+
+func TestDHCPRuntimeObservationPreservesConfiguredDNSAndDesiredAddressState(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	if _, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "ETHERNET_PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("e", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{
+		ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan",
+		AddressMode: AddressDHCP, DNS: []string{"9.9.9.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.ObserveEthernetRuntime(ctx, created.ID, EthernetRuntimeObservation{
+		NetworkInterfaceID: created.NetworkInterfaceID, InterfaceName: "enp3s0",
+		IPv4CIDR: "172.20.1.2/24", Gateway: "172.20.1.1", DNS: []string{"9.9.9.9"},
+		State: StateReady, ReadinessReason: "READY", ConfigurationSeen: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repository.Get(ctx, created.ID)
+	if err != nil || stored.IPv4CIDR != "172.20.1.2/24" || stored.Gateway != "172.20.1.1" ||
+		stored.ConfiguredIPv4CIDR != "" || stored.ConfiguredGateway != "" || stored.ConfiguredDNSJSON != `["9.9.9.9"]` {
+		t.Fatalf("DHCP observed/configured state = %+v, %v", stored, err)
+	}
+	var configuredCIDR, configuredGateway sql.NullString
+	if err := database.QueryRowContext(ctx, "SELECT configured_ipv4_cidr, configured_gateway FROM uplinks WHERE id=?", created.ID).Scan(&configuredCIDR, &configuredGateway); err != nil || configuredCIDR.Valid || configuredGateway.Valid {
+		t.Fatalf("DHCP configured static state = %+v/%+v, %v", configuredCIDR, configuredGateway, err)
+	}
+}
+
+func TestReorderEnabledUsesOneOrderAcrossHiLinkAndEthernet(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	if _, err := modem.NewRepository(database, 1101, 0x1101).Adopt(ctx, modem.AdoptInput{
+		ID: "modem-a", Name: "HiLink A", IdentityKind: "usb_serial_hash",
+		IdentityHash: strings.Repeat("e", 64),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("3", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{
+		ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan", AddressMode: AddressDHCP,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReorderEnabled(ctx, []string{created.ID, "modem-a"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := repository.List(ctx)
+	if err != nil || len(items) != 2 || items[0].ID != created.ID || items[0].Priority != 10 || items[1].ID != "modem-a" || items[1].Priority != 20 {
+		t.Fatalf("generic uplink order = %+v, %v", items, err)
+	}
+	var legacyPriority int64
+	if err := database.QueryRow("SELECT priority FROM modems WHERE id='modem-a'").Scan(&legacyPriority); err != nil || legacyPriority != 20 {
+		t.Fatalf("legacy modem priority = %d, %v", legacyPriority, err)
+	}
+	if err := repository.ReorderEnabled(ctx, []string{"modem-a"}); !errors.Is(err, store.ErrPrioritySetMismatch) {
+		t.Fatalf("incomplete generic priority set error = %v", err)
+	}
+}
+
+func TestSetEthernetEnabledUsesGenerationAndInvalidatesPaths(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	if _, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("4", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.CreateEthernet(ctx, CreateEthernetInput{ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan", AddressMode: AddressDHCP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedGenericPaths(t, database, created.ID, created.RouteGeneration)
+	disabled, err := repository.SetEthernetEnabled(ctx, created.ID, SetEthernetEnabledInput{Enabled: false, ExpectedDesiredGeneration: created.DesiredGeneration})
+	if err != nil || disabled.Enabled || disabled.State != StateDisabled || disabled.ReadinessReason != "DISABLED_BY_USER" || disabled.DesiredGeneration != created.DesiredGeneration+1 || disabled.RouteGeneration != created.RouteGeneration+1 {
+		t.Fatalf("disabled Ethernet = %+v, %v", disabled, err)
+	}
+	var vpnState, directState string
+	if err := database.QueryRow("SELECT state FROM subscription_uplink_paths WHERE uplink_id=?", created.ID).Scan(&vpnState); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT state FROM direct_uplink_paths WHERE uplink_id=?", created.ID).Scan(&directState); err != nil {
+		t.Fatal(err)
+	}
+	if vpnState != "UPLINK_DISABLED" || directState != "UPLINK_DISABLED" {
+		t.Fatalf("disabled path states = %s/%s", vpnState, directState)
+	}
+	enabled, err := repository.SetEthernetEnabled(ctx, created.ID, SetEthernetEnabledInput{Enabled: true, ExpectedDesiredGeneration: disabled.DesiredGeneration})
+	if err != nil || !enabled.Enabled || enabled.State != StateConfiguredOffline || enabled.ReadinessReason != "NOT_OBSERVED" || enabled.ObservedGeneration != 0 {
+		t.Fatalf("re-enabled Ethernet = %+v, %v", enabled, err)
+	}
+	if _, err := repository.SetEthernetEnabled(ctx, created.ID, SetEthernetEnabledInput{Enabled: false, ExpectedDesiredGeneration: disabled.DesiredGeneration}); !errors.Is(err, store.ErrStaleGeneration) {
+		t.Fatalf("stale enabled update error = %v", err)
 	}
 }
 

@@ -223,6 +223,109 @@ func TestUbuntuBackendEthernetRejectsInterfaceRemovedAfterSnapshot(t *testing.T)
 	}
 }
 
+func TestUbuntuBackendEthernetDeleteKeepsCanonicalStateUntilConfirmationAndRollsBackFile(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	backend, _, _, transactionDirectory := ubuntuBackendFixture(t)
+	backend.Database = database
+	backend.RoutingTableStart = 1101
+	backend.FwmarkStart = 0x1101
+	backend.Paths.EthernetNetworkDir = filepath.Join(filepath.Dir(backend.Paths.LANNetworkFile), "ethernet")
+	if err := os.MkdirAll(backend.Paths.EthernetNetworkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repository := uplink.NewRepository(database, 1101, 0x1101)
+	observeEthernetTestInterface(t, repository, "netif:wan", "enp3s0", "a")
+	created, err := repository.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan",
+		AddressMode: uplink.AddressDHCP, DNS: []string{"9.9.9.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := repository.SetEthernetEnabled(ctx, created.ID, uplink.SetEthernetEnabledInput{Enabled: false, ExpectedDesiredGeneration: created.DesiredGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := backend.ethernetOwnedPath(created.ID)
+	previousNetwork, err := renderEthernetNetwork(disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, owned, []byte(previousNetwork))
+	manifest := ethernetTestManifest(EthernetMutation{
+		Operation: EthernetDelete, UplinkID: disabled.ID,
+		ExpectedDesiredGeneration: disabled.DesiredGeneration, TargetInterfaceID: disabled.NetworkInterfaceID,
+	})
+	if err := backend.Snapshot(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Apply(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
+		t.Fatalf("delete candidate owned file = %v", err)
+	}
+	stillStored, err := repository.Get(ctx, disabled.ID)
+	if err != nil || stillStored.DesiredGeneration != disabled.DesiredGeneration {
+		t.Fatalf("unconfirmed delete changed canonical state = %+v, %v", stillStored, err)
+	}
+	if err := backend.Rollback(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(owned)
+	if err != nil || string(content) != previousNetwork {
+		t.Fatalf("delete rollback file = %q, %v", content, err)
+	}
+	restored, err := repository.Get(ctx, disabled.ID)
+	if err != nil || restored.DesiredGeneration != disabled.DesiredGeneration || restored.Enabled {
+		t.Fatalf("delete rollback canonical state = %+v, %v", restored, err)
+	}
+}
+
+func TestUbuntuBackendEthernetDeleteCommitAtomicallyRemovesDisabledUplink(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	backend, _, _, transactionDirectory := ubuntuBackendFixture(t)
+	backend.Database = database
+	backend.RoutingTableStart = 1101
+	backend.FwmarkStart = 0x1101
+	backend.Paths.EthernetNetworkDir = filepath.Join(filepath.Dir(backend.Paths.LANNetworkFile), "ethernet")
+	if err := os.MkdirAll(backend.Paths.EthernetNetworkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repository := uplink.NewRepository(database, 1101, 0x1101)
+	observeEthernetTestInterface(t, repository, "netif:wan", "enp3s0", "b")
+	created, err := repository.CreateEthernet(ctx, uplink.CreateEthernetInput{ID: "ethernet-a", Name: "WAN", NetworkInterfaceID: "netif:wan", AddressMode: uplink.AddressDHCP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := repository.SetEthernetEnabled(ctx, created.ID, uplink.SetEthernetEnabledInput{Enabled: false, ExpectedDesiredGeneration: created.DesiredGeneration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, backend.ethernetOwnedPath(created.ID), []byte("owned"))
+	manifest := ethernetTestManifest(EthernetMutation{Operation: EthernetDelete, UplinkID: disabled.ID, ExpectedDesiredGeneration: disabled.DesiredGeneration, TargetInterfaceID: disabled.NetworkInterfaceID})
+	if err := backend.Snapshot(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Apply(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Commit(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Get(ctx, disabled.ID); err == nil {
+		t.Fatal("confirmed delete retained Ethernet uplink")
+	}
+	var roles int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM interface_role_assignments WHERE uplink_id=?", disabled.ID).Scan(&roles); err != nil || roles != 0 {
+		t.Fatalf("confirmed delete roles = %d, %v", roles, err)
+	}
+	// Confirmation replay after a crash is intentionally idempotent.
+	if err := backend.Commit(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatalf("idempotent delete commit = %v", err)
+	}
+}
+
 func observeEthernetTestInterface(t *testing.T, repository *uplink.Repository, id, ifname, digit string) {
 	t.Helper()
 	if _, err := repository.ObserveInterface(context.Background(), uplink.InterfaceObservation{

@@ -275,6 +275,14 @@ paths:
       operationId: listUplinks
       summary: Перечислить secret-free инвентарь HiLink и Ethernet выходов вместе с путями доступа
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/priorities:
+    put:
+      tags: [Uplinks]
+      operationId: reorderUplinks
+      summary: Задать единый полный приоритет всех включённых HiLink и Ethernet uplinks
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/uplinks/ethernet:
     post:
       tags: [Uplinks, Network]
@@ -289,6 +297,40 @@ paths:
       tags: [Uplinks, Network]
       operationId: replaceEthernetInterface
       summary: Переназначить stable NIC Ethernet-выхода через generation-checked safe apply
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}/impact:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [Uplinks]
+      operationId: previewEthernetUplinkImpact
+      summary: Показать последствия отключения или удаления Ethernet-выхода до изменения
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [Uplinks, Network]
+      operationId: deleteEthernetUplink
+      summary: Удалить отключённый Ethernet-выход через подтверждаемую safe-apply транзакцию
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}/enable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Uplinks]
+      operationId: enableEthernetUplink
+      summary: Включить Ethernet-выход с optimistic generation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/uplinks/{id}/disable:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Uplinks]
+      operationId: disableEthernetUplink
+      summary: Безопасно закрыть активный путь и отключить Ethernet-выход
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}

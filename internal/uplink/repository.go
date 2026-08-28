@@ -27,6 +27,8 @@ const (
 	StateConfiguredOffline = "UPLINK_CONFIGURED_OFFLINE"
 	StateConfiguring       = "UPLINK_CONFIGURING"
 	StateReady             = "UPLINK_READY"
+	StateSubnetConflict    = "UPLINK_SUBNET_CONFLICT"
+	StateDisabled          = "UPLINK_DISABLED"
 )
 
 type Repository struct {
@@ -118,6 +120,9 @@ type Uplink struct {
 	IPv4CIDR           string
 	Gateway            string
 	DNSJSON            string
+	ConfiguredIPv4CIDR string
+	ConfiguredGateway  string
+	ConfiguredDNSJSON  string
 	MTU                int64
 	RoutingTableID     int64
 	Fwmark             int64
@@ -125,10 +130,34 @@ type Uplink struct {
 	DesiredGeneration  int64
 	ObservedGeneration int64
 	State              string
+	ReadinessReason    string
 	LastSeenAt         string
 	StableSince        string
 	CreatedAt          string
 	UpdatedAt          string
+}
+
+type EthernetRuntimeObservation struct {
+	NetworkInterfaceID   string
+	InterfaceName        string
+	IPv4CIDR             string
+	Gateway              string
+	DNS                  []string
+	State                string
+	ReadinessReason      string
+	ConfigurationSeen    bool
+	RouteIdentityChanged bool
+}
+
+type EthernetRuntimeUpdate struct {
+	RouteContextChanged bool
+	RouteGeneration     int64
+	PathsInvalidated    int64
+}
+
+type SetEthernetEnabledInput struct {
+	Enabled                   bool
+	ExpectedDesiredGeneration int64
 }
 
 type HiLinkDetails struct {
@@ -309,11 +338,14 @@ WHERE network_interface_id=? AND role NOT IN ('UNUSED', 'SHARED_ONE_ARM')`, inpu
 	_, err = transaction.ExecContext(ctx, `
 INSERT INTO uplinks (
     id, display_number, type, name, enabled, priority, network_interface_id,
-    address_mode, ipv4_cidr, gateway, dns_json, mtu, routing_table_id, fwmark,
+    address_mode, ipv4_cidr, gateway, dns_json,
+    configured_ipv4_cidr, configured_gateway, configured_dns_json,
+    mtu, routing_table_id, fwmark,
     state, created_at, updated_at
-) VALUES (?, ?, 'ETHERNET', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLINK_CONFIGURED_OFFLINE', ?, ?)`,
+) VALUES (?, ?, 'ETHERNET', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLINK_CONFIGURED_OFFLINE', ?, ?)`,
 		input.ID, displayNumber, strings.TrimSpace(input.Name), priority, input.NetworkInterfaceID,
 		input.AddressMode, nullIfEmpty(input.IPv4CIDR), nullIfEmpty(input.Gateway), string(dnsJSON),
+		nullIfEmpty(input.IPv4CIDR), nullIfEmpty(input.Gateway), string(dnsJSON),
 		nullIfZero(input.MTU), routingTableID, fwmark, now, now)
 	if err != nil {
 		return Uplink{}, fmt.Errorf("insert Ethernet uplink: %w", err)
@@ -371,17 +403,504 @@ func (repository *Repository) List(ctx context.Context) ([]Uplink, error) {
 	return result, nil
 }
 
+// ReorderEnabled applies one total priority order across HiLink and Ethernet.
+// Legacy HiLink rows are updated through their compatibility source so both
+// projections remain identical until the bounded legacy tables are removed.
+func (repository *Repository) ReorderEnabled(ctx context.Context, orderedIDs []string) error {
+	return repository.reorderEnabled(ctx, "", orderedIDs)
+}
+
+// ReorderEnabledType preserves positions occupied by other uplink types. It
+// keeps the legacy modem endpoint safe while the primary WebUI uses the total
+// generic order.
+func (repository *Repository) ReorderEnabledType(ctx context.Context, uplinkType string, orderedIDs []string) error {
+	if uplinkType != TypeHiLink && uplinkType != TypeEthernet {
+		return errors.New("valid uplink type is required")
+	}
+	return repository.reorderEnabled(ctx, uplinkType, orderedIDs)
+}
+
+func (repository *Repository) reorderEnabled(ctx context.Context, typeFilter string, orderedIDs []string) error {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin uplink reorder: %w", err)
+	}
+	defer transaction.Rollback()
+	rows, err := transaction.QueryContext(ctx, "SELECT id, type FROM uplinks WHERE enabled=1 ORDER BY priority, display_number")
+	if err != nil {
+		return fmt.Errorf("list enabled uplinks for reorder: %w", err)
+	}
+	type typedID struct{ id, uplinkType string }
+	var current []typedID
+	for rows.Next() {
+		var item typedID
+		if err := rows.Scan(&item.id, &item.uplinkType); err != nil {
+			rows.Close()
+			return err
+		}
+		current = append(current, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	wanted := make(map[string]struct{}, len(orderedIDs))
+	for _, id := range orderedIDs {
+		if !validIdentifier(id) {
+			return errors.New("uplink priority list contains an invalid id")
+		}
+		if _, duplicate := wanted[id]; duplicate {
+			return store.ErrPrioritySetMismatch
+		}
+		wanted[id] = struct{}{}
+	}
+	var final []string
+	if typeFilter == "" {
+		if len(current) != len(orderedIDs) {
+			return store.ErrPrioritySetMismatch
+		}
+		for _, item := range current {
+			if _, exists := wanted[item.id]; !exists {
+				return store.ErrPrioritySetMismatch
+			}
+		}
+		final = append(final, orderedIDs...)
+	} else {
+		expected := 0
+		for _, item := range current {
+			if item.uplinkType == typeFilter {
+				expected++
+			}
+		}
+		if expected != len(orderedIDs) {
+			return store.ErrPrioritySetMismatch
+		}
+		position := 0
+		for _, item := range current {
+			if item.uplinkType == typeFilter {
+				id := orderedIDs[position]
+				position++
+				matched := false
+				for _, candidate := range current {
+					if candidate.id == id && candidate.uplinkType == typeFilter {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return store.ErrPrioritySetMismatch
+				}
+				final = append(final, id)
+			} else {
+				final = append(final, item.id)
+			}
+		}
+	}
+	// Global display numbers are unique, so negative temporary priorities are
+	// collision-free in both the legacy modem table and generic uplink table.
+	if _, err := transaction.ExecContext(ctx, "UPDATE modems SET priority=-display_number WHERE enabled=1"); err != nil {
+		return fmt.Errorf("clear legacy modem priorities: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE uplinks SET priority=-display_number WHERE enabled=1"); err != nil {
+		return fmt.Errorf("clear generic uplink priorities: %w", err)
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	for index, id := range final {
+		priority := int64((index + 1) * 10)
+		var uplinkType string
+		if err := transaction.QueryRowContext(ctx, "SELECT type FROM uplinks WHERE id=? AND enabled=1", id).Scan(&uplinkType); err != nil {
+			return store.ErrPrioritySetMismatch
+		}
+		var result sql.Result
+		if uplinkType == TypeHiLink {
+			result, err = transaction.ExecContext(ctx, "UPDATE modems SET priority=?, updated_at=? WHERE id=? AND enabled=1", priority, now, id)
+		} else {
+			result, err = transaction.ExecContext(ctx, "UPDATE uplinks SET priority=?, updated_at=? WHERE id=? AND enabled=1 AND type='ETHERNET'", priority, now, id)
+		}
+		if err != nil {
+			return fmt.Errorf("set uplink priority: %w", err)
+		}
+		if count, countErr := result.RowsAffected(); countErr != nil || count != 1 {
+			return store.ErrPrioritySetMismatch
+		}
+	}
+	if err := appendEventTx(ctx, transaction, now, "UPLINK_PRIORITY_REORDERED", "", map[string]any{"ordered_uplink_ids": final}); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+func (repository *Repository) SetEthernetEnabled(ctx context.Context, id string, input SetEthernetEnabledInput) (Uplink, error) {
+	if !validIdentifier(id) || input.ExpectedDesiredGeneration < 1 {
+		return Uplink{}, errors.New("Ethernet uplink and expected generation are required")
+	}
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Uplink{}, fmt.Errorf("begin Ethernet enabled update: %w", err)
+	}
+	defer transaction.Rollback()
+	var uplinkType string
+	var currentEnabled int
+	var currentDesired, currentRoute, priority int64
+	if err := transaction.QueryRowContext(ctx, `
+SELECT type, enabled, desired_generation, route_generation, priority
+FROM uplinks WHERE id=?`, id).Scan(&uplinkType, &currentEnabled, &currentDesired, &currentRoute, &priority); errors.Is(err, sql.ErrNoRows) {
+		return Uplink{}, store.ErrNotFound
+	} else if err != nil {
+		return Uplink{}, err
+	}
+	if uplinkType != TypeEthernet {
+		return Uplink{}, errors.New("only an Ethernet uplink can use generic enabled control")
+	}
+	if currentDesired != input.ExpectedDesiredGeneration {
+		return Uplink{}, store.ErrStaleGeneration
+	}
+	if input.Enabled == (currentEnabled != 0) {
+		return Uplink{}, errors.New("Ethernet enabled state is unchanged")
+	}
+	if !input.Enabled {
+		var active int
+		if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM runtime_state WHERE singleton_id=1 AND active_uplink_id=?", id).Scan(&active); err != nil {
+			return Uplink{}, err
+		}
+		if active != 0 {
+			return Uplink{}, errors.New("active Ethernet uplink must be blocked before disabling")
+		}
+	} else if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority),0)+10 FROM uplinks WHERE enabled=1").Scan(&priority); err != nil {
+		return Uplink{}, err
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	state, reason, pathState := StateDisabled, "DISABLED_BY_USER", "UPLINK_DISABLED"
+	if input.Enabled {
+		state, reason, pathState = StateConfiguredOffline, "NOT_OBSERVED", "UPLINK_OFFLINE"
+	}
+	nextDesired, nextRoute := currentDesired+1, currentRoute+1
+	result, err := transaction.ExecContext(ctx, `
+UPDATE uplinks
+SET enabled=?, priority=?, desired_generation=?, observed_generation=0,
+    route_generation=?, state=?, readiness_reason=?, stable_since=NULL,
+    updated_at=?
+WHERE id=? AND desired_generation=? AND type='ETHERNET'`,
+		boolInt(input.Enabled), priority, nextDesired, nextRoute, state, reason, now, id, currentDesired)
+	if err != nil {
+		return Uplink{}, fmt.Errorf("update Ethernet enabled state: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return Uplink{}, store.ErrStaleGeneration
+	}
+	roleState := "OFFLINE"
+	if input.Enabled {
+		roleState = "CONFIGURED"
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE interface_role_assignments
+SET desired_generation=desired_generation+1, observed_generation=0,
+    state=?, updated_at=?
+WHERE uplink_id=? AND role='ETHERNET_UPLINK'`, roleState, now, id); err != nil {
+		return Uplink{}, err
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE subscription_uplink_paths
+SET route_generation=?, state=?, transport_state='UNKNOWN', selected_node_id=NULL,
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0, last_checked_at=NULL,
+    expires_at=NULL, updated_at=? WHERE uplink_id=?`, nextRoute, pathState, now, id); err != nil {
+		return Uplink{}, err
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE direct_uplink_paths
+SET route_generation=?, state=?, transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    whitelist_targets_passed=0, last_checked_at=NULL, expires_at=NULL,
+    updated_at=? WHERE uplink_id=?`, nextRoute, pathState, now, id); err != nil {
+		return Uplink{}, err
+	}
+	if err := appendEventTx(ctx, transaction, now, "ETHERNET_ENABLED_CHANGED", id, map[string]any{
+		"enabled": input.Enabled, "desired_generation": nextDesired, "route_generation": nextRoute,
+	}); err != nil {
+		return Uplink{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Uplink{}, err
+	}
+	return repository.Get(ctx, id)
+}
+
+// MarkUnseenEthernetInterfacesAbsent closes stale ifname ownership after a
+// hot-unplug or rename. HiLink and virtual-role records are intentionally not
+// touched by the generic Ethernet observer.
+func (repository *Repository) MarkUnseenEthernetInterfacesAbsent(ctx context.Context, seen map[string]struct{}) error {
+	rows, err := repository.database.QueryContext(ctx, `
+SELECT id FROM network_interfaces
+WHERE stable_identity_kind LIKE 'ETHERNET\_%' ESCAPE '\'`)
+	if err != nil {
+		return fmt.Errorf("list generic Ethernet interfaces: %w", err)
+	}
+	var missing []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan generic Ethernet interface: %w", err)
+		}
+		if _, present := seen[id]; !present {
+			missing = append(missing, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate generic Ethernet interfaces: %w", err)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin absent Ethernet observation: %w", err)
+	}
+	defer transaction.Rollback()
+	for _, id := range missing {
+		if _, err := transaction.ExecContext(ctx, `
+UPDATE network_interfaces
+SET current_ifname=NULL, carrier_state='ABSENT', addresses_json='[]',
+    observed_at=?, updated_at=?
+WHERE id=? AND stable_identity_kind LIKE 'ETHERNET\_%' ESCAPE '\'`, now, now, id); err != nil {
+			return fmt.Errorf("mark Ethernet interface absent: %w", err)
+		}
+	}
+	return transaction.Commit()
+}
+
+// EthernetApplyInProgress prevents a temporary safe-apply candidate from
+// becoming eligible before explicit confirmation. Candidate JSON is decoded
+// in Go rather than interpolated into SQL.
+func (repository *Repository) EthernetApplyInProgress(ctx context.Context, uplinkID string) (bool, error) {
+	if !validIdentifier(uplinkID) {
+		return false, errors.New("valid Ethernet uplink id is required")
+	}
+	rows, err := repository.database.QueryContext(ctx, `
+SELECT candidate_json FROM network_apply_transactions
+WHERE operation_kind='ETHERNET_UPLINK'
+  AND state IN ('PREPARING','ARMED','APPLIED','CONFIRMING')`)
+	if err != nil {
+		return false, fmt.Errorf("list active Ethernet safe applies: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return false, fmt.Errorf("scan active Ethernet safe apply: %w", err)
+		}
+		var candidate struct {
+			UplinkID string `json:"uplink_id"`
+		}
+		if err := json.Unmarshal([]byte(payload), &candidate); err != nil {
+			return false, errors.New("active Ethernet safe apply metadata is invalid")
+		}
+		if candidate.UplinkID == uplinkID {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// ObserveEthernetRuntime is the sole transition from desired Ethernet
+// configuration to observed eligibility. It invalidates only this uplink's
+// evidence whenever the effective route context changes or becomes unusable.
+func (repository *Repository) ObserveEthernetRuntime(ctx context.Context, id string, input EthernetRuntimeObservation) (EthernetRuntimeUpdate, error) {
+	if !validIdentifier(id) || !validIdentifier(input.NetworkInterfaceID) || input.ReadinessReason == "" || len(input.ReadinessReason) > 128 {
+		return EthernetRuntimeUpdate{}, errors.New("complete Ethernet runtime observation is required")
+	}
+	switch input.State {
+	case StateReady, StateConfiguring, StateConfiguredOffline, StateSubnetConflict, StateDisabled:
+	default:
+		return EthernetRuntimeUpdate{}, errors.New("invalid Ethernet runtime state")
+	}
+	if input.InterfaceName != "" && !validIfname(input.InterfaceName) {
+		return EthernetRuntimeUpdate{}, errors.New("invalid observed Ethernet interface name")
+	}
+	var prefix netip.Prefix
+	var gateway netip.Addr
+	var err error
+	if input.State == StateReady || input.State == StateSubnetConflict {
+		prefix, err = netip.ParsePrefix(input.IPv4CIDR)
+		if err != nil || !netutil.IsUsableIPv4Host(prefix, prefix.Addr()) {
+			return EthernetRuntimeUpdate{}, errors.New("ready Ethernet observation requires a usable IPv4 CIDR")
+		}
+		gateway, err = netip.ParseAddr(input.Gateway)
+		if err != nil || !gateway.Is4() || !netutil.IsUsableIPv4Host(prefix, gateway) || gateway == prefix.Addr() {
+			return EthernetRuntimeUpdate{}, errors.New("ready Ethernet observation requires a different gateway in the same subnet")
+		}
+	}
+	dnsJSON, err := json.Marshal(input.DNS)
+	if err != nil {
+		return EthernetRuntimeUpdate{}, err
+	}
+	for _, raw := range input.DNS {
+		address, parseErr := netip.ParseAddr(raw)
+		if parseErr != nil || !address.Is4() || address.IsUnspecified() {
+			return EthernetRuntimeUpdate{}, fmt.Errorf("invalid observed Ethernet DNS address %q", raw)
+		}
+	}
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return EthernetRuntimeUpdate{}, fmt.Errorf("begin Ethernet runtime observation: %w", err)
+	}
+	defer transaction.Rollback()
+	var uplinkType, interfaceID, addressMode, currentCIDR, currentGateway, currentDNS, currentState, currentReason string
+	var enabled int
+	var desiredGeneration, observedGeneration, routeGeneration int64
+	err = transaction.QueryRowContext(ctx, `
+SELECT type, COALESCE(network_interface_id,''), address_mode,
+       COALESCE(ipv4_cidr,''), COALESCE(gateway,''), dns_json, enabled,
+       desired_generation, observed_generation, route_generation, state,
+       readiness_reason
+FROM uplinks WHERE id=?`, id).Scan(
+		&uplinkType, &interfaceID, &addressMode, &currentCIDR, &currentGateway,
+		&currentDNS, &enabled, &desiredGeneration, &observedGeneration,
+		&routeGeneration, &currentState, &currentReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EthernetRuntimeUpdate{}, store.ErrNotFound
+	}
+	if err != nil {
+		return EthernetRuntimeUpdate{}, fmt.Errorf("read Ethernet runtime state: %w", err)
+	}
+	if uplinkType != TypeEthernet || interfaceID != input.NetworkInterfaceID {
+		return EthernetRuntimeUpdate{}, errors.New("Ethernet observation does not match assigned stable interface")
+	}
+	if enabled == 0 && input.State != StateDisabled {
+		return EthernetRuntimeUpdate{}, errors.New("disabled Ethernet uplink must remain disabled")
+	}
+	if enabled != 0 && input.State == StateDisabled {
+		return EthernetRuntimeUpdate{}, errors.New("enabled Ethernet uplink cannot observe disabled state")
+	}
+	if addressMode == AddressStatic && (input.State == StateReady || input.State == StateSubnetConflict) && (currentCIDR != input.IPv4CIDR || currentGateway != input.Gateway) {
+		return EthernetRuntimeUpdate{}, errors.New("observed static Ethernet route differs from desired configuration")
+	}
+	routeChanged := input.RouteIdentityChanged || currentState == StateReady && input.State != StateReady
+	if input.State == StateReady || input.State == StateSubnetConflict {
+		routeChanged = routeChanged || currentCIDR != input.IPv4CIDR || currentGateway != input.Gateway || currentDNS != string(dnsJSON)
+	}
+	nextRouteGeneration := routeGeneration
+	if routeChanged {
+		nextRouteGeneration++
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	stableSince := any(nil)
+	if input.State == StateReady {
+		if currentState == StateReady && !routeChanged {
+			var existing sql.NullString
+			if err := transaction.QueryRowContext(ctx, "SELECT stable_since FROM uplinks WHERE id=?", id).Scan(&existing); err != nil {
+				return EthernetRuntimeUpdate{}, err
+			}
+			stableSince = nullIfEmpty(existing.String)
+		} else {
+			stableSince = now
+		}
+	}
+	nextObserved := int64(0)
+	if input.ConfigurationSeen {
+		nextObserved = desiredGeneration
+	}
+	updateCIDR, updateGateway, updateDNS := currentCIDR, currentGateway, currentDNS
+	if addressMode == AddressDHCP && (input.State == StateReady || input.State == StateSubnetConflict) {
+		updateCIDR, updateGateway, updateDNS = input.IPv4CIDR, input.Gateway, string(dnsJSON)
+	}
+	result, err := transaction.ExecContext(ctx, `
+UPDATE uplinks
+SET ipv4_cidr=?, gateway=?, dns_json=?, observed_generation=?, state=?,
+    readiness_reason=?, route_generation=?,
+    last_seen_at=CASE WHEN ?<>'' THEN ? ELSE last_seen_at END,
+    stable_since=?, updated_at=?
+WHERE id=? AND network_interface_id=?`,
+		nullIfEmpty(updateCIDR), nullIfEmpty(updateGateway), updateDNS,
+		nextObserved, input.State, input.ReadinessReason, nextRouteGeneration,
+		input.InterfaceName, now, stableSince, now, id, input.NetworkInterfaceID)
+	if err != nil {
+		return EthernetRuntimeUpdate{}, fmt.Errorf("store Ethernet runtime observation: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return EthernetRuntimeUpdate{}, store.ErrNotFound
+	}
+	roleState := "CONFIGURING"
+	if input.State == StateReady {
+		roleState = "APPLIED"
+	} else if input.State == StateSubnetConflict {
+		roleState = "CONFLICT"
+	} else if input.State == StateConfiguredOffline || input.State == StateDisabled {
+		roleState = "OFFLINE"
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE interface_role_assignments
+SET observed_generation=?, state=?, updated_at=?
+WHERE uplink_id=? AND network_interface_id=? AND role='ETHERNET_UPLINK'`,
+		nextObserved, roleState, now, id, input.NetworkInterfaceID); err != nil {
+		return EthernetRuntimeUpdate{}, fmt.Errorf("store Ethernet role observation: %w", err)
+	}
+	pathsInvalidated := int64(0)
+	if routeChanged || input.State != StateReady {
+		pathState := "UPLINK_OFFLINE"
+		if input.State == StateDisabled {
+			pathState = "UPLINK_DISABLED"
+		} else if input.State == StateSubnetConflict {
+			pathState = "SUBNET_CONFLICT"
+		}
+		vpnResult, err := transaction.ExecContext(ctx, `
+UPDATE subscription_uplink_paths
+SET route_generation=?, state=?, transport_state='UNKNOWN', selected_node_id=NULL,
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0, last_checked_at=NULL,
+    expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, nextRouteGeneration, pathState, now, id)
+		if err != nil {
+			return EthernetRuntimeUpdate{}, fmt.Errorf("invalidate Ethernet VPN paths: %w", err)
+		}
+		directResult, err := transaction.ExecContext(ctx, `
+UPDATE direct_uplink_paths
+SET route_generation=?, state=?, transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    whitelist_targets_passed=0, last_checked_at=NULL, expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, nextRouteGeneration, pathState, now, id)
+		if err != nil {
+			return EthernetRuntimeUpdate{}, fmt.Errorf("invalidate Ethernet direct path: %w", err)
+		}
+		vpnCount, _ := vpnResult.RowsAffected()
+		directCount, _ := directResult.RowsAffected()
+		pathsInvalidated = vpnCount + directCount
+	}
+	if routeChanged || currentState != input.State || currentReason != input.ReadinessReason || observedGeneration != nextObserved {
+		if err := appendEventTx(ctx, transaction, now, "ETHERNET_RUNTIME_OBSERVED", id, map[string]any{
+			"state": input.State, "reason": input.ReadinessReason,
+			"route_generation": nextRouteGeneration, "route_changed": routeChanged,
+		}); err != nil {
+			return EthernetRuntimeUpdate{}, err
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return EthernetRuntimeUpdate{}, fmt.Errorf("commit Ethernet runtime observation: %w", err)
+	}
+	return EthernetRuntimeUpdate{RouteContextChanged: routeChanged, RouteGeneration: nextRouteGeneration, PathsInvalidated: pathsInvalidated}, nil
+}
+
 func (repository *Repository) GetHiLink(ctx context.Context, id string) (HiLinkDetails, error) {
 	var result HiLinkDetails
 	var enabled int64
 	var networkInterfaceID, currentIfname, ipv4CIDR, gateway, dnsJSON sql.NullString
+	var configuredCIDR, configuredGateway sql.NullString
 	var mtu sql.NullInt64
 	var lastSeenAt, stableSince, operatorLabel, observedOperator, maskedSerial, apiSecretRef sql.NullString
 	err := repository.database.QueryRowContext(ctx, `
 SELECT u.id, u.display_number, u.type, u.name, u.enabled, u.priority,
        u.network_interface_id, n.current_ifname, u.address_mode, u.ipv4_cidr,
-       u.gateway, u.dns_json, u.mtu, u.routing_table_id, u.fwmark,
+       u.gateway, u.dns_json, u.configured_ipv4_cidr, u.configured_gateway,
+       u.configured_dns_json, u.mtu, u.routing_table_id, u.fwmark,
        u.route_generation, u.desired_generation, u.observed_generation, u.state,
+       u.readiness_reason,
        u.last_seen_at, u.stable_since, u.created_at, u.updated_at,
        h.operator_label, h.observed_operator, h.identity_kind, h.masked_serial,
        h.modem_state, h.telemetry_state, h.management_reachability_state, h.api_secret_ref
@@ -391,8 +910,9 @@ LEFT JOIN network_interfaces AS n ON n.id=u.network_interface_id
 WHERE u.id=? AND u.type='HILINK'`, id).Scan(
 		&result.ID, &result.DisplayNumber, &result.Type, &result.Name, &enabled, &result.Priority,
 		&networkInterfaceID, &currentIfname, &result.AddressMode, &ipv4CIDR, &gateway, &dnsJSON,
+		&configuredCIDR, &configuredGateway, &result.ConfiguredDNSJSON,
 		&mtu, &result.RoutingTableID, &result.Fwmark, &result.RouteGeneration,
-		&result.DesiredGeneration, &result.ObservedGeneration, &result.State,
+		&result.DesiredGeneration, &result.ObservedGeneration, &result.State, &result.ReadinessReason,
 		&lastSeenAt, &stableSince, &result.CreatedAt, &result.UpdatedAt,
 		&operatorLabel, &observedOperator, &result.IdentityKind, &maskedSerial,
 		&result.ModemState, &result.TelemetryState, &result.ManagementReachabilityState, &apiSecretRef)
@@ -405,6 +925,7 @@ WHERE u.id=? AND u.type='HILINK'`, id).Scan(
 	result.Enabled = enabled != 0
 	result.NetworkInterfaceID, result.CurrentIfname = networkInterfaceID.String, currentIfname.String
 	result.IPv4CIDR, result.Gateway, result.DNSJSON = ipv4CIDR.String, gateway.String, dnsJSON.String
+	result.ConfiguredIPv4CIDR, result.ConfiguredGateway = configuredCIDR.String, configuredGateway.String
 	result.MTU, result.LastSeenAt, result.StableSince = mtu.Int64, lastSeenAt.String, stableSince.String
 	result.OperatorLabel, result.ObservedOperator = operatorLabel.String, observedOperator.String
 	result.MaskedSerial, result.APISecretRef = maskedSerial.String, apiSecretRef.String
@@ -549,16 +1070,17 @@ func (repository *Repository) UpdateEthernetConfiguration(ctx context.Context, u
 		return Uplink{}, fmt.Errorf("begin Ethernet configuration update: %w", err)
 	}
 	defer transaction.Rollback()
-	var uplinkType, currentInterfaceID, currentAddressMode, currentCIDR, currentGateway, currentDNS string
+	var uplinkType, currentInterfaceID, currentAddressMode, configuredCIDR, configuredGateway, configuredDNS string
 	var currentMTU sql.NullInt64
 	var currentDesired, currentRoute int64
 	err = transaction.QueryRowContext(ctx, `
 SELECT type, COALESCE(network_interface_id, ''), address_mode,
-       COALESCE(ipv4_cidr, ''), COALESCE(gateway, ''), dns_json, mtu,
+       COALESCE(configured_ipv4_cidr, ''), COALESCE(configured_gateway, ''),
+       configured_dns_json, mtu,
        desired_generation, route_generation
 FROM uplinks WHERE id=?`, uplinkID).Scan(
-		&uplinkType, &currentInterfaceID, &currentAddressMode, &currentCIDR,
-		&currentGateway, &currentDNS, &currentMTU, &currentDesired, &currentRoute)
+		&uplinkType, &currentInterfaceID, &currentAddressMode, &configuredCIDR,
+		&configuredGateway, &configuredDNS, &currentMTU, &currentDesired, &currentRoute)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Uplink{}, store.ErrNotFound
 	}
@@ -578,18 +1100,20 @@ FROM uplinks WHERE id=?`, uplinkID).Scan(
 	if err != nil {
 		return Uplink{}, fmt.Errorf("encode Ethernet DNS: %w", err)
 	}
-	if currentAddressMode == input.AddressMode && currentCIDR == input.IPv4CIDR && currentGateway == input.Gateway && currentDNS == string(dnsJSON) && currentMTU.Int64 == input.MTU {
+	if currentAddressMode == input.AddressMode && configuredCIDR == input.IPv4CIDR && configuredGateway == input.Gateway && configuredDNS == string(dnsJSON) && currentMTU.Int64 == input.MTU {
 		return Uplink{}, errors.New("Ethernet configuration is unchanged")
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	result, err := transaction.ExecContext(ctx, `
 UPDATE uplinks
-SET address_mode=?, ipv4_cidr=?, gateway=?, dns_json=?, mtu=?,
+SET address_mode=?, ipv4_cidr=?, gateway=?, dns_json=?,
+    configured_ipv4_cidr=?, configured_gateway=?, configured_dns_json=?, mtu=?,
     desired_generation=desired_generation+1, observed_generation=0,
     route_generation=route_generation+1, state='UPLINK_CONFIGURING',
     last_seen_at=NULL, stable_since=NULL, updated_at=?
 WHERE id=? AND desired_generation=? AND network_interface_id=?`,
 		input.AddressMode, nullIfEmpty(input.IPv4CIDR), nullIfEmpty(input.Gateway),
+		string(dnsJSON), nullIfEmpty(input.IPv4CIDR), nullIfEmpty(input.Gateway),
 		string(dnsJSON), nullIfZero(input.MTU), now, uplinkID,
 		input.ExpectedDesiredGeneration, input.NetworkInterfaceID)
 	if err != nil {
@@ -767,8 +1291,10 @@ ON CONFLICT(key) DO UPDATE SET
 const uplinkSelect = `
 SELECT u.id, u.display_number, u.type, u.name, u.enabled, u.priority,
        u.network_interface_id, n.current_ifname, u.address_mode, u.ipv4_cidr,
-       u.gateway, u.dns_json, u.mtu, u.routing_table_id, u.fwmark,
+       u.gateway, u.dns_json, u.configured_ipv4_cidr, u.configured_gateway,
+       u.configured_dns_json, u.mtu, u.routing_table_id, u.fwmark,
        u.route_generation, u.desired_generation, u.observed_generation, u.state,
+       u.readiness_reason,
        u.last_seen_at, u.stable_since, u.created_at, u.updated_at
 FROM uplinks AS u
 LEFT JOIN network_interfaces AS n ON n.id=u.network_interface_id`
@@ -784,18 +1310,20 @@ type scanner interface{ Scan(...any) error }
 func scanUplink(row scanner) (Uplink, error) {
 	var item Uplink
 	var enabled int64
-	var networkInterfaceID, currentIfname, ipv4CIDR, gateway sql.NullString
+	var networkInterfaceID, currentIfname, ipv4CIDR, gateway, configuredCIDR, configuredGateway sql.NullString
 	var mtu sql.NullInt64
 	var lastSeenAt, stableSince sql.NullString
 	err := row.Scan(
 		&item.ID, &item.DisplayNumber, &item.Type, &item.Name, &enabled, &item.Priority,
 		&networkInterfaceID, &currentIfname, &item.AddressMode, &ipv4CIDR, &gateway,
-		&item.DNSJSON, &mtu, &item.RoutingTableID, &item.Fwmark, &item.RouteGeneration,
-		&item.DesiredGeneration, &item.ObservedGeneration, &item.State,
+		&item.DNSJSON, &configuredCIDR, &configuredGateway, &item.ConfiguredDNSJSON,
+		&mtu, &item.RoutingTableID, &item.Fwmark, &item.RouteGeneration,
+		&item.DesiredGeneration, &item.ObservedGeneration, &item.State, &item.ReadinessReason,
 		&lastSeenAt, &stableSince, &item.CreatedAt, &item.UpdatedAt)
 	item.Enabled = enabled != 0
 	item.NetworkInterfaceID, item.CurrentIfname = networkInterfaceID.String, currentIfname.String
 	item.IPv4CIDR, item.Gateway, item.MTU = ipv4CIDR.String, gateway.String, mtu.Int64
+	item.ConfiguredIPv4CIDR, item.ConfiguredGateway = configuredCIDR.String, configuredGateway.String
 	item.LastSeenAt, item.StableSince = lastSeenAt.String, stableSince.String
 	return item, err
 }
@@ -826,4 +1354,11 @@ func nullIfZero(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

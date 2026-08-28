@@ -302,9 +302,14 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.accessPolicySettings)))
 	mux.Handle("PUT /api/v1/settings/access-policy", server.protected(http.HandlerFunc(server.updateAccessPolicySettings)))
 	mux.Handle("GET /api/v1/uplinks", server.protected(http.HandlerFunc(server.uplinks)))
+	mux.Handle("PUT /api/v1/uplinks/priorities", server.protected(http.HandlerFunc(server.reorderUplinks)))
 	mux.Handle("POST /api/v1/uplinks/ethernet", server.protected(http.HandlerFunc(server.createEthernetUplink)))
+	mux.Handle("GET /api/v1/uplinks/{id}/impact", server.protected(http.HandlerFunc(server.uplinkImpact)))
+	mux.Handle("POST /api/v1/uplinks/{id}/enable", server.protected(http.HandlerFunc(server.enableEthernetUplink)))
+	mux.Handle("POST /api/v1/uplinks/{id}/disable", server.protected(http.HandlerFunc(server.disableEthernetUplink)))
 	mux.Handle("POST /api/v1/uplinks/{id}/replace-interface", server.protected(http.HandlerFunc(server.replaceEthernetInterface)))
 	mux.Handle("PUT /api/v1/uplinks/{id}/network", server.protected(http.HandlerFunc(server.updateEthernetNetwork)))
+	mux.Handle("DELETE /api/v1/uplinks/{id}", server.protected(http.HandlerFunc(server.deleteEthernetUplink)))
 	mux.Handle("GET /api/v1/network/interfaces", server.protected(http.HandlerFunc(server.networkInterfaces)))
 	mux.Handle("GET /api/v1/modems", server.protected(http.HandlerFunc(server.modems)))
 	mux.Handle("PUT /api/v1/modems/priorities", server.protected(http.HandlerFunc(server.reorderModems)))
@@ -1023,6 +1028,9 @@ type uplinkReadItem struct {
 	IPv4CIDR                    string         `json:"ipv4_cidr"`
 	Gateway                     string         `json:"gateway"`
 	DNS                         []string       `json:"dns"`
+	ConfiguredIPv4CIDR          string         `json:"configured_ipv4_cidr"`
+	ConfiguredGateway           string         `json:"configured_gateway"`
+	ConfiguredDNS               []string       `json:"configured_dns"`
 	MTU                         int64          `json:"mtu"`
 	RoutingTableID              int64          `json:"routing_table_id"`
 	Fwmark                      int64          `json:"fwmark"`
@@ -1030,6 +1038,7 @@ type uplinkReadItem struct {
 	DesiredGeneration           int64          `json:"desired_generation"`
 	ObservedGeneration          int64          `json:"observed_generation"`
 	State                       string         `json:"state"`
+	ReadinessReason             string         `json:"readiness_reason"`
 	LastSeenAt                  string         `json:"last_seen_at"`
 	StableSince                 string         `json:"stable_since"`
 	OperatorLabel               string         `json:"operator_label,omitempty"`
@@ -1090,15 +1099,23 @@ func (server *Server) uplinks(writer http.ResponseWriter, request *http.Request)
 			writeInternalError(writer, fmt.Errorf("decode DNS for uplink %s: %w", item.ID, err))
 			return
 		}
+		var configuredDNS []string
+		if err := json.Unmarshal([]byte(item.ConfiguredDNSJSON), &configuredDNS); err != nil {
+			writeInternalError(writer, fmt.Errorf("decode configured DNS for uplink %s: %w", item.ID, err))
+			return
+		}
 		view := uplinkReadItem{
 			ID: item.ID, Number: item.DisplayNumber, Type: item.Type, Name: item.Name,
 			Enabled: item.Enabled, Priority: item.Priority,
 			NetworkInterfaceID: item.NetworkInterfaceID, InterfaceName: item.CurrentIfname,
 			AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway,
-			DNS: dns, MTU: item.MTU, RoutingTableID: item.RoutingTableID, Fwmark: item.Fwmark,
+			DNS: dns, ConfiguredIPv4CIDR: item.ConfiguredIPv4CIDR,
+			ConfiguredGateway: item.ConfiguredGateway, ConfiguredDNS: configuredDNS,
+			MTU: item.MTU, RoutingTableID: item.RoutingTableID, Fwmark: item.Fwmark,
 			RouteGeneration: item.RouteGeneration, DesiredGeneration: item.DesiredGeneration,
 			ObservedGeneration: item.ObservedGeneration, State: item.State,
-			LastSeenAt: item.LastSeenAt, StableSince: item.StableSince,
+			ReadinessReason: item.ReadinessReason,
+			LastSeenAt:      item.LastSeenAt, StableSince: item.StableSince,
 			Paths: pathsByUplink[item.ID],
 		}
 		if item.Type == uplink.TypeHiLink {
@@ -1116,6 +1133,134 @@ func (server *Server) uplinks(writer http.ResponseWriter, request *http.Request)
 		result = append(result, view)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func (server *Server) reorderUplinks(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil || server.dependencies.ModemRuntime == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление физическими выходами не подключено")
+		return
+	}
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if err := server.dependencies.Uplinks.ReorderEnabled(request.Context(), input.IDs); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"convergence": server.convergeModemRuntime(request.Context())})
+}
+
+func (server *Server) uplinkImpact(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil || server.dependencies.State == nil || server.dependencies.Database == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Предварительная оценка физического выхода не подключена")
+		return
+	}
+	operation := strings.ToUpper(strings.TrimSpace(request.URL.Query().Get("operation")))
+	if operation != "DISABLE" && operation != "DELETE" {
+		writeError(writer, http.StatusBadRequest, "INVALID_OPERATION", "Поддерживается предварительная оценка DISABLE или DELETE")
+		return
+	}
+	item, err := server.dependencies.Uplinks.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	if item.Type != uplink.TypeEthernet {
+		writeError(writer, http.StatusConflict, "UPLINK_TYPE_INVALID", "Эта оценка предназначена для Ethernet-выхода")
+		return
+	}
+	snapshot, err := server.dependencies.State.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	var vpnPaths, directPaths, readyAlternatives int64
+	if err := server.dependencies.Database.QueryRowContext(request.Context(), "SELECT COUNT(*) FROM subscription_uplink_paths WHERE uplink_id=?", item.ID).Scan(&vpnPaths); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if err := server.dependencies.Database.QueryRowContext(request.Context(), "SELECT COUNT(*) FROM direct_uplink_paths WHERE uplink_id=?", item.ID).Scan(&directPaths); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if err := server.dependencies.Database.QueryRowContext(request.Context(), "SELECT COUNT(*) FROM uplinks WHERE id<>? AND enabled=1 AND state='UPLINK_READY'", item.ID).Scan(&readyAlternatives); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	active := snapshot.ActiveUplinkID == item.ID
+	allowed := true
+	blockedReason := ""
+	if operation == "DELETE" && item.Enabled {
+		allowed, blockedReason = false, "DISABLE_FIRST"
+	}
+	if operation == "DELETE" && active {
+		allowed, blockedReason = false, "ACTIVE_UPLINK"
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"uplink_id": item.ID, "operation": operation, "active": active,
+		"enabled": item.Enabled, "state": item.State, "readiness_reason": item.ReadinessReason,
+		"affected_vpn_paths": vpnPaths, "affected_direct_paths": directPaths,
+		"ready_alternative_uplinks":   readyAlternatives,
+		"will_close_current_path":     active,
+		"internet_may_be_blocked":     active && readyAlternatives == 0,
+		"expected_desired_generation": item.DesiredGeneration,
+		"allowed":                     allowed, "blocked_reason": blockedReason,
+	})
+}
+
+func (server *Server) enableEthernetUplink(writer http.ResponseWriter, request *http.Request) {
+	server.setEthernetUplinkEnabled(writer, request, true)
+}
+
+func (server *Server) disableEthernetUplink(writer http.ResponseWriter, request *http.Request) {
+	server.setEthernetUplinkEnabled(writer, request, false)
+}
+
+func (server *Server) setEthernetUplinkEnabled(writer http.ResponseWriter, request *http.Request, enabled bool) {
+	if server.dependencies.Uplinks == nil || server.dependencies.ModemRuntime == nil || server.dependencies.State == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление Ethernet-выходами не подключено")
+		return
+	}
+	var input struct {
+		ExpectedDesiredGeneration int64 `json:"expected_desired_generation"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	id := request.PathValue("id")
+	if !enabled {
+		snapshot, err := server.dependencies.State.Get(request.Context())
+		if err != nil {
+			writeInternalError(writer, err)
+			return
+		}
+		if snapshot.ActiveUplinkID == id {
+			if err := server.dependencies.ModemRuntime.BlockPath(request.Context()); err != nil {
+				writeError(writer, http.StatusBadGateway, "PATH_BLOCK_FAILED", "Не удалось безопасно закрыть активный путь")
+				return
+			}
+			if _, _, err := server.dependencies.State.Block(request.Context(), state.GatewayBlocked, "ACTIVE_ETHERNET_UPLINK_DISABLED"); err != nil {
+				writeInternalError(writer, err)
+				return
+			}
+		}
+	}
+	updated, err := server.dependencies.Uplinks.SetEthernetEnabled(request.Context(), id, uplink.SetEthernetEnabledInput{
+		Enabled: enabled, ExpectedDesiredGeneration: input.ExpectedDesiredGeneration,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{
+		"enabled": updated.Enabled, "desired_generation": updated.DesiredGeneration,
+		"state": updated.State, "convergence": server.convergeModemRuntime(request.Context()),
+	})
 }
 
 func (server *Server) networkInterfaces(writer http.ResponseWriter, request *http.Request) {
@@ -1280,7 +1425,11 @@ func (server *Server) reorderModems(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	if err := server.dependencies.Modems.ReorderEnabled(request.Context(), input.IDs); err != nil {
+	if server.dependencies.Uplinks == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Общий приоритет физических выходов не подключён")
+		return
+	}
+	if err := server.dependencies.Uplinks.ReorderEnabledType(request.Context(), uplink.TypeHiLink, input.IDs); err != nil {
 		writeDomainError(writer, err)
 		return
 	}
@@ -3816,7 +3965,7 @@ func (server *Server) replaceEthernetInterface(writer http.ResponseWriter, reque
 		return
 	}
 	var dns []string
-	if err := json.Unmarshal([]byte(current.DNSJSON), &dns); err != nil {
+	if err := json.Unmarshal([]byte(current.ConfiguredDNSJSON), &dns); err != nil {
 		writeInternalError(writer, err)
 		return
 	}
@@ -3824,7 +3973,7 @@ func (server *Server) replaceEthernetInterface(writer http.ResponseWriter, reque
 		Operation: networkapply.EthernetReplaceInterface, UplinkID: current.ID,
 		ExpectedDesiredGeneration: input.ExpectedDesiredGeneration,
 		TargetInterfaceID:         input.NetworkInterfaceID, AddressMode: current.AddressMode,
-		IPv4CIDR: current.IPv4CIDR, Gateway: current.Gateway, DNS: dns, MTU: current.MTU,
+		IPv4CIDR: current.ConfiguredIPv4CIDR, Gateway: current.ConfiguredGateway, DNS: dns, MTU: current.MTU,
 	})
 	if err != nil {
 		writeDomainError(writer, err)
@@ -3866,6 +4015,60 @@ func (server *Server) updateEthernetNetwork(writer http.ResponseWriter, request 
 		return
 	}
 	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.EthernetUpdateAddress, current.ID)
+}
+
+func (server *Server) deleteEthernetUplink(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Uplinks == nil || server.dependencies.State == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Удаление Ethernet-выходов не подключено")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "delete-disabled-ethernet-uplink" {
+		writeError(writer, http.StatusConflict, "CONFIRM_DELETE_ETHERNET_UPLINK", "Удаление отключённого Ethernet-выхода требует явного подтверждения")
+		return
+	}
+	var input struct {
+		ExpectedDesiredGeneration int64 `json:"expected_desired_generation"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	current, err := server.dependencies.Uplinks.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	if current.Type != uplink.TypeEthernet {
+		writeError(writer, http.StatusConflict, "UPLINK_TYPE_INVALID", "Удалить здесь можно только Ethernet-выход")
+		return
+	}
+	if current.DesiredGeneration != input.ExpectedDesiredGeneration {
+		writeDomainError(writer, store.ErrStaleGeneration)
+		return
+	}
+	if current.Enabled {
+		writeError(writer, http.StatusConflict, "DISABLE_UPLINK_FIRST", "Перед удалением Ethernet-выход необходимо отключить")
+		return
+	}
+	snapshot, err := server.dependencies.State.Get(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if snapshot.ActiveUplinkID == current.ID {
+		writeError(writer, http.StatusConflict, "ACTIVE_UPLINK_PROTECTED", "Активный Ethernet-выход нельзя удалить")
+		return
+	}
+	candidate, err := server.ethernetCandidate(request, networkapply.EthernetMutation{
+		Operation: networkapply.EthernetDelete, UplinkID: current.ID,
+		ExpectedDesiredGeneration: current.DesiredGeneration,
+		TargetInterfaceID:         current.NetworkInterfaceID,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.EthernetDelete, current.ID)
 }
 
 func (server *Server) ethernetCandidate(request *http.Request, mutation networkapply.EthernetMutation) (networkapply.Candidate, error) {

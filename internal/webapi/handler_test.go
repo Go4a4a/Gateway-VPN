@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net"
@@ -1584,6 +1585,125 @@ func TestEthernetSafeApplyBuildsStableIDCandidateWithoutBrokerIfname(t *testing.
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("Ethernet API accepted interface_name: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestEthernetRuntimeControlsImpactMixedPriorityAndSafeDelete(t *testing.T) {
+	server, ctx := testServer(t)
+	runtime := &fakeModemRuntime{}
+	server.dependencies.ModemRuntime = runtime
+	if _, err := server.dependencies.Uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:wan", StableIdentityKind: "ETHERNET_PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("8", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := server.dependencies.Uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-control", Name: "Проводной Internet", NetworkInterfaceID: "netif:wan",
+		AddressMode: uplink.AddressDHCP, DNS: []string{"9.9.9.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.dependencies.Database.ExecContext(ctx, "UPDATE uplinks SET state='UPLINK_READY', readiness_reason='READY', ipv4_cidr='172.20.1.2/24', gateway='172.20.1.1' WHERE id=?", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.dependencies.Paths.ReconcileCells(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := accesspolicy.NewDirectPathRepository(server.dependencies.Database).Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := login(t, server)
+	call := func(method, path, body, confirmation string, withCSRF bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request = request.WithContext(context.WithValue(request.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("192.168.200.1"), Port: 8443}))
+		request.AddCookie(cookie)
+		if withCSRF {
+			request.Header.Set("X-CSRF-Token", csrf)
+		}
+		if confirmation != "" {
+			request.Header.Set("X-Confirm-Destructive", confirmation)
+		}
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+
+	inventory := call(http.MethodGet, "/api/v1/uplinks", "", "", false)
+	if inventory.Code != http.StatusOK || !strings.Contains(inventory.Body.String(), `"readiness_reason":"READY"`) ||
+		!strings.Contains(inventory.Body.String(), `"configured_dns":["9.9.9.9"]`) ||
+		!strings.Contains(inventory.Body.String(), `"ipv4_cidr":"172.20.1.2/24"`) {
+		t.Fatalf("Ethernet runtime inventory = %d %s", inventory.Code, inventory.Body.String())
+	}
+	if response := call(http.MethodPut, "/api/v1/uplinks/priorities", `{"ids":["ethernet-control","modem-a"]}`, "", false); response.Code != http.StatusForbidden {
+		t.Fatalf("mixed reorder without CSRF = %d %s", response.Code, response.Body.String())
+	}
+	if response := call(http.MethodPut, "/api/v1/uplinks/priorities", `{"ids":["ethernet-control","modem-a"]}`, "", true); response.Code != http.StatusAccepted {
+		t.Fatalf("mixed reorder = %d %s", response.Code, response.Body.String())
+	}
+	ordered, _ := server.dependencies.Uplinks.List(ctx)
+	if len(ordered) != 2 || ordered[0].ID != created.ID || ordered[1].ID != "modem-a" {
+		t.Fatalf("mixed uplink order = %+v", ordered)
+	}
+	impact := call(http.MethodGet, "/api/v1/uplinks/"+created.ID+"/impact?operation=DISABLE", "", "", false)
+	if impact.Code != http.StatusOK || !strings.Contains(impact.Body.String(), `"affected_vpn_paths":1`) || !strings.Contains(impact.Body.String(), `"affected_direct_paths":1`) {
+		t.Fatalf("Ethernet impact = %d %s", impact.Code, impact.Body.String())
+	}
+	if _, err := server.dependencies.Database.ExecContext(ctx, "UPDATE runtime_state SET active_uplink_id=? WHERE singleton_id=1", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	disableBody := fmt.Sprintf(`{"expected_desired_generation":%d}`, created.DesiredGeneration)
+	disabledResponse := call(http.MethodPost, "/api/v1/uplinks/"+created.ID+"/disable", disableBody, "", true)
+	if disabledResponse.Code != http.StatusAccepted || runtime.blocks != 1 {
+		t.Fatalf("active Ethernet disable = %d blocks=%d %s", disabledResponse.Code, runtime.blocks, disabledResponse.Body.String())
+	}
+	disabled, err := server.dependencies.Uplinks.Get(ctx, created.ID)
+	if err != nil || disabled.Enabled || disabled.ReadinessReason != "DISABLED_BY_USER" {
+		t.Fatalf("disabled Ethernet = %+v, %v", disabled, err)
+	}
+	staleEnable := call(http.MethodPost, "/api/v1/uplinks/"+created.ID+"/enable", disableBody, "", true)
+	if staleEnable.Code != http.StatusConflict || !strings.Contains(staleEnable.Body.String(), "STALE_GENERATION") {
+		t.Fatalf("stale Ethernet enable = %d %s", staleEnable.Code, staleEnable.Body.String())
+	}
+	enableBody := fmt.Sprintf(`{"expected_desired_generation":%d}`, disabled.DesiredGeneration)
+	if response := call(http.MethodPost, "/api/v1/uplinks/"+created.ID+"/enable", enableBody, "", true); response.Code != http.StatusAccepted {
+		t.Fatalf("Ethernet enable = %d %s", response.Code, response.Body.String())
+	}
+	enabled, _ := server.dependencies.Uplinks.Get(ctx, created.ID)
+	disableBody = fmt.Sprintf(`{"expected_desired_generation":%d}`, enabled.DesiredGeneration)
+	if response := call(http.MethodPost, "/api/v1/uplinks/"+created.ID+"/disable", disableBody, "", true); response.Code != http.StatusAccepted {
+		t.Fatalf("second Ethernet disable = %d %s", response.Code, response.Body.String())
+	}
+	disabled, _ = server.dependencies.Uplinks.Get(ctx, created.ID)
+
+	attachBackupManager(t, server)
+	broker := &fakeNetworkBroker{applied: make(chan string, 1), prepared: networkapply.Prepared{
+		ApplyID: "apply-delete-ethernet", ConfirmToken: strings.Repeat("c", 64),
+		OldURL: "https://192.168.200.1:8443", NewURL: "https://192.168.200.1:8443",
+		RollbackDeadline: time.Now().Add(time.Minute),
+	}}
+	server.dependencies.NetworkBroker = broker
+	deleteBody := fmt.Sprintf(`{"expected_desired_generation":%d}`, disabled.DesiredGeneration)
+	if response := call(http.MethodDelete, "/api/v1/uplinks/"+created.ID, deleteBody, "", true); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "CONFIRM_DELETE_ETHERNET_UPLINK") {
+		t.Fatalf("unconfirmed Ethernet delete = %d %s", response.Code, response.Body.String())
+	}
+	deleteImpact := call(http.MethodGet, "/api/v1/uplinks/"+created.ID+"/impact?operation=DELETE", "", "", false)
+	if deleteImpact.Code != http.StatusOK || !strings.Contains(deleteImpact.Body.String(), `"allowed":true`) {
+		t.Fatalf("Ethernet delete impact = %d %s", deleteImpact.Code, deleteImpact.Body.String())
+	}
+	deleted := call(http.MethodDelete, "/api/v1/uplinks/"+created.ID, deleteBody, "delete-disabled-ethernet-uplink", true)
+	if deleted.Code != http.StatusAccepted || broker.staged.Ethernet == nil || broker.staged.Ethernet.Operation != networkapply.EthernetDelete || broker.staged.Ethernet.AddressMode != "" {
+		t.Fatalf("safe Ethernet delete = %d %s candidate=%+v", deleted.Code, deleted.Body.String(), broker.staged)
+	}
+	select {
+	case id := <-broker.applied:
+		if id != broker.prepared.ApplyID {
+			t.Fatalf("async delete apply id = %s", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async Ethernet delete did not start")
 	}
 }
 

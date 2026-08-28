@@ -27,6 +27,7 @@ const (
 	EthernetCreate           = "CREATE"
 	EthernetReplaceInterface = "REPLACE_INTERFACE"
 	EthernetUpdateAddress    = "UPDATE_ADDRESS"
+	EthernetDelete           = "DELETE"
 
 	PhaseCreated    = "CREATED"
 	PhaseSnapshot   = "SNAPSHOT_READY"
@@ -279,6 +280,14 @@ func validateEthernetMutation(candidate EthernetMutation) error {
 		if candidate.ExpectedDesiredGeneration < 1 || candidate.Name != "" {
 			return errors.New("existing uplink mutation requires its expected generation")
 		}
+	case EthernetDelete:
+		if candidate.ExpectedDesiredGeneration < 1 || candidate.Name != "" {
+			return errors.New("delete requires the expected uplink generation")
+		}
+		if candidate.AddressMode != "" || candidate.IPv4CIDR != "" || candidate.Gateway != "" || len(candidate.DNS) != 0 || candidate.MTU != 0 {
+			return errors.New("delete cannot contain Ethernet address configuration")
+		}
+		return nil
 	default:
 		return errors.New("unsupported Ethernet operation")
 	}

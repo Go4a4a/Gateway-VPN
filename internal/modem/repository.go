@@ -132,7 +132,7 @@ func (repository *Repository) Adopt(ctx context.Context, input AdoptInput) (Mode
 		return Modem{}, err
 	}
 	var priority int64
-	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM modems WHERE enabled=1").Scan(&priority); err != nil {
+	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM uplinks WHERE enabled=1").Scan(&priority); err != nil {
 		return Modem{}, fmt.Errorf("allocate modem priority: %w", err)
 	}
 
@@ -499,7 +499,7 @@ func (repository *Repository) SetEnabled(ctx context.Context, id string, enabled
 		return transaction.Commit()
 	}
 	if enabled {
-		if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM modems WHERE enabled=1").Scan(&priority); err != nil {
+		if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(priority), 0) + 10 FROM uplinks WHERE enabled=1").Scan(&priority); err != nil {
 			return err
 		}
 	}

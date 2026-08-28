@@ -21,6 +21,7 @@ import (
 	"gateway-vpn/internal/candidateruntime"
 	"gateway-vpn/internal/config"
 	"gateway-vpn/internal/directprobe"
+	"gateway-vpn/internal/ethernet"
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/mihomo"
@@ -52,6 +53,7 @@ type dataPlaneComponents struct {
 	DirectRunner    *directprobe.Runner
 	ProbeScheduler  *scheduler.Scheduler
 	ModemRunner     *hilink.Runner
+	EthernetRunner  *ethernet.Runner
 	Discoveries     *hilink.DiscoveryRegistry
 	MihomoClient    *mihomo.Client
 	Uplinks         *uplink.Repository
@@ -210,6 +212,12 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	}
 	discoveries := hilink.NewDiscoveryRegistry(modems)
 	modemRunner := &hilink.Runner{Manager: modemManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}
+	ethernetManager := &ethernet.Manager{
+		Probe: ethernet.HostProbe(identitySalt), LeaseReader: hilink.NetworkdLeaseReader{},
+		Routes: broker, Uplinks: uplinks, LANPrefix: configuration.Network.LANAddress,
+		WireGuardPrefix: "10.80.0.0/24",
+	}
+	ethernetRunner := &ethernet.Runner{Manager: ethernetManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}
 	pathActuator := &pathruntime.Actuator{
 		Database: database, Targets: targets, Broker: broker, Mihomo: client,
 		BodyProber: scheduledProber, OperationLock: operationLock,
@@ -234,7 +242,7 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		},
 		Config: candidateruntime.DefaultPeriodicConfig(),
 	}
-	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, RefreshDispatch: refreshDispatch, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, Discoveries: discoveries, MihomoClient: client, Uplinks: uplinks}, nil
+	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, RefreshDispatch: refreshDispatch, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, EthernetRunner: ethernetRunner, Discoveries: discoveries, MihomoClient: client, Uplinks: uplinks}, nil
 }
 
 func readBoundedSecret(filename string, maximum int64) (string, error) {

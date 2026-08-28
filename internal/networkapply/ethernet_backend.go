@@ -112,11 +112,27 @@ func (backend UbuntuBackend) applyEthernet(ctx context.Context, manifest Manifes
 	if err != nil {
 		return err
 	}
-	if _, err := backend.validateEthernetProtectedState(ctx, manifest); err != nil {
+	protected, err := backend.validateEthernetProtectedState(ctx, manifest)
+	if err != nil {
 		return err
 	}
 	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
 	mutation := *manifest.Ethernet
+	if mutation.Operation == EthernetDelete {
+		ownedPath := backend.ethernetOwnedPath(mutation.UplinkID)
+		if err := os.Remove(ownedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove owned Ethernet networkd configuration: %w", err)
+		}
+		if err := backend.networkctlReload(ctx); err != nil {
+			return err
+		}
+		if validInterfaceName(protected.TargetIfname) {
+			if err := backend.networkctlReconfigure(ctx, protected.TargetIfname); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	switch mutation.Operation {
 	case EthernetCreate:
 		_, err = repository.CreateEthernet(ctx, uplink.CreateEthernetInput{
@@ -165,9 +181,65 @@ func (backend UbuntuBackend) applyEthernet(ctx context.Context, manifest Manifes
 	return nil
 }
 
-func (backend UbuntuBackend) commitEthernet(ctx context.Context, manifest Manifest) error {
+func (backend UbuntuBackend) commitEthernet(ctx context.Context, manifest Manifest, transactionDirectory string) error {
 	if err := backend.validateEthernetBackend(); err != nil {
 		return err
+	}
+	if manifest.Ethernet.Operation == EthernetDelete {
+		snapshotDirectory, _, err := existingBackendDirectories(transactionDirectory)
+		if err != nil {
+			return err
+		}
+		snapshot, err := readEthernetSnapshot(snapshotDirectory, manifest)
+		if err != nil || snapshot.Uplink == nil || snapshot.Uplink.Enabled || snapshot.Uplink.DesiredGeneration != manifest.Ethernet.ExpectedDesiredGeneration {
+			return errors.New("Ethernet delete snapshot is invalid")
+		}
+		if _, err := os.Lstat(backend.ethernetOwnedPath(manifest.Ethernet.UplinkID)); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return errors.New("owned Ethernet networkd configuration still exists before delete confirmation")
+		}
+		repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
+		configured, err := repository.Get(ctx, manifest.Ethernet.UplinkID)
+		if errors.Is(err, store.ErrNotFound) {
+			// A crash after the atomic delete but before the confirmed phase is
+			// recovered by replaying this idempotent commit.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if configured.Type != uplink.TypeEthernet || configured.Enabled ||
+			configured.DesiredGeneration != manifest.Ethernet.ExpectedDesiredGeneration ||
+			configured.NetworkInterfaceID != manifest.Ethernet.TargetInterfaceID {
+			return errors.New("Ethernet uplink changed before delete confirmation")
+		}
+		transaction, err := backend.Database.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		var active int
+		if err := transaction.QueryRowContext(ctx, "SELECT COUNT(*) FROM runtime_state WHERE singleton_id=1 AND active_uplink_id=?", configured.ID).Scan(&active); err != nil {
+			return err
+		}
+		if active != 0 {
+			return errors.New("active Ethernet uplink cannot be deleted")
+		}
+		result, err := transaction.ExecContext(ctx, `
+DELETE FROM uplinks
+WHERE id=? AND type='ETHERNET' AND enabled=0 AND desired_generation=? AND network_interface_id=?`,
+			configured.ID, configured.DesiredGeneration, configured.NetworkInterfaceID)
+		if err != nil {
+			return fmt.Errorf("delete confirmed Ethernet uplink: %w", err)
+		}
+		if count, countErr := result.RowsAffected(); countErr != nil || count != 1 {
+			return store.ErrStaleGeneration
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		details, _ := json.Marshal(map[string]any{"uplink_id": configured.ID, "display_number": configured.DisplayNumber})
+		if _, err := transaction.ExecContext(ctx, "INSERT INTO events(occurred_at,severity,type,details_json) VALUES(?,'INFO','ETHERNET_DELETED',?)", now, string(details)); err != nil {
+			return err
+		}
+		return transaction.Commit()
 	}
 	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
 	configured, err := repository.Get(ctx, manifest.Ethernet.UplinkID)
@@ -205,7 +277,15 @@ func (backend UbuntuBackend) rollbackEthernet(ctx context.Context, manifest Mani
 		return err
 	}
 	var failures []error
-	if err := backend.restoreEthernetDatabase(ctx, manifest, snapshot); err != nil {
+	if manifest.Ethernet.Operation == EthernetDelete {
+		repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
+		current, currentErr := repository.Get(ctx, manifest.Ethernet.UplinkID)
+		if currentErr != nil || snapshot.Uplink == nil || current.Enabled ||
+			current.DesiredGeneration != snapshot.Uplink.DesiredGeneration ||
+			current.NetworkInterfaceID != snapshot.Uplink.NetworkInterfaceID {
+			failures = append(failures, errors.New("Ethernet delete rollback canonical state changed"))
+		}
+	} else if err := backend.restoreEthernetDatabase(ctx, manifest, snapshot); err != nil {
 		failures = append(failures, err)
 	}
 	ownedPath := backend.ethernetOwnedPath(manifest.Ethernet.UplinkID)
@@ -270,6 +350,14 @@ func (backend UbuntuBackend) validateEthernetProtectedState(ctx context.Context,
 	if !foundListen {
 		return ethernetContext{}, errors.New("Ethernet confirmation URL is not a protected API listener")
 	}
+	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
+	existing, getErr := repository.Get(ctx, mutation.UplinkID)
+	context := ethernetContext{}
+	if getErr == nil {
+		context.Existing = &existing
+	} else if !errors.Is(getErr, store.ErrNotFound) {
+		return ethernetContext{}, getErr
+	}
 	var ifname, carrier string
 	err = backend.Database.QueryRowContext(ctx, `
 SELECT COALESCE(current_ifname, ''), carrier_state
@@ -280,16 +368,9 @@ FROM network_interfaces WHERE id=?`, mutation.TargetInterfaceID).Scan(&ifname, &
 	if err != nil {
 		return ethernetContext{}, fmt.Errorf("read protected target interface: %w", err)
 	}
-	if !validInterfaceName(ifname) || carrier == "ABSENT" {
+	context.TargetIfname = ifname
+	if mutation.Operation != EthernetDelete && (!validInterfaceName(ifname) || carrier == "ABSENT") {
 		return ethernetContext{}, errors.New("target Ethernet interface is absent or has no current kernel name")
-	}
-	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
-	existing, getErr := repository.Get(ctx, mutation.UplinkID)
-	context := ethernetContext{TargetIfname: ifname}
-	if getErr == nil {
-		context.Existing = &existing
-	} else if !errors.Is(getErr, store.ErrNotFound) {
-		return ethernetContext{}, getErr
 	}
 	switch mutation.Operation {
 	case EthernetCreate:
@@ -319,11 +400,30 @@ FROM network_interfaces WHERE id=?`, mutation.TargetInterfaceID).Scan(&ifname, &
 		if context.Existing.NetworkInterfaceID != mutation.TargetInterfaceID {
 			return ethernetContext{}, errors.New("Ethernet interface changed before address update")
 		}
+	case EthernetDelete:
+		if context.Existing == nil || context.Existing.Type != uplink.TypeEthernet || context.Existing.DesiredGeneration != mutation.ExpectedDesiredGeneration {
+			return ethernetContext{}, store.ErrStaleGeneration
+		}
+		if context.Existing.NetworkInterfaceID != mutation.TargetInterfaceID {
+			return ethernetContext{}, errors.New("Ethernet interface changed before delete")
+		}
+		if context.Existing.Enabled {
+			return ethernetContext{}, errors.New("Ethernet uplink must be disabled before delete")
+		}
+		var active int
+		if err := backend.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM runtime_state WHERE singleton_id=1 AND active_uplink_id=?", mutation.UplinkID).Scan(&active); err != nil {
+			return ethernetContext{}, err
+		}
+		if active != 0 {
+			return ethernetContext{}, errors.New("active Ethernet uplink cannot be deleted")
+		}
 	default:
 		return ethernetContext{}, errors.New("unsupported Ethernet operation")
 	}
-	if err := backend.validateEthernetSubnetConflicts(ctx, configuration, manifest); err != nil {
-		return ethernetContext{}, err
+	if mutation.Operation != EthernetDelete {
+		if err := backend.validateEthernetSubnetConflicts(ctx, configuration, manifest); err != nil {
+			return ethernetContext{}, err
+		}
 	}
 	return context, nil
 }
@@ -343,7 +443,7 @@ WHERE network_interface_id=? AND role NOT IN ('UNUSED', 'SHARED_ONE_ARM')`, inte
 
 func (backend UbuntuBackend) validateEthernetSubnetConflicts(ctx context.Context, configuration config.Config, manifest Manifest) error {
 	mutation := manifest.Ethernet
-	if mutation.AddressMode != uplink.AddressStatic {
+	if mutation.Operation == EthernetDelete || mutation.AddressMode != uplink.AddressStatic {
 		return nil
 	}
 	candidate, _ := netip.ParsePrefix(mutation.IPv4CIDR)
@@ -463,14 +563,17 @@ SELECT desired_generation, route_generation FROM uplinks WHERE id=? AND type='ET
 		_, err := transaction.ExecContext(ctx, `
 UPDATE uplinks SET
     name=?, enabled=?, priority=?, network_interface_id=?, address_mode=?, ipv4_cidr=?,
-    gateway=?, dns_json=?, mtu=?, route_generation=?, desired_generation=?,
+    gateway=?, dns_json=?, configured_ipv4_cidr=?, configured_gateway=?,
+    configured_dns_json=?, mtu=?, route_generation=?, desired_generation=?,
     observed_generation=0, state='UPLINK_CONFIGURING', last_seen_at=NULL,
-    stable_since=NULL, updated_at=?
+    readiness_reason='SAFE_APPLY_ROLLED_BACK', stable_since=NULL, updated_at=?
 WHERE id=? AND type='ETHERNET'`,
 			snapshot.Uplink.Name, boolInt(snapshot.Uplink.Enabled), snapshot.Uplink.Priority,
 			snapshot.Uplink.NetworkInterfaceID, snapshot.Uplink.AddressMode,
 			nullIfBlank(snapshot.Uplink.IPv4CIDR), nullIfBlank(snapshot.Uplink.Gateway),
-			snapshot.Uplink.DNSJSON, nullIfZeroInt(snapshot.Uplink.MTU), nextRoute,
+			snapshot.Uplink.DNSJSON, nullIfBlank(snapshot.Uplink.ConfiguredIPv4CIDR),
+			nullIfBlank(snapshot.Uplink.ConfiguredGateway), snapshot.Uplink.ConfiguredDNSJSON,
+			nullIfZeroInt(snapshot.Uplink.MTU), nextRoute,
 			nextDesired, now, mutation.UplinkID)
 		if err != nil {
 			return fmt.Errorf("restore Ethernet uplink snapshot: %w", err)
@@ -547,7 +650,9 @@ func readEthernetSnapshot(snapshotDirectory string, manifest Manifest) (ethernet
 	if err := decodeStrictJSON(payload, &snapshot); err != nil {
 		return ethernetSnapshot{}, errors.New("decode Ethernet safe-apply snapshot failed")
 	}
-	if !validInterfaceName(snapshot.TargetIfname) || snapshot.Uplink != nil && snapshot.Uplink.ID != manifest.Ethernet.UplinkID {
+	if manifest.Ethernet.Operation != EthernetDelete && !validInterfaceName(snapshot.TargetIfname) ||
+		snapshot.TargetIfname != "" && !validInterfaceName(snapshot.TargetIfname) ||
+		snapshot.Uplink != nil && snapshot.Uplink.ID != manifest.Ethernet.UplinkID {
 		return ethernetSnapshot{}, errors.New("Ethernet safe-apply snapshot does not match manifest")
 	}
 	return snapshot, nil
@@ -571,7 +676,7 @@ func renderEthernetNetwork(item uplink.Uplink) (string, error) {
 	}
 	builder.WriteString("\n[Network]\nIPv6AcceptRA=no\nLinkLocalAddressing=no\nDNSDefaultRoute=no\n")
 	var dns []string
-	if err := json.Unmarshal([]byte(item.DNSJSON), &dns); err != nil || len(dns) > 8 {
+	if err := json.Unmarshal([]byte(item.ConfiguredDNSJSON), &dns); err != nil || len(dns) > 8 {
 		return "", errors.New("stored Ethernet DNS is invalid")
 	}
 	for _, raw := range dns {
@@ -588,11 +693,11 @@ func renderEthernetNetwork(item uplink.Uplink) (string, error) {
 		}
 		return builder.String(), nil
 	}
-	prefix, err := netip.ParsePrefix(item.IPv4CIDR)
+	prefix, err := netip.ParsePrefix(item.ConfiguredIPv4CIDR)
 	if err != nil || !prefix.Addr().Is4() {
 		return "", errors.New("stored static Ethernet address is invalid")
 	}
-	gateway, err := netip.ParseAddr(item.Gateway)
+	gateway, err := netip.ParseAddr(item.ConfiguredGateway)
 	if err != nil || !gateway.Is4() || !prefix.Contains(gateway) {
 		return "", errors.New("stored static Ethernet gateway is invalid")
 	}
@@ -613,7 +718,7 @@ func (backend UbuntuBackend) networkctlReconfigure(ctx context.Context, ifname s
 
 func sameEthernetAddressConfiguration(item uplink.Uplink, mutation EthernetMutation) bool {
 	var currentDNS []string
-	if err := json.Unmarshal([]byte(item.DNSJSON), &currentDNS); err != nil {
+	if err := json.Unmarshal([]byte(item.ConfiguredDNSJSON), &currentDNS); err != nil {
 		return false
 	}
 	if len(currentDNS) != len(mutation.DNS) {
@@ -624,8 +729,8 @@ func sameEthernetAddressConfiguration(item uplink.Uplink, mutation EthernetMutat
 			return false
 		}
 	}
-	return item.AddressMode == mutation.AddressMode && item.IPv4CIDR == mutation.IPv4CIDR &&
-		item.Gateway == mutation.Gateway && item.MTU == mutation.MTU
+	return item.AddressMode == mutation.AddressMode && item.ConfiguredIPv4CIDR == mutation.IPv4CIDR &&
+		item.ConfiguredGateway == mutation.Gateway && item.MTU == mutation.MTU
 }
 
 func uniqueIfnames(values ...string) []string {
