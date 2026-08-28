@@ -330,6 +330,20 @@ paths:
       summary: Запустить bounded recovery модема
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/modems/{id}/recovery:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [Modems]
+      operationId: getModemRecovery
+      summary: Получить bounded recovery policy, runtime и очищенную историю
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [Modems]
+      operationId: updateModemRecovery
+      summary: Изменить bounded recovery policy без сброса USB budget
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/modems/{id}/replace-identity:
     parameters: [{$ref: '#/components/parameters/ID'}]
     post:

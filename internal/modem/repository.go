@@ -402,6 +402,86 @@ WHERE uplink_id=?`, id, now, id); err != nil {
 	return nil
 }
 
+// ObservePhysicalLink records a connected USB network function that is not
+// yet usable. Unlike MarkOffline it deliberately preserves the current
+// interface so the privileged recovery broker can derive (never accept) the
+// DHCP-renew target from SQLite.
+func (repository *Repository) ObservePhysicalLink(ctx context.Context, id, interfaceName string, carrier bool) error {
+	if !validInterfaceName(interfaceName) {
+		return errors.New("invalid observed modem interface name")
+	}
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin modem physical link observation: %w", err)
+	}
+	defer transaction.Rollback()
+	var currentInterface, currentState string
+	var enabled int
+	if err := transaction.QueryRowContext(ctx, `
+SELECT COALESCE(interface_name, ''), state, enabled FROM modems WHERE id=?`, id).Scan(&currentInterface, &currentState, &enabled); errors.Is(err, sql.ErrNoRows) {
+		return store.ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("read modem physical link state: %w", err)
+	}
+	if enabled == 0 {
+		return errors.New("disabled modem cannot observe a physical link")
+	}
+	state := StateDiscovered
+	carrierState := "DOWN"
+	pathState := "UPLINK_OFFLINE"
+	if carrier {
+		state = StateConfiguring
+		carrierState = "UP"
+		pathState = "STALE"
+	}
+	changed := currentInterface != interfaceName || currentState != state
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE modems
+SET interface_name=?, state=?, last_seen_at=?, stable_since=NULL,
+    management_reachability_state='STALE',
+    route_generation=route_generation+?, updated_at=?
+WHERE id=? AND enabled=1`, interfaceName, state, now, boolInt(changed), now, id); err != nil {
+		return fmt.Errorf("record modem physical link: %w", err)
+	}
+	// The legacy projection trigger cannot distinguish carrier-down from other
+	// discovered states, so set the canonical observed carrier explicitly in
+	// the same transaction.
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE network_interfaces
+SET current_ifname=?, carrier_state=?, observed_at=?, updated_at=?
+WHERE id=(SELECT network_interface_id FROM uplinks WHERE id=?)`, interfaceName, carrierState, now, now, id); err != nil {
+		return fmt.Errorf("record canonical modem carrier: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE subscription_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
+    state=?, transport_state='UNKNOWN', selected_node_id=NULL,
+    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
+    quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, id, pathState, now, id); err != nil {
+		return fmt.Errorf("invalidate modem paths after physical link observation: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE direct_uplink_paths
+SET route_generation=(SELECT route_generation FROM uplinks WHERE id=?),
+    state=?, transport_state='UNKNOWN', quality_class='UNKNOWN',
+    functional_score=0, required_targets_passed=0, optional_targets_passed=0,
+    whitelist_targets_passed=0, expires_at=NULL, updated_at=?
+WHERE uplink_id=?`, id, pathState, now, id); err != nil {
+		return fmt.Errorf("invalidate direct modem path after physical link observation: %w", err)
+	}
+	if changed {
+		if err := appendModemEventTx(ctx, transaction, now, "MODEM_PHYSICAL_LINK_OBSERVED", id, map[string]any{"carrier": carrier}); err != nil {
+			return err
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit modem physical link observation: %w", err)
+	}
+	return nil
+}
+
 func (repository *Repository) SetEnabled(ctx context.Context, id string, enabled bool) error {
 	transaction, err := repository.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -466,55 +546,6 @@ WHERE uplink_id=?`, id, pathState, now, id); err != nil {
 		return fmt.Errorf("commit modem enabled update: %w", err)
 	}
 	return nil
-}
-
-func (repository *Repository) SetRecovering(ctx context.Context, id string) error {
-	transaction, err := repository.database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin modem recovery: %w", err)
-	}
-	defer transaction.Rollback()
-	var enabled int
-	if err := transaction.QueryRowContext(ctx, "SELECT enabled FROM modems WHERE id=?", id).Scan(&enabled); errors.Is(err, sql.ErrNoRows) {
-		return store.ErrNotFound
-	} else if err != nil {
-		return err
-	}
-	if enabled == 0 {
-		return errors.New("disabled modem cannot be recovered")
-	}
-	now := repository.now().UTC().Format(time.RFC3339Nano)
-	result, err := transaction.ExecContext(ctx, `
-UPDATE modems
-SET state=?, stable_since=NULL, management_reachability_state='STALE', updated_at=?
-WHERE id=? AND enabled=1`, StateRecovering, now, id)
-	if err != nil {
-		return fmt.Errorf("mark modem recovering: %w", err)
-	}
-	count, err := result.RowsAffected()
-	if err != nil || count != 1 {
-		return store.ErrNotFound
-	}
-	if _, err := transaction.ExecContext(ctx, `
-UPDATE subscription_uplink_paths
-SET state='STALE', transport_state='UNKNOWN', selected_node_id=NULL,
-    qualified_nodes=0, required_targets_passed=0, optional_targets_passed=0,
-    quality_class='UNKNOWN', functional_score=0, expires_at=NULL, updated_at=?
-WHERE uplink_id=?`, now, id); err != nil {
-		return fmt.Errorf("invalidate paths for modem recovery: %w", err)
-	}
-	if _, err := transaction.ExecContext(ctx, `
-UPDATE direct_uplink_paths
-SET state='STALE', transport_state='UNKNOWN', quality_class='UNKNOWN',
-    functional_score=0, required_targets_passed=0, optional_targets_passed=0, whitelist_targets_passed=0,
-    expires_at=NULL, updated_at=?
-WHERE uplink_id=?`, now, id); err != nil {
-		return fmt.Errorf("invalidate direct path for modem recovery: %w", err)
-	}
-	if err := appendModemEventTx(ctx, transaction, now, "MODEM_RECOVERY_REQUESTED", id, nil); err != nil {
-		return err
-	}
-	return transaction.Commit()
 }
 
 func (repository *Repository) ReplaceIdentity(ctx context.Context, id string, input ReplaceIdentityInput) error {

@@ -13,6 +13,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/traffic"
 )
 
@@ -78,9 +79,57 @@ type fakeTrafficAdmin struct {
 	err      error
 }
 
+type fakeModemRecoveryAdmin struct {
+	commands []modemrecovery.Command
+	err      error
+}
+
+func (admin *fakeModemRecoveryAdmin) Execute(_ context.Context, command modemrecovery.Command) error {
+	admin.commands = append(admin.commands, command)
+	return admin.err
+}
+
 func (admin *fakeTrafficAdmin) ReadTrafficCounters(context.Context) (traffic.AuthoritativeSnapshot, error) {
 	admin.calls++
 	return admin.snapshot, admin.err
+}
+
+func TestBrokerModemRecoveryAcceptsOnlyTypedBoundedTuple(t *testing.T) {
+	_, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	admin := &fakeModemRecoveryAdmin{}
+	server, err := NewBrokerServerWithFullRuntime(engine, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+
+	command := modemrecovery.Command{UplinkID: "modem-a", PolicyGeneration: 7, Action: modemrecovery.ActionDHCPRenew}
+	if err := client.Execute(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if len(admin.commands) != 1 || admin.commands[0] != command {
+		t.Fatalf("recovery commands = %+v", admin.commands)
+	}
+
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/modem/recovery/execute", strings.NewReader(`{"uplink_id":"modem-a","policy_generation":7,"action":"DHCP_RENEW","interface":"eth0"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || len(admin.commands) != 1 {
+		t.Fatalf("arbitrary interface request status=%d commands=%+v", response.StatusCode, admin.commands)
+	}
+
+	admin.err = modemrecovery.ErrActionUnsupported
+	if err := client.Execute(context.Background(), command); !errors.Is(err, modemrecovery.ErrActionUnsupported) {
+		t.Fatalf("unsupported action mapping = %v", err)
+	}
 }
 
 func (admin *fakeUpdateAdmin) ApplyPendingUpdate(context.Context) error {

@@ -408,9 +408,13 @@ Recovery ladder выполняется независимо для каждог�
 
 Recovery не запускается из-за недоступности глобальных targets, VPN nodes либо HiLink telemetry при исправных carrier/DHCP/gateway. Состояние `WHITELIST_ONLY` является свойством direct path и означает ограничение оператора, а не аппаратную неисправность модема.
 
+Physical-failure classifier использует только `DEVICE_ABSENT`, `CARRIER_DOWN`, `DHCP_LEASE_MISSING` и отдельно подтверждённый `HILINK_MANAGEMENT_UNREACHABLE`. Полученный carrier + валидный DHCP lease завершает hardware-recovery episode даже при subnet conflict, ошибке policy routing или отсутствии глобального доступа: эти причины исправляются своими контроллерами. Ручная кнопка сначала заново обнаруживает устройство/carrier/lease и не выполняет reset физически исправного модема только потому, что Internet или VPN недоступны.
+
 Каждый автоматический recovery step получает durable per-modem attempt budget, minimum failure duration, deadline, cooldown и generation. Выполнение сериализуется с hot-plug/replacement; disconnect во время действия завершает его как `DEVICE_REMOVED`, а новый USB identity никогда не наследует reset старого modem без явного match. После DHCP/API/mobile-session/USB действия маршруты остаются закрытыми до нового lease, увеличения `route_generation` и fresh path qualification.
 
 Controlled USB recovery выполняется только параметрическим root broker по сохранённой и повторно сверенной sysfs identity: сначала driver unbind/bind, затем поддерживаемый USBDEVFS reset, а реальный port power-cycle — только если обнаружен hub с индивидуальным управлением портом и policy явно разрешена. Произвольный sysfs path из Web/API root broker не принимает. При исчерпании budget модем становится `MODEM_ERROR/RECOVERY_SUPPRESSED`, остальные uplinks продолжают работу, а полный host reboot не запускается из-за одного внешнего modem outage.
+
+Каждый signed hardware profile явно перечисляет фактически разрешённые recovery actions. Ступень, ещё не прошедшая реальный gate на данном modem/driver/hub, завершается `SUPPRESSED/HARDWARE_ACTION_NOT_AVAILABLE`, а не пробует generic sysfs mutation. WebUI показывает отдельные policy, текущую физическую причину, durable budget/cooldown и очищенную историю; изменение policy generation не обнуляет уже использованный USB budget.
 
 ### 5.5 Конфигурация
 

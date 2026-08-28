@@ -83,8 +83,13 @@ func TestManagerPersistsObservedStateBeforeAuthoritativeRouteSync(t *testing.T) 
 		t.Fatalf("ready reconcile/state = %v/%v", err, readyObserved)
 	}
 	manager.Probe = fakeProbe{}
-	if _, err := manager.Reconcile(ctx); err != nil || !offlineObserved {
+	offlineResult, err := manager.Reconcile(ctx)
+	if err != nil || !offlineObserved || offlineResult.PhysicalFailures["m-one"] != PhysicalFailureDeviceAbsent {
 		t.Fatalf("offline reconcile/state = %v/%v", err, offlineObserved)
+	}
+	stillOffline, err := manager.Reconcile(ctx)
+	if err != nil || stillOffline.PhysicalFailures["m-one"] != PhysicalFailureDeviceAbsent {
+		t.Fatalf("persistent absent observation = %+v, %v", stillOffline, err)
 	}
 }
 

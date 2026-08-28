@@ -372,6 +372,14 @@ sudo timeout --signal=INT 180 tcpdump -ni gateway-vpn-tun -s 0 \
 - `user_*` изменяются known-size transfer, `service_*` считаются отдельно;
 - отсутствие direct traffic сохраняется после reload, guard recovery и reboot.
 
+### Bounded recovery физического HiLink
+
+Во вкладке **Модемы → Самовосстановление модемов** отдельно показаны physical failure, recovery runtime, last outcome, cooldown, durable USB budget и последние попытки. Кнопка **Проверить и восстановить** сначала повторяет discovery/carrier/DHCP observation. При исправном carrier/lease она возвращает `NO_PHYSICAL_FAILURE` и не пытается перезапустить модем из-за `WHITELIST_ONLY`, недоступных global targets, VPN nodes, subscription endpoint или routing/subnet ошибки.
+
+На текущем непроверенном hardware profile автоматически исполняется только фиксированный networkd DHCP renew. HiLink mobile reconnect, driver rebind, USBDEVFS reset и hub port power-cycle должны отображаться как `HARDWARE_ACTION_NOT_AVAILABLE`; это ожидаемая защита, а не повод запускать команды вручную. Разрешать эти ступени можно только после H1/H2 проверки точного Huawei E3372h/driver identity, disconnect во время действия, cooldown/budget и отсутствия воздействия на соседний USB modem. Изменение WebUI policy не обнуляет уже использованный budget; процессный restart закрывает незавершённую попытку кодом `PROCESS_RESTARTED`.
+
+Для диагностики используйте тематический журнал `modems`/`watchdog-recovery` и API/WebUI history. В журнале допустимы только uplink display identity, action, generation и redacted outcome; serial, identity hash, sysfs path и HiLink credentials не экспортируются.
+
 Любой подтверждённый direct IPv4/DNS/IPv6 packet является немедленным `FAIL`: оставьте `PATH_BLOCKED`, сохраните diagnostics/pcap и не подключайте основной домашний трафик.
 
 ### 5. Failure matrix H1/H2

@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-28
-**Общее состояние:** `IMMUTABLE_PUBLIC_RELEASE / EXPANDED_SUCCESSOR_IMPLEMENTATION / SCHEMA_V18_GENERIC_RUNTIME / HARDWARE_GATES_PENDING`
-**Текущий этап:** опубликованный successor `0.1.0-successor.5723940` остаётся неизменяемым контрольным release с проверенной GitHub attestation. Exact source `1b90ffcb99b25f79954cbc1b4bde7bcc0140175d` и disposable-signed `0.1.0-successor.1b90ffc` сохраняются как доказательство прежнего universal-installer scope, но больше не являются кандидатом текущего расширенного контракта. Canonical generic `uplink × access method` уже подключён к path matrix, selector, Mihomo, firewall/direct runtime и secret-free Web API; direct-only whitelist classifier и ручная direct-проверка также реализованы. Следующими остаются safe Ethernet mutation transactions, bounded modem recovery, `wg-ingress`, тематические логи/SFTP и полный contextual help. Новый tag/Release запрещён до реализации и проверки всего расширения.
+**Общее состояние:** `IMMUTABLE_PUBLIC_RELEASE / EXPANDED_SUCCESSOR_IMPLEMENTATION / SCHEMA_V18_GENERIC_RUNTIME / BOUNDED_MODEM_RECOVERY_LOCAL / HARDWARE_GATES_PENDING`
+**Текущий этап:** опубликованный successor `0.1.0-successor.5723940` остаётся неизменяемым контрольным release с проверенной GitHub attestation. Exact source `1b90ffcb99b25f79954cbc1b4bde7bcc0140175d` и disposable-signed `0.1.0-successor.1b90ffc` сохраняются как доказательство прежнего universal-installer scope, но больше не являются кандидатом текущего расширенного контракта. Canonical generic `uplink × access method`, direct-only whitelist classifier и bounded physical modem recovery уже реализованы локально. Следующими остаются safe Ethernet mutation transactions, `wg-ingress`, тематические логи/SFTP и полный contextual help. Firmware/USB recovery actions остаются аппаратным gate Huawei E3372h. Новый tag/Release запрещён до реализации и проверки всего расширения.
 
-**Оценка прогресса:** прежний scope остаётся воспроизводимо завершённым примерно на `99%`, но это больше не процент текущего проекта. После расширения знаменателя текущая программная реализация оценивается примерно в `83%`, общая production-готовность — примерно в `66%`. Это не потеря уже сделанного: installer, update/rollback, fail-closed, подписки, multi-uplink policy, API/auth/logging/watchdog и release pipeline переиспользуются. Незавершённый объём теперь включает Ethernet/role safe apply, реальный bounded USB recovery, полный `wg-ingress`, оставшиеся generic WebUI/read models, exports/help и повторный сквозной audit. После этого всё равно остаются physical Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательные 24/72-часовые endurance.
+**Оценка прогресса:** прежний scope остаётся воспроизводимо завершённым примерно на `99%`, но это больше не процент текущего проекта. После расширения знаменателя текущая программная реализация оценивается примерно в `84%`, общая production-готовность — примерно в `67%`. Это не потеря уже сделанного: installer, update/rollback, fail-closed, подписки, multi-uplink policy, API/auth/logging/watchdog и release pipeline переиспользуются. Незавершённый объём теперь включает Ethernet/role safe apply, hardware-validated firmware/USB recovery, полный `wg-ingress`, оставшиеся generic WebUI/read models, exports/help и повторный сквозной audit. После этого всё равно остаются physical Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture и обязательные 24/72-часовые endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -39,7 +39,7 @@
 | Этап 1: bootstrap | `UNIVERSAL_WIZARD_V2_INSTALL_READY / PRODUCTION_RELEASE_PENDING / HARDWARE_PENDING` | Мастер единообразно объясняет выборы для каждого компонента, выбирает несколько LAN-портов, DHCP/CIDR/dependencies, no-wait и GRUB, выводит обязательные/WebUI-настройки и exact mutation plan. Candidate `0.1.0-successor.1b90ffc` прошёл fresh apply, exact reinstall, no-carrier boot и forced rollback |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
 | Firewall / routing | `SCHEMA_V3_STARTUP_BOOT_REMOTE_PASS / HARDWARE_PENDING` | Schema `3` сохраняет counters и atomic mutually-exclusive TUN/direct gates. Exact run `33128823746` подтвердил production renderer/decoder, firewall recovery, ON/OFF startup policy, exact direct LKG, same-boot restart, next-boot quarantine, LAN→fwmark и отсутствие unmarked direct route |
-| Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
+| Modem Manager | `BOUNDED_RECOVERY_LOCAL_PASS / HARDWARE_PENDING` | Physical classifier, durable attempts/cooldown/budget, process-restart cleanup, manual API/WebUI/history и typed root DHCP renew подключены. Firmware API/mobile-session/USB identity actions намеренно suppressed до Huawei E3372h gate |
 | WireGuard management | `EXACT_SIGNED_SYNTHETIC_HANDSHAKE_PASS / HOST_NOT_RUN` | Неизменённая signed `.13` через production Gateway broker получила endpoint `8.8.8.8:51821`, fwmark `0x1101`, адрес `10.80.0.2/32`, двусторонний handshake/transfer и `REACHABLE`; VPS systemd gates прошли на Ubuntu 22.04/24.04/26.04. Реальный HiLink/VPS/provider UDP gate остаётся обязательным |
 | Subscription Manager | `RESILIENT_REFRESH_LADDER_LOCAL_PASS / LINUX_NOT_RUN` | Active target node → other allowed target nodes → allowed nodes других subscriptions → policy-enabled direct ready-модемы подключены через отдельный Mihomo probe listener; EXCLUDE повторно проверяется под operation lock. Disabled user method обновляет service-only LKG без публикации user path; `Retry-After`, lease, redacted stages и bounded retention покрыты tests |
 | Qualification / scheduler | `UNIFIED_FULL_LIMITED_LOCAL_PASS / LINUX_NOT_RUN` | Direct и VPN qualification создают generation-scoped `FULL/LIMITED/FAILED`; LIMITED VPN хранит точный частично доступный node и перед activation повторно проверяет только fresh passed targets. Ranking, hysteresis и direct probes покрыты tests |
@@ -94,7 +94,7 @@
 | 28 | `PASS_LOCAL` | Domain tests и exact remote Linux integration используют persistent SQLite и production nft/ip backends: gate ON остаётся blocked, gate OFF открывает только exact LKG `wan0+fwmark`, same-boot restart сохраняет tuple, следующий boot сбрасывает direct-only и возвращает `PATH_BLOCKED` без unmarked route |
 | 29 | `IN_PROGRESS_LOCAL` | Schema v17/18 атомарно переносит HiLink/path/runtime identity в generic uplinks. Selector, Mihomo, direct/TUN firewall, state and path operations используют canonical uplink IDs; authenticated inventory/API/WebUI проходят tests. Ethernet create/replacement ещё не опубликованы как mutation API до подключения safe-apply/confirm/rollback |
 | 30 | `IN_PROGRESS_LOCAL` | Target class и generic evidence schema добавлены; direct-only execution и classifier `WHITELIST_ONLY` ещё не реализованы |
-| 31 | `IN_PROGRESS_LOCAL` | Durable recovery policy/runtime/attempt schema добавлена; root broker ladder и hardware identity gate ещё не реализованы |
+| 31 | `PARTIAL_EXTERNAL` | Durable controller/runner, physical-only classifier, process-restart cleanup, typed root broker DHCP renew, API/WebUI policy/history и suppression tests проходят. Firmware mobile reconnect, verified driver rebind/USB reset/hub action требуют реального Huawei E3372h hardware gate |
 | 32 | `IN_PROGRESS_LOCAL` | Non-secret `wg-ingress` server/peer/route/runtime schema добавлена; key lifecycle, root sync, API/WebUI/config/QR и one-card netns gate ещё не реализованы |
 | 33 | `NOT_STARTED` | Generic role UI, contextual mouse/keyboard/touch help, impact preview и safe apply integration ещё не реализованы |
 | 34 | `IN_PROGRESS_LOCAL` | Canonical journald reader/redaction уже проходит прежние tests; thematic tabs, bounded exporter и SFTP path verification ещё не реализованы |
@@ -301,8 +301,32 @@ Universal-installer successor локально достиг `INSTALL_READY`: dat
 | DEV-173 | 2026-08-28 | Modem recovery получает durable policy/runtime/attempt budget и выполняет только последовательность DHCP→HiLink API→mobile session→verified USB actions; whitelist/VPN/global target outage не запускает hardware reset | Неограниченные resets/reboots ухудшают 24/7 работу и могут циклически отключать исправный модем при операторской фильтрации |
 | DEV-174 | 2026-08-28 | Journald остаётся authoritative; тематические WebUI вкладки являются фильтрами одного stream, а `/var/log/gateway-vpn` содержит только bounded redacted exports для штатного OpenSSH/SFTP через management paths | Несколько независимых журналов расходились бы по событиям и retention; отдельный SFTP daemon/account не нужен и расширил бы поверхность атаки |
 | DEV-175 | 2026-08-28 | Ручная проверка `GLOBAL_*` target выполняет fresh direct requalification всех eligible uplinks и VPN requalification; `WHITELIST_INDICATOR` выполняет только fresh direct requalification, а `SERVICE_ENDPOINT` не допускается в user-access probe | Старое fresh evidence не должно скрывать изменение операторского фильтра. Whitelist probe через VPN дал бы ложную диагностику, а service endpoint не может объявить пользовательский Internet рабочим |
+| DEV-176 | 2026-08-28 | Modem recovery принимает только четыре физические причины; ручная кнопка заново проверяет discovery/carrier/lease. Root broker принимает только `uplink_id + enum action + policy_generation`, повторно читает active attempt/interface из SQLite и пока исполняет только fixed networkd DHCP renew | Global/whitelist/VPN/subscription/routing outage не должен перезапускать исправный USB. Непроверенные firmware/sysfs actions безопаснее явно подавить до E3372h hardware identity gate |
 
 ## Журнал разработки
+
+### Сессия 092 — bounded physical modem recovery vertical slice — 2026-08-28
+
+**Сделано:**
+
+- добавлен самостоятельный `internal/modemrecovery`: durable policy/runtime/attempt repository, physical-only controller, coalescing runner, hysteresis, cooldown, USB reset window budget, policy generation и restart cleanup;
+- HiLink reconcile теперь явно публикует только `DEVICE_ABSENT`, `CARRIER_DOWN` и `DHCP_LEASE_MISSING`; carrier + валидный DHCP lease считается физически здоровым даже при subnet/routing/global/VPN ошибке;
+- отсутствие уже offline модема продолжает наблюдаться на каждом цикле, поэтому recovery timer не замерзает после первого disconnect; при reconnect физический episode сбрасывается;
+- старый `SetRecovering`, который только менял legacy state и инвалидировал paths, удалён из production surface;
+- root broker получил strict typed request `uplink_id + action + policy_generation`; backend повторно читает active attempt, HiLink/enabled/address mode/current ifname/carrier из SQLite и исполняет только `/usr/bin/networkctl renew <derived-ifname>`;
+- произвольный interface/sysfs path/executable не принимается. HiLink API/mobile-session/driver rebind/USB reset/hub power-cycle возвращают `HARDWARE_ACTION_NOT_AVAILABLE` до реального E3372h profile gate;
+- `GET/PUT /api/v1/modems/{id}/recovery`, расширенный modem DTO и отдельная WebUI-карточка показывают physical reason, policy, runtime, cooldown, durable budget и очищенную историю; ручная кнопка ничего не сбрасывает у физически исправного модема;
+- каждая начатая/завершённая попытка и policy mutation создаёт redacted event; незавершённая попытка после process restart закрывается как `PROCESS_RESTARTED`, не обнуляя USB budget.
+
+**Проверено:**
+
+- non-physical `GLOBAL_TARGETS_FAILED` отклоняется recovery controller; healthy и absent-without-safe-action не создают reset attempt — PASS;
+- DHCP hysteresis/manual action, exact broker tuple, rejection extra `interface`, stale generation, device/identity boundary и unsupported hardware suppression — PASS;
+- interrupted RUNNING attempt, durable USB cooldown/window counter и recovery history после restart — PASS;
+- authenticated recovery API, policy generation, modem DTO, WebUI JavaScript syntax и OpenAPI route parity — PASS;
+- полный `go test ./...`, `go vet ./...`, targeted package suites, оба `node --check` и `git diff --check` — PASS; реальные Linux `networkctl`, Huawei firmware API и USB actions не запускались.
+
+**Следующий шаг:** зафиксировать exact source commit и реализовать safe Ethernet mutation manifest v2 с snapshot/apply/confirm/rollback. Production key/tag/Release не использовать.
 
 ### Сессия 091 — canonical runtime, whitelist classifier и generic uplink WebUI — 2026-08-28
 

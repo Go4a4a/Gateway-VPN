@@ -121,18 +121,8 @@ func TestModemLifecycleOperationsAreSafeAndAudited(t *testing.T) {
 	if disabled.Enabled || disabled.State != StateDisabled || disabled.InterfaceName != "" || disabled.ManagementReachabilityState != "STALE" {
 		t.Fatalf("disabled modem = %+v", disabled)
 	}
-	if err := repository.SetRecovering(ctx, "modem-a"); err == nil {
-		t.Fatal("disabled modem recovery was accepted")
-	}
 	if err := repository.SetEnabled(ctx, "modem-a", true); err != nil {
 		t.Fatal(err)
-	}
-	if err := repository.SetRecovering(ctx, "modem-a"); err != nil {
-		t.Fatal(err)
-	}
-	recovering, _ := repository.Get(ctx, "modem-a")
-	if recovering.State != StateRecovering {
-		t.Fatalf("recovering modem state = %s", recovering.State)
 	}
 	if err := repository.MarkOffline(ctx, "modem-a"); err != nil {
 		t.Fatal(err)

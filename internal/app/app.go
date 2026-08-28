@@ -31,6 +31,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/mihomo"
 	"gateway-vpn/internal/modem"
+	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
@@ -61,6 +62,7 @@ type Runtime struct {
 	Routing               interface{ SyncRouting(context.Context) error }
 	WireGuard             interface{ SyncWireGuard(context.Context) error }
 	ModemRunner           *hilink.Runner
+	ModemRecovery         *modemrecovery.Runner
 	HealthRunner          *candidateruntime.PeriodicRunner
 	DirectRunner          *directprobe.Runner
 	Logging               *loggingpkg.Controller
@@ -160,6 +162,11 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	systemLogger := logger.With("component", loggingpkg.ComponentSystem)
 	subscriptionLogger := logger.With("component", loggingpkg.ComponentSubscription)
 	modemLogger := logger.With("component", loggingpkg.ComponentModem)
+	recoveryController := &modemrecovery.Controller{Repository: modemrecovery.NewRepository(database), Executor: networkBroker}
+	recoveryRunner := modemrecovery.NewRunner(recoveryController)
+	recoveryRunner.OnError = func(err error) {
+		modemLogger.Warn("bounded physical modem recovery failed", "error", err)
+	}
 	healthLogger := logger.With("component", loggingpkg.ComponentPathHealth)
 	routingLogger := logger.With("component", loggingpkg.ComponentRoutingFirewall)
 	wireGuardLogger := logger.With("component", loggingpkg.ComponentWireGuard)
@@ -169,6 +176,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	}
 	dataPlane.ModemRunner.OnCycle = func(result hilink.CycleResult) {
 		dataPlane.Discoveries.Replace(result.Matches)
+		recoveryRunner.Submit(modemrecovery.ObservationBatch{Healthy: append([]string(nil), result.PhysicallyHealthyModems...), Failures: cloneStringMap(result.PhysicalFailures)})
 		if len(result.ReadyModems) != 0 || len(result.OfflineModems) != 0 || len(result.ConflictModems) != 0 || len(result.Errors) != 0 {
 			modemLogger.Info("HiLink modem inventory reconciled", "ready", result.ReadyModems, "offline", result.OfflineModems, "conflicts", len(result.ConflictModems), "errors", len(result.Errors))
 		}
@@ -250,6 +258,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		WireGuardConfigPath: filepath.Join(configuration.System.StateDir, "secrets", "wireguard.yaml"),
 		WireGuardSync:       networkBroker,
 		ModemRuntime:        networkBroker,
+		ModemRecovery:       recoveryController,
 		ModemReconcile: func(ctx context.Context) (hilink.CycleResult, error) {
 			return dataPlane.ModemRunner.Manager.Reconcile(ctx)
 		},
@@ -291,7 +300,15 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC()}, nil
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
 }
 
 func initializeStartupPolicy(ctx context.Context, database *sql.DB, states *state.Repository, bootID string) (bool, error) {
@@ -369,7 +386,7 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	application.logger.Info("management TLS ready", "certificate_sha256", application.TLS.Fingerprint)
 	workerContext, stopWorker := context.WithCancel(ctx)
 	defer stopWorker()
-	workerDone := make(chan runtimeWorkerExit, 12)
+	workerDone := make(chan runtimeWorkerExit, 16)
 	workers := 0
 	startWorker := func(name string, run func(context.Context) error) {
 		workers++
@@ -390,6 +407,9 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.ModemRunner != nil {
 		startWorker("modem-reconcile", application.ModemRunner.Run)
+	}
+	if application.ModemRecovery != nil {
+		startWorker("modem-recovery", application.ModemRecovery.Run)
 	}
 	if application.HealthRunner != nil {
 		startWorker("path-health", application.HealthRunner.Run)

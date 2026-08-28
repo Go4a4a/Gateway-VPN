@@ -24,6 +24,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/mihomoruntime"
 	"gateway-vpn/internal/modem"
+	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/state"
@@ -127,7 +128,7 @@ func runNetworkBroker(args []string) int {
 		Executor: executor, IP: "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg",
 		Uname: "/usr/bin/uname", MihomoBinary: "/opt/gateway-vpn/current/libexec/mihomo", OSReleaseFile: "/etc/os-release",
 	}
-	server, err := networkapply.NewBrokerServerWithTrafficRuntime(
+	server, err := networkapply.NewBrokerServerWithFullRuntime(
 		engine,
 		mihomoruntime.SystemdAdmin{Executor: executor, Systemctl: "/usr/bin/systemctl"},
 		firewallBackend,
@@ -143,6 +144,7 @@ func runNetworkBroker(args []string) int {
 			JournalRoot: filepath.Join(defaultPrivilegedRoot, "update-transactions"),
 		},
 		traffic.NFTReader{Executor: executor, NFT: "/usr/sbin/nft"},
+		modemrecovery.LinuxBackend{Database: database, Executor: executor, Networkctl: "/usr/bin/networkctl"},
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create network broker: %v\n", err)

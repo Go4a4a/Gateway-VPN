@@ -40,6 +40,7 @@ import (
 	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modem"
+	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
@@ -71,6 +72,7 @@ type Dependencies struct {
 	WireGuardConfigPath     string
 	WireGuardSync           WireGuardSynchronizer
 	ModemRuntime            ModemRuntime
+	ModemRecovery           ModemRecoveryController
 	ModemReconcile          func(context.Context) (hilink.CycleResult, error)
 	ModemPathProbe          ModemPathProber
 	DirectPathProbe         DirectPathProber
@@ -193,6 +195,12 @@ type ModemRuntime interface {
 	SyncWireGuard(context.Context) error
 }
 
+type ModemRecoveryController interface {
+	Request(context.Context, string, string) (modemrecovery.Result, error)
+	Snapshot(context.Context, string, int) (modemrecovery.Snapshot, error)
+	UpdatePolicy(context.Context, string, modemrecovery.PolicyUpdate) (modemrecovery.Policy, error)
+}
+
 type ModemPathProber interface {
 	RequalifyModem(context.Context, string) (candidateruntime.RequalificationResult, error)
 }
@@ -291,6 +299,8 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/modems/{id}/disable", server.protected(http.HandlerFunc(server.disableModem)))
 	mux.Handle("POST /api/v1/modems/{id}/probe", server.protected(http.HandlerFunc(server.probeModem)))
 	mux.Handle("POST /api/v1/modems/{id}/recover", server.protected(http.HandlerFunc(server.recoverModem)))
+	mux.Handle("GET /api/v1/modems/{id}/recovery", server.protected(http.HandlerFunc(server.modemRecovery)))
+	mux.Handle("PUT /api/v1/modems/{id}/recovery", server.protected(http.HandlerFunc(server.updateModemRecovery)))
 	mux.Handle("POST /api/v1/modems/{id}/replace-identity", server.protected(http.HandlerFunc(server.replaceModemIdentity)))
 	mux.Handle("DELETE /api/v1/modems/{id}", server.protected(http.HandlerFunc(server.forgetModem)))
 	mux.Handle("GET /api/v1/modems/discovered", server.protected(http.HandlerFunc(server.discoveredModems)))
@@ -1156,6 +1166,12 @@ func (server *Server) modems(writer http.ResponseWriter, request *http.Request) 
 	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		modemPaths := pathsByModem[item.ID]
+		recoveryState, recoveryReason, recoveryFailure := "NOT_AVAILABLE", "", ""
+		if server.dependencies.ModemRecovery != nil {
+			if recoverySnapshot, snapshotErr := server.dependencies.ModemRecovery.Snapshot(request.Context(), item.ID, 1); snapshotErr == nil {
+				recoveryState, recoveryReason, recoveryFailure = recoverySnapshot.Runtime.State, recoverySnapshot.Runtime.LastOutcomeCode, recoverySnapshot.Runtime.FailureReason
+			}
+		}
 		var directPath any
 		for index := range modemPaths {
 			if modemPaths[index].Kind == accesspolicy.MethodDirect {
@@ -1172,6 +1188,7 @@ func (server *Server) modems(writer http.ResponseWriter, request *http.Request) 
 			"state": item.State, "telemetry_state": item.TelemetryState,
 			"management_reachability_state": item.ManagementReachabilityState,
 			"last_seen_at":                  item.LastSeenAt, "stable_since": item.StableSince,
+			"recovery_state": recoveryState, "recovery_reason": recoveryReason, "physical_failure": recoveryFailure,
 			"direct_path": directPath, "paths": modemPaths,
 		})
 	}
@@ -1340,16 +1357,70 @@ func (server *Server) recoverModem(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	id := request.PathValue("id")
-	if err := server.dependencies.Modems.SetRecovering(request.Context(), id); err != nil {
+	current, err := server.dependencies.Modems.Get(request.Context(), id)
+	if err != nil {
 		writeDomainError(writer, err)
+		return
+	}
+	if !current.Enabled {
+		writeError(writer, http.StatusConflict, "MODEM_DISABLED", "Отключённый модем не восстанавливается автоматически")
 		return
 	}
 	result, err := server.reconcileModemInventory(request.Context())
 	if err != nil {
-		writeJSON(writer, http.StatusAccepted, map[string]any{"recovery": "RETRY_PENDING", "convergence": server.convergeModemRuntime(request.Context())})
+		writeJSON(writer, http.StatusAccepted, map[string]any{"recovery": "OBSERVATION_RETRY_PENDING", "reason_code": "PHYSICAL_STATE_NOT_CONFIRMED", "convergence": server.convergeModemRuntime(request.Context())})
 		return
 	}
-	writeJSON(writer, http.StatusAccepted, map[string]any{"recovery": "RECONCILED", "ready": containsString(result.ReadyModems, id), "convergence": server.convergeModemRuntime(request.Context())})
+	reason := result.PhysicalFailures[id]
+	if server.dependencies.ModemRecovery == nil {
+		writeJSON(writer, http.StatusAccepted, map[string]any{"recovery": "CONTROLLER_NOT_AVAILABLE", "ready": containsString(result.ReadyModems, id), "convergence": server.convergeModemRuntime(request.Context())})
+		return
+	}
+	recovery, recoveryErr := server.dependencies.ModemRecovery.Request(request.Context(), id, reason)
+	if recoveryErr != nil && !errors.Is(recoveryErr, modemrecovery.ErrNoPhysicalFailure) {
+		writeDomainError(writer, recoveryErr)
+		return
+	}
+	if recovery.Action != "" && recovery.Status == modemrecovery.AttemptSucceeded {
+		result, _ = server.reconcileModemInventory(request.Context())
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"recovery": recovery, "ready": containsString(result.ReadyModems, id), "convergence": server.convergeModemRuntime(request.Context())})
+}
+
+func (server *Server) modemRecovery(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ModemRecovery == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Восстановление модемов не подключено")
+		return
+	}
+	limit, err := parsePageLimit(request, 20)
+	if err != nil || limit > 100 {
+		writeError(writer, http.StatusBadRequest, "INVALID_LIMIT", "limit должен быть от 1 до 100")
+		return
+	}
+	snapshot, err := server.dependencies.ModemRecovery.Snapshot(request.Context(), request.PathValue("id"), limit)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, snapshot)
+}
+
+func (server *Server) updateModemRecovery(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ModemRecovery == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Восстановление модемов не подключено")
+		return
+	}
+	var input modemrecovery.PolicyUpdate
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	policy, err := server.dependencies.ModemRecovery.UpdatePolicy(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"policy": policy})
 }
 
 func (server *Server) replaceModemIdentity(writer http.ResponseWriter, request *http.Request) {

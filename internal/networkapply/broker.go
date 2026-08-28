@@ -16,6 +16,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/traffic"
 )
 
@@ -34,6 +35,7 @@ type BrokerServer struct {
 	Restore     RestoreAdmin
 	Update      UpdateAdmin
 	Traffic     TrafficAdmin
+	Recovery    ModemRecoveryAdmin
 	handler     http.Handler
 }
 
@@ -110,6 +112,13 @@ type TrafficAdmin interface {
 	ReadTrafficCounters(context.Context) (traffic.AuthoritativeSnapshot, error)
 }
 
+// ModemRecoveryAdmin accepts only a stable uplink id, a durable policy
+// generation and an enum action. The root implementation independently reads
+// the current interface, active attempt and physical identity context.
+type ModemRecoveryAdmin interface {
+	Execute(context.Context, modemrecovery.Command) error
+}
+
 // UpdateTransactionStatus is the only update-journal information exposed to
 // the unprivileged control plane. It intentionally omits filesystem paths,
 // database hashes, snapshot identifiers and service-manager diagnostics.
@@ -177,10 +186,14 @@ func NewBrokerServerWithUpdateRuntime(engine *Engine, dataPlane DataPlaneAdmin, 
 }
 
 func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin, pathPlane PathAdmin, routingAdmin RoutingAdmin, bootstrapAdmin BootstrapAdmin, wireGuardAdmin WireGuardAdmin, loggingAdmin LoggingAdmin, journalAdmin JournalAdmin, diagnosticsAdmin HostDiagnosticsAdmin, restoreAdmin RestoreAdmin, updateAdmin UpdateAdmin, trafficAdmin TrafficAdmin) (*BrokerServer, error) {
+	return NewBrokerServerWithFullRuntime(engine, dataPlane, pathPlane, routingAdmin, bootstrapAdmin, wireGuardAdmin, loggingAdmin, journalAdmin, diagnosticsAdmin, restoreAdmin, updateAdmin, trafficAdmin, nil)
+}
+
+func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pathPlane PathAdmin, routingAdmin RoutingAdmin, bootstrapAdmin BootstrapAdmin, wireGuardAdmin WireGuardAdmin, loggingAdmin LoggingAdmin, journalAdmin JournalAdmin, diagnosticsAdmin HostDiagnosticsAdmin, restoreAdmin RestoreAdmin, updateAdmin UpdateAdmin, trafficAdmin TrafficAdmin, recoveryAdmin ModemRecoveryAdmin) (*BrokerServer, error) {
 	if engine == nil {
 		return nil, errors.New("network apply engine is required")
 	}
-	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin}
+	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin, Recovery: recoveryAdmin}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/stage", server.stage)
 	mux.HandleFunc("POST /v1/apply", server.apply)
@@ -226,12 +239,36 @@ func NewBrokerServerWithTrafficRuntime(engine *Engine, dataPlane DataPlaneAdmin,
 	if trafficAdmin != nil {
 		mux.HandleFunc("POST /v1/traffic/counters", server.readTrafficCounters)
 	}
+	if recoveryAdmin != nil {
+		mux.HandleFunc("POST /v1/modem/recovery/execute", server.executeModemRecovery)
+	}
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) executeModemRecovery(writer http.ResponseWriter, request *http.Request) {
+	var input modemrecovery.Command
+	if err := decodeBrokerJSON(request, &input); err != nil || modemrecovery.ValidateCommand(input) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	err := server.Recovery.Execute(request.Context(), input)
+	switch {
+	case err == nil:
+		writer.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, modemrecovery.ErrActionUnsupported):
+		writeBrokerError(writer, http.StatusConflict, "RECOVERY_ACTION_NOT_SUPPORTED")
+	case errors.Is(err, modemrecovery.ErrDeviceRemoved):
+		writeBrokerError(writer, http.StatusConflict, "RECOVERY_DEVICE_REMOVED")
+	case errors.Is(err, modemrecovery.ErrStaleGeneration):
+		writeBrokerError(writer, http.StatusConflict, "RECOVERY_STALE_GENERATION")
+	default:
+		writeBrokerError(writer, http.StatusServiceUnavailable, "RECOVERY_ACTION_FAILED")
+	}
 }
 
 func (server *BrokerServer) activateDirectPath(writer http.ResponseWriter, request *http.Request) {
@@ -683,6 +720,24 @@ func (client *BrokerClient) ReadTrafficCounters(ctx context.Context) (traffic.Au
 	var snapshot traffic.AuthoritativeSnapshot
 	err := client.call(ctx, "/v1/traffic/counters", struct{}{}, http.StatusOK, &snapshot)
 	return snapshot, err
+}
+
+func (client *BrokerClient) Execute(ctx context.Context, command modemrecovery.Command) error {
+	err := client.call(ctx, "/v1/modem/recovery/execute", command, http.StatusNoContent, nil)
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "RECOVERY_ACTION_NOT_SUPPORTED"):
+		return modemrecovery.ErrActionUnsupported
+	case strings.Contains(message, "RECOVERY_DEVICE_REMOVED"):
+		return modemrecovery.ErrDeviceRemoved
+	case strings.Contains(message, "RECOVERY_STALE_GENERATION"):
+		return modemrecovery.ErrStaleGeneration
+	default:
+		return err
+	}
 }
 
 func (client *BrokerClient) call(ctx context.Context, endpoint string, input any, expectedStatus int, output any) error {
