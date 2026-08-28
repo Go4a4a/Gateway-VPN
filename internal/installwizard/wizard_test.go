@@ -37,20 +37,21 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 	}
 	// First select the addressed HiLink and the default-route NIC, then the
 	// unused Ethernet intended for Keenetic WAN.
-	input := strings.NewReader("4\n2\n\n\n\n\n")
+	input := strings.NewReader("4\n2\n\n\n\n\n\n\n")
 	output := new(bytes.Buffer)
 	session, err := NewSession(executor, input, output)
 	if err != nil {
 		t.Fatal(err)
 	}
+	session.inspectBoot = configurableGRUB
 	selection, err := session.Select(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.InstallDependencies {
+	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.InstallDependencies || selection.BootNetworkPolicy != BootNetworkNonBlocking || selection.GRUBPolicy != GRUBAutomatic {
 		t.Fatalf("selection = %+v", selection)
 	}
-	for _, expected := range []string{"eno1", "enp2s0", "enp3s0", "enxhilink", "enxhilink2", "blocked: current default route", "blocked: Huawei USB/HiLink", "CIDR"} {
+	for _, expected := range []string{"eno1", "enp2s0", "enp3s0", "enxhilink", "enxhilink2", "текущий выход Ubuntu", "Huawei USB/HiLink", "НУЖНО ВЫБРАТЬ СЕЙЧАС", "БУДЕТ НАСТРОЕНО АВТОМАТИЧЕСКИ", "МОЖНО ИЗМЕНИТЬ ПОСЛЕ УСТАНОВКИ", "без Ethernet carrier"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("wizard output missing %q: %s", expected, output.String())
 		}
@@ -62,17 +63,18 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 
 func TestInteractiveSelectionValidatesCustomCIDRAndDHCPPrefix(t *testing.T) {
 	executor := cleanWizardExecutor()
-	input := strings.NewReader("2\n\nno\n10.42.0.1/16\n10.42.0.1/24\n")
+	input := strings.NewReader("2\n\n10.42.0.1/16\n10.42.0.1/24\nno\n2\n3\n")
 	output := new(bytes.Buffer)
 	session, _ := NewSession(executor, input, output)
+	session.inspectBoot = configurableGRUB
 	selection, err := session.Select(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || !selection.EnableDHCP {
+	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || !selection.EnableDHCP || selection.BootNetworkPolicy != BootNetworkKeep || selection.GRUBPolicy != GRUBKeep {
 		t.Fatalf("selection = %+v", selection)
 	}
-	if !strings.Contains(output.String(), "requires a /24") {
+	if !strings.Contains(output.String(), "требует подсеть /24") {
 		t.Fatalf("missing DHCP prefix explanation: %s", output.String())
 	}
 }
@@ -84,7 +86,7 @@ func TestInteractiveSelectionBlocksActiveManagementRoute(t *testing.T) {
 	if !session.ProtectManagementPeer("203.0.113.10") {
 		t.Fatal("valid management peer was rejected")
 	}
-	if _, err := session.Select(context.Background()); err == nil || !strings.Contains(err.Error(), "no unused safe Ethernet") {
+	if _, err := session.Select(context.Background()); err == nil || !strings.Contains(err.Error(), "нет свободного безопасного Ethernet") {
 		t.Fatalf("management interface was selectable: %v", err)
 	}
 }
@@ -101,7 +103,7 @@ func TestInteractiveCancellationAndExactFinalConfirmation(t *testing.T) {
 	if err != nil || confirmed {
 		t.Fatalf("non-exact confirmation = %v,%v", confirmed, err)
 	}
-	if !strings.Contains(output.String(), "cancelled") {
+	if !strings.Contains(output.String(), "отменена") {
 		t.Fatalf("cancellation not reported: %s", output.String())
 	}
 
@@ -109,6 +111,40 @@ func TestInteractiveCancellationAndExactFinalConfirmation(t *testing.T) {
 	confirmed, err = session.ConfirmApply("1.2.0", "PASSED", Selection{})
 	if err != nil || !confirmed {
 		t.Fatalf("exact confirmation = %v,%v", confirmed, err)
+	}
+}
+
+func TestUnknownBootloaderIsPreservedWithoutUnsafePrompt(t *testing.T) {
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n"), new(bytes.Buffer))
+	session.inspectBoot = func() bootObservation {
+		return bootObservation{bootloader: "неизвестный", firmware: "UEFI", detail: "нет подтверждённого GRUB"}
+	}
+	selection, err := session.Select(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.GRUBPolicy != GRUBKeep || selection.BootNetworkPolicy != BootNetworkNonBlocking {
+		t.Fatalf("unsafe boot policy selection = %+v", selection)
+	}
+}
+
+func TestWindowsBootEntryMakesVisibleBoundedMenuTheRecommendation(t *testing.T) {
+	output := new(bytes.Buffer)
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n"), output)
+	session.inspectBoot = func() bootObservation {
+		return bootObservation{bootloader: "GRUB", configurable: true, firmware: "UEFI", detail: "Windows detected", windowsEntry: true}
+	}
+	selection, err := session.Select(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.GRUBPolicy != GRUBMenu {
+		t.Fatalf("Windows-safe GRUB selection = %+v", selection)
+	}
+	for _, expected := range []string{"Обнаружена Windows", "Показывать меню выбора 5 секунд — рекомендуется"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("Windows-safe explanation missing %q: %s", expected, output.String())
+		}
 	}
 }
 
@@ -131,6 +167,10 @@ func cleanWizardExecutor() *wizardExecutor {
 		addresses: `[{"ifname":"lo","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]},{"ifname":"enp2s0","addr_info":[]}]`,
 		routes:    `[]`,
 	}
+}
+
+func configurableGRUB() bootObservation {
+	return bootObservation{bootloader: "GRUB", configurable: true, firmware: "UEFI", detail: "valid configuration"}
 }
 
 type wizardExecutor struct {

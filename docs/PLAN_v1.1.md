@@ -1897,6 +1897,11 @@ gateway-vpn/
 
 ### 17.2 Installer requirements
 
+- официальный first-install entrypoint остаётся одной одинаковой version-pinned командой; после cryptographic bootstrap она запускает последовательный интерактивный мастер на целевой машине, а не требует предварительно редактировать Netplan, GRUB, systemd или файлы проекта;
+- мастер использует единый human-readable contract для **каждого** компонента установки: показывает обнаруженное состояние, понятное назначение компонента, рекомендуемый вариант с причиной, остальные безопасные варианты, последствия каждого выбора, возможность позднего изменения и точный список будущих host mutations; термин без расшифровки (`CIDR`, `DHCP`, `GRUB`, `PATH_BLOCKED`, `wait-online`, `fwmark` и т. п.) не может быть единственным объяснением;
+- все компоненты делятся на три явно названные группы: **«Нужно выбрать сейчас»**, **«Будет настроено автоматически для безопасности»** и **«Можно изменить после установки в WebUI»**. Обязательные security invariants не маскируются как пользовательский выбор, но мастер объясняет, что и зачем будет сделано; необязательные policy decisions всегда имеют `Рекомендуется`, `Сохранить текущую настройку` и безопасную отмену;
+- Enter принимает только показанный рекомендуемый вариант; номер/значение проверяется повторно, `q` отменяет установку без persistent mutation. Перед apply мастер печатает исчерпывающую сводку, предупреждает о временной потере сети/перезагрузке, если применимо, и требует точный token `INSTALL`;
+- первоначально мастер обязан одинаково покрывать: проверку release/signature, support matrix ОС/CPU/bootloader/filesystem, зависимости, выбор одного или нескольких LAN-портов, transit subnet, DHCP/DNS для WAN Keenetic, SSH через owned LAN bridge, IPv4 forwarding/IPv6 block, boot firewall/startup policy, динамические HiLink-модемы, `networkd-wait-online`, GRUB, systemd services/watchdog/logging, backup/rollback и итоговую readiness-проверку; параметры, которые меняются только после установки, перечисляются с путём к соответствующей вкладке WebUI;
 - проверяет ОС, kernel features, TUN, nftables, WireGuard и свободные подсети;
 - обнаруживает конфликт UFW/firewalld/NetworkManager configuration;
 - не делает безусловный full system upgrade;
@@ -1912,11 +1917,17 @@ gateway-vpn/
 - `openssh-server` проверяется как managed dependency; если его нет, package загружается до firewall mutation, но устанавливается/запускается только после durable marker и `PATH_BLOCKED`; installer проверяет IPv4 wildcard TCP/22, а rollback/uninstall восстанавливает прежние enabled/active states (установленный OS package, как и прочие dependencies, не удаляется);
 - предлагает первый свободный private transit CIDR, разрешает ввести другой `/16../30` и до установки проверяет его против всех host addresses/routes, HiLink management networks и `10.80.0.0/24`;
 - отдельно спрашивает про DHCP и установку отсутствующих зависимостей; DHCP требует `/24`;
+- предлагает boot-network policy: рекомендуемый appliance-вариант не ждёт carrier, DHCP или Internet ни от одного Ethernet/HiLink uplink, заменяет запуск штатного `systemd-networkd-wait-online` owned success-no-wait drop-in и запускает Gateway control plane независимо от `network-online.target`; вариант `Сохранить Ubuntu` не меняет host wait-online policy и явно предупреждает о возможной задержке 90–120 секунд;
+- HiLink, выбранные физические LAN members и сам owned bridge имеют явный `RequiredForOnline=no`; отсутствие/зависание одного или всех модемов отображается runtime state machine и никогда не задерживает boot ОС;
+- предлагает GRUB policy только после read-only определения фактического GRUB/UEFI/Legacy состояния: при единственной Ubuntu рекомендуемый `Автоматическая Ubuntu` скрывает меню, оставляет короткое окно вызова `Esc/Shift` и не останавливается на menu после `recordfail`; при найденной Windows boot entry скрытый вариант недоступен и рекомендуется видимое меню на 5 секунд; альтернативой всегда остаётся полное сохранение текущей policy. Неизвестный/не-GRUB bootloader никогда не изменяется автоматически;
+- GRUB настраивается отдельным owned `/etc/default/grub.d/` drop-in без перезаписи vendor/user файла, затем `update-grub` и generated-config validation; boot-network policy использует отдельный owned systemd drop-in. Оба файла, их отсутствие до установки и regenerated state входят в first-install snapshot/recovery/rollback и удаляются при uninstall;
 - после read-only preflight показывает итоговую сводку и требует отдельного точного подтверждения до первой разрешённой host mutation;
 - при отсутствии настоящего TTY интерактивный режим завершается fail-closed; для CI/deploy сохраняется отдельный automation mode с обязательными явными `LAN interface/CIDR` и policy flags;
 - сохраняет pre-install network/firewall snapshot;
 - умеет dry-run;
 - при ошибке выполняет rollback.
+
+Одна команда не означает опасную установку без вопросов. Она означает отсутствие ручной подготовки: все hardware-dependent решения принимает человек в одном понятном мастере после автоматического read-only обследования. Если состояние неоднозначно (несколько ОС, неизвестный bootloader, активная management-сессия на изменяемом порту, чужой firewall/network ownership, повреждённый filesystem/GRUB или неподдерживаемая ОС), мастер объясняет конкретный конфликт и завершается до первой mutation вместо догадки.
 
 ### 17.3 Обновление
 
@@ -1949,7 +1960,7 @@ Systemd запускает `/opt/gateway-vpn/current/bin/gateway-vpn`. Новы�
 10. при неуспехе остановить новый binary, вернуть старый symlink и исходную DB как согласованную пару;
 11. удалить rollback copy только после завершения заданного stability window.
 
-Pointer-only update дополнительно принимает candidate только при точном совпадении подписанного `host_contract_sha256`, вычисленного по полному набору packaged systemd unit/socket/timer files, с контрактом текущего release. Изменение root-owned lifecycle assets нельзя молча проигнорировать при переключении binaries: такой artifact отклоняется до host mutation и требует отдельной подписанной installer-upgrade transaction. После успешного stability window и повторной health-проверки `recovery` symlink атомарно переводится на новый проверенный release; до этого момента он остаётся на старом release для rollback. Поэтому следующую update-транзакцию всегда выполняет последний finalized trusted updater, а не произвольно давний binary.
+Pointer-only update дополнительно принимает candidate только при точном совпадении подписанного `host_contract_sha256`, вычисленного по полному набору root-owned lifecycle assets: systemd units, networkd policy, boot wait-online, GRUB, nftables, sysctl, journald, dnsmasq, sysusers/tmpfiles и first-install recovery helper. Изменение этих файлов нельзя молча проигнорировать при переключении binaries: такой artifact отклоняется до host mutation и требует отдельной подписанной installer-upgrade transaction. После успешного stability window и повторной health-проверки `recovery` symlink атомарно переводится на новый проверенный release; до этого момента он остаётся на старом release для rollback. Поэтому следующую update-транзакцию всегда выполняет последний finalized trusted updater, а не произвольно давний binary.
 
 Down-migration новой БД старым binary не используется: rollback всегда восстанавливает snapshot до migration.
 

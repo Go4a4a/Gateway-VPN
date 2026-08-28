@@ -507,6 +507,13 @@ func ReadReleaseMetadata(root string) (Release, error) {
 }
 
 var requiredHostContractFiles = []string{
+	"packaging/dnsmasq/dnsmasq.conf.in",
+	"packaging/grub/90-gateway-vpn-automatic.cfg",
+	"packaging/grub/90-gateway-vpn-menu.cfg",
+	"packaging/journald/gateway-vpn.conf",
+	"packaging/nftables/boot.nft.in",
+	"packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf",
+	"packaging/sysctl.d/90-gateway-vpn-ipv6.conf",
 	"packaging/systemd/gateway-vpn.service",
 	"packaging/systemd/gateway-vpn-watchdog.service",
 	"packaging/systemd/gateway-vpn-firewall.service",
@@ -517,6 +524,31 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd/gateway-vpn-update-resume.service",
 	"packaging/systemd/gateway-vpn-update-finalize.service",
 	"packaging/systemd/gateway-vpn-update-finalize.timer",
+	"packaging/systemd-networkd/05-gateway-vpn-lan.netdev",
+	"packaging/systemd-networkd/05-gateway-vpn-lan.network.in",
+	"packaging/systemd-networkd/06-gateway-vpn-lan-member.network.in",
+	"packaging/systemd-networkd/80-gateway-vpn-hilink.network",
+	"packaging/systemd-wait-online/gateway-vpn.conf",
+	"packaging/sysusers.d/gateway-vpn.conf",
+	"packaging/tmpfiles.d/gateway-vpn.conf",
+	"scripts/recover-gateway-install.sh",
+}
+
+var hostContractDirectories = []string{
+	"packaging/dnsmasq",
+	"packaging/grub",
+	"packaging/journald",
+	"packaging/nftables",
+	"packaging/sysctl.d",
+	"packaging/systemd",
+	"packaging/systemd-networkd",
+	"packaging/systemd-wait-online",
+	"packaging/sysusers.d",
+	"packaging/tmpfiles.d",
+}
+
+var hostContractStandaloneFiles = []string{
+	"scripts/recover-gateway-install.sh",
 }
 
 type hostContractFile struct {
@@ -525,55 +557,75 @@ type hostContractFile struct {
 	digest string
 }
 
-// ComputeHostContractSHA256 binds pointer-only updates to the exact signed
-// systemd lifecycle already installed on the host. Updating these root-owned
-// assets requires a separate installer transaction; silently ignoring changed
-// units while switching binaries would create an untested hybrid release.
+// ComputeHostContractSHA256 binds pointer-only updates to every exact signed
+// lifecycle asset copied into root-owned host paths by the first installer.
+// Updating any of these assets requires a separate installer transaction;
+// silently switching only binaries would create an untested hybrid release.
 func ComputeHostContractSHA256(root string) (string, error) {
 	root, err := safeRoot(root)
 	if err != nil {
 		return "", err
 	}
-	contractRoot := filepath.Join(root, "packaging", "systemd")
-	info, err := os.Lstat(contractRoot)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", errors.New("release systemd contract directory is invalid")
-	}
-	files := make([]hostContractFile, 0, 32)
-	err = filepath.WalkDir(contractRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == contractRoot {
-			return nil
-		}
-		if entry.IsDir() {
-			return errors.New("release systemd contract must be a flat directory")
-		}
-		entryInfo, err := entry.Info()
-		if err != nil || entryInfo.Mode()&os.ModeSymlink != 0 || !entryInfo.Mode().IsRegular() || entryInfo.Size() <= 0 || entryInfo.Size() > MaximumReleaseBytes {
-			return errors.New("release systemd contract contains an invalid file")
+	files := make([]hostContractFile, 0, 48)
+	seen := make(map[string]bool, 48)
+	addFile := func(path string, info os.FileInfo) error {
+		if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaximumReleaseBytes {
+			return errors.New("release host lifecycle contract contains an invalid file")
 		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {
-			return errors.New("resolve release systemd contract path failed")
+			return errors.New("resolve release host lifecycle contract path failed")
 		}
 		relative = filepath.ToSlash(relative)
-		if !safeRelativePath(relative) || !strings.HasPrefix(relative, "packaging/systemd/") {
-			return errors.New("release systemd contract path is invalid")
+		if !safeRelativePath(relative) || seen[relative] {
+			return errors.New("release host lifecycle contract path is invalid or duplicated")
 		}
 		digest, bytesRead, err := hashFile(path, MaximumReleaseBytes)
-		if err != nil || bytesRead != entryInfo.Size() {
-			return errors.New("hash release systemd contract file failed")
+		if err != nil || bytesRead != info.Size() {
+			return errors.New("hash release host lifecycle contract file failed")
 		}
+		seen[relative] = true
 		files = append(files, hostContractFile{path: relative, bytes: bytesRead, digest: digest})
-		if len(files) > 64 {
-			return errors.New("release systemd contract contains too many files")
+		if len(files) > 96 {
+			return errors.New("release host lifecycle contract contains too many files")
 		}
 		return nil
-	})
-	if err != nil {
-		return "", err
+	}
+	for _, relativeRoot := range hostContractDirectories {
+		contractRoot := filepath.Join(root, filepath.FromSlash(relativeRoot))
+		info, err := os.Lstat(contractRoot)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("release host lifecycle contract directory is invalid: %s", relativeRoot)
+		}
+		err = filepath.WalkDir(contractRoot, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == contractRoot {
+				return nil
+			}
+			if entry.IsDir() {
+				return errors.New("release host lifecycle contract directories must be flat")
+			}
+			entryInfo, err := entry.Info()
+			if err != nil {
+				return errors.New("inspect release host lifecycle contract file failed")
+			}
+			return addFile(path, entryInfo)
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	for _, relative := range hostContractStandaloneFiles {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("release host lifecycle contract file is unavailable: %s", relative)
+		}
+		if err := addFile(path, info); err != nil {
+			return "", err
+		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 	present := make(map[string]bool, len(files))

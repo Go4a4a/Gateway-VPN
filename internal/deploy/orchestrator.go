@@ -289,6 +289,7 @@ func gatewayCommand(request Request, apply bool) (string, error) {
 		ManifestSHA256: request.ManifestSHA256, SignerKeySHA256: request.SignerKeySHA256,
 		LANInterface: request.LANInterface, LANAddress: request.LANAddress,
 		InstallDependencies: request.InstallDependencies, EnableDHCP: request.EnableDHCP,
+		BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep",
 		Apply: apply, NonInteractiveRoot: true, DependencyPreflightOnly: request.InstallDependencies && !apply,
 	})
 }

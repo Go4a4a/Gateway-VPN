@@ -1,10 +1,10 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-08-28
-**Общее состояние:** `IMMUTABLE_PUBLIC_RELEASE / GITHUB_ATTESTATION_VERIFIED / HARDWARE_GATES_PENDING`
-**Текущий этап:** successor `0.1.0-successor.5723940` дважды offline собран и подписан из exact commit `57239401732c18822729499656801b994d627477`; все `78` файлов совпали побайтно, по SHA-256, Unix mode и size. Exact tag `v0.1.0-successor.5723940` разрешается только в signed source commit. GitHub Release `378316577` публично опубликован, immutable и содержит ровно `10` assets; public downloads побайтно совпали с signed build1, а GitHub release attestation и отдельная attestation каждого asset проверены официальным `gh v2.98.0`. До полной production-готовности остаются только реальные Gateway/VPS/HiLink/Keenetic и 24/72-часовые endurance gates.
+**Общее состояние:** `IMMUTABLE_PUBLIC_RELEASE / UNIVERSAL_INSTALLER_V2_LOCAL_PASS / EXACT_SUCCESSOR_PENDING / HARDWARE_GATES_PENDING`
+**Текущий этап:** опубликованный successor `0.1.0-successor.5723940` остаётся неизменяемым контрольным release с проверенной GitHub attestation. После него принят новый first-install contract: понятный мастер для всех компонентов, GRUB policy и загрузка без ожидания Ethernet/HiLink. Изменения прошли local Go/shell/Ubuntu-systemd/GRUB gates, но ещё не зафиксированы exact commit/tag и не входят в публичный Release `378316577`; физическую установку следует выполнять только после нового exact successor.
 
-**Оценка прогресса:** программная реализация unified-access successor выполнена примерно на `99%`; точный подписанный кандидат прошёл локальные release/install gates и опубликован как immutable GitHub Release с проверенной attestation. Общая production-готовность оценивается примерно в `95%`: реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательные реальные 24/72-часовые endurance остаются отдельными несокращаемыми gates. Test-only перенос stability deadline не считается фактически прошедшими 24 часами.
+**Оценка прогресса:** программная реализация с новым universal installer выполнена примерно на `99%`. Общая production-готовность остаётся около `95%`: перед физической установкой latest worktree нужно превратить в новый exact signed successor и повторить clean install/recovery gate; затем остаются реальный Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic packet capture, USB hotplug/failover и обязательные 24/72-часовые endurance. Test-only перенос stability deadline не считается фактически прошедшими 24 часами.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
 
@@ -33,10 +33,10 @@
 
 | Область | Состояние | Комментарий |
 |---|---|---|
-| Архитектурный план | `DONE / AMENDED_2026-08-27` | `PLAN_v1.1.md` дополнен единым списком direct/VPN methods, `FULL/LIMITED` ranking, durable node preferences, resilient refresh, operation panel, startup gate и временным direct-only mode |
-| Репозиторий | `PUBLIC_IMMUTABLE_RELEASE / ATTESTATION_VERIFIED / EXACT_CI_PASS` | `origin/main` содержит release-attestation journal commit `c776f04290160feb23761a2d06888064709d3822`, exact CI `33152806661` — `success`. Tag `v0.1.0-successor.5723940^{}` равен `57239401732c18822729499656801b994d627477`; public immutable Release `378316577` имеет verified GitHub attestation и `10/10` independently verified assets |
+| Архитектурный план | `DONE / AMENDED_2026-08-28` | Помимо unified direct/VPN policy закреплён единый human-readable first-install wizard contract для каждого компонента, GRUB и no-wait boot-network policy |
+| Репозиторий | `LOCAL_SUCCESSOR_CHANGES / PUBLIC_BASE_IMMUTABLE` | Public `v0.1.0-successor.5723940` и Release `378316577` неизменны; universal-installer-v2 пока находится только в проверенном local worktree, exact commit/push/CI/tag ещё не выполнены |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
-| Этап 1: bootstrap | `5723940_FRESH_DOCKER_SYSTEMD_PASS / HARDWARE_PENDING` | Exact signed successor прошёл clean dependency gate, apply, strict idempotency, persistent `lan0`, HTTPS/SSH/DNS/DHCP, DB/config ownership, recovery markers, tracked validator и новый PID 1; реальный bare-metal host ещё не проверен |
+| Этап 1: bootstrap | `UNIVERSAL_WIZARD_V2_LOCAL_PASS / EXACT_SIGNED_GATE_PENDING / HARDWARE_PENDING` | Мастер выбирает несколько LAN-портов, DHCP/CIDR/dependencies, no-wait и GRUB; выводит обязательные и WebUI-настройки и exact mutation plan. Старый exact signed rehearsal остаётся evidence base, новый successor ещё не собран |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
 | Firewall / routing | `SCHEMA_V3_STARTUP_BOOT_REMOTE_PASS / HARDWARE_PENDING` | Schema `3` сохраняет counters и atomic mutually-exclusive TUN/direct gates. Exact run `33128823746` подтвердил production renderer/decoder, firewall recovery, ON/OFF startup policy, exact direct LKG, same-boot restart, next-boot quarantine, LAN→fwmark и отсутствие unmarked direct route |
 | Modem Manager | `CODE_PASS / LINUX_NOT_RUN` | Netlink+poll runner, sysfs identity, networkd DHCP leases без default route, disconnect/replug sync и WebUI adoption подключены; реальные USB/networkd events не запускались |
@@ -56,7 +56,7 @@
 | Uninstall | `DOCKER_SYSTEMD_PRESERVE_REINSTALL_PURGE_PASS / HOST_NOT_RUN` | Gateway exact `.27`: default preserve, reboot, reinstall с сохранённой SQLite, explicit purge с root-only DB backup и reboot — PASS. VPS signed `.8` использует byte-identical current uninstaller: default key/state preserve, reboot, reinstall с byte-identical `wg-mgmt.conf`, explicit key purge и reboot — PASS. Bare-metal cleanup ещё не выполнялся |
 | Endurance | `HARNESS_LINUX_SMOKE_PASS / 24H_72H_NOT_STARTED` | Linux-only CLI требует TLS 1.3/explicit CA и 0600 password file, держит session secrets в памяти, сохраняет minute samples и verified start/end diagnostics, автоматически оценивает restart/gaps/goroutines/FD/RSS/heap/live objects/SQLite retention. Smoke end-to-end прошёл, но не является gate; 24h developer и 72h hardware release ещё не запускались |
 | Traffic accounting | `EXACT_INSTALL_UPDATE_PASS / HARDWARE_PENDING` | Option A реализован: authoritative `user_upload/user_download/service_upload/service_download`, reset/epoch, session/daily/monthly totals, Mihomo cross-check, API/CSV/UI. Schema-v2 counters прошли fresh boot и signed update; мобильный hardware budget/cross-check ещё `NOT_RUN` |
-| Автоматические тесты | `LOCAL_REMOTE_SIGNED_AND_PUBLIC_RELEASE_GATE_PASS` | Full Windows suite/vet, Linux cross-compile, exact remote race/build/netns/systemd run `33130137658`, release-attestation exact run `33152806661`, local exact signed fresh-install/new-PID1/kernel gates и public Release attestation проходят |
+| Автоматические тесты | `NEW_LOCAL_SUITE_SYSTEMD_GRUB_PASS / EXACT_REMOTE_PENDING` | Новый worktree: full Windows suite/vet, Linux cross-build, shell/JS syntax, Ubuntu 24.04 systemd analyze, PID1 no-network wait-online и real update-grub/grub-script-check с deterministic Docker storage probe проходят; exact remote CI и signed fresh-install нового successor ещё не запускались |
 
 ## Матрица доказательств Definition of Done
 
@@ -288,6 +288,30 @@ Unified-access successor локально достиг install-ready: data-plane
 | DEV-166 | 2026-08-28 | Startup-policy integration выполняется четырьмя отдельными process phases над persistent SQLite и одним isolated kernel namespace; production `firewall-boot`, `FirewallBackend` и `RoutingBackend` являются actuator-ами, а изменяемый boot ID моделирует host boundary | Domain tests не доказывают соответствие DB intent фактическим nft sets/policy route. Раздельные процессы выявляют ложное manufacture-reboot, а новый boot обязан закрыть kernel до control recovery и не создавать unmarked default route |
 
 ## Журнал разработки
+
+### Сессия 088 — единый понятный installer, GRUB и загрузка без ожидания сети — 2026-08-28
+
+**Причина:** пользователь потребовал сохранить одну универсальную команду, но сделать понятный интерактивный выбор для каждого компонента установки. Отдельно требовалось убрать самопроизвольное GRUB-меню и исключить задержку Ubuntu из-за отсутствующего Ethernet, медленного/зависшего HiLink или недоступного Internet.
+
+**Реализовано локально:**
+
+- §17.2 `PLAN_v1.1.md` закрепляет единый human-readable contract: обнаруженное состояние, объяснение простыми словами, рекомендация с причиной, последствия альтернатив, позднее изменение, `q` без mutation и exact `INSTALL` после полного mutation plan;
+- мастер разделён на «Нужно выбрать сейчас», «Будет настроено автоматически для безопасности» и «Можно изменить после установки в WebUI»; hardware/policy choices покрывают несколько LAN ports, DHCP, свободный CIDR, dependencies, boot-network и GRUB;
+- wizard определяет GRUB/UEFI/Legacy; для одной Ubuntu рекомендует hidden timeout, при Windows boot entry скрытый вариант не предлагает и рекомендует меню 5 секунд, неизвестный загрузчик сохраняет без изменений;
+- owned GRUB drop-in задаёт Ubuntu default, hidden timeout `1s`/recordfail `0` либо visible menu `5s`; installer проверяет existing/generated `grub.cfg`, отказывается скрывать Windows, а recovery/uninstall удаляют только owned drop-in и повторно выполняют `update-grub`/`grub-script-check`;
+- Gateway control plane и Mihomo больше не зависят от `network-online.target`; LAN bridge/members и HiLink имеют `RequiredForOnline=no`;
+- рекомендуемая boot policy заменяет `systemd-networkd-wait-online` на owned immediate-success drop-in `/usr/bin/true`; `systemd-networkd` продолжает в фоне принимать hotplug и DHCP. Альтернатива `keep` не меняет Ubuntu wait-online;
+- automation mode получил обязательные typed `--boot-network-policy` и `--grub-policy`; deploy передаёт no-wait + GRUB keep явно;
+- install report и durable marker расширены двумя policy fields; recovery/uninstall сохраняют совместимость со старыми 14-field markers и новыми 16-field markers;
+- `host_contract_sha256` теперь связывает pointer-only update не только с systemd, но со всеми root-owned lifecycle assets: networkd, wait-online, GRUB, nftables, sysctl, journald, dnsmasq, sysusers/tmpfiles и recovery helper.
+
+**Найдено и исправлено проверкой:** первоначальный `systemd-networkd-wait-online --interface=gateway-vpn-lan:off --timeout=10` на настоящем Ubuntu 24.04 PID 1 без сети ждал ровно 10 секунд и завершался failure, поскольку bridge оставался `configuring/no-carrier`. Этот вариант удалён. Owned `ExecStart=/usr/bin/true` повторно завершил service как `active/success` за `19 ms`, хотя bridge оставался без carrier; именно это требуемая appliance-семантика.
+
+**Проверено:** full `go test ./... -count=1`, `go vet ./...`, четыре CGO-free Linux/amd64 builds, Node/shell syntax и `git diff --check` — PASS. Disposable Ubuntu 24.04 `systemd-analyze verify` принял все Gateway/VPS units и no-wait drop-in. Штатные `update-grub` и `grub-script-check` успешно сгенерировали/проверили hidden, menu и rollback конфигурации; из-за Docker overlay storage использован детерминированный test-only `grub-probe`, поэтому реальный disk/UEFI NVRAM остаётся bare-metal gate.
+
+**Release boundary:** immutable public `v0.1.0-successor.5723940` не менялся и не содержит эту доработку. Текущий worktree ещё не commit/push/exact-CI и не подписан production key.
+
+**Следующий шаг:** commit/push successor, дождаться exact CI, затем собрать disposable-signed clean bundle и повторить fresh Ubuntu/systemd install, idempotency, forced rollback и reboot. Новый production tag/Release требует отдельного разрешения пользователя.
 
 ### Сессия 087 — immutable public Release и GitHub attestation — 2026-08-28
 

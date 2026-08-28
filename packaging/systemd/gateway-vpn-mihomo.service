@@ -1,8 +1,7 @@
 [Unit]
 Description=Gateway VPN Mihomo data plane
-After=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service network-online.target
+After=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
 Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
-Wants=network-online.target
 ConditionPathExists=/var/lib/gateway-vpn/mihomo/active/config.yaml
 ConditionPathExists=|!/var/lib/gateway-vpn-privileged/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-install-authorized

@@ -15,9 +15,11 @@ RELEASE_VERSION=""
 LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS="192.168.200.1/24"
+BOOT_NETWORK_POLICY=""
+GRUB_POLICY=""
 
 usage() {
-  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply]"
+  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply]"
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
@@ -49,6 +51,8 @@ while (($#)); do
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
     --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
+    --boot-network-policy) BOOT_NETWORK_POLICY=${2:?}; shift 2 ;;
+    --grub-policy) GRUB_POLICY=${2:?}; shift 2 ;;
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
     --dependency-preflight-only) DEPENDENCY_PREFLIGHT_ONLY=1; shift ;;
     --enable-dhcp) ENABLE_DHCP=1; shift ;;
@@ -58,11 +62,13 @@ while (($#)); do
   esac
 done
 
-[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" ]] || { usage >&2; exit 2; }
+[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" && -n "$BOOT_NETWORK_POLICY" && -n "$GRUB_POLICY" ]] || { usage >&2; exit 2; }
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
 [[ "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "Invalid LAN interface" >&2; exit 2; }
+[[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Invalid boot network policy" >&2; exit 2; }
+[[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Invalid GRUB policy" >&2; exit 2; }
 LAN_MEMBER_NAMES=()
 LAN_MEMBER_WAS_UP_VALUES=()
 if [[ -n "$LAN_MEMBERS" ]]; then
@@ -116,9 +122,26 @@ RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN release currently requires x86_64" >&2; exit 1; }
-for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep; do
+for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
+if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
+  [[ -f "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" ]] || { echo "Signed Gateway boot-network policy is missing" >&2; exit 1; }
+fi
+if [[ "$GRUB_POLICY" != keep ]]; then
+  for command in update-grub grub-script-check; do
+    command -v "$command" >/dev/null || { echo "Requested GRUB policy requires Ubuntu command: $command" >&2; exit 1; }
+  done
+  [[ -f /etc/default/grub && ! -L /etc/default/grub && -f /boot/grub/grub.cfg && ! -L /boot/grub/grub.cfg ]] || { echo "Requested GRUB policy requires a regular Ubuntu GRUB configuration" >&2; exit 1; }
+  grub-script-check /boot/grub/grub.cfg >/dev/null || { echo "Existing GRUB configuration is invalid; installer will not modify it" >&2; exit 1; }
+  if [[ "$GRUB_POLICY" == automatic-hidden ]] && grep -Eqi -- "menuentry .*Windows|--class[[:space:]]+windows" /boot/grub/grub.cfg; then
+    echo "Automatic hidden GRUB policy is unsafe because another operating system was detected; choose menu-5s or keep" >&2
+    exit 1
+  fi
+  [[ -f "$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg" ]] || {
+    [[ "$GRUB_POLICY" == automatic-hidden && -f "$ROOT_DIR/packaging/grub/90-gateway-vpn-automatic.cfg" ]] || { echo "Signed Gateway GRUB policy is missing" >&2; exit 1; }
+  }
+fi
 [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) == yes ]] || { echo "Gateway clock is not reported as NTP-synchronized" >&2; exit 1; }
 if ! getent ahostsv4 github.com >/dev/null; then
   COMPLETED_INSTALL_HINT=0
@@ -130,7 +153,9 @@ if ! getent ahostsv4 github.com >/dev/null; then
      grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json; then
+     grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
   fi
   ((COMPLETED_INSTALL_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
@@ -347,6 +372,22 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN member set differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway boot-network policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway GRUB policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
+    [[ -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Installed Gateway boot-network policy is missing or unsafe" >&2; exit 1; }
+    [[ $(cat /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf) == $(cat "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf") ]] || { echo "Installed Gateway boot-network policy differs" >&2; exit 1; }
+  else
+    [[ ! -e /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Unexpected Gateway boot-network policy exists" >&2; exit 1; }
+  fi
+  GRUB_DROPIN=/etc/default/grub.d/90-gateway-vpn.cfg
+  if [[ "$GRUB_POLICY" == keep ]]; then
+    [[ ! -e "$GRUB_DROPIN" && ! -L "$GRUB_DROPIN" ]] || { echo "Unexpected Gateway GRUB policy exists" >&2; exit 1; }
+  else
+    GRUB_SOURCE="$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg"
+    [[ -f "$GRUB_DROPIN" && ! -L "$GRUB_DROPIN" && $(cat "$GRUB_DROPIN") == $(cat "$GRUB_SOURCE") ]] || { echo "Installed Gateway GRUB policy differs" >&2; exit 1; }
+    grub-script-check /boot/grub/grub.cfg >/dev/null || { echo "Installed generated GRUB configuration is invalid" >&2; exit 1; }
+  fi
   if ((ENABLE_DHCP)); then
     [[ -f /etc/gateway-vpn/dnsmasq.conf && ! -L /etc/gateway-vpn/dnsmasq.conf ]] || { echo "Installed Gateway dnsmasq config is missing or unsafe" >&2; exit 1; }
     DHCP_START="$LAN_A.$LAN_B.$LAN_C.100"
@@ -379,6 +420,7 @@ else
   for conflict in \
     /opt/gateway-vpn/current /opt/gateway-vpn/recovery /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf \
     /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
+    /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf /etc/default/grub.d/90-gateway-vpn.cfg \
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /var/lib/gateway-vpn-dnsmasq \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
@@ -404,6 +446,8 @@ echo "Release destination: $DEST"
 echo "LAN: $LAN_INTERFACE / $LAN_ADDRESS"
 echo "LAN physical members: ${LAN_MEMBERS:-direct-interface mode}"
 echo "DHCP enable requested: $ENABLE_DHCP"
+echo "Boot network policy: $BOOT_NETWORK_POLICY"
+echo "GRUB policy: $GRUB_POLICY"
 if ((EXISTING)); then
   if systemctl is-enabled --quiet gateway-vpn-install-recovery.service; then
     echo "Completed Gateway install unexpectedly has first-install recovery enabled" >&2
@@ -451,7 +495,7 @@ systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -478,6 +522,18 @@ ip -json address show >"$SNAPSHOT/ip-address.json"
 ip -json route show table all >"$SNAPSHOT/ip-route.json"
 ip -json rule show >"$SNAPSHOT/ip-rule.json"
 nft --json list ruleset >"$SNAPSHOT/nft-ruleset.json"
+if [[ "$GRUB_POLICY" != keep ]]; then
+  install -m 0600 /etc/default/grub "$SNAPSHOT/default-grub.before"
+  install -m 0600 /boot/grub/grub.cfg "$SNAPSHOT/grub.cfg.before"
+  [[ ! -f /boot/grub/grubenv || -L /boot/grub/grubenv ]] || install -m 0600 /boot/grub/grubenv "$SNAPSHOT/grubenv.before"
+fi
+
+if [[ "$GRUB_POLICY" != keep ]]; then
+  GRUB_SOURCE="$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg"
+  install -D -m 0644 "$GRUB_SOURCE" /etc/default/grub.d/90-gateway-vpn.cfg
+  update-grub
+  grub-script-check /boot/grub/grub.cfg >/dev/null
+fi
 
 install -D -m 0644 "$ROOT_DIR/packaging/sysusers.d/gateway-vpn.conf" /usr/lib/sysusers.d/gateway-vpn.conf
 systemd-sysusers /usr/lib/sysusers.d/gateway-vpn.conf
@@ -512,6 +568,9 @@ if ((${#LAN_MEMBER_NAMES[@]})); then
   done
 fi
 install -D -m 0644 "$ROOT_DIR/packaging/systemd-networkd/80-gateway-vpn-hilink.network" /etc/systemd/network/80-gateway-vpn-hilink.network
+if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
+  install -D -m 0644 "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf
+fi
 install -D -m 0644 "$ROOT_DIR/packaging/journald/gateway-vpn.conf" /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 install -D -m 0644 "$TRUSTED_UPDATE_KEY" /etc/gateway-vpn/update-signing.pub
 networkctl reload
@@ -620,6 +679,16 @@ if ((ENABLE_DHCP)); then
 fi
 EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
 [[ $(cat /etc/systemd/network/05-gateway-vpn-lan.network) == "$EXPECTED_LAN_NETWORK" ]] || { echo "Installed persistent Gateway LAN policy verification failed" >&2; exit 1; }
+if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
+  [[ -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf && ! -L /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf ]] || { echo "Installed non-blocking boot-network policy is missing" >&2; exit 1; }
+  [[ $(cat /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf) == $(cat "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf") ]] || { echo "Installed non-blocking boot-network policy verification failed" >&2; exit 1; }
+fi
+if [[ "$GRUB_POLICY" != keep ]]; then
+  GRUB_SOURCE="$ROOT_DIR/packaging/grub/90-gateway-vpn-${GRUB_POLICY%%-*}.cfg"
+  [[ -f /etc/default/grub.d/90-gateway-vpn.cfg && ! -L /etc/default/grub.d/90-gateway-vpn.cfg ]] || { echo "Installed GRUB policy is missing" >&2; exit 1; }
+  [[ $(cat /etc/default/grub.d/90-gateway-vpn.cfg) == $(cat "$GRUB_SOURCE") ]] || { echo "Installed GRUB policy verification failed" >&2; exit 1; }
+  grub-script-check /boot/grub/grub.cfg >/dev/null || { echo "Generated GRUB configuration failed validation after installation" >&2; exit 1; }
+fi
 if ((${#LAN_MEMBER_NAMES[@]})); then
   ip -d -o link show dev "$LAN_INTERFACE" | grep -Eq ' bridge ' || { echo "Installed Gateway logical LAN bridge is unavailable" >&2; exit 1; }
   for member in "${LAN_MEMBER_NAMES[@]}"; do
@@ -629,7 +698,7 @@ fi
 systemctl is-active --quiet ssh.service || { echo "Installed Gateway SSH management service is not active" >&2; exit 1; }
 ss -H -ltn "sport = :22" | grep -q . || { echo "Installed Gateway SSH management service is not listening" >&2; exit 1; }
 [[ -d /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || false
-printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": true,\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" >/var/lib/gateway-vpn/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": true,\n  "boot_network_policy": "%s",\n  "grub_policy": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >/var/lib/gateway-vpn/install-report.json
 chmod 0600 /var/lib/gateway-vpn/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)

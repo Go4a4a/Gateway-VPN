@@ -332,6 +332,39 @@ func TestSignerRejectsChangedHostLifecycleWithoutMetadataUpdate(t *testing.T) {
 	}
 }
 
+func TestHostContractCoversInstallerOwnedBootNetworkGRUBAndRecoveryAssets(t *testing.T) {
+	for _, relative := range []string{
+		"packaging/systemd-networkd/05-gateway-vpn-lan.network.in",
+		"packaging/systemd-wait-online/gateway-vpn.conf",
+		"packaging/grub/90-gateway-vpn-automatic.cfg",
+		"packaging/nftables/boot.nft.in",
+		"scripts/recover-gateway-install.sh",
+	} {
+		t.Run(strings.ReplaceAll(relative, "/", "_"), func(t *testing.T) {
+			root, _, _ := unsignedReleaseFixture(t, "1.2.0", 11, 12)
+			before, err := ComputeHostContractSHA256(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, filepath.FromSlash(relative))
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, append(content, []byte("# changed\n")...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			after, err := ComputeHostContractSHA256(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before == after {
+				t.Fatalf("host contract ignored installer-owned asset %s", relative)
+			}
+		})
+	}
+}
+
 func TestSemanticVersionOrdering(t *testing.T) {
 	cases := []struct {
 		left, right string

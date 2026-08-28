@@ -75,6 +75,8 @@ type GatewayOptions struct {
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
+	BootNetworkPolicy       string
+	GRUBPolicy              string
 	Apply                   bool
 	DependencyPreflightOnly bool
 }
@@ -109,6 +111,9 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	if !interfacePattern.MatchString(options.LANInterface) || !validIPv4CIDR(options.LANAddress) || !validLANMembers(options.LANInterface, options.LANMembers) {
 		return InstallResult{}, errors.New("explicit valid Gateway LAN interface and CIDR are required")
 	}
+	if !validGatewayBootNetworkPolicy(options.BootNetworkPolicy) || !validGatewayGRUBPolicy(options.GRUBPolicy) {
+		return InstallResult{}, errors.New("explicit valid Gateway boot-network and GRUB policies are required")
+	}
 	if options.DependencyPreflightOnly && (options.Apply || !options.InstallDependencies) {
 		return InstallResult{}, errors.New("dependency-preflight-only requires a dependency-enabled dry-run")
 	}
@@ -119,6 +124,8 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		"--version", prepared.VerifiedRelease.Release.GatewayVersion,
 		"--lan-interface", options.LANInterface,
 		"--lan-address", options.LANAddress,
+		"--boot-network-policy", options.BootNetworkPolicy,
+		"--grub-policy", options.GRUBPolicy,
 	}
 	if len(options.LANMembers) > 0 {
 		arguments = append(arguments, "--lan-members", strings.Join(options.LANMembers, ","))
@@ -257,6 +264,14 @@ func validLANMembers(lanInterface string, members []string) bool {
 		seen[member] = true
 	}
 	return true
+}
+
+func validGatewayBootNetworkPolicy(value string) bool {
+	return value == "gateway-nonblocking" || value == "keep"
+}
+
+func validGatewayGRUBPolicy(value string) bool {
+	return value == "automatic-hidden" || value == "menu-5s" || value == "keep"
 }
 
 func validWireGuardPublicKey(value string) bool {

@@ -62,10 +62,17 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 		}
 	}
 	control := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn.service"))
-	for _, required := range []string{"Type=notify", "NotifyAccess=all", "WatchdogSec=120s", "Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service", "Wants=network-online.target gateway-vpn-network-broker.socket", "PartOf=gateway-vpn-watchdog.service", "ReadWritePaths=/var/lib/gateway-vpn /run/gateway-vpn-watchdog"} {
+	for _, required := range []string{"Type=notify", "NotifyAccess=all", "WatchdogSec=120s", "Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service", "Wants=gateway-vpn-network-broker.socket", "PartOf=gateway-vpn-watchdog.service", "ReadWritePaths=/var/lib/gateway-vpn /run/gateway-vpn-watchdog"} {
 		if !strings.Contains(control, required) {
 			t.Errorf("control hang-detection contract missing %q", required)
 		}
+	}
+	if strings.Contains(control, "network-online.target") {
+		t.Fatal("Gateway control plane must not wait for external network-online.target")
+	}
+	mihomo := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-mihomo.service"))
+	if strings.Contains(mihomo, "network-online.target") {
+		t.Fatal("Mihomo must start independently and tolerate dynamic/offline modems")
 	}
 	for filename, required := range map[string]string{
 		"gateway-vpn-install-recovery.service":      "Before=network-pre.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service",
@@ -582,13 +589,13 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 		}
 	}
 	networkd := read(t, filepath.Join(root, "packaging", "systemd-networkd", "80-gateway-vpn-hilink.network"))
-	for _, required := range []string{"ID_VENDOR_ID=12d1", "DHCP=ipv4", "UseRoutes=no", "UseGateway=no", "IPv6AcceptRA=no"} {
+	for _, required := range []string{"ID_VENDOR_ID=12d1", "DHCP=ipv4", "UseRoutes=no", "UseGateway=no", "IPv6AcceptRA=no", "RequiredForOnline=no"} {
 		if !strings.Contains(networkd, required) {
 			t.Errorf("HiLink networkd policy missing %q", required)
 		}
 	}
 	lanNetwork := read(t, filepath.Join(root, "packaging", "systemd-networkd", "05-gateway-vpn-lan.network.in"))
-	for _, required := range []string{"Name=__LAN_INTERFACE__", "Address=__LAN_ADDRESS__", "DHCP=no", "IPv6AcceptRA=no", "LinkLocalAddressing=no"} {
+	for _, required := range []string{"Name=__LAN_INTERFACE__", "Address=__LAN_ADDRESS__", "DHCP=no", "IPv6AcceptRA=no", "LinkLocalAddressing=no", "RequiredForOnline=no"} {
 		if !strings.Contains(lanNetwork, required) {
 			t.Errorf("persistent LAN networkd policy missing %q", required)
 		}
@@ -605,6 +612,24 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 			t.Errorf("persistent LAN bridge member policy missing %q", required)
 		}
 	}
+	waitOnline := read(t, filepath.Join(root, "packaging", "systemd-wait-online", "gateway-vpn.conf"))
+	for _, required := range []string{"ExecStart=", "ExecStart=/usr/bin/true"} {
+		if !strings.Contains(waitOnline, required) {
+			t.Errorf("bounded wait-online policy missing %q", required)
+		}
+	}
+	grubPolicies := map[string][]string{
+		"90-gateway-vpn-automatic.cfg": {"GRUB_DEFAULT=0", "GRUB_TIMEOUT_STYLE=hidden", "GRUB_TIMEOUT=1", "GRUB_RECORDFAIL_TIMEOUT=0"},
+		"90-gateway-vpn-menu.cfg":      {"GRUB_DEFAULT=0", "GRUB_TIMEOUT_STYLE=menu", "GRUB_TIMEOUT=5", "GRUB_RECORDFAIL_TIMEOUT=5"},
+	}
+	for filename, requirements := range grubPolicies {
+		policy := read(t, filepath.Join(root, "packaging", "grub", filename))
+		for _, required := range requirements {
+			if !strings.Contains(policy, required) {
+				t.Errorf("%s missing %q", filename, required)
+			}
+		}
+	}
 }
 
 func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
@@ -616,7 +641,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16`, "boot_network_policy", "grub_policy", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("Gateway recovery missing %q", required)
 		}
@@ -631,7 +656,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16`, "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "90-gateway-vpn.cfg", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
 		if !strings.Contains(uninstaller, required) {
 			t.Errorf("Gateway uninstall missing %q", required)
 		}

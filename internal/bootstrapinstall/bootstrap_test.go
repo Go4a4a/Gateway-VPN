@@ -182,42 +182,42 @@ func TestGatewayInstallerRunsReadOnlyPreflightBeforeApplyWithTypedArguments(t *t
 	defer prepared.Cleanup()
 	runner := &recordingRunner{}
 	result, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, EnableDHCP: true, Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, EnableDHCP: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "automatic-hidden", Apply: true,
 	})
 	if err != nil || result.Preflight != "PASSED" || result.Installation != "APPLIED" || len(runner.requests) != 2 {
 		t.Fatalf("InstallGateway() = %+v,%v requests=%d", result, err, len(runner.requests))
 	}
 	first, second := runner.requests[0], runner.requests[1]
-	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
+	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(first.Arguments, "gateway-nonblocking") || !contains(first.Arguments, "automatic-hidden") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
 		t.Fatalf("installer requests = %+v", runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 10}}
 	result, err = (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
 	})
 	if err != nil || result.Preflight != "PASSED" || result.Installation != "APPLIED" || len(runner.requests) != 2 {
 		t.Fatalf("Gateway APT index refresh continuation = %+v,%v requests=%+v", result, err, runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 20}}
 	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
 	}); err == nil || len(runner.requests) != 1 {
 		t.Fatalf("unsafe Gateway APT plan reached apply: requests=%+v err=%v", runner.requests, err)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 10}}
 	result, err = (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, DependencyPreflightOnly: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", DependencyPreflightOnly: true,
 	})
 	if err != nil || result.Preflight != "DEPENDENCY_GATE_PASSED_OR_REFRESH_REQUIRED" || result.Installation != "NOT_REQUESTED" || len(runner.requests) != 1 || !contains(runner.requests[0].Arguments, "--dependency-preflight-only") {
 		t.Fatalf("orchestrated Gateway dependency gate = %+v,%v requests=%+v", result, err, runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1}
-	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", Apply: true}); err == nil || len(runner.requests) != 1 {
+	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true}); err == nil || len(runner.requests) != 1 {
 		t.Fatalf("failed preflight did not stop apply: requests=%d err=%v", len(runner.requests), err)
 	}
 	runner = &recordingRunner{}
 	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "gateway-vpn-lan", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24",
+		LANInterface: "gateway-vpn-lan", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep",
 	}); err != nil || len(runner.requests) != 1 || !contains(runner.requests[0].Arguments, "--lan-members") || !contains(runner.requests[0].Arguments, "enp2s0,enp3s0") {
 		t.Fatalf("multi-port Gateway arguments = %+v, %v", runner.requests, err)
 	}
@@ -475,6 +475,7 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 	mihomo := []byte("synthetic mihomo binary v1.19.10")
 	writeFixtureFile(t, releaseRoot, "libexec/mihomo", mihomo)
 	writeFixtureFile(t, releaseRoot, "scripts/install-gateway.sh", fixture.installerContent)
+	writeFixtureFile(t, releaseRoot, "scripts/recover-gateway-install.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
 	writeFixtureFile(t, releaseRoot, "manifest.sha256", []byte(strings.Repeat("0", 64)+"  placeholder\n"))
 	writeFixtureFile(t, releaseRoot, "share/supply-chain/sbom.spdx.json", []byte("{}\n"))
 	writeFixtureFile(t, releaseRoot, "share/supply-chain/provenance.intoto.json", []byte("{}\n"))
@@ -485,6 +486,24 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 		"gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer",
 	} {
 		writeFixtureFile(t, releaseRoot, "packaging/systemd/"+name, []byte("[Unit]\nDescription=synthetic lifecycle unit\n"))
+	}
+	for relative, content := range map[string][]byte{
+		"packaging/dnsmasq/dnsmasq.conf.in":                               []byte("interface=synthetic\n"),
+		"packaging/grub/90-gateway-vpn-automatic.cfg":                     []byte("GRUB_TIMEOUT=1\n"),
+		"packaging/grub/90-gateway-vpn-menu.cfg":                          []byte("GRUB_TIMEOUT=5\n"),
+		"packaging/journald/gateway-vpn.conf":                             []byte("[Journal]\nStorage=persistent\n"),
+		"packaging/nftables/boot.nft.in":                                  []byte("table inet gateway_vpn {}\n"),
+		"packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf":          []byte("net.ipv4.ip_forward=1\n"),
+		"packaging/sysctl.d/90-gateway-vpn-ipv6.conf":                     []byte("net.ipv6.conf.all.disable_ipv6=1\n"),
+		"packaging/systemd-networkd/05-gateway-vpn-lan.netdev":            []byte("[NetDev]\nName=gateway-vpn-lan\n"),
+		"packaging/systemd-networkd/05-gateway-vpn-lan.network.in":        []byte("[Match]\nName=__LAN_INTERFACE__\n"),
+		"packaging/systemd-networkd/06-gateway-vpn-lan-member.network.in": []byte("[Match]\nName=__LAN_MEMBER__\n"),
+		"packaging/systemd-networkd/80-gateway-vpn-hilink.network":        []byte("[Match]\nType=ether\n"),
+		"packaging/systemd-wait-online/gateway-vpn.conf":                  []byte("[Service]\nExecStart=/usr/bin/true\n"),
+		"packaging/sysusers.d/gateway-vpn.conf":                           []byte("u gateway-vpn - - - -\n"),
+		"packaging/tmpfiles.d/gateway-vpn.conf":                           []byte("d /run/gateway-vpn 0750 root root -\n"),
+	} {
+		writeFixtureFile(t, releaseRoot, relative, content)
 	}
 	mihomoDigest := sha256.Sum256(mihomo)
 	hostContract, err := updatepkg.ComputeHostContractSHA256(releaseRoot)

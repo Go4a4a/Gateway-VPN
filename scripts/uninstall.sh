@@ -57,10 +57,15 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
   if [[ -n "$LATEST_TRANSACTION" ]]; then
     [[ -f "$LATEST_TRANSACTION" && ! -L "$LATEST_TRANSACTION" && $(stat -c '%u:%g:%a' "$LATEST_TRANSACTION") == "0:0:600" ]] || { echo "Completed Gateway install marker ownership or mode is unsafe" >&2; exit 1; }
     MARKER_BYTES=$(stat -c '%s' "$LATEST_TRANSACTION")
-    [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 1024 ]] || { echo "Completed Gateway install marker size is unsafe" >&2; exit 1; }
-    [[ $(wc -l <"$LATEST_TRANSACTION") == 14 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
-    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active)=' "$LATEST_TRANSACTION") == 14 ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
-    for marker_key in version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active; do
+    [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Completed Gateway install marker size is unsafe" >&2; exit 1; }
+    MARKER_FIELD_COUNT=$(wc -l <"$LATEST_TRANSACTION")
+    [[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
+    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|boot_network_policy|grub_policy)=' "$LATEST_TRANSACTION") == "$MARKER_FIELD_COUNT" ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
+    MARKER_KEYS=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
+    if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+      MARKER_KEYS+=(boot_network_policy grub_policy)
+    fi
+    for marker_key in "${MARKER_KEYS[@]}"; do
       [[ $(grep -c "^${marker_key}=" "$LATEST_TRANSACTION") == 1 ]] || { echo "Completed Gateway install marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
     done
     VERSION=$(sed -n 's/^version=//p' "$LATEST_TRANSACTION")
@@ -77,7 +82,15 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     LAN_WAS_UP=$(sed -n 's/^lan_was_up=//p' "$LATEST_TRANSACTION")
     SSH_WAS_ENABLED=$(sed -n 's/^ssh_was_enabled=//p' "$LATEST_TRANSACTION")
     SSH_WAS_ACTIVE=$(sed -n 's/^ssh_was_active=//p' "$LATEST_TRANSACTION")
+    BOOT_NETWORK_POLICY=keep
+    GRUB_POLICY=keep
+    if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+      BOOT_NETWORK_POLICY=$(sed -n 's/^boot_network_policy=//p' "$LATEST_TRANSACTION")
+      GRUB_POLICY=$(sed -n 's/^grub_policy=//p' "$LATEST_TRANSACTION")
+    fi
     [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ && "$SSH_WAS_ENABLED" =~ ^[01]$ && "$SSH_WAS_ACTIVE" =~ ^[01]$ ]] && validate_marker_lan "$LAN_ADDRESS" || { echo "Completed Gateway install marker values are invalid" >&2; exit 1; }
+    [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Completed Gateway boot-network policy is invalid" >&2; exit 1; }
+    [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Completed Gateway GRUB policy is invalid" >&2; exit 1; }
     if [[ -n "$LAN_MEMBERS" ]]; then
       [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ && "$LAN_MEMBER_WAS_UP" =~ ^[01](,[01]){0,15}$ ]] || { echo "Completed Gateway LAN bridge marker values are invalid" >&2; exit 1; }
       IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
@@ -99,6 +112,15 @@ rm -f /etc/systemd/system/gateway-vpn-update.service /etc/systemd/system/gateway
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
+rm -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf
+GRUB_POLICY_REMOVED=0
+if [[ -f /etc/default/grub.d/90-gateway-vpn.cfg && ! -L /etc/default/grub.d/90-gateway-vpn.cfg ]]; then
+  rm -f /etc/default/grub.d/90-gateway-vpn.cfg
+  GRUB_POLICY_REMOVED=1
+elif [[ -e /etc/default/grub.d/90-gateway-vpn.cfg || -L /etc/default/grub.d/90-gateway-vpn.cfg ]]; then
+  echo "Unsafe Gateway GRUB policy path requires manual inspection" >&2
+  exit 1
+fi
 if /usr/sbin/nft list table inet gateway_vpn >/dev/null 2>&1; then
   /usr/sbin/nft delete table inet gateway_vpn
 fi
@@ -142,4 +164,9 @@ if ((PURGE_DATA)); then
 fi
 networkctl reload
 systemctl daemon-reload
+if ((GRUB_POLICY_REMOVED)); then
+  command -v update-grub >/dev/null && command -v grub-script-check >/dev/null || { echo "Cannot regenerate GRUB after uninstall" >&2; exit 1; }
+  update-grub
+  grub-script-check /boot/grub/grub.cfg >/dev/null
+fi
 echo "Gateway VPN uninstalled. Reboot or apply the desired host firewall/network configuration explicitly."

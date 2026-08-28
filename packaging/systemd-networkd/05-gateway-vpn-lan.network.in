@@ -6,3 +6,6 @@ Address=__LAN_ADDRESS__
 DHCP=no
 IPv6AcceptRA=no
 LinkLocalAddressing=no
+
+[Link]
+RequiredForOnline=no

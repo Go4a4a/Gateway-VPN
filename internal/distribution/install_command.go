@@ -31,6 +31,8 @@ type GatewayInstallCommandOptions struct {
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
+	BootNetworkPolicy       string
+	GRUBPolicy              string
 	Apply                   bool
 	NonInteractiveRoot      bool
 	DependencyPreflightOnly bool
@@ -87,10 +89,10 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		return "", errors.New("safe GitHub release inputs are required")
 	}
 	if options.Interactive {
-		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
+		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
 			return "", errors.New("interactive Gateway command must defer all host policy choices and confirmation to the target terminal")
 		}
-	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) {
+	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) || !validBootNetworkPolicy(options.BootNetworkPolicy) || !validGRUBPolicy(options.GRUBPolicy) {
 		return "", errors.New("safe explicit Gateway LAN inputs are required for automation mode")
 	}
 	bootstrap, err := SelectArtifact(manifest, RoleBootstrap, "linux", "amd64")
@@ -122,7 +124,8 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	if options.Interactive {
 		installCommand += " --interactive --management-peer \"$management_peer\""
 	} else {
-		installCommand += " --lan-interface " + options.LANInterface + " --lan-address " + options.LANAddress
+		installCommand += " --lan-interface " + options.LANInterface + " --lan-address " + options.LANAddress +
+			" --boot-network-policy " + options.BootNetworkPolicy + " --grub-policy " + options.GRUBPolicy
 	}
 	parts = append(parts, installCommand)
 	if options.EnableDHCP {
@@ -145,6 +148,14 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	// unset guard, so nounset would abort the verified bootstrap before it can
 	// run. --norc makes the generated command independent of remote dotfiles.
 	return "bash --norc -ceu " + shellQuote(strings.Join(parts, "; ")), nil
+}
+
+func validBootNetworkPolicy(value string) bool {
+	return value == "gateway-nonblocking" || value == "keep"
+}
+
+func validGRUBPolicy(value string) bool {
+	return value == "automatic-hidden" || value == "menu-5s" || value == "keep"
 }
 
 // VPSInstallCommand provides the same bootstrap trust chain for the VPS role.

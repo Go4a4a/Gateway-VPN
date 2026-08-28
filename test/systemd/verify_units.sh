@@ -14,11 +14,12 @@ done
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -qq --yes --no-install-recommends \
-  systemd nftables dnsmasq-base wireguard-tools >/dev/null
+  systemd nftables dnsmasq-base wireguard-tools grub-common grub2-common >/dev/null
 command -v systemd-analyze >/dev/null || { echo "systemd-analyze is unavailable after installing systemd" >&2; exit 1; }
 
 mkdir -p \
   /etc/systemd/system/wg-quick@wg-mgmt.service.d \
+	/etc/systemd/system/systemd-networkd-wait-online.service.d \
   /opt/gateway-vpn/current/bin \
   /opt/gateway-vpn/current/libexec \
   /opt/gateway-vpn/recovery/bin \
@@ -34,6 +35,9 @@ done
 install -m 0644 \
   "$ROOT/packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf" \
   /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf
+install -m 0644 \
+  "$ROOT/packaging/systemd-wait-online/gateway-vpn.conf" \
+  /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf
 
 # systemd-analyze verifies command existence in addition to unit syntax and
 # dependency structure. These inert placeholders occupy the exact signed
@@ -51,6 +55,9 @@ systemd-analyze verify \
   /etc/systemd/system/gateway-vpn*.service \
   /etc/systemd/system/gateway-vpn*.socket \
   /etc/systemd/system/gateway-vpn*.timer \
+	/lib/systemd/system/systemd-networkd-wait-online.service \
   /lib/systemd/system/wg-quick@.service
 
-echo "PASS: Ubuntu 24.04 systemd verified Gateway/VPS units, timers, sockets and WireGuard drop-in"
+bash "$ROOT/test/systemd/verify_grub_policy.sh"
+
+echo "PASS: Ubuntu 24.04 systemd verified Gateway/VPS units, no-wait boot policy, timers, sockets and WireGuard drop-in"

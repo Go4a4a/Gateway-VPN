@@ -114,7 +114,16 @@ Publisher сверяет clean HEAD, local/remote exact tag, отсутстви�
 6. спрашивает, нужен ли DHCP для WAN Keenetic/прямых management clients и можно ли установить отсутствующие managed dependencies;
 7. предлагает первый свободный `/24` из безопасного набора либо принимает другой private host CIDR `/16../30`; при DHCP разрешён только `/24`;
 8. проверяет CIDR против всех IPv4 addresses/non-default routes хоста и фиксированной WireGuard management subnet;
-9. запускает signed read-only preflight, показывает итоговую сводку и применяет изменения только после точного ввода `INSTALL`.
+9. предлагает не ждать внешнюю сеть при boot (рекомендуется для Gateway) либо сохранить штатную Ubuntu policy; в рекомендуемом режиме Ethernet, HiLink, DHCP и Интернет не задерживают загрузку ОС;
+10. определяет GRUB и UEFI/Legacy, затем предлагает скрытую автоматическую загрузку Ubuntu, видимое меню на 5 секунд либо сохранение текущей policy; если найдена Windows boot entry, скрытый вариант не предлагается, а неизвестный загрузчик всегда сохраняется;
+11. отдельно показывает полный список обязательных автоматических настроек и runtime-параметров, которые позднее меняются в WebUI;
+12. запускает signed read-only preflight, показывает итоговую сводку и применяет изменения только после точного ввода `INSTALL`.
+
+Каждый пункт мастера объясняет назначение простыми словами, показывает обнаруженное состояние, явно помечает рекомендацию и последствия остальных вариантов. `Enter` принимает только видимую рекомендацию, `q` завершает работу без persistent mutation. Security invariants (проверка подписи, firewall, IPv6 block, ownership, recovery) не изображаются как отключаемые вопросы: они перечисляются отдельным блоком до итогового `INSTALL`.
+
+Appliance-вариант boot-network устанавливает только owned drop-in `/etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf`, который успешно завершает штатное ожидание сразу. Сам `systemd-networkd` продолжает работать и динамически настраивает появившиеся интерфейсы; Gateway control plane не зависит от `network-online.target`. Вариант `Сохранить Ubuntu` не создаёт drop-in.
+
+GRUB policy хранится только в owned `/etc/default/grub.d/90-gateway-vpn.cfg`; `/etc/default/grub` не перезаписывается. После изменения выполняются `update-grub` и `grub-script-check`. Recovery/uninstall удаляют owned drop-in и заново генерируют валидный `grub.cfg`. Даже при скрытом меню остаётся короткое окно `Esc` (UEFI) либо `Shift` (Legacy BIOS) для ручного recovery.
 
 OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. Installer требует IPv4 wildcard listener TCP/22, а nftables принимает новые SSH connections только с `gateway-vpn-lan`. На HiLink/uplink TCP/22 не открывается. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
 
@@ -137,7 +146,7 @@ EOF, отмена, отсутствие TTY, конфликт подсети и�
   --interactive
 ```
 
-Для CI, заранее подготовленного provisioning и `gateway-vpn-deploy` сохраняется неинтерактивный automation mode: там `--lan-interface`, `--lan-address`, dependency/DHCP policy и `--apply` задаются явно. Он намеренно не угадывает hardware inputs.
+Для CI, заранее подготовленного provisioning и `gateway-vpn-deploy` сохраняется неинтерактивный automation mode: там `--lan-interface`, `--lan-address`, dependency/DHCP policy, `--boot-network-policy`, `--grub-policy` и `--apply` задаются явно. Он намеренно не угадывает hardware inputs.
 
 Факт наличия generated command ещё не является Linux installation PASS: первый production release должен пройти реальную загрузку GitHub redirect, dry-run/apply, forced recovery и reboot на Ubuntu 24.04.
 
