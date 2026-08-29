@@ -256,8 +256,14 @@ fi
 INNER_UPGRADE_HINT=0
 host_upgrade_inner_authorized && INNER_UPGRADE_HINT=1
 if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) != yes ]]; then
-  ((INNER_UPGRADE_HINT == 1)) || { echo "Gateway clock is not reported as NTP-synchronized" >&2; exit 1; }
-  echo "Gateway NTP status became unavailable after fail-closed quiesce; continuing with the verified outer host-upgrade preflight"
+  if ((INNER_UPGRADE_HINT == 1)); then
+    echo "Gateway NTP is unavailable inside the signed host-upgrade transaction; continuing with strict offline release and host verification"
+  elif ((HOST_UPGRADE_REQUIRED == 1)); then
+    echo "Gateway NTP is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification"
+  else
+    echo "Gateway clock is not reported as NTP-synchronized" >&2
+    exit 1
+  fi
 fi
 if ! getent ahostsv4 github.com >/dev/null; then
   COMPLETED_INSTALL_HINT=0

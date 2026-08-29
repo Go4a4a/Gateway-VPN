@@ -146,7 +146,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"--host-upgrade-inner",
 		"Inherited host-upgrade transaction lock is invalid",
 		"host_upgrade_inner_authorized",
-		"Gateway NTP status became unavailable after fail-closed quiesce; continuing with the verified outer host-upgrade preflight",
+		"Gateway NTP is unavailable inside the signed host-upgrade transaction; continuing with strict offline release and host verification",
+		"Gateway NTP is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification",
+		"Gateway clock is not reported as NTP-synchronized",
 		"Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification",
 		"Requested Gateway version does not match signed release metadata",
 	} {
@@ -156,6 +158,10 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Index(installer, `gateway-install-preflight --lan-interface`) > strings.Index(installer, `exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`) {
 		t.Fatal("host-upgrade dispatch occurs before the complete local host preflight")
+	}
+	if strings.Index(installer, `release-verify --release-dir "$RELEASE_DIR"`) < 0 ||
+		strings.Index(installer, `release-verify --release-dir "$RELEASE_DIR"`) > strings.Index(installer, "Gateway NTP is blocked by the installed fail-closed policy") {
+		t.Fatal("installed-host NTP exception occurs before candidate signature verification")
 	}
 	if strings.Count(installer, "host_upgrade_inner_authorized") < 3 ||
 		!strings.Contains(installer, `[[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a' "$marker") == "0:0:600" ]]`) ||
@@ -296,6 +302,7 @@ func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectN
 		"HOST_UPGRADE_REQUIRED=0",
 		"INNER_UPGRADE_HINT=0",
 		`$(readlink -f /proc/$$/fd/9) == "$lock"`,
+		"HOST_UPGRADE_REQUIRED == 1",
 		"COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1",
 		"continuing with strict signed existing/upgrade verification",
 	} {
