@@ -587,6 +587,9 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 		t.Fatal("root broker cannot atomically synchronize the fixed journald namespace drop-in")
 	}
 	recovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-recovery.service"))
+	if !strings.Contains(recovery, "StartLimitIntervalSec=0") {
+		t.Fatal("idempotent network recovery can hit systemd start limiting while several dependents start sequentially")
+	}
 	for name, unit := range map[string]string{"broker": broker, "recovery": recovery} {
 		if !strings.Contains(unit, "CAP_FOWNER") {
 			t.Errorf("%s cannot enforce modes on gateway-vpn-owned SQLite recovery directories", name)

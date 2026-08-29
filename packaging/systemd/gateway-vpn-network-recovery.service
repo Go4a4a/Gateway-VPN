@@ -2,6 +2,7 @@
 Description=Gateway VPN recover unfinished network apply
 Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
 DefaultDependencies=no
+StartLimitIntervalSec=0
 After=local-fs.target gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-database-restore-boot.service
 Requires=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service
 Wants=gateway-vpn-database-restore-boot.service
