@@ -38,7 +38,7 @@ DATABASE=/var/lib/gateway-vpn/state.db
 [[ -z $($SQLITE -readonly "$DATABASE" 'PRAGMA foreign_key_check;') ]]
 
 runtime=$("$CONTROL" status --database "$DATABASE" --json)
-[[ $runtime == *'"GatewayState":"ALL_MODEMS_OFFLINE"'* ]]
+[[ $runtime == *'"GatewayState":"ALL_UPLINKS_OFFLINE"'* ]]
 [[ $runtime == *'"PathState":"PATH_BLOCKED"'* ]]
 [[ $runtime == *'"ActivePathID":""'* ]]
 

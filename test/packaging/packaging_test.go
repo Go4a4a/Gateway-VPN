@@ -779,6 +779,14 @@ func TestGatewayInstallerUsesLiteralFileComparisonsForOwnedPolicies(t *testing.T
 	}
 }
 
+func TestSystemdReleaseGateUsesCanonicalGenericUplinkState(t *testing.T) {
+	root := repositoryRoot(t)
+	gate := read(t, filepath.Join(root, "test", "release-gate", "validate_gateway_systemd.sh"))
+	if !strings.Contains(gate, `"GatewayState":"ALL_UPLINKS_OFFLINE"`) || strings.Contains(gate, `"GatewayState":"ALL_MODEMS_OFFLINE"`) {
+		t.Fatal("systemd release gate still asserts the retired modem-only runtime state")
+	}
+}
+
 func TestFirewallGuardIsIndependentPrivilegedQuarantineService(t *testing.T) {
 	root := repositoryRoot(t)
 	guard := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-firewall-guard.service"))
