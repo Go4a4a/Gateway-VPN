@@ -63,6 +63,13 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 - Forwarding обычного LAN в outer `wg-mgmt` запрещён. Локальные ресурсы публикуются default-off как typed Gateway/Keenetic/host/subnet services через `GATEWAY_ONLY`, Keenetic WAN/routed, router WireGuard либо dedicated LAN profile и explicit administrator ACL.
 - Для каждой публикации `site × resource × VPS link` выделяется уникальный alias prefix. Это позволяет безопасно различать одинаковые `192.168.1.0/24`/`192.168.50.0/24` разных Gateway и одновременно держать admin tunnels к нескольким VPS без duplicate `AllowedIPs`.
 - Обычный Internet Keenetic продолжает идти через WAN. Management WireGuard на Keenetic не обязателен; без него Home LAN требует явного WAN→LAN firewall/return path либо dedicated LAN link и остаётся `WAITING_EXTERNAL_CONFIGURATION`, пока fresh probe не подтвердит доступ.
+
+## VPS coexistence с AmneziaVPN и чужими сетевыми owners
+
+- VPS-роли принадлежат только bounded interfaces `gvm<N>`/`gva<N>`, непересекающимся management/admin/alias prefixes, собственным ports, fwmarks/tables и routes protocol `186`. Preflight сверяет их со всеми observed addresses/routes/rules/listeners, WireGuard/Amnezia/Docker interfaces и отклоняет конфликт до mutation.
+- `inet gateway_vpn_vps` не использует blanket base-chain `policy drop` для всего host traffic: unowned interfaces/addresses/ports получают ранний `return`/policy accept, а deny применяется только внутри owned contour. `flush ruleset`, disable UFW/firewalld, удаление foreign nft/iptables rules и изменение чужих WireGuard peers запрещены.
+- Gateway VPN не создаёт default route VPS и не меняет AmneziaVPN, Docker bridge, NAT или policy marks. Watchdog читает чужой state только для conflict/drift classification и никогда не restart/reload чужой unit/interface либо весь VPS.
+- Если IPv4 forwarding уже включён, Gateway VPN не считает его своим. Если его включила Gateway VPN, uninstall возвращает `0` только при доказанном отсутствии нового foreign forwarding owner; иначе удаляет owned sysctl projection, сохраняет безопасное `1` и выдаёт явный residual-state warning, чтобы не оборвать позднее установленную AmneziaVPN.
 - Пересечения LAN/uplink/management/admin/ingress/peer/resource prefixes и duplicate peer routes отклоняются до apply. Management→Internet, непубликованная LAN и inter-site traffic всегда default deny.
 
 Конкретные addresses, interfaces, USB IDs и routing values стенда записываются после hardware discovery, а не предполагаются из порядка PCI/USB-портов.

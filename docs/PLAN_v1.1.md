@@ -9,7 +9,7 @@
 **Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
 **Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
 **Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 17 компонентов, включая отдельный `logging_pipeline`, с per-component recovery mode и классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
-**Поправка 2026-08-30:** односерверный `wg-mgmt` расширяется в successor до many-to-many Management Fabric `1..N Gateway ↔ 1..N VPS`; добавлены независимые одновременно активные management links, optional end-to-end `wg-admin` через VPS UDP relay, публикация Gateway/Keenetic/local resources с ACL и alias-prefix для пересекающихся домашних подсетей, несколько способов доступа в LAN без обязательной замены обычного WAN Keenetic, безопасное переключение topology profiles после установки и сгруппированная навигация WebUI
+**Поправка 2026-08-30:** односерверный `wg-mgmt` расширяется в successor до many-to-many Management Fabric `1..N Gateway ↔ 1..N VPS`; добавлены независимые одновременно активные management links, optional end-to-end `wg-admin` через VPS UDP relay, публикация Gateway/Keenetic/local resources с ACL и alias-prefix для пересекающихся домашних подсетей, несколько способов доступа в LAN без обязательной замены обычного WAN Keenetic, безопасное переключение topology profiles после установки, сгруппированная навигация WebUI, лёгкий VPS Hub/Agent, обязательное невмешательство в AmneziaVPN/чужие VPN и portable Windows deploy wizard после стабилизации core API
 
 ---
 
@@ -76,13 +76,16 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - HTTPS Web UI, REST API и CLI;
 - удалённый доступ к самому Gateway через один или несколько VPS WireGuard;
 - successor Management Fabric для нескольких Gateway на одном VPS и одного Gateway на нескольких VPS, с явной публикацией разрешённых локальных ресурсов;
+- лёгкий VPS Agent с embedded WebUI/CLI/watchdog только для owned Gateway VPN state, без обязательных nginx/Node.js/Python runtime;
+- coexistence VPS-роли с AmneziaVPN, Docker, UFW и другими VPN/firewall owners без изменения их interfaces/routes/rules/services;
 - SQLite, структурированные события и учёт трафика;
 - idempotent install/update/uninstall scripts;
-- backup, restore и diagnostic bundle.
+- удобные encrypted file backup/restore через WebUI отдельно для Gateway и VPS Hub, а также diagnostic bundle;
 - круглосуточный self-health supervisor с настраиваемой через Web UI безопасной лестницей восстановления и защитой от restart/reboot loop.
 - отдельные direct-only индикаторы белых списков, не смешиваемые с проверкой полноценного Internet через VPN;
 - опциональный входящий WireGuard-сервер `wg-ingress` с полным управлением peers/клиентами через Web UI, включая однокарточную схему через Keenetic;
 - тематические представления журналов в Web UI и redacted plain-text exports для скачивания штатным OpenSSH/SFTP.
+- portable `gateway-vpn-deploy.exe` для Windows 10/11 x64 как завершающий onboarding-клиент после стабилизации pairing/VPS API; Linux launcher сохраняется.
 
 Рабочая топология — `1..N` adopted HiLink-модемов. Один модем является полностью поддерживаемой штатной конфигурацией: список modem priority состоит из одного элемента, межмодемный failover не выполняется, а при disconnect единственного uplink Gateway остаётся `PATH_BLOCKED` до его стабильного reconnect либо добавления другого модема. При двух, пяти или большем числе модемов используется та же модель без специального «двухмодемного» режима; каждый модем имеет собственные identity, priority, management subnet, route table, fwmark, health и ячейки `modem × subscription`. Web UI не задаёт искусственный предел количества записей, но фактический hard limit определяется уникальностью подсетей, USB-питанием и hardware-profile limits для размера Mihomo config и probe matrix. Требование иметь минимум два модема относится только к стендовой проверке multi-modem failover и не является минимальным требованием для обычной установки.
 
@@ -1366,7 +1369,11 @@ Recovery выполняется только для неисправного lin
 
 Gateway WebUI получает отдельную предметную группу **«Удалённый доступ»** с подстраницами **«VPS и каналы»**, **«Администраторы»**, **«Локальные ресурсы»** и **«Матрица доступа»**. На ней видны все links одновременно, selected uplink, endpoint/handshake/RTT, pairing/rotation, `ROUTED_HUB`/`END_TO_END_RELAY`, relay port/inner peer health, resource access profile, external prerequisites, alias, ACL generation и точная причина недоступности.
 
-VPS Hub является минимальным отдельным WebUI/API VPS-роли, доступным только через admin WireGuard либо localhost. Он управляет Gateway public peers, admin peers, assigned prefixes и ACL, показывает handshake/last seen и ссылки на WebUI каждого Gateway. Он не является публичным reverse proxy и не хранит Gateway passwords/secrets. Pairing и любое route/ACL изменение имеют operation ID, durable stages, audit, retry и terminal receipt.
+VPS Hub реализуется одним лёгким Go Agent с embedded static WebUI и небольшой versioned SQLite, без обязательных nginx, Node.js или Python runtime. Он доступен только через admin WireGuard либо localhost/явный SSH port-forwarding, управляет Gateway public peers, admin peers, assigned prefixes и ACL, показывает собственный watchdog, handshakes/last seen, тематические logs, signed update/recovery и ссылки на WebUI каждого Gateway. Он не является публичным reverse proxy, не хранит Gateway passwords/secrets и не предоставляет arbitrary root shell либо общее управление ОС.
+
+Первичная установка VPS выполняется одной проверяемой GitHub Release-командой. Installer после полного preflight создаёт локальные keys и bounded одноразовое pairing invitation с endpoint, pinned VPS identity/fingerprint и expiry. Gateway WebUI импортирует код/файл и передаёт только свою public identity; reusable VPS SSH login/password/private key в Gateway не вводится и не хранится. Pre-pairing listener, если выбран этим implementation profile, принимает только invitation protocol и закрывается сразу после success/expiry; после pairing Agent API доступен только внутри management contour. Создание следующего invitation для дополнительного Gateway требует локального `gateway-vpn-vpsctl pairing create` либо уже аутентифицированной операции VPS Hub.
+
+VPS Hub разделён на **Обзор**, **Gateway**, **Каналы**, **Администраторы**, **Локальные ресурсы**, **Матрицу доступа**, **Watchdog**, **Журналы**, **Backup/обновление/восстановление** и **Диагностику**. Watchdog наблюдает и восстанавливает только units/interfaces/routes/firewall/relay/database Gateway VPN; он не restart/reload AmneziaVPN, Docker, UFW, чужой WireGuard либо весь VPS и не выполняет автоматический host reboot.
 
 Для удобства VPS Hub может выдавать только внутри admin tunnel локальные DNS-имена Gateway/resources в отдельной выбранной private zone; IP/alias всегда остаются видимыми и пригодными как fallback. Имена нормализуются, не публикуются в public DNS и не являются identity/ACL key. WebUI показывает для одного logical resource все варианты **«через VPS …»**, копируемый адрес/имя и кнопку проверки именно этого пути.
 
@@ -1755,6 +1762,14 @@ WireGuard private keys/PSK, reusable pairing secrets и downloadable admin priva
 - если backup отсутствует или также повреждён, создаётся diagnostic event и остаётся `PATH_BLOCKED`; пустая БД автоматически поверх повреждённой не создаётся;
 - после восстановления reconciler заново сверяет SQLite, Mihomo, nftables и observed network state до `PATH_ACTIVE`.
 
+### 12.5 Переносимые role backup files
+
+Gateway WebUI сохраняет существующий encrypted `.gvpn`, а VPS Hub — отдельный encrypted `.gvpn-vps`; cross-role restore отклоняется. Оба формата versioned, имеют authenticated role/schema/source identity, bounded manifest и per-file SHA-256, шифруются chunked AES-256-GCM с ключом Argon2id из введённой пользователем passphrase. Passphrase, plaintext archive и upload после staging не сохраняются; logs, sessions, login attempts, diagnostic archives и временные/использованные pairing invitations не входят в portable backup.
+
+Gateway file содержит DB/config/TLS/Mihomo/subscription и локальные management/ingress secrets, VPS file — VPS Agent DB/config/TLS, собственные outer/relay/admin private keys, public peer inventory, prefix allocations, ACL/resources и update identity. Один backup никогда не содержит private keys другой роли. WebUI до Apply показывает role/version/schema/site-or-vps identity, состав, конфликты и режим восстановления; требует password re-authentication, passphrase и typed confirmation, создаёт verified pre-restore backup, а root transaction имеет durable journal, reboot recovery и rollback.
+
+Для обеих ролей доступны режимы **«восстановить то же устройство»** и **«импортировать настройки как новое»**. Первый сохраняет `site_id`/`vps_id` и keys только после explicit replacement/quarantine проверки, запрещая одновременно active clone. Второй импортирует безопасные policy/settings, но генерирует новые identity, keys, addresses/pairing и требует fresh handshakes/ACL acknowledgement. Gateway после restore остаётся `PATH_BLOCKED`, VPS — с default-deny fabric projection, пока reconciler заново не докажет links/routes/ACL.
+
 ---
 
 ## 13. Traffic accounting
@@ -2077,6 +2092,9 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - компрометация VPS management peer.
 - подмена admin source полностью скомпрометированным routed-hub VPS и abuse публичного UDP relay;
 - повторное использование pairing token или подмена VPS fingerprint;
+- попытка pairing через поддельный VPS Agent либо оставшийся публичный listener после expiry/success;
+- конфликт или непреднамеренная модификация AmneziaVPN/чужого VPN, Docker/UFW interfaces, routes, ports, sysctl либо firewall hooks;
+- global drop/base-chain priority VPS-роли, способные заблокировать не принадлежащий Gateway VPN трафик;
 - route/AllowedIPs injection, пересечение alias pool и доступ не к тому Gateway при одинаковых Home LAN;
 - lateral movement Gateway↔Gateway либо admin↔admin через общий VPS;
 - рассинхронизация ACL generations между Gateway и несколькими VPS;
@@ -2324,6 +2342,8 @@ Down-migration новой БД старым binary не используется
 2. одна сгенерированная release-команда на чистом VPS с ролью `vps`;
 3. одна команда `gateway-vpn-deploy` с административного компьютера, которая по SSH выполняет preflight обеих машин, устанавливает обе роли, обменивает только WireGuard public keys и запускает end-to-end verification.
 
+Первый production launcher поддерживает Linux/amd64. После стабилизации Management Fabric/VPS Agent/pairing API выпускается отдельный signed portable `gateway-vpn-deploy.exe` для Windows 10/11 x64 без обязательной установки: он использует только проверенный системный Windows OpenSSH Client, pinned host keys и выбранный пользователем SSH key, не сохраняет пароль/private key и проходит тот же signed-channel/dry-run/readiness contract. Windows GUI/wizard является последним delivery-слоем над уже замороженным API, а не альтернативной реализацией pairing/security rules.
+
 Первый deploy создаёт один management link, но не закрепляет односерверную топологию навсегда. После установки Gateway WebUI может pair дополнительный VPS, а VPS Hub — дополнительный Gateway без переустановки любой роли. Installer VPS предлагает conflict-free management/admin/resource pools, проверяет их против host routes и существующих peers и никогда не перенумеровывает уже выданные site/link/admin prefixes автоматически. Повторный deploy существующей роли использует authenticated pairing/update transaction и не запускает clean-host wizard.
 
 VPS Hub после first install слушает только localhost и admin WireGuard address; публичный HTTPS bind является запрещённым default и не включается pairing bundle. Итоговая readiness проверка для management fabric отдельно подтверждает Gateway→каждый VPS handshake, admin→Gateway HTTPS, ACL deny между sites и отсутствие management prefixes в user Internet/NAT path.
@@ -2471,6 +2491,11 @@ Linux network namespaces моделируют:
 - `GATEWAY_ONLY`, `KEENETIC_WAN`, `VIA_KEENETIC_WAN_ROUTED`, `VIA_WG_ROUTER` и `VIA_DEDICATED_LAN` имеют отдельные fixtures; отсутствие внешнего Keenetic firewall/return path оставляет resource `WAITING_EXTERNAL_CONFIGURATION`, не создавая широкого fallback;
 - topology profiles переключаются после установки одной durable safe-apply transaction; подтверждение только со старого management address не фиксирует candidate, timeout/process kill/reboot возвращают LKG topology;
 - grouped WebUI navigation сохраняет единственного владельца каждой настройки, breadcrumbs/deep links и доступность keyboard/touch при desktop/mobile layouts;
+- VPS Agent/Hub работает одним bounded Go service, слушает только localhost/admin WireGuard, а его watchdog/restart/update/log operations не принимают arbitrary unit/command/path;
+- coexistence fixture заранее поднимает synthetic Amnezia/WireGuard, Docker bridge, foreign nft/iptables/UFW state, routes/marks/ports; install, pairing, watchdog recovery, update и uninstall Gateway VPN не меняют их hashes/runtime connectivity;
+- VPS firewall имеет scope-only rules: unowned interfaces/addresses/ports рано возвращаются, blanket base-chain `policy drop` для чужого трафика запрещён; конфликт port/subnet/table/mark отклоняется до mutation;
+- Windows 10/11 x64 deploy smoke использует clean VM, системный OpenSSH, pinned host fingerprints и exact signed artifacts, заканчиваясь тем же READY/INSTALLED_NOT_READY contract без сохранённого credential;
+- Gateway `.gvpn` и VPS `.gvpn-vps` создаются/скачиваются/preview/apply через соответствующий WebUI; wrong role/passphrase, truncated/tag-corrupt, schema conflict и duplicate identity безопасно отклоняются, а SIGKILL/reboot между replacements откатывает exact prior state;
 - reboot with PATH_BLOCKED;
 - truncated/invalid-checksum WAL после power cut: SQLite отбрасывает неподтверждённый tail, `quick_check` проходит, Gateway начинает с verification;
 - page corruption/partial write в основном DB-файле: `integrity_check` падает, запись прекращается, выполняется restore verified backup либо остаётся `PATH_BLOCKED`;
@@ -2718,6 +2743,8 @@ Fixtures не содержат production credentials, настоящие subscr
 - [ ] local-resource profiles через Gateway-only, Keenetic WAN/routed, router WireGuard и dedicated LAN;
 - [ ] unique published alias pool и typed translation для overlapping Home LAN;
 - [ ] Gateway **«Удалённый доступ»** tabs и restricted VPS Hub;
+- [ ] один lightweight VPS Agent с embedded WebUI/CLI и ownership-scoped watchdog;
+- [ ] AmneziaVPN/foreign VPN coexistence install/update/watchdog/uninstall gate;
 - [ ] topology profile switching после установки через durable safe apply;
 - [ ] management/resource watchdog, logs, diagnostics и survival tests.
 
@@ -2728,12 +2755,13 @@ Fixtures не содержат production credentials, настоящие subscr
 - [ ] реализовать общий authoritative traffic accounting без per-subscription attribution;
 - [ ] retention/aggregation;
 - [ ] CSV export;
-- [ ] backup/restore;
+- [ ] encrypted file backup/preview/restore через WebUI отдельно для Gateway и VPS, включая same-device/new-identity modes и power-loss rollback;
 - [ ] diagnostic bundle;
 - [ ] signed update/rollback;
 - [ ] idempotent install/uninstall;
 - [ ] signed GitHub Releases для ролей Gateway/VPS и generated one-command install;
 - [ ] `gateway-vpn-deploy` для одной SSH-orchestrated zero-to-ready установки обеих ролей;
+- [ ] после стабилизации VPS/pairing API — signed portable `gateway-vpn-deploy.exe` для Windows 10/11 x64;
 - [ ] совместный preflight/report, transaction resume/rollback и end-to-end readiness gate;
 - [ ] operations documentation.
 
@@ -2787,6 +2815,10 @@ Fixtures не содержат production credentials, настоящие subscr
 40. одинаковые private Home LAN нескольких Gateway доступны через уникальные conflict-checked aliases для каждой `site × resource × VPS link` publication без изменения адресов локальных устройств и без route ambiguity на VPS/admin.
 41. WebUI использует сгруппированную предметную навигацию, отдельные вкладки VPS/администраторов/локальных ресурсов/матрицы доступа, единственного владельца каждой настройки и canonical backend state без дублирующих форм/вычислений.
 42. Для local-resource access доступен Gateway-terminated `END_TO_END_RELAY`: VPS пересылает только зашифрованные inner WireGuard datagrams, не может подделать admin peer, а `ROUTED_HUB` остаётся явно обозначенным более доверительным opt-in.
+43. VPS Hub/Agent является одним лёгким bounded Go service с embedded WebUI/CLI/SQLite, слушает только localhost/admin WireGuard, управляет исключительно Gateway VPN objects и не предоставляет arbitrary root/OS management; watchdog не перезапускает чужие services либо весь VPS.
+44. VPS install/update/watchdog/uninstall доказанно сосуществует с AmneziaVPN и другими foreign VPN/firewall/Docker owners: чужие interfaces, ports, routes, marks, sysctl dependencies, nft/iptables/UFW rules и connectivity не изменяются, а конфликт отклоняется до mutation.
+45. После стабилизации core Management Fabric API выпускается подписанный portable `gateway-vpn-deploy.exe` для Windows 10/11 x64; clean-VM test доказывает pinned SSH identity, отсутствие сохранённых credentials и тот же end-to-end readiness contract, что Linux launcher.
+46. Gateway и VPS Hub имеют удобный WebUI backup/preview/restore в раздельные encrypted role files; same-device restore защищён от active clone, import-as-new ротирует identity/keys, а corruption/wrong-role/SIGKILL/reboot не оставляют mixed state или открытый data/management path.
 
 ---
 

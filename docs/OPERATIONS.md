@@ -2,7 +2,7 @@
 
 ## Поддерживаемая платформа
 
-Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS role поддерживает перечисленные release manifest профили Ubuntu Server 20.04/22.04/24.04/26.04 LTS x86_64 и Debian 12+; Ubuntu 20.04 принимается только при активном Ubuntu Pro/ESM и актуальных security updates. Windows используется только как среда разработки. Production runtime ожидает systemd, nftables, iproute2 и WireGuard tools; dnsmasq и `/dev/net/tun` обязательны только для Gateway role.
+Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS role поддерживает перечисленные release manifest профили Ubuntu Server 20.04/22.04/24.04/26.04 LTS x86_64 и Debian 12+; Ubuntu 20.04 принимается только при активном Ubuntu Pro/ESM и актуальных security updates. Gateway/VPS runtime на Windows не поддерживается; после стабилизации Management Fabric отдельным support profile становится portable административный `gateway-vpn-deploy.exe` для Windows 10/11 x64. Production Linux runtime ожидает systemd, nftables, iproute2 и WireGuard tools; dnsmasq и `/dev/net/tun` обязательны только для Gateway role.
 
 До аппаратного gate запрещено считать Gateway готовым к домашнему трафику. Рабочая установка поддерживает `1..N` HiLink-модемов и не требует резервного uplink; при disconnect единственного модема data path остаётся `PATH_BLOCKED` до его возврата. Стенд должен включать Keenetic и минимум два HiLink-модема с разными management-подсетями, чтобы отдельно доказать multi-modem failover; результаты фиксируются в `PROJECT_STATUS.md`.
 
@@ -52,7 +52,7 @@ Builder требует clean committed Git tree и создаёт:
 - `dist/gateway-vpn-gateway-<version>-linux-amd64/` — полный подписанный tree;
 - `dist/gateway-vpn-gateway-<version>-linux-amd64.tar.gz` — Gateway role artifact;
 - `dist/gateway-vpn-bootstrap-<version>-linux-amd64` — независимый bootstrap binary;
-- `dist/gateway-vpn-deploy-<version>-linux-amd64` и его SBOM/provenance — административный SSH launcher;
+- `dist/gateway-vpn-deploy-<version>-linux-amd64` и после стабилизации API `dist/gateway-vpn-deploy-<version>-windows-amd64.exe`, каждый со своим SBOM/provenance, — административные SSH launchers;
 - SHA-256 role archives, bootstrap и deploy launcher в stdout trusted build.
 
 Все четыре роли и signed channel можно собрать и повторно проверить одной командой на trusted Ubuntu builder. `dist/` перед запуском обязан отсутствовать, private key должен быть regular non-symlink file без group/other permissions, а tag — точно `vVERSION`:
@@ -217,9 +217,15 @@ Ubuntu 20.04 до managed dependency provisioning требует уже уста
 
 Успешная установка намеренно завершается состоянием `INSTALLED_NOT_READY` и выводит VPS public key. Готовность подтверждается только после настройки обоих peers и свежего WireGuard handshake; наличие файлов или active unit не заменяет handshake.
 
+Successor добавляет один лёгкий `gateway-vpn-vps` Go Agent с embedded WebUI/CLI/SQLite. Он слушает только localhost и admin WireGuard, а SSH port forwarding остаётся аварийным способом доступа; публичный bind запрещён по умолчанию. WebUI показывает Gateway/links/admin/resources/ACL, ownership-scoped watchdog, тематические logs, signed update/recovery и diagnostics. Он не предоставляет shell, generic systemd manager, APT upgrade либо power control VPS.
+
+На VPS с AmneziaVPN или другим VPN preflight сначала снимет bounded inventory interfaces/addresses/routes/rules/fwmarks/listeners/nftables/iptables/UFW/Docker bridges и выберет только свободные Gateway VPN values. Owned firewall не имеет blanket drop для unowned traffic, не вызывает `flush ruleset` и не disable/reload foreign services. Watchdog работает только с `gateway-vpn-vps*`, `gvm<N>`/`gva<N>`, owned protocol-186 routes и `inet gateway_vpn_vps`. Перед production acceptance обязательны install → pairing → watchdog recovery → signed update → uninstall с побайтным/семантическим сравнением foreign Amnezia/Docker/UFW state и реальной проверкой его connectivity.
+
 ### Одна команда для Gateway и VPS
 
-`gateway-vpn-deploy` запускается с отдельного административного Linux/amd64 компьютера. Нужны `/usr/bin/ssh`, HTTPS downloader, `sha256sum`, два заранее проверенных SSH host keys в одном absolute `known_hosts`, passwordless `sudo -n` на обеих machines и отдельные SSH destinations. Launcher запускает OpenSSH с `-F /dev/null`, `BatchMode=yes`, `StrictHostKeyChecking=yes`, запрещёнными password/keyboard-interactive/TTY и bounded output; произвольные SSH options, ProxyCommand и shell fragments из пользовательских полей не принимаются. Первый pinned SSH check создаёт отдельные ControlMaster connections в новом private `0700` temporary directory. Все последующие команды используют те же established TCP sessions после включения fail-closed firewall; TCP/22 ради installer не открывается. В конце launcher посылает обоим masters `-O exit`, проверяет исчезновение control sockets и удаляет temporary directory.
+Первый `gateway-vpn-deploy` запускается с отдельного административного Linux/amd64 компьютера. Нужны `/usr/bin/ssh`, HTTPS downloader, `sha256sum`, два заранее проверенных SSH host keys в одном absolute `known_hosts`, passwordless `sudo -n` на обеих machines и отдельные SSH destinations. Launcher запускает OpenSSH с `-F /dev/null`, `BatchMode=yes`, `StrictHostKeyChecking=yes`, запрещёнными password/keyboard-interactive/TTY и bounded output; произвольные SSH options, ProxyCommand и shell fragments из пользовательских полей не принимаются. Первый pinned SSH check создаёт отдельные ControlMaster connections в новом private `0700` temporary directory. Все последующие команды используют те же established TCP sessions после включения fail-closed firewall; TCP/22 ради installer не открывается. В конце launcher посылает обоим masters `-O exit`, проверяет исчезновение control sockets и удаляет temporary directory.
+
+Windows 10/11 x64 launcher реализуется в конце после заморозки VPS Agent/pairing API как один подписанный portable `gateway-vpn-deploy.exe` без установки. Он использует проверенный системный `C:\Windows\System32\OpenSSH\ssh.exe`, pinned host fingerprints и явно выбранный SSH key; password/private key не сохраняются и не попадают в report. Clean Windows VM должна пройти тот же signed-channel, dry-run, READY/INSTALLED_NOT_READY и interruption diagnostics contract до объявления Windows support.
 
 Точная команда создаётся после signed channel. Вариант ниже сам создаёт admin private key локально и после получения VPS public key атомарно формирует `/home/operator/.config/gateway-vpn/admin.conf` с mode `0600`; каталог должен существовать и иметь mode `0700`:
 
@@ -737,6 +743,17 @@ sudo nft list table inet gateway_vpn
 ```
 
 `gateway-vpn database-restore` не запускается вручную: binary требует fixed systemd-unit environment, а unit обеспечивает остановку процессов и повторную загрузку fail-closed firewall. Если restore unit завершился ошибкой, не удаляйте `pending-restore.json`, operation tree, root transaction journal или rollback paths вручную; сохраните diagnostic bundle, проверьте `last-restore.json`/`operation.apply_error_code` в WebUI и повторяйте Apply только после выяснения причины. Простая перезагрузка не считается повторным Apply. Этот contract проверяется unit/integration tests; реальный bare-metal power-cut остаётся отдельным hardware gate.
+
+### Backup и восстановление VPS Hub
+
+Во вкладке VPS Hub **Backup/обновление/восстановление** кнопка **Скачать backup** создаёт encrypted `.gvpn-vps`. Файл содержит только состояние VPS-роли: Agent DB/config/TLS, VPS-owned WireGuard/relay/admin private keys, public peers, prefix allocations, resources/ACL и update identity. Gateway private keys, Gateway application DB, Web-сессии, login attempts, logs/diagnostics и временные либо уже использованные pairing invitations исключены. Gateway `.gvpn` и VPS `.gvpn-vps` имеют разные authenticated role и не принимаются чужим restore endpoint.
+
+WebUI требует свежую password re-authentication и введённую пользователем passphrase, показывает version/schema/VPS identity, состав и конфликты до Apply и никогда не сохраняет passphrase/plaintext archive. Доступны два явных режима:
+
+- **Восстановить тот же VPS** — сохраняет `vps_id`, keys, links и allocations только после подтверждения замены; старый экземпляр должен быть выключен/отозван, duplicate active identity остаётся quarantined;
+- **Импортировать настройки как новый VPS** — переносит разрешённые policy/settings, но создаёт новый `vps_id`, все keys/prefixes/pairing и требует заново pair Gateway/admin.
+
+Перед Apply создаётся verified local pre-restore snapshot. Root transaction использует fixed destinations, durable journal и reboot recovery; при SIGKILL/power loss возвращает прежний exact VPS state. После commit fabric остаётся default-deny до свежих peer handshakes, route/ACL reconciliation и acknowledgement. Restore VPS не меняет AmneziaVPN/Docker/UFW/foreign VPN state; conflict до mutation показывается в preview и блокирует Apply.
 
 ## Подписанное обновление и atomic rollback
 
