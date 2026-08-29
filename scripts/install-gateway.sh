@@ -50,6 +50,51 @@ watchdog_runtime_ready() {
   grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
 }
 
+# Ubuntu's ssh.service creates this fixed privilege-separation directory via
+# RuntimeDirectory=sshd before its own OpenSSH configuration check.  A
+# clean host does not have the directory immediately after openssh-server is
+# unpacked, so an installer-side validation must reproduce that narrow systemd
+# prerequisite without accepting a configurable path or trusting a symlink.
+prepare_sshd_runtime_directory() {
+  SSHD_RUNTIME_CREATED=0
+  [[ -d /run && ! -L /run && $(stat -c '%u:%g:%a' /run) == "0:0:755" ]] || {
+    echo "OpenSSH runtime parent /run is unsafe" >&2
+    return 1
+  }
+  if [[ -e /run/sshd || -L /run/sshd ]]; then
+    [[ -d /run/sshd && ! -L /run/sshd && $(stat -c '%u:%g:%a' /run/sshd) == "0:0:755" ]] || {
+      echo "OpenSSH runtime directory /run/sshd is unsafe" >&2
+      return 1
+    }
+    return 0
+  fi
+  install -d -m 0755 -o root -g root -- /run/sshd
+  SSHD_RUNTIME_CREATED=1
+  [[ -d /run/sshd && ! -L /run/sshd && $(stat -c '%u:%g:%a' /run/sshd) == "0:0:755" ]] || {
+    echo "OpenSSH runtime directory /run/sshd could not be prepared safely" >&2
+    return 1
+  }
+}
+
+validate_openssh_configuration() {
+  local temporary_runtime=${1:-0}
+  local validation_result=0
+  prepare_sshd_runtime_directory || return 1
+  /usr/sbin/sshd -t || validation_result=$?
+  if ((temporary_runtime && SSHD_RUNTIME_CREATED)); then
+    [[ -d /run/sshd && ! -L /run/sshd && $(stat -c '%u:%g:%a' /run/sshd) == "0:0:755" ]] || {
+      echo "Temporary OpenSSH runtime directory changed during validation" >&2
+      return 1
+    }
+    rmdir -- /run/sshd || {
+      echo "Temporary OpenSSH runtime directory is not empty after validation" >&2
+      return 1
+    }
+    SSHD_RUNTIME_CREATED=0
+  fi
+  ((validation_result == 0))
+}
+
 while (($#)); do
   case "$1" in
     --release-dir) RELEASE_DIR=${2:?}; shift 2 ;;
@@ -151,7 +196,7 @@ fi
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN release currently requires x86_64" >&2; exit 1; }
-for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd; do
+for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm rmdir sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
@@ -337,7 +382,7 @@ for command in ip nft wg sysctl dnsmasq modprobe ss; do
 done
 if ((ENABLE_SSH && SSH_PACKAGE_INSTALLED)); then
   [[ -x /usr/sbin/sshd ]] || { echo "OpenSSH was requested but /usr/sbin/sshd is unavailable" >&2; exit 1; }
-  /usr/sbin/sshd -t || { echo "Existing OpenSSH configuration is invalid; fix it before Gateway installation" >&2; exit 1; }
+  validate_openssh_configuration 1 || { echo "Existing OpenSSH configuration is invalid; fix it before Gateway installation" >&2; exit 1; }
   if ((SSH_UNIT_ACTIVE)); then
     ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Active OpenSSH must listen on IPv4 wildcard TCP/22 so every selected management LAN port remains usable" >&2; exit 1; }
   elif ss -H -ltn "sport = :22" | grep -q .; then
@@ -542,7 +587,7 @@ if ((EXISTING)); then
   if ((ENABLE_SSH)); then
     systemctl is-enabled --quiet ssh.service
     systemctl is-active --quiet ssh.service
-    /usr/sbin/sshd -t
+    validate_openssh_configuration
     ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$'
   fi
   if ((ENABLE_WIREGUARD_INGRESS)); then
@@ -655,7 +700,7 @@ if ((${#MISSING_LATE_PACKAGES[@]})); then
 fi
 if ((ENABLE_SSH)); then
   [[ -x /usr/sbin/sshd ]] || { echo "OpenSSH server binary is unavailable after dependency installation" >&2; exit 1; }
-  /usr/sbin/sshd -t || { echo "OpenSSH configuration validation failed; ssh.service was not changed" >&2; exit 1; }
+  validate_openssh_configuration || { echo "OpenSSH configuration validation failed; ssh.service was not changed" >&2; exit 1; }
   systemctl enable --now ssh.service
   systemctl is-enabled --quiet ssh.service || { echo "OpenSSH service did not become enabled" >&2; exit 1; }
   systemctl is-active --quiet ssh.service || { echo "OpenSSH service did not become active" >&2; exit 1; }
@@ -834,7 +879,7 @@ if ((${#LAN_MEMBER_NAMES[@]})); then
   done
 fi
 if ((ENABLE_SSH)); then
-  /usr/sbin/sshd -t || { echo "Installed OpenSSH configuration is invalid" >&2; exit 1; }
+  validate_openssh_configuration || { echo "Installed OpenSSH configuration is invalid" >&2; exit 1; }
   systemctl is-enabled --quiet ssh.service || { echo "Installed Gateway SSH management service is not enabled" >&2; exit 1; }
   systemctl is-active --quiet ssh.service || { echo "Installed Gateway SSH management service is not active" >&2; exit 1; }
   ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Installed Gateway SSH management service is not listening on IPv4 wildcard TCP/22" >&2; exit 1; }

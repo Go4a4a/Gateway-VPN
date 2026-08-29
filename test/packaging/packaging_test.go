@@ -133,6 +133,32 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	}
 }
 
+func TestGatewayInstallerPreparesFixedOpenSSHRuntimeDirectorySafely(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{
+		"prepare_sshd_runtime_directory",
+		"validate_openssh_configuration",
+		`$(stat -c '%u:%g:%a' /run) == "0:0:755"`,
+		`$(stat -c '%u:%g:%a' /run/sshd) == "0:0:755"`,
+		"[[ -d /run/sshd && ! -L /run/sshd",
+		"install -d -m 0755 -o root -g root -- /run/sshd",
+		"rmdir -- /run/sshd",
+		"validate_openssh_configuration 1",
+		"validate_openssh_configuration ||",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway clean-host OpenSSH runtime contract missing %q", required)
+		}
+	}
+	if strings.Contains(installer, "mkdir -p /run/sshd") || strings.Contains(installer, "chmod 0755 /run/sshd") {
+		t.Fatal("Gateway installer uses an unchecked or path-following OpenSSH runtime preparation")
+	}
+	if got := strings.Count(installer, "/usr/sbin/sshd -t"); got != 1 {
+		t.Fatalf("sshd validation bypasses the fixed safe helper: raw command count = %d", got)
+	}
+}
+
 func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
