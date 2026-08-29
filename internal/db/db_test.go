@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 22 {
+	if err != nil || version != 24 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 22 {
+	if err != nil || latest != 24 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -214,6 +214,11 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"wireguard_ingress_peer_routes",
 		"wireguard_ingress_runtime",
 		"wireguard_ingress_peer_runtime",
+		"wireguard_ingress_server_dns",
+		"wireguard_ingress_listen_interfaces",
+		"wireguard_ingress_peer_client_allowed_ips",
+		"wireguard_ingress_peer_access_methods",
+		"wireguard_ingress_counters",
 		"modem_recovery_policy",
 		"modem_recovery_runtime",
 		"modem_recovery_attempts",
@@ -233,8 +238,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 22 {
-		t.Fatalf("SchemaVersion() = %d, want 22", version)
+	if version != 24 {
+		t.Fatalf("SchemaVersion() = %d, want 24", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -278,8 +283,64 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 22 {
-		t.Fatalf("migration count = %d, want 22", count)
+	if count != 24 {
+		t.Fatalf("migration count = %d, want 24", count)
+	}
+}
+
+func TestMigration23PreservesIngressPeersAndAddsSecretFreeLifecycle(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 22)); err != nil {
+		t.Fatalf("migrate schema 22: %v", err)
+	}
+	const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO wireguard_ingress_servers(
+  id,enabled,name,interface_name,subnet_cidr,listen_port,endpoint_host,mtu,
+  private_key_secret_ref,topology_mode,created_at,updated_at
+) VALUES('wg-ingress-default',0,'Ingress','wg-ingress','10.90.0.0/24',51820,'',1420,
+  '/var/lib/gateway-vpn/secrets/wireguard-ingress/servers/wg-ingress-default.key','ROUTED','now','now');
+INSERT INTO wireguard_ingress_runtime(server_id,desired_generation,applied_generation,state,updated_at)
+VALUES('wg-ingress-default',1,0,'DISABLED','now');
+INSERT INTO wireguard_ingress_peers(
+  id,server_id,display_number,name,enabled,peer_kind,key_mode,public_key,
+  private_key_secret_ref,preshared_key_secret_ref,assigned_address,
+  endpoint_override,persistent_keepalive,access_policy_mode,created_at,updated_at
+) VALUES('wgpeer:legacy','wg-ingress-default',7,'Legacy',1,'DEVICE','MANAGED',?,
+  '/var/lib/gateway-vpn/secrets/wireguard-ingress/peers/legacy.key',
+  '/var/lib/gateway-vpn/secrets/wireguard-ingress/peers/legacy.psk','10.90.0.7','',25,'AUTO','now','now');
+INSERT INTO wireguard_ingress_peer_runtime(peer_id,state,updated_at)
+VALUES('wgpeer:legacy','NEVER_CONNECTED','now')`, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateFS(ctx, database, migrationsThrough(t, 23)); err != nil {
+		t.Fatalf("migrate schema 23: %v", err)
+	}
+	var version, nextNumber, configGeneration int64
+	var publicKey string
+	var clientDNS, allowWhitelist, blockUnqualified int
+	if err := database.QueryRowContext(ctx, "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, "SELECT next_peer_number FROM wireguard_ingress_counters WHERE singleton_id=1").Scan(&nextNumber); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, "SELECT public_key,config_generation FROM wireguard_ingress_servers WHERE id='wg-ingress-default'").Scan(&publicKey, &configGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, "SELECT client_dns_enabled,allow_whitelist_only,block_when_unqualified FROM wireguard_ingress_peers WHERE id='wgpeer:legacy'").Scan(&clientDNS, &allowWhitelist, &blockUnqualified); err != nil {
+		t.Fatal(err)
+	}
+	if version != 23 || nextNumber != 8 || publicKey != "" || configGeneration != 1 || clientDNS != 1 || allowWhitelist != 1 || blockUnqualified != 1 {
+		t.Fatalf("migration 23 result = version:%d next:%d public:%q generation:%d flags:%d/%d/%d", version, nextNumber, publicKey, configGeneration, clientDNS, allowWhitelist, blockUnqualified)
+	}
+	if err := ForeignKeyCheck(ctx, database); err != nil {
+		t.Fatalf("migration 23 foreign keys: %v", err)
 	}
 }
 
@@ -299,7 +360,7 @@ SET value_json=json_set(value_json, '$.check_interval_seconds', 42, '$.host_rebo
 WHERE key='watchdog'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := Migrate(ctx, database); err != nil {
+	if err := migrateFS(ctx, database, migrationsThrough(t, 22)); err != nil {
 		t.Fatalf("migrate schema 22: %v", err)
 	}
 	var schema, interval, reboot int
@@ -319,6 +380,42 @@ FROM settings WHERE key='watchdog'`).Scan(&schema, &interval, &reboot, &componen
 	}
 	if schema != 2 || interval != 42 || reboot != 1 || modeCount != 16 || componentModesType != "object" {
 		t.Fatalf("migrated watchdog = schema:%d interval:%d reboot:%d modes:%d type:%s", schema, interval, reboot, modeCount, componentModesType)
+	}
+}
+
+func TestMigration24AddsLoggingPipelineWithoutChangingWatchdogChoices(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 23)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+UPDATE settings SET value_json=json_set(value_json, '$.check_interval_seconds', 42)
+WHERE key='watchdog'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	var version, interval int
+	var loggingMode string
+	if err := database.QueryRowContext(ctx, `
+SELECT (SELECT MAX(version) FROM schema_migrations),
+       json_extract(value_json, '$.check_interval_seconds'),
+       json_extract(value_json, '$.component_recovery_modes.logging_pipeline')
+FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode); err != nil {
+		t.Fatal(err)
+	}
+	var modeCount int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
+		t.Fatal(err)
+	}
+	if version != 24 || interval != 42 || loggingMode != "RESTART" || modeCount != 17 {
+		t.Fatalf("migration 24 = version:%d interval:%d mode:%s count:%d", version, interval, loggingMode, modeCount)
 	}
 }
 

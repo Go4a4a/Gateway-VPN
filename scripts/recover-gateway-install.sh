@@ -21,11 +21,14 @@ flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction
 MARKER_BYTES=$(stat -c '%s' "$MARKER")
 [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Gateway recovery marker size is invalid" >&2; exit 1; }
 MARKER_FIELD_COUNT=$(wc -l <"$MARKER")
-[[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
-[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|boot_network_policy|grub_policy)=' "$MARKER") == "$MARKER_FIELD_COUNT" ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
+[[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
+[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$MARKER") == "$MARKER_FIELD_COUNT" ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
 MARKER_KEYS=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
-if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 ]]; then
   MARKER_KEYS+=(boot_network_policy grub_policy)
+fi
+if [[ "$MARKER_FIELD_COUNT" == 18 ]]; then
+  MARKER_KEYS+=(log_reader_user log_reader_was_member)
 fi
 for marker_key in "${MARKER_KEYS[@]}"; do
   [[ $(grep -c "^${marker_key}=" "$MARKER") == 1 ]] || { echo "Gateway recovery marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
@@ -46,13 +49,20 @@ SSH_WAS_ENABLED=$(sed -n 's/^ssh_was_enabled=//p' "$MARKER")
 SSH_WAS_ACTIVE=$(sed -n 's/^ssh_was_active=//p' "$MARKER")
 BOOT_NETWORK_POLICY=keep
 GRUB_POLICY=keep
-if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+LOG_READER_USER=""
+LOG_READER_WAS_MEMBER=1
+if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 ]]; then
   BOOT_NETWORK_POLICY=$(sed -n 's/^boot_network_policy=//p' "$MARKER")
   GRUB_POLICY=$(sed -n 's/^grub_policy=//p' "$MARKER")
+fi
+if [[ "$MARKER_FIELD_COUNT" == 18 ]]; then
+  LOG_READER_USER=$(sed -n 's/^log_reader_user=//p' "$MARKER")
+  LOG_READER_WAS_MEMBER=$(sed -n 's/^log_reader_was_member=//p' "$MARKER")
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|30)$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ && "$SSH_WAS_ENABLED" =~ ^[01]$ && "$SSH_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "Gateway recovery marker values are invalid" >&2; exit 1; }
 [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Gateway recovery boot-network policy is invalid" >&2; exit 1; }
 [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Gateway recovery GRUB policy is invalid" >&2; exit 1; }
+[[ -z "$LOG_READER_USER" || "$LOG_READER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$LOG_READER_USER" != root && "$LOG_READER_WAS_MEMBER" =~ ^[01]$ ]] || { echo "Gateway recovery log-reader values are invalid" >&2; exit 1; }
 if [[ -n "$LAN_MEMBERS" ]]; then
   [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ && "$LAN_MEMBER_WAS_UP" =~ ^[01](,[01]){0,15}$ ]] || { echo "Gateway recovery LAN bridge marker values are invalid" >&2; exit 1; }
   IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
@@ -117,6 +127,9 @@ fi
 if ((SSH_WAS_ENABLED == 0)); then
   systemctl disable ssh.service >/dev/null 2>&1 || record_failure "restore disabled OpenSSH state"
 fi
+if [[ -n "$LOG_READER_USER" && "$LOG_READER_WAS_MEMBER" == 0 ]] && getent group gateway-vpn-log-readers >/dev/null 2>&1; then
+  gpasswd -d "$LOG_READER_USER" gateway-vpn-log-readers >/dev/null 2>&1 || record_failure "restore Gateway log-reader group membership"
+fi
 sysctl -q -w "net.ipv6.conf.all.disable_ipv6=$OLD_IPV6_ALL_DISABLE" || record_failure "restore IPv6 all disable state"
 sysctl -q -w "net.ipv6.conf.default.disable_ipv6=$OLD_IPV6_DEFAULT_DISABLE" || record_failure "restore IPv6 default disable state"
 sysctl -q -w "net.ipv6.conf.all.forwarding=$OLD_IPV6_ALL_FORWARDING" || record_failure "restore IPv6 forwarding state"
@@ -156,6 +169,7 @@ rm -f /run/gateway-vpn-install-authorized || record_failure "remove ephemeral se
 rm -rf /var/lib/gateway-vpn-dnsmasq || record_failure "remove newly created dnsmasq state root"
 if ((PRESERVE_STATE_ROOT == 0)); then
   rm -rf /var/lib/gateway-vpn || record_failure "remove newly created Gateway state root"
+  rm -rf /var/log/gateway-vpn || record_failure "remove newly created Gateway log export root"
 fi
 networkctl reload || record_failure "reload networkd after policy cleanup"
 systemctl daemon-reload || record_failure "reload systemd after owned-state cleanup"

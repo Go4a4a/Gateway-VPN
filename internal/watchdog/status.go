@@ -28,6 +28,7 @@ const (
 	ComponentConvergence      = "configuration_convergence"
 	ComponentBackup           = "database_backup"
 	ComponentResources        = "resources"
+	ComponentLogging          = "logging_pipeline"
 
 	ComponentHealthy       = "HEALTHY"
 	ComponentDegraded      = "DEGRADED"
@@ -69,6 +70,7 @@ var fixedComponentSpecs = []ComponentSpec{
 	{ID: ComponentConvergence, Label: "Согласование настроек и runtime", Reconcileable: true, Restartable: true, RebootEligible: true},
 	{ID: ComponentBackup, Label: "Проверенные резервные копии SQLite", Reconcileable: true, Restartable: true},
 	{ID: ComponentResources, Label: "Диск, память и file descriptors"},
+	{ID: ComponentLogging, Label: "Journald и SFTP-выгрузки логов", Reconcileable: true, Restartable: true},
 }
 
 func ComponentSpecs() []ComponentSpec {

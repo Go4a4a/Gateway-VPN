@@ -8,7 +8,7 @@
 **Проверяемые Ubuntu VPS profiles:** 20.04, 22.04, 24.04 и 26.04 LTS; 20.04 допускается только с активным Ubuntu Pro/ESM и актуальными security updates
 **Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
 **Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
-**Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 16 компонентов с per-component recovery mode и отдельной классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
+**Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 17 компонентов, включая отдельный `logging_pipeline`, с per-component recovery mode и классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
 
 ---
 

@@ -40,6 +40,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
 	"gateway-vpn/internal/pathmatrix"
+	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/reconcile"
 	"gateway-vpn/internal/scheduler"
 	"gateway-vpn/internal/state"
@@ -48,6 +49,7 @@ import (
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
+	"gateway-vpn/internal/wgingress"
 )
 
 const previewPassword = "gateway-vpn-preview-only"
@@ -96,6 +98,45 @@ type previewRuntime struct{}
 func (previewRuntime) BlockPath(context.Context) error     { return nil }
 func (previewRuntime) SyncRouting(context.Context) error   { return nil }
 func (previewRuntime) SyncWireGuard(context.Context) error { return nil }
+
+type previewIngressController struct{ backend *wgingress.Backend }
+
+func (controller previewIngressController) SyncWireGuardIngress(ctx context.Context) error {
+	return controller.backend.Sync(ctx)
+}
+func (controller previewIngressController) UpdateWireGuardIngressServer(ctx context.Context, input wgingress.ServerUpdate) (wgingress.Server, error) {
+	return controller.backend.UpdateServer(ctx, input)
+}
+func (controller previewIngressController) RotateWireGuardIngressServer(ctx context.Context) (wgingress.Server, error) {
+	return controller.backend.RotateServer(ctx)
+}
+func (controller previewIngressController) CreateWireGuardIngressPeer(ctx context.Context, input wgingress.PeerCreate) (wgingress.Peer, error) {
+	return controller.backend.CreatePeer(ctx, input)
+}
+func (controller previewIngressController) UpdateWireGuardIngressPeer(ctx context.Context, id string, input wgingress.PeerUpdate) (wgingress.Peer, error) {
+	return controller.backend.UpdatePeer(ctx, id, input)
+}
+func (controller previewIngressController) RevokeWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	return controller.backend.RevokePeer(ctx, id)
+}
+func (controller previewIngressController) DeleteWireGuardIngressPeer(ctx context.Context, id string) error {
+	return controller.backend.DeletePeer(ctx, id)
+}
+func (controller previewIngressController) RotateWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	return controller.backend.RotatePeer(ctx, id)
+}
+func (controller previewIngressController) ProbeWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	return controller.backend.ProbePeer(ctx, id)
+}
+func (controller previewIngressController) ExportWireGuardIngressPeer(ctx context.Context, id string) (wgingress.ExportedConfig, error) {
+	return controller.backend.ExportPeerConfig(ctx, id)
+}
+
+type previewNoCommandExecutor struct{}
+
+func (previewNoCommandExecutor) Run(context.Context, platformexec.Request) (platformexec.Result, error) {
+	return platformexec.Result{}, errors.New("preview host mutation is disabled")
+}
 
 type previewWatchdogStatus struct{}
 
@@ -429,6 +470,34 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	}); err != nil {
 		return err
 	}
+	if _, err := uplinks.EnsureManagedLANInterface(ctx, "gateway-vpn-lan", "192.168.200.1/24"); err != nil {
+		return err
+	}
+	ingressSecretRoot := filepath.Join(root, "secrets", "wireguard-ingress")
+	ingressRepository := &wgingress.Repository{Database: database, SecretRoot: ingressSecretRoot, ReservedPrefixes: []netip.Prefix{netip.MustParsePrefix("192.168.200.0/24")}}
+	ingressBackend := &wgingress.Backend{
+		Repository: *ingressRepository, Keys: wgingress.KeyStore{Root: ingressSecretRoot}, Executor: previewNoCommandExecutor{},
+		IP: "/usr/sbin/ip", WG: "/usr/bin/wg", NFT: "/usr/sbin/nft", Mutate: false,
+	}
+	if err := ingressBackend.Sync(ctx); err != nil {
+		return err
+	}
+	if _, err := ingressBackend.UpdateServer(ctx, wgingress.ServerUpdate{
+		Enabled: false, Name: "WireGuard для клиентов", SubnetCIDR: "10.90.0.0/24",
+		ListenPort: 51820, EndpointHost: "gateway.example.org", MTU: 1420, TopologyMode: "ROUTED",
+		DNS: []string{"1.1.1.1"}, ListenInterfaces: []wgingress.ListenInterface{{
+			NetworkInterfaceID: uplink.ManagedLANInterfaceID, ExposureMode: "LOCAL", Priority: 1,
+		}},
+	}); err != nil {
+		return err
+	}
+	if _, err := ingressBackend.CreatePeer(ctx, wgingress.PeerCreate{
+		Name: "Телефон — preview", PeerKind: "DEVICE", KeyMode: "MANAGED",
+		PersistentKeepalive: 25, AccessPolicyMode: "AUTO", AllowWhitelistOnly: true,
+		BlockWhenUnqualified: true, ClientDNSEnabled: true, ClientAllowedIPs: []string{"0.0.0.0/0"},
+	}); err != nil {
+		return err
+	}
 	if err := paths.ReconcileCells(ctx); err != nil {
 		return err
 	}
@@ -525,6 +594,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
+		WireGuardIngress: ingressRepository, WireGuardIngressAdmin: previewIngressController{backend: ingressBackend},
 		DirectPaths:         directPaths,
 		DirectPathProbe:     previewDirectProbe{},
 		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,

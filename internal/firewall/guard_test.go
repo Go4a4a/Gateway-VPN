@@ -237,6 +237,9 @@ set firewall_schema_generation
 set active_tun_interfaces
 set active_direct_interfaces
 set active_direct_context
+set user_ingress_interfaces
+set wireguard_ingress_listeners
+set wireguard_ingress_allowed_v4
 map active_direct_marks
 set active_path_generation
 set active_route_generation
@@ -247,9 +250,9 @@ counter user_upload
 counter user_download
 counter service_upload
 counter service_download
-chain input { type filter hook input priority filter; policy drop; }
+chain input { type filter hook input priority filter; policy drop; iifname . udp dport @wireguard_ingress_listeners; }
 chain prerouting { type filter hook prerouting priority mangle; meta mark set iifname map @active_direct_marks }
-chain forward { type filter hook forward priority filter; policy drop; oifname @active_tun_interfaces oifname . meta mark @active_direct_context counter comment "gateway-vpn PATH_BLOCKED" }
+chain forward { type filter hook forward priority filter; policy drop; ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces oifname . meta mark @active_direct_context counter comment "gateway-vpn PATH_BLOCKED" }
 chain postrouting { type nat hook postrouting priority srcnat; oifname . meta mark @active_direct_context masquerade }
 chain output { type filter hook output priority filter; policy drop; oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 accept }
 }`

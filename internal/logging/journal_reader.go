@@ -35,6 +35,7 @@ type JournalQuery struct {
 	Until          string   `json:"until,omitempty"`
 	Levels         []string `json:"levels,omitempty"`
 	Component      string   `json:"component,omitempty"`
+	Category       string   `json:"category,omitempty"`
 	ModemID        string   `json:"modem_id,omitempty"`
 	SubscriptionID string   `json:"subscription_id,omitempty"`
 	PathID         string   `json:"path_id,omitempty"`
@@ -146,6 +147,10 @@ func NormalizeJournalQuery(query JournalQuery, now time.Time) (JournalQuery, err
 	query.Component = strings.ToLower(strings.TrimSpace(query.Component))
 	if query.Component != "" && !validComponent(query.Component) {
 		return JournalQuery{}, errors.New("journal component is invalid")
+	}
+	query.Category = strings.ToLower(strings.TrimSpace(query.Category))
+	if query.Category != "" && !validCategory(query.Category) {
+		return JournalQuery{}, errors.New("journal category is invalid")
 	}
 	for _, item := range []struct {
 		name  string
@@ -261,6 +266,7 @@ func journalEntryMatches(entry JournalEntry, query JournalQuery) bool {
 		}
 	}
 	if query.Component != "" && entry.Component != query.Component ||
+		query.Category != "" && query.Category != "all" && !entryInCategory(entry, query.Category) ||
 		query.ModemID != "" && entry.ModemID != query.ModemID ||
 		query.SubscriptionID != "" && entry.SubscriptionID != query.SubscriptionID ||
 		query.PathID != "" && entry.PathID != query.PathID ||
@@ -268,6 +274,34 @@ func journalEntryMatches(entry JournalEntry, query JournalQuery) bool {
 		return false
 	}
 	return query.Search == "" || strings.Contains(strings.ToLower(entry.Message), strings.ToLower(query.Search))
+}
+
+func entryInCategory(entry JournalEntry, category string) bool {
+	unit := strings.ToLower(entry.Unit)
+	switch category {
+	case "all":
+		return true
+	case "modems":
+		return entry.Component == ComponentModem
+	case "subscriptions":
+		return entry.Component == ComponentSubscription
+	case "access":
+		return entry.Component == ComponentPathHealth || entry.Component == ComponentTraffic
+	case "vpn-mihomo":
+		return entry.Component == ComponentMihomo
+	case "network":
+		return entry.Component == ComponentRoutingFirewall || strings.Contains(unit, "networkd") || strings.Contains(unit, "dnsmasq")
+	case "wireguard-vps":
+		return entry.Component == ComponentWireGuard || strings.Contains(unit, "wireguard")
+	case "watchdog":
+		return strings.Contains(unit, "watchdog")
+	case "updates":
+		return strings.Contains(unit, "update") || strings.Contains(unit, "restore") || strings.Contains(unit, "backup")
+	case "security-audit":
+		return entry.Component == ComponentAuthAudit
+	default:
+		return false
+	}
 }
 
 func journalField(raw map[string]any, key string) string {
@@ -342,6 +376,8 @@ func componentForUnit(unit string) string {
 	switch {
 	case strings.Contains(unit, "mihomo"):
 		return ComponentMihomo
+	case strings.Contains(unit, "wireguard"):
+		return ComponentWireGuard
 	case strings.Contains(unit, "firewall"), strings.Contains(unit, "network-broker"), strings.Contains(unit, "network-recovery"), strings.Contains(unit, "network-rollback"):
 		return ComponentRoutingFirewall
 	default:

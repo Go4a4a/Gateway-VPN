@@ -59,6 +59,7 @@ func runWatchdog(args []string) int {
 		GatewayBinary: "/opt/gateway-vpn/current/bin/gateway-vpn", ConfigPath: *configPath,
 		DatabasePath: configuration.System.Database, HeartbeatPath: defaultControlHeartbeat,
 		MihomoConfigPath: "/var/lib/gateway-vpn/mihomo/active/config.yaml", MihomoTUN: configuration.Mihomo.TunName,
+		LogExportRoot:       "/var/log/gateway-vpn",
 		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml",
 		LANPrefix:           configuration.Network.LANAddress, WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS:      configuration.Mihomo.BootstrapDNS,

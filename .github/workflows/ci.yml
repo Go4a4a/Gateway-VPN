@@ -58,6 +58,9 @@ jobs:
         run: |
           set -euo pipefail
           node --check internal/webapi/static/app.js
+          node --check internal/webapi/static/logging-ui.js
+          node --check internal/webapi/static/wireguard-ingress.js
+          node --check internal/webapi/static/contextual-help.js
           bash -n scripts/*.sh test/netns/*.sh test/systemd/*.sh test/release-gate/*.sh
 
   netns:
@@ -80,7 +83,7 @@ jobs:
       - name: Refresh Ubuntu package indexes
         run: sudo apt-get update
       - name: Install netns test dependencies
-        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping
+        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping wireguard-tools
       - name: Build native Linux netns binary
         shell: bash
         run: |
@@ -88,12 +91,15 @@ jobs:
           go build -trimpath -o /tmp/gateway-vpn-netns ./cmd/gateway-vpn
           go test -c -o /tmp/gateway-vpn-dataplane-test ./internal/dataplane
           go test -c -o /tmp/gateway-vpn-app-test ./internal/app
+          go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
       - name: Prove startup policy across boot and process boundaries
         run: sudo ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
       - name: Prove multi-port LAN bridge SSH and uplink isolation
         run: sudo ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
+      - name: Prove WireGuard ingress kernel lifecycle and handshake
+        run: sudo ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04
         shell: bash
         run: |

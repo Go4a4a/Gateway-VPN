@@ -95,6 +95,7 @@ func TestJournalReaderRejectsUnsafeFiltersAndOutputFailure(t *testing.T) {
 		{Limit: 26},
 		{Limit: 10, Cursor: "$(command)"},
 		{Limit: 10, Component: "unknown"},
+		{Limit: 10, Category: "arbitrary-unit"},
 		{Limit: 10, ModemID: "id\nnext"},
 		{Limit: 10, Levels: []string{"fatal"}},
 		{Limit: 10, Search: strings.Repeat("x", 129)},
@@ -110,6 +111,44 @@ func TestJournalReaderRejectsUnsafeFiltersAndOutputFailure(t *testing.T) {
 	reader.Executor = executor
 	if _, err := reader.QueryLogs(context.Background(), JournalQuery{Limit: 10}); err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatalf("journal executor error = %v", err)
+	}
+}
+
+func TestJournalCategoriesUseFixedComponentAndUnitMappings(t *testing.T) {
+	now := time.Date(2026, 8, 29, 15, 0, 0, 0, time.UTC)
+	entries := []JournalEntry{
+		{Component: ComponentModem, Unit: "gateway-vpn.service"},
+		{Component: ComponentSubscription, Unit: "gateway-vpn.service"},
+		{Component: ComponentPathHealth, Unit: "gateway-vpn.service"},
+		{Component: ComponentTraffic, Unit: "gateway-vpn.service"},
+		{Component: ComponentMihomo, Unit: "gateway-vpn-mihomo.service"},
+		{Component: ComponentRoutingFirewall, Unit: "gateway-vpn-network-broker.service"},
+		{Component: ComponentSystem, Unit: "gateway-vpn-dnsmasq.service"},
+		{Component: ComponentWireGuard, Unit: "gateway-vpn.service"},
+		{Component: ComponentSystem, Unit: "gateway-vpn-watchdog.service"},
+		{Component: ComponentSystem, Unit: "gateway-vpn-update.service"},
+		{Component: ComponentSystem, Unit: "gateway-vpn-database-restore.service"},
+		{Component: ComponentAuthAudit, Unit: "gateway-vpn.service"},
+	}
+	expected := map[string][]int{
+		"modems": {0}, "subscriptions": {1}, "access": {2, 3}, "vpn-mihomo": {4},
+		"network": {5, 6}, "wireguard-vps": {7}, "watchdog": {8},
+		"updates": {9, 10}, "security-audit": {11},
+	}
+	for category, indexes := range expected {
+		normalized, err := NormalizeJournalQuery(JournalQuery{Limit: 25, Category: category}, now)
+		if err != nil {
+			t.Fatalf("NormalizeJournalQuery(%s): %v", category, err)
+		}
+		for index, entry := range entries {
+			want := false
+			for _, expectedIndex := range indexes {
+				want = want || index == expectedIndex
+			}
+			if got := journalEntryMatches(entry, normalized); got != want {
+				t.Fatalf("category %s entry %d match=%t want=%t", category, index, got, want)
+			}
+		}
 	}
 }
 

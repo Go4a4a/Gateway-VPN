@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"gateway-vpn/internal/netutil"
+	"gateway-vpn/internal/wgingress"
 	"gateway-vpn/internal/wireguard"
 )
 
@@ -19,6 +20,7 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
 	tagPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$`)
 	interfacePattern  = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
+	linuxUserPattern  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
 type GatewayInstallCommandOptions struct {
@@ -27,11 +29,17 @@ type GatewayInstallCommandOptions struct {
 	ManifestSHA256          string
 	SignerKeySHA256         string
 	Interactive             bool
+	LogReaderUser           string
 	LANInterface            string
 	LANAddress              string
 	InstallDependencies     bool
 	EnableDHCP              bool
 	DisableSSH              bool
+	EnableWGIngress         bool
+	WGEndpointHost          string
+	WGSubnetCIDR            string
+	WGListenPort            int
+	WGClientDNS             []string
 	BootNetworkPolicy       string
 	GRUBPolicy              string
 	Apply                   bool
@@ -90,11 +98,25 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		return "", errors.New("safe GitHub release inputs are required")
 	}
 	if options.Interactive {
-		if options.LANInterface != "" || options.LANAddress != "" || options.InstallDependencies || options.EnableDHCP || options.DisableSSH || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
+		if options.LANInterface != "" || options.LANAddress != "" || options.LogReaderUser != "" || options.InstallDependencies || options.EnableDHCP || options.DisableSSH || options.EnableWGIngress || options.WGEndpointHost != "" || options.WGSubnetCIDR != "" || options.WGListenPort != 0 || len(options.WGClientDNS) != 0 || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
 			return "", errors.New("interactive Gateway command must defer all host policy choices and confirmation to the target terminal")
 		}
 	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) || !validBootNetworkPolicy(options.BootNetworkPolicy) || !validGRUBPolicy(options.GRUBPolicy) {
 		return "", errors.New("safe explicit Gateway LAN inputs are required for automation mode")
+	}
+	if options.LogReaderUser != "" && (!linuxUserPattern.MatchString(options.LogReaderUser) || options.LogReaderUser == "root") {
+		return "", errors.New("safe non-root Gateway SFTP log reader is required")
+	}
+	if !options.Interactive {
+		if options.EnableWGIngress {
+			lan, lanErr := netip.ParsePrefix(options.LANAddress)
+			ingress, ingressErr := netip.ParsePrefix(options.WGSubnetCIDR)
+			if wgingress.ValidateInitialServerOptions(options.WGEndpointHost, options.WGSubnetCIDR, options.WGListenPort, options.WGClientDNS) != nil || lanErr != nil || ingressErr != nil || lan.Masked().Overlaps(ingress.Masked()) {
+				return "", errors.New("safe non-overlapping initial WireGuard ingress inputs are required")
+			}
+		} else if options.WGEndpointHost != "" || options.WGSubnetCIDR != "" || options.WGListenPort != 0 || len(options.WGClientDNS) != 0 {
+			return "", errors.New("WireGuard ingress inputs require explicit enablement")
+		}
 	}
 	bootstrap, err := SelectArtifact(manifest, RoleBootstrap, "linux", "amd64")
 	if err != nil {
@@ -107,6 +129,11 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	manifestName := "channel-" + manifest.Channel + ".json"
 	signatureName := "channel-" + manifest.Channel + ".sig"
 	parts := bootstrapCommandPrefix(baseURL+bootstrap.Filename, bootstrap.SHA256, options.NonInteractiveRoot)
+	if options.Interactive || options.LogReaderUser == "" {
+		parts = append(parts, "management_user=$(id -un)", "if [ \"$management_user\" = root ]; then management_user=$(getent passwd 1000 | cut -d: -f1); fi", "test -n \"$management_user\"")
+	} else {
+		parts = append(parts, "management_user="+shellQuote(options.LogReaderUser))
+	}
 	if options.Interactive {
 		// Capture the SSH client before sudo can filter SSH_CONNECTION. The
 		// bootstrap parses this only as a typed IP and protects its route.
@@ -122,6 +149,7 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		" --public-key-url " + baseURL + "update-signing.pub" +
 		" --signer-key-sha256 " + options.SignerKeySHA256 +
 		" --artifact-base-url " + baseURL
+	installCommand += " --log-reader-user \"$management_user\""
 	if options.Interactive {
 		installCommand += " --interactive --management-peer \"$management_peer\""
 	} else {
@@ -134,6 +162,13 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	}
 	if options.DisableSSH {
 		parts[len(parts)-1] += " --disable-ssh"
+	}
+	if options.EnableWGIngress {
+		parts[len(parts)-1] += " --enable-wireguard-ingress" +
+			" --wireguard-endpoint-host " + options.WGEndpointHost +
+			" --wireguard-subnet " + options.WGSubnetCIDR +
+			" --wireguard-listen-port " + strconv.Itoa(options.WGListenPort) +
+			" --wireguard-client-dns " + strings.Join(options.WGClientDNS, ",")
 	}
 	if options.InstallDependencies {
 		parts[len(parts)-1] += " --install-dependencies"

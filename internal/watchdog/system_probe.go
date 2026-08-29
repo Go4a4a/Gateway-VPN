@@ -25,6 +25,7 @@ const (
 	unitDNSMasq       = "gateway-vpn-dnsmasq.service"
 	unitSSH           = "ssh.service"
 	unitMihomo        = "gateway-vpn-mihomo.service"
+	unitJournald      = "systemd-journald@gateway-vpn.service"
 )
 
 var restartUnits = map[string][]string{
@@ -43,6 +44,7 @@ var restartUnits = map[string][]string{
 	ComponentWorkerRuntime:    {unitControl},
 	ComponentConvergence:      {unitControl},
 	ComponentBackup:           {unitControl},
+	ComponentLogging:          {unitJournald, unitBroker, unitControl},
 }
 
 var maintenanceUnits = []struct {
@@ -90,6 +92,7 @@ type SystemProbe struct {
 	DatabasePath        string
 	HeartbeatPath       string
 	MihomoConfigPath    string
+	LogExportRoot       string
 	MihomoTUN           string
 	WireGuardConfigPath string
 	LANPrefix           string
@@ -155,6 +158,7 @@ func (probe *SystemProbe) Snapshot(ctx context.Context, policy Policy) (ProbeSna
 	items = append(items, Observation{ComponentID: ComponentBackup, Applicable: true, Healthy: backupHealthy, ErrorCode: backupCode, Details: backupDetails})
 	resourceHealthy, resourceCode, details := systemResourceHealth(probe.DatabasePath, policy)
 	items = append(items, Observation{ComponentID: ComponentResources, Applicable: true, Healthy: resourceHealthy, ErrorCode: resourceCode, Details: details})
+	items = append(items, probe.loggingPipelineHealth(ctx))
 	for index := range items {
 		if items[index].Healthy {
 			items[index].ErrorCode = ""
@@ -373,7 +377,7 @@ func ipv4WildcardSSHListener(output string) bool {
 }
 
 func fixedUnit(unit string) bool {
-	for _, expected := range []string{unitControl, unitFirewall, unitFirewallGuard, unitBroker, unitNetworkd, unitDNSMasq, unitSSH, unitMihomo} {
+	for _, expected := range []string{unitControl, unitFirewall, unitFirewallGuard, unitBroker, unitNetworkd, unitDNSMasq, unitSSH, unitMihomo, unitJournald} {
 		if unit == expected {
 			return true
 		}
@@ -394,7 +398,7 @@ func (probe *SystemProbe) run(ctx context.Context, executable string, arguments 
 }
 
 func (probe *SystemProbe) validate() error {
-	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.WG != "/usr/bin/wg" || probe.SSHD != "/usr/sbin/sshd" || probe.SS != "/usr/bin/ss" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.WireGuardConfigPath != "/etc/gateway-vpn/wireguard.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 || probe.LANPrefix == "" || probe.WireGuardPrefix != "10.80.0.0/24" || len(probe.BootstrapDNS) == 0 || probe.RoutingTableStart < 256 || probe.FwmarkStart == 0 {
+	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.WG != "/usr/bin/wg" || probe.SSHD != "/usr/sbin/sshd" || probe.SS != "/usr/bin/ss" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.LogExportRoot != "/var/log/gateway-vpn" || probe.WireGuardConfigPath != "/etc/gateway-vpn/wireguard.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 || probe.LANPrefix == "" || probe.WireGuardPrefix != "10.80.0.0/24" || len(probe.BootstrapDNS) == 0 || probe.RoutingTableStart < 256 || probe.FwmarkStart == 0 {
 		return errors.New("complete fixed system watchdog probe configuration is required")
 	}
 	return nil

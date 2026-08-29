@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,7 +15,9 @@ import (
 
 	configpkg "gateway-vpn/internal/config"
 	databasepkg "gateway-vpn/internal/db"
+	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -181,5 +185,154 @@ func TestSSHHealthRequiresEnabledValidWildcardServiceAndLANOnlyFirewall(t *testi
 	observation = probe.sshManagementHealthForConfig(context.Background(), configuration)
 	if observation.Healthy || observation.ErrorCode != "SSH_FIREWALL_SCOPE_INVALID" {
 		t.Fatalf("uplink-scoped SSH firewall observation = %+v", observation)
+	}
+}
+
+func TestLoggingPipelineHealthRequiresConvergedJournaldAndBoundedExports(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose the Unix 0640 mode required by the Linux log export contract")
+	}
+	ctx := context.Background()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "state.db")
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	settings, err := (loggingpkg.Repository{Database: database}).Get(ctx)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	fingerprint := loggingpkg.RetentionFingerprint(settings)
+	if _, err := database.ExecContext(ctx, `
+UPDATE logging_runtime
+SET desired_sha256=?, applied_sha256=?, state='APPLIED', applied_at='now'
+WHERE singleton_id=1;
+UPDATE log_export_policy
+SET applied_generation=desired_generation, state='APPLIED'
+WHERE singleton_id=1`, fingerprint, fingerprint); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	policy, err := (loggingpkg.ExportRepository{Database: database}).Get(ctx)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(directory, "gateway-vpn")
+	if err := os.MkdirAll(filepath.Join(root, "current"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, category := range policy.Categories {
+		filename := filepath.Join(root, "current", category+".log")
+		if err := os.WriteFile(filename, []byte("safe\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		// Windows applies the process umask/ACL translation to newly created files,
+		// so set the portable permission bits explicitly just like the exporter.
+		if err := os.Chmod(filename, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &exactOutputExecutor{outputs: map[string]string{
+		"/usr/bin/systemctl is-active --quiet systemd-journald@gateway-vpn.service": "",
+	}}
+	probe := &SystemProbe{Executor: executor, Systemctl: "/usr/bin/systemctl", DatabasePath: databasePath, LogExportRoot: root}
+	observation := probe.loggingPipelineHealth(ctx)
+	if !observation.Healthy || observation.ErrorCode != "" || observation.Details["categories"] != len(policy.Categories) {
+		t.Fatalf("healthy logging pipeline = %+v", observation)
+	}
+	if err := os.Chmod(filepath.Join(root, "current", "all.log"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	observation = probe.loggingPipelineHealth(ctx)
+	if observation.Healthy || observation.ErrorCode != "LOG_EXPORT_FILE_INVALID" {
+		t.Fatalf("unsafe log export observation = %+v", observation)
+	}
+}
+
+func TestWireGuardIngressHealthRequiresExactLocalKernelContour(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "state.db")
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at)
+VALUES('netif:lan','MANAGED_VIRTUAL','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','gateway-vpn-lan','UP','now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	secretRoot := filepath.Join(directory, "secrets", "wireguard-ingress")
+	repository := wgingress.Repository{Database: database, SecretRoot: secretRoot}
+	keys := wgingress.KeyStore{Root: secretRoot}
+	server, err := repository.EnsureDefault(ctx, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err = repository.UpdateServer(ctx, wgingress.ServerUpdate{
+		Enabled: true, Name: "Clients", SubnetCIDR: "10.90.0.0/24", ListenPort: 51820,
+		EndpointHost: "vpn.example.org", MTU: 1420, TopologyMode: "ROUTED",
+		ListenInterfaces: []wgingress.ListenInterface{{NetworkInterfaceID: "netif:lan", ExposureMode: "LOCAL", Priority: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetRuntime(ctx, server.ID, "ACTIVE", "", server.DesiredGeneration); err != nil {
+		t.Fatal(err)
+	}
+	pair, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	psk, err := wgingress.GeneratePresharedKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := repository.CreatePeer(ctx, wgingress.PeerCreate{
+		Name: "Phone", PeerKind: "DEVICE", KeyMode: "MANAGED", PersistentKeepalive: 25,
+		AccessPolicyMode: "AUTO", ClientAllowedIPs: []string{"0.0.0.0/0"},
+	}, &pair, psk, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err = repository.GetServer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetRuntime(ctx, server.ID, "ACTIVE", "", server.DesiredGeneration); err != nil {
+		t.Fatal(err)
+	}
+	executor := &exactOutputExecutor{outputs: map[string]string{
+		"/usr/sbin/ip -json link show dev wg-ingress":                         `[{"flags":["UP"]}]`,
+		"/usr/sbin/ip -json -4 address show dev wg-ingress":                   `[{"addr_info":[{"local":"10.90.0.1","prefixlen":24}]}]`,
+		"/usr/bin/wg show wg-ingress public-key":                              server.PublicKey + "\n",
+		"/usr/bin/wg show wg-ingress listen-port":                             "51820\n",
+		"/usr/bin/wg show wg-ingress peers":                                   peer.PublicKey + "\n",
+		"/usr/sbin/ip -N -json -4 route show dev wg-ingress protocol 186":     `[]`,
+		"/usr/sbin/nft list set inet gateway_vpn wireguard_ingress_listeners": `set wireguard_ingress_listeners { type ifname . inet_service; elements = { "gateway-vpn-lan" . 51820 } }`,
+	}}
+	probe := &SystemProbe{Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg", NFT: "/usr/sbin/nft", DatabasePath: databasePath}
+	observation := probe.wireGuardIngressHealth(ctx)
+	if !observation.Applicable || !observation.Healthy || observation.ErrorCode != "" || observation.Details["enabled_peers"] != 1 {
+		t.Fatalf("healthy ingress observation = %+v", observation)
+	}
+	executor.outputs["/usr/sbin/nft list set inet gateway_vpn wireguard_ingress_listeners"] = `set wireguard_ingress_listeners { type ifname . inet_service; elements = { "wrong0" . 51820 } }`
+	observation = probe.wireGuardIngressHealth(ctx)
+	if observation.Healthy || observation.ErrorCode != "WG_INGRESS_FIREWALL_LISTENER_MISMATCH" {
+		t.Fatalf("mismatched listener observation = %+v", observation)
 	}
 }

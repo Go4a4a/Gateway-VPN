@@ -94,6 +94,7 @@ func TestSystemProbeRestartMatrixIsFixedAndComplete(t *testing.T) {
 		ComponentWorkerRuntime:    {"gateway-vpn.service"},
 		ComponentConvergence:      {"gateway-vpn.service"},
 		ComponentBackup:           {"gateway-vpn.service"},
+		ComponentLogging:          {"systemd-journald@gateway-vpn.service", "gateway-vpn-network-broker.service", "gateway-vpn.service"},
 	}
 	for componentID, units := range want {
 		t.Run(componentID, func(t *testing.T) {
@@ -197,6 +198,7 @@ func fixedTestSystemProbe(executor platformexec.Executor) *SystemProbe {
 		GatewayBinary: "/opt/gateway-vpn/current/bin/gateway-vpn", ConfigPath: "/etc/gateway-vpn/config.yaml",
 		DatabasePath: "/var/lib/gateway-vpn/state.db", HeartbeatPath: "/run/gateway-vpn-watchdog/control.json",
 		MihomoConfigPath: "/var/lib/gateway-vpn/mihomo/active/config.yaml", MihomoTUN: "gateway-vpn-tun",
+		LogExportRoot:       "/var/log/gateway-vpn",
 		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml", LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",

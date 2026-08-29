@@ -35,9 +35,20 @@ type JournaldSynchronizer struct {
 	Runtime  RuntimeRepository
 	Executor platformexec.Executor
 	Paths    JournaldPaths
+	Exporter *Exporter
 }
 
 func (synchronizer JournaldSynchronizer) SyncLogging(ctx context.Context) error {
+	if err := synchronizer.syncRetention(ctx); err != nil {
+		return err
+	}
+	if synchronizer.Exporter != nil {
+		return synchronizer.Exporter.Sync(ctx)
+	}
+	return nil
+}
+
+func (synchronizer JournaldSynchronizer) syncRetention(ctx context.Context) error {
 	if err := synchronizer.validate(); err != nil {
 		return err
 	}

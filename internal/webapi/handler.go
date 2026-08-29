@@ -55,7 +55,9 @@ import (
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const sessionCookieName = "gateway_vpn_session"
@@ -73,6 +75,8 @@ type Dependencies struct {
 	WireGuardRuntime        *wireguardpkg.RuntimeStore
 	WireGuardConfigPath     string
 	WireGuardSync           WireGuardSynchronizer
+	WireGuardIngress        *wgingress.Repository
+	WireGuardIngressAdmin   WireGuardIngressController
 	ModemRuntime            ModemRuntime
 	ModemRecovery           ModemRecoveryController
 	ModemReconcile          func(context.Context) (hilink.CycleResult, error)
@@ -197,6 +201,19 @@ type WireGuardSynchronizer interface {
 	SyncWireGuard(context.Context) error
 }
 
+type WireGuardIngressController interface {
+	SyncWireGuardIngress(context.Context) error
+	UpdateWireGuardIngressServer(context.Context, wgingress.ServerUpdate) (wgingress.Server, error)
+	RotateWireGuardIngressServer(context.Context) (wgingress.Server, error)
+	CreateWireGuardIngressPeer(context.Context, wgingress.PeerCreate) (wgingress.Peer, error)
+	UpdateWireGuardIngressPeer(context.Context, string, wgingress.PeerUpdate) (wgingress.Peer, error)
+	RevokeWireGuardIngressPeer(context.Context, string) (wgingress.Peer, error)
+	DeleteWireGuardIngressPeer(context.Context, string) error
+	RotateWireGuardIngressPeer(context.Context, string) (wgingress.Peer, error)
+	ProbeWireGuardIngressPeer(context.Context, string) (wgingress.Peer, error)
+	ExportWireGuardIngressPeer(context.Context, string) (wgingress.ExportedConfig, error)
+}
+
 type ModemRuntime interface {
 	BlockPath(context.Context) error
 	SyncRouting(context.Context) error
@@ -241,6 +258,14 @@ type Server struct {
 	maintenanceMutex      sync.Mutex
 	maintenanceMutations  int
 	powerPending          bool
+	secretGrantMutex      sync.Mutex
+	secretGrants          map[string]secretExportGrant
+}
+
+type secretExportGrant struct {
+	PeerID      string
+	SessionHash string
+	ExpiresAt   time.Time
 }
 
 type contextKey string
@@ -274,7 +299,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	if dependencies.Now != nil {
 		startedAt = dependencies.Now().UTC()
 	}
-	server := &Server{dependencies: dependencies, startedAt: startedAt, matcherPreviewSecret: previewSecret, journalLimiter: newJournalRateLimiter(), metricsLimiter: newJournalRateLimiter(), diagnosticLimiter: newDiagnosticRateLimiter(), snapshotLimiter: newDiagnosticRateLimiter(), portableBackupLimiter: newDiagnosticRateLimiter(), updateLimiter: newDiagnosticRateLimiter()}
+	server := &Server{dependencies: dependencies, startedAt: startedAt, matcherPreviewSecret: previewSecret, journalLimiter: newJournalRateLimiter(), metricsLimiter: newJournalRateLimiter(), diagnosticLimiter: newDiagnosticRateLimiter(), snapshotLimiter: newDiagnosticRateLimiter(), portableBackupLimiter: newDiagnosticRateLimiter(), updateLimiter: newDiagnosticRateLimiter(), secretGrants: make(map[string]secretExportGrant)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", server.login)
 	mux.Handle("POST /api/v1/auth/logout", server.protected(http.HandlerFunc(server.logout)))
@@ -293,6 +318,19 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/wireguard/status", server.protected(http.HandlerFunc(server.wireGuardStatus)))
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
+	mux.Handle("GET /api/v1/wireguard-ingress", server.protected(http.HandlerFunc(server.wireGuardIngressServer)))
+	mux.Handle("PUT /api/v1/wireguard-ingress", server.protected(http.HandlerFunc(server.updateWireGuardIngressServer)))
+	mux.Handle("POST /api/v1/wireguard-ingress/rotate", server.protected(http.HandlerFunc(server.rotateWireGuardIngressServer)))
+	mux.Handle("GET /api/v1/wireguard-ingress/peers", server.protected(http.HandlerFunc(server.wireGuardIngressPeers)))
+	mux.Handle("POST /api/v1/wireguard-ingress/peers", server.protected(http.HandlerFunc(server.createWireGuardIngressPeer)))
+	mux.Handle("PATCH /api/v1/wireguard-ingress/peers/{id}", server.protected(http.HandlerFunc(server.updateWireGuardIngressPeer)))
+	mux.Handle("DELETE /api/v1/wireguard-ingress/peers/{id}", server.protected(http.HandlerFunc(server.deleteWireGuardIngressPeer)))
+	mux.Handle("POST /api/v1/wireguard-ingress/peers/{id}/revoke", server.protected(http.HandlerFunc(server.revokeWireGuardIngressPeer)))
+	mux.Handle("POST /api/v1/wireguard-ingress/peers/{id}/rotate", server.protected(http.HandlerFunc(server.rotateWireGuardIngressPeer)))
+	mux.Handle("POST /api/v1/wireguard-ingress/peers/{id}/probe", server.protected(http.HandlerFunc(server.probeWireGuardIngressPeer)))
+	mux.Handle("POST /api/v1/wireguard-ingress/peers/{id}/reauth", server.protected(http.HandlerFunc(server.reauthWireGuardIngressPeer)))
+	mux.Handle("GET /api/v1/wireguard-ingress/peers/{id}/config", server.protected(http.HandlerFunc(server.wireGuardIngressPeerConfig)))
+	mux.Handle("GET /api/v1/wireguard-ingress/peers/{id}/qrcode", server.protected(http.HandlerFunc(server.wireGuardIngressPeerQRCode)))
 	mux.Handle("POST /api/v1/gateway/reconcile", server.protected(http.HandlerFunc(server.reconcile)))
 	mux.Handle("GET /api/v1/access-methods", server.protected(http.HandlerFunc(server.accessMethods)))
 	mux.Handle("PUT /api/v1/access-methods/priorities", server.protected(http.HandlerFunc(server.reorderAccessMethods)))
@@ -761,6 +799,321 @@ func (server *Server) wireGuardSettings(writer http.ResponseWriter, request *htt
 		"allowed_ips": configuration.AllowedIPs, "persistent_keepalive": configuration.PersistentKeepalive,
 		"handshake_timeout_seconds": int(wireguardpkg.HandshakeTimeout(configuration) / time.Second),
 	})
+}
+
+func (server *Server) wireGuardIngressServer(writer http.ResponseWriter, request *http.Request) {
+	item, err := server.loadWireGuardIngressServer(request.Context())
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"server": item})
+}
+
+func (server *Server) updateWireGuardIngressServer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	var input wgingress.ServerUpdate
+	if err := decodeJSON(request, &input); err != nil || wgingress.ValidateServerUpdate(input) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_SERVER", "Проверьте подсеть, endpoint, порт, интерфейсы и topology mode")
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.UpdateWireGuardIngressServer(request.Context(), input)
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"server": item})
+}
+
+func (server *Server) rotateWireGuardIngressServer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	var input struct {
+		PasswordConfirmation string `json:"password_confirmation"`
+		Confirmation         string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Confirmation != "ROTATE_WIREGUARD_SERVER_KEY" {
+		writeError(writer, http.StatusBadRequest, "CONFIRMATION_REQUIRED", "Требуется точное подтверждение ROTATE_WIREGUARD_SERVER_KEY")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.PasswordConfirmation); err != nil {
+		writeAuthManagementError(writer, err)
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.RotateWireGuardIngressServer(request.Context())
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"server": item})
+}
+
+func (server *Server) wireGuardIngressPeers(writer http.ResponseWriter, request *http.Request) {
+	if _, err := server.loadWireGuardIngressServer(request.Context()); err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	items, err := server.dependencies.WireGuardIngress.ListPeers(request.Context())
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) createWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	var input wgingress.PeerCreate
+	if err := decodeJSON(request, &input); err != nil || wgingress.ValidatePeerCreate(input) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER", "Проверьте тип, ключ, адреса, маршруты и политику клиента")
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.CreateWireGuardIngressPeer(request.Context(), input)
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"peer": item})
+}
+
+func (server *Server) updateWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	var input wgingress.PeerUpdate
+	if err := decodeJSON(request, &input); err != nil || wgingress.ValidatePeerUpdate(input) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER", "Проверьте параметры WireGuard-клиента")
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.UpdateWireGuardIngressPeer(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"peer": item})
+}
+
+func (server *Server) revokeWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "revoke-wireguard-peer" {
+		writeError(writer, http.StatusBadRequest, "CONFIRMATION_REQUIRED", "Требуется подтверждение отзыва клиента")
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.RevokeWireGuardIngressPeer(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"peer": item})
+}
+
+func (server *Server) deleteWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "delete-revoked-wireguard-peer" {
+		writeError(writer, http.StatusBadRequest, "CONFIRMATION_REQUIRED", "Удалить можно только уже отозванного клиента после явного подтверждения")
+		return
+	}
+	if err := server.dependencies.WireGuardIngressAdmin.DeleteWireGuardIngressPeer(request.Context(), request.PathValue("id")); err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) rotateWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	var input struct {
+		PasswordConfirmation string `json:"password_confirmation"`
+		Confirmation         string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Confirmation != "ROTATE_WIREGUARD_CLIENT_KEY" {
+		writeError(writer, http.StatusBadRequest, "CONFIRMATION_REQUIRED", "Требуется точное подтверждение ROTATE_WIREGUARD_CLIENT_KEY")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.PasswordConfirmation); err != nil {
+		writeAuthManagementError(writer, err)
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.RotateWireGuardIngressPeer(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"peer": item})
+}
+
+func (server *Server) probeWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngressAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	item, err := server.dependencies.WireGuardIngressAdmin.ProbeWireGuardIngressPeer(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"peer": item})
+}
+
+func (server *Server) reauthWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.WireGuardIngress == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Управление входящим WireGuard не подключено")
+		return
+	}
+	peer, err := server.dependencies.WireGuardIngress.GetPeer(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	if peer.KeyMode != "MANAGED" || peer.RevokedAt != "" {
+		writeError(writer, http.StatusConflict, "PRIVATE_CONFIG_UNAVAILABLE", "Gateway не хранит private key этого клиента")
+		return
+	}
+	var input struct {
+		PasswordConfirmation string `json:"password_confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Укажите текущий пароль")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.PasswordConfirmation); err != nil {
+		writeAuthManagementError(writer, err)
+		return
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	digest := sha256.Sum256([]byte(token))
+	expires := server.now().Add(90 * time.Second)
+	server.secretGrantMutex.Lock()
+	for key, grant := range server.secretGrants {
+		if !grant.ExpiresAt.After(server.now()) {
+			delete(server.secretGrants, key)
+		}
+	}
+	server.secretGrants[hex.EncodeToString(digest[:])] = secretExportGrant{PeerID: peer.ID, SessionHash: principal.SessionHash, ExpiresAt: expires}
+	server.secretGrantMutex.Unlock()
+	writeJSON(writer, http.StatusOK, map[string]any{"reauth_token": token, "expires_at": expires.Format(time.RFC3339Nano), "single_use": true})
+}
+
+func (server *Server) wireGuardIngressPeerConfig(writer http.ResponseWriter, request *http.Request) {
+	configuration, peer, err := server.exportWireGuardIngressPeer(request)
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/wireguard-profile; charset=utf-8")
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": configuration.Filename}))
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	if peer.KeyMode == "EXTERNAL" {
+		writer.Header().Set("X-Gateway-VPN-Key-Mode", "external-template")
+	}
+	writer.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(writer, configuration.Content)
+}
+
+func (server *Server) wireGuardIngressPeerQRCode(writer http.ResponseWriter, request *http.Request) {
+	configuration, peer, err := server.exportWireGuardIngressPeer(request)
+	if err != nil {
+		writeWireGuardIngressError(writer, err)
+		return
+	}
+	if peer.KeyMode != "MANAGED" {
+		writeError(writer, http.StatusConflict, "PRIVATE_CONFIG_UNAVAILABLE", "QR доступен только для managed client key")
+		return
+	}
+	png, err := qrcode.Encode(configuration.Content, qrcode.Medium, 384)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "image/png")
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": strings.TrimSuffix(configuration.Filename, ".conf") + "-qr.png"}))
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(png)
+}
+
+func (server *Server) exportWireGuardIngressPeer(request *http.Request) (wgingress.ExportedConfig, wgingress.Peer, error) {
+	if server.dependencies.WireGuardIngress == nil || server.dependencies.WireGuardIngressAdmin == nil {
+		return wgingress.ExportedConfig{}, wgingress.Peer{}, errors.New("WireGuard ingress controller is unavailable")
+	}
+	peer, err := server.dependencies.WireGuardIngress.GetPeer(request.Context(), request.PathValue("id"))
+	if err != nil {
+		return wgingress.ExportedConfig{}, wgingress.Peer{}, err
+	}
+	if peer.KeyMode == "MANAGED" {
+		principal := request.Context().Value(principalKey).(auth.Principal)
+		if !server.consumeSecretGrant(request.Header.Get("X-Reauth-Token"), principal.SessionHash, peer.ID) {
+			return wgingress.ExportedConfig{}, wgingress.Peer{}, errors.New("fresh single-use reauthentication is required")
+		}
+	}
+	configuration, err := server.dependencies.WireGuardIngressAdmin.ExportWireGuardIngressPeer(request.Context(), peer.ID)
+	return configuration, peer, err
+}
+
+func (server *Server) consumeSecretGrant(token, sessionHash, peerID string) bool {
+	if token == "" || sessionHash == "" || peerID == "" {
+		return false
+	}
+	digest := sha256.Sum256([]byte(token))
+	key := hex.EncodeToString(digest[:])
+	server.secretGrantMutex.Lock()
+	defer server.secretGrantMutex.Unlock()
+	grant, exists := server.secretGrants[key]
+	delete(server.secretGrants, key)
+	return exists && grant.PeerID == peerID && grant.SessionHash == sessionHash && grant.ExpiresAt.After(server.now())
+}
+
+func (server *Server) loadWireGuardIngressServer(ctx context.Context) (wgingress.Server, error) {
+	if server.dependencies.WireGuardIngress == nil || server.dependencies.WireGuardIngressAdmin == nil {
+		return wgingress.Server{}, errors.New("WireGuard ingress controller is unavailable")
+	}
+	item, err := server.dependencies.WireGuardIngress.GetServer(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		if syncErr := server.dependencies.WireGuardIngressAdmin.SyncWireGuardIngress(ctx); syncErr != nil {
+			return wgingress.Server{}, syncErr
+		}
+		return server.dependencies.WireGuardIngress.GetServer(ctx)
+	}
+	return item, err
+}
+
+func writeWireGuardIngressError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "NOT_FOUND", "WireGuard-клиент не найден")
+	case strings.Contains(err.Error(), "reauthentication"):
+		writeError(writer, http.StatusForbidden, "REAUTH_REQUIRED", "Для выдачи private-key конфигурации повторно подтвердите пароль")
+	default:
+		writeError(writer, http.StatusConflict, "WIREGUARD_INGRESS_REJECTED", "Настройка отклонена безопасной проверкой или не применилась")
+	}
 }
 
 func (server *Server) updateWireGuardSettings(writer http.ResponseWriter, request *http.Request) {
@@ -3674,7 +4027,7 @@ func (server *Server) logs(writer http.ResponseWriter, request *http.Request) {
 	}
 	allowedKeys := map[string]bool{
 		"limit": true, "cursor": true, "since": true, "until": true, "level": true,
-		"component": true, "modem_id": true, "subscription_id": true,
+		"component": true, "category": true, "modem_id": true, "subscription_id": true,
 		"path_id": true, "correlation_id": true, "search": true,
 	}
 	for key := range request.URL.Query() {
@@ -3696,7 +4049,7 @@ func (server *Server) logs(writer http.ResponseWriter, request *http.Request) {
 		Limit: limit, Cursor: request.URL.Query().Get("cursor"),
 		Since: request.URL.Query().Get("since"), Until: request.URL.Query().Get("until"),
 		Levels:    append([]string(nil), request.URL.Query()["level"]...),
-		Component: request.URL.Query().Get("component"), ModemID: request.URL.Query().Get("modem_id"),
+		Component: request.URL.Query().Get("component"), Category: request.URL.Query().Get("category"), ModemID: request.URL.Query().Get("modem_id"),
 		SubscriptionID: request.URL.Query().Get("subscription_id"), PathID: request.URL.Query().Get("path_id"),
 		CorrelationID: request.URL.Query().Get("correlation_id"), Search: request.URL.Query().Get("search"),
 	}
@@ -3828,9 +4181,15 @@ func (server *Server) writeLoggingSettings(writer http.ResponseWriter, ctx conte
 		writeInternalError(writer, err)
 		return
 	}
+	exportPolicy, err := (loggingpkg.ExportRepository{Database: server.dependencies.Database}).Get(ctx)
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"global_level": settings.GlobalLevel, "component_levels": settings.ComponentLevels,
 		"effective_levels": effective, "available_components": loggingpkg.Components(),
+		"available_categories":  loggingpkg.Categories(),
 		"available_base_levels": []string{loggingpkg.LevelError, loggingpkg.LevelWarning, loggingpkg.LevelInfo},
 		"debug_components":      settings.DebugComponents, "debug_until": settings.DebugUntil,
 		"debug_remaining_seconds":   remainingSeconds,
@@ -3844,6 +4203,15 @@ func (server *Server) writeLoggingSettings(writer http.ResponseWriter, ctx conte
 		"retention_last_error_code": retention.LastErrorCode,
 		"retention_desired_sha256":  retention.DesiredSHA256, "retention_applied_sha256": retention.AppliedSHA256,
 		"retention_applied_at": retention.AppliedAt,
+		"log_export_enabled":   exportPolicy.Enabled, "log_export_state": exportPolicy.State,
+		"log_export_desired_generation": exportPolicy.DesiredGeneration,
+		"log_export_applied_generation": exportPolicy.AppliedGeneration,
+		"log_export_max_file_bytes":     exportPolicy.MaxFileBytes,
+		"log_export_max_total_bytes":    exportPolicy.MaxTotalBytes,
+		"log_export_max_archive_files":  exportPolicy.MaxArchiveFiles,
+		"log_export_retention_days":     exportPolicy.RetentionDays,
+		"log_export_categories":         exportPolicy.Categories,
+		"log_export_sftp_path":          "/var/log/gateway-vpn/current",
 	})
 }
 
@@ -4392,6 +4760,13 @@ func writeDomainError(writer http.ResponseWriter, err error) {
 
 func writeAuthManagementError(writer http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, auth.ErrRateLimited):
+		writer.Header().Set("Retry-After", "2")
+		writeError(writer, http.StatusTooManyRequests, "REAUTH_RATE_LIMITED", "Слишком много неверных попыток; повторите позже")
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		writeError(writer, http.StatusUnauthorized, "REAUTH_FAILED", "Текущий пароль указан неверно")
+	case errors.Is(err, auth.ErrInvalidSession):
+		writeError(writer, http.StatusUnauthorized, "SESSION_INVALID", "Сессия истекла или отозвана")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "NOT_FOUND", "Пользователь или сессия не найдены")
 	case errors.Is(err, auth.ErrInvalidUsername):

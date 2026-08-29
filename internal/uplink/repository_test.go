@@ -70,6 +70,37 @@ func TestRepositoryMigratesHiLinkAndCreatesEthernetFromUnusedInterface(t *testin
 	}
 }
 
+func TestEnsureManagedLANInterfaceIsStableAndCannotBecomeAnUplink(t *testing.T) {
+	ctx, _, repository := newFixture(t)
+	first, err := repository.EnsureManagedLANInterface(ctx, "gateway-vpn-lan", "192.168.200.1/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repository.EnsureManagedLANInterface(ctx, "gateway-vpn-lan", "192.168.200.1/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != ManagedLANInterfaceID || second.ID != first.ID || first.StableIdentityKind != "MANAGED_VIRTUAL" {
+		t.Fatalf("managed LAN identity = %+v then %+v", first, second)
+	}
+	inventory, err := repository.ListInterfaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *InterfaceInventory
+	for index := range inventory {
+		if inventory[index].ID == ManagedLANInterfaceID {
+			found = &inventory[index]
+		}
+	}
+	if found == nil || found.CurrentIfname != "gateway-vpn-lan" || len(found.Roles) != 1 || found.Roles[0].Role != "MANAGEMENT" {
+		t.Fatalf("managed LAN inventory = %+v", found)
+	}
+	if _, err := repository.CreateEthernet(ctx, CreateEthernetInput{ID: "bad-uplink", Name: "Bad", NetworkInterfaceID: ManagedLANInterfaceID, AddressMode: AddressDHCP}); err == nil {
+		t.Fatal("managed LAN bridge was accepted as a physical Ethernet uplink")
+	}
+}
+
 func TestRepositoryRejectsUnsafeOrAlreadyAssignedEthernetInterface(t *testing.T) {
 	ctx, database, repository := newFixture(t)
 	_, err := repository.ObserveInterface(ctx, InterfaceObservation{

@@ -114,10 +114,11 @@ Publisher сверяет clean HEAD, local/remote exact tag, отсутстви�
 6. спрашивает, нужен ли DHCP для WAN Keenetic/прямых management clients и можно ли установить отсутствующие managed dependencies;
 7. предлагает первый свободный `/24` из безопасного набора либо принимает другой private host CIDR `/16../30`; при DHCP разрешён только `/24`;
 8. проверяет CIDR против всех IPv4 addresses/non-default routes хоста и фиксированной WireGuard management subnet;
-9. предлагает не ждать внешнюю сеть при boot (рекомендуется для Gateway) либо сохранить штатную Ubuntu policy; в рекомендуемом режиме Ethernet, HiLink, DHCP и Интернет не задерживают загрузку ОС;
-10. определяет GRUB и UEFI/Legacy, затем предлагает скрытую автоматическую загрузку Ubuntu, видимое меню на 5 секунд либо сохранение текущей policy; если найдена Windows boot entry, скрытый вариант не предлагается, а неизвестный загрузчик всегда сохраняется;
-11. отдельно показывает полный список обязательных автоматических настроек и runtime-параметров, которые позднее меняются в WebUI;
-12. запускает signed read-only preflight, показывает итоговую сводку и применяет изменения только после точного ввода `INSTALL`.
+9. отдельно предлагает штатный OpenSSH/SFTP (рекомендуется) и optional входящий WireGuard для телефонов, ПК или роутеров; для WireGuard проверяет public endpoint, отдельную private subnet, UDP port и DNS;
+10. предлагает не ждать внешнюю сеть при boot (рекомендуется для Gateway) либо сохранить штатную Ubuntu policy; в рекомендуемом режиме Ethernet, HiLink, DHCP и Интернет не задерживают загрузку ОС;
+11. определяет GRUB и UEFI/Legacy, затем предлагает скрытую автоматическую загрузку Ubuntu, видимое меню на 5 секунд либо сохранение текущей policy; если найдена Windows boot entry, скрытый вариант не предлагается, а неизвестный загрузчик всегда сохраняется;
+12. отдельно показывает полный список обязательных автоматических настроек и runtime-параметров, которые позднее меняются в WebUI;
+13. запускает signed read-only preflight, показывает итоговую сводку и применяет изменения только после точного ввода `INSTALL`.
 
 Каждый пункт мастера объясняет назначение простыми словами, показывает обнаруженное состояние, явно помечает рекомендацию и последствия остальных вариантов. `Enter` принимает только видимую рекомендацию, `q` завершает работу без persistent mutation. Security invariants (проверка подписи, firewall, IPv6 block, ownership, recovery) не изображаются как отключаемые вопросы: они перечисляются отдельным блоком до итогового `INSTALL`.
 
@@ -526,6 +527,23 @@ Retention policy имеет отдельный durable state `UNKNOWN/PENDING/AP
 
 Там же доступен **Технический журнал** только из namespace `gateway-vpn`: страницы до 25 записей, период не более 31 дня и фильтры по уровню, component, modem/subscription/path, correlation ID и тексту. API ограничен 20 запросами в минуту на session. Reader всегда запускает фиксированный `/usr/bin/journalctl` с фиксированными namespace/JSON/reverse flags, считывает не более 129 записей/2 MiB за вызов, ограничивает cursor/поля/сообщение и повторно применяет secret redaction. Control plane не добавляется в широкую группу чтения host journal; доступ выполняется через тот же UID-bound root broker. Недоступность журнала не скрывает logging settings и отображается отдельной ошибкой блока.
 
+WebUI делит этот же поток на десять вкладок: **Все**, **Модемы**, **Подписки и VPN-серверы**, **Доступ и переключения**, **VPN / Mihomo**, **Сеть**, **WireGuard / VPS**, **Watchdog**, **Обновления / backup**, **Безопасность / audit**. Категория является server-side allowlisted filter, а не отдельным источником; одна запись сохраняет тот же cursor/timestamp/correlation identity при просмотре через общий и тематический фильтр.
+
+Для удобного скачивания exporter создаёт только очищенные текстовые копии в `/var/log/gateway-vpn/current/<category>.log`, а при смене суток переносит прежние bounded files в `/var/log/gateway-vpn/archive/`. Исходным журналом остаётся journald. По умолчанию включены все десять категорий, максимум одного файла 10 MiB, общий budget 256 MiB, 14 archive files и 14 дней; WebUI показывает desired/applied generation и ошибку convergence. Запись выполняется atomic rename, повторным redaction pass и отклоняет symlink/non-regular/неверно принадлежащий tree.
+
+Installer создаёт группу `gateway-vpn-log-readers`, добавляет только явно выбранный обычный Ubuntu account и устанавливает каталоги `root:gateway-vpn-log-readers 2750`, файлы `0640`. После первой установки войдите заново, чтобы новая supplementary group применилась. Стандартный SFTP использует тот же TCP/22 и account, отдельного daemon/password нет:
+
+```bash
+id -nG <ubuntu-user>
+sftp <ubuntu-user>@<LAN-IP-Gateway>
+sftp> ls /var/log/gateway-vpn/current
+sftp> get /var/log/gateway-vpn/current/modems.log
+sudo find /var/log/gateway-vpn -maxdepth 2 -printf '%u:%g %m %p\n'
+sudo journalctl --namespace=gateway-vpn --since=-15min
+```
+
+Если SSH отключён, WebUI-журнал и exporter продолжают работать, но SFTP недоступен. Watchdog component `logging_pipeline` отдельно проверяет journald, generation, freshness, размеры и permissions exports; он не заменяет authoritative journal из экспортированных файлов.
+
 Audit входов, policy/settings mutations, manual activation, update/restore и destructive actions не отключается и имеет жёсткий minimum `info`, даже если global level равен `warning` или `error`. Pre-logger handler удаляет subscription URL/token, passwords, private/API keys, proxy credentials, modem serial/identity hash, response body, полный subscription payload и несаницированный Mihomo config также из вложенных map/struct/error. Journal reader и diagnostic builder выполняют независимый второй redaction pass и не полагаются на текущий log level.
 
 ## Учёт трафика
@@ -565,7 +583,7 @@ sudo journalctl --namespace=gateway-vpn -u gateway-vpn.service --since=-15min
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** отдельно показываются локальное состояние процессов/SQLite/firewall, доступность глобального Интернета, active maintenance и durable restart/reboot budgets. Потеря модемов, операторов, подписок, targets, VPS или всего внешнего Интернета отображается как connectivity outage и сама по себе никогда не запускает restart либо reboot.
 
-Safe-default policy проверяет фиксированный allowlist из 16 компонентов каждые 15 секунд: WebUI/API/control, SQLite, firewall guard/ruleset, broker/networkd, DNS/DHCP, optional SSH/SFTP, Mihomo/TUN, WireGuard management/ingress, policy routing, background workers, desired/observed convergence, verified backup/WAL и host resources. Она требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает read-only monitoring, systemd crash restart, fail-closed firewall guard и audit.
+Safe-default policy проверяет фиксированный allowlist из 17 компонентов каждые 15 секунд: WebUI/API/control, SQLite, firewall guard/ruleset, broker/networkd, DNS/DHCP, optional SSH/SFTP, Mihomo/TUN, WireGuard management/ingress, policy routing, background workers, desired/observed convergence, verified backup/WAL, host resources и logging/export pipeline. Она требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает read-only monitoring, systemd crash restart, fail-closed firewall guard и audit.
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** для каждого fixed component выбирается только допустимый `Только наблюдать`, `Reconcile без restart` или `Reconcile и bounded restart`. WebUI не принимает имя unit, executable, interface, route или command. Отдельно настраиваются worker-stale, WireGuard-handshake, backup-age, SQLite-WAL, disk и memory thresholds. Resource pressure отображается, но не делает host reboot допустимым. Старый WireGuard handshake при корректных interface/address/peer/fwmark/routes классифицируется как внешний outage и подавляет локальные recovery/reboot действия.
 
@@ -749,6 +767,33 @@ sudo nft list table inet gateway_vpn
 
 Не удаляйте staging, root journal, snapshot, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering. Exact privileged Ubuntu 24.04 Docker/systemd install/update/rollback/finalize/reboot gate пройден; bare-metal reboot/power-cut и 24/72h hardware endurance остаются обязательными до production acceptance.
 
+## Входящий WireGuard для клиентов
+
+Вкладка **WireGuard-клиенты** управляет отдельным интерфейсом `wg-ingress`; он не является служебным `wg-mgmt`. Сервер можно включить при первой интерактивной установке либо позднее в WebUI. Standard routed profile использует отдельную private subnet (по умолчанию `10.90.0.0/24`), UDP port и public endpoint для готовых клиентских профилей. Если Gateway находится за Keenetic/другим NAT, этот UDP port нужно пробросить на LAN-адрес Gateway. Firewall принимает его только на выбранных listener interfaces; disabled или failed apply полностью удаляет `wg-ingress` из kernel.
+
+`ROUTED` принимает traffic с выделенного LAN/listener. `SHARED_ONE_ARM` предназначен для схемы, где один Ethernet-интерфейс одновременно принимает WireGuard от существующего роутера и является явно назначенным uplink обратно к нему; выбранная карта обязана иметь роль `SHARED_ONE_ARM` и enabled uplink. Gateway всё равно применяет fwmark/owned routes и не создаёт wildcard/main-table fallback. Переход topology/subnet/listener проходит conflict validation до generation apply.
+
+Поддерживаются два типа ключей клиента:
+
+- **Managed** — Gateway создаёт private key и PSK в root-only `/var/lib/gateway-vpn/secrets/wireguard-ingress/`; готовый `.conf` и QR доступны только после повторного ввода текущего WebUI-пароля через одноразовый 90-секундный grant;
+- **External** — пользователь вводит только public key; скачиваемый файл является шаблоном с `<INSERT_PRIVATE_KEY>`, QR намеренно недоступен.
+
+Для каждого peer задаются адрес, device/router kind, optional подсети за удалённым роутером, client AllowedIPs, keepalive, DNS и разрешённые access methods. Режим `AUTO` следует общей priority/quality policy; direct-only/VPN-only и точный список методов ограничивают peer дополнительно. Рекомендуемая `Блокировать при неподходящем пути` не позволяет трафику peer выйти через незаявленный fallback. Handshake показывает только локальную WireGuard-связь и не заменяет FULL/LIMITED проверку Интернета.
+
+**Отключить** сохраняет peer и номер, но удаляет его из kernel. **Отозвать** необратимо запрещает старый профиль и сохраняет audit row; только после этого доступно удаление root-only client secrets. **Повернуть ключ** для managed peer немедленно делает старый `.conf` недействительным. Server key rotation отзывает все ранее выданные client endpoint profiles и требует осознанного повторного экспорта.
+
+Диагностика без вывода private keys:
+
+```bash
+sudo wg show wg-ingress
+sudo ip -N -json -4 address show dev wg-ingress
+sudo ip -N -json -4 route show dev wg-ingress protocol 186
+sudo nft list set inet gateway_vpn wireguard_ingress_listeners
+sudo journalctl --namespace=gateway-vpn --since=-15min | grep -i wireguard
+```
+
+Portable backup включает server key, managed peer keys и PSK только внутри encrypted `.gvpn`; plaintext secrets не появляются в manifest/API/logs. До hardware acceptance требуется клиентский handshake через реальный Keenetic, capture входящего UDP и выходного direct/VPN path, revoke/reconnect test и отдельная проверка one-arm loop isolation.
+
 ## Удалённый доступ WireGuard
 
 Management-туннель настраивается во вкладке **Удалённый доступ**. Для первой настройки нужны private key Gateway, public key VPS и endpoint VPS с фиксированным UDP-портом `51821`. Gateway использует `10.80.0.2/32`, а `AllowedIPs` в MVP фиксирован как `10.80.0.0/24`. Начальное ожидание нового handshake — 45 секунд; Web UI допускает диапазон 30–180 секунд.
@@ -774,7 +819,7 @@ sudo systemctl kill -s SIGKILL gateway-vpn-mihomo.service
 
 После остановки Mihomo новый LAN traffic не должен попасть в HiLink напрямую. `nft flush ruleset`, reboot, unplug/replug обоих модемов и обратный USB-порядок входят в integration/hardware matrix и не заменяются unit-тестами.
 
-`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `2`, четыре named traffic counters и критические rules. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
+`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `4`, четыре named traffic counters, WireGuard-ingress listener set и критические rules. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
 
 Диагностика guard:
 

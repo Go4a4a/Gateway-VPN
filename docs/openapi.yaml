@@ -269,6 +269,118 @@ paths:
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
+  /api/v1/wireguard-ingress:
+    get:
+      tags: [WireGuard]
+      operationId: getWireGuardIngressServer
+      summary: Получить настройки и runtime-состояние входящего WireGuard без private key
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [WireGuard]
+      operationId: updateWireGuardIngressServer
+      summary: Безопасно применить настройки входящего WireGuard-сервера
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/rotate:
+    post:
+      tags: [WireGuard]
+      operationId: rotateWireGuardIngressServerKey
+      summary: После повторного ввода пароля заменить ключ сервера и переподключить всех клиентов
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers:
+    get:
+      tags: [WireGuard]
+      operationId: listWireGuardIngressPeers
+      summary: Перечислить клиентов, состояние handshake и счётчики без private keys
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [WireGuard]
+      operationId: createWireGuardIngressPeer
+      summary: Создать managed-клиента либо зарегистрировать внешний public key
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [WireGuard]
+      operationId: updateWireGuardIngressPeer
+      summary: Изменить маршруты, доступ и состояние WireGuard-клиента
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [WireGuard]
+      operationId: deleteRevokedWireGuardIngressPeer
+      summary: Окончательно удалить заранее отозванного клиента и его managed secrets
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}/revoke:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [WireGuard]
+      operationId: revokeWireGuardIngressPeer
+      summary: Немедленно отозвать клиента с явным подтверждением
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}/rotate:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [WireGuard]
+      operationId: rotateWireGuardIngressPeerKey
+      summary: После повторного ввода пароля заменить managed keypair и PSK клиента
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}/probe:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [WireGuard]
+      operationId: probeWireGuardIngressPeer
+      summary: Немедленно перечитать handshake, endpoint и RX/TX выбранного клиента
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}/reauth:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [WireGuard]
+      operationId: reauthenticateWireGuardIngressPeerExport
+      summary: Выдать одноразовый 90-секундный grant для экспорта managed private config
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/wireguard-ingress/peers/{id}/config:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [WireGuard]
+      operationId: downloadWireGuardIngressPeerConfig
+      summary: Скачать конфигурацию; managed private config требует одноразовый re-auth header
+      responses:
+        '200':
+          description: WireGuard profile
+          content:
+            application/wireguard-profile: {schema: {type: string}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/wireguard-ingress/peers/{id}/qrcode:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    get:
+      tags: [WireGuard]
+      operationId: downloadWireGuardIngressPeerQRCode
+      summary: Получить QR managed-конфигурации по одноразовому re-auth header
+      responses:
+        '200':
+          description: QR-код WireGuard profile
+          content:
+            image/png: {schema: {type: string, contentEncoding: base64}}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/v1/uplinks:
     get:
       tags: [Uplinks]
@@ -764,7 +876,10 @@ paths:
       tags: [Logging]
       operationId: listLogs
       summary: Читать bounded page namespaced journald
-      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/LogCategory'}
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/system/diagnostics:
@@ -966,6 +1081,14 @@ components:
       in: query
       required: false
       schema: {type: string, maxLength: 1024}
+    LogCategory:
+      name: category
+      in: query
+      required: false
+      description: Фиксированная тематическая вкладка canonical namespaced journald stream.
+      schema:
+        type: string
+        enum: [all, modems, subscriptions, access, vpn-mihomo, network, wireguard-vps, watchdog, updates, security-audit]
   requestBodies:
     JSON:
       required: true

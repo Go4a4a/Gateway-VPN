@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/signal"
 	"os/user"
@@ -32,6 +33,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
 	"gateway-vpn/internal/uplink"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -119,10 +121,16 @@ func runNetworkBroker(args []string) int {
 		Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg",
 		ConfigPath: filepath.Join(configuration.System.StateDir, "secrets", "wireguard.yaml"),
 	}
+	loggingExporter := &loggingpkg.Exporter{
+		Repository: loggingpkg.ExportRepository{Database: database},
+		Executor:   executor,
+		Paths:      loggingpkg.DefaultExportPaths(),
+	}
 	loggingBackend := loggingpkg.JournaldSynchronizer{
 		Settings: loggingpkg.Repository{Database: database},
 		Runtime:  loggingpkg.RuntimeRepository{Database: database},
 		Executor: executor, Paths: loggingpkg.DefaultJournaldPaths(),
+		Exporter: loggingExporter,
 	}
 	journalReader := loggingpkg.JournalReader{Executor: executor, Journalctl: "/usr/bin/journalctl"}
 	hostDiagnostics := diagnostics.HostCollector{
@@ -150,6 +158,20 @@ func runNetworkBroker(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create network broker: %v\n", err)
 		return 1
+	}
+	lanPrefix, err := netip.ParsePrefix(configuration.Network.LANAddress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parse LAN prefix for WireGuard ingress: %v\n", err)
+		return 1
+	}
+	ingressSecretRoot := filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress")
+	server.Ingress = &wgingress.Backend{
+		Repository: wgingress.Repository{
+			Database: database, SecretRoot: ingressSecretRoot,
+			ReservedPrefixes: []netip.Prefix{lanPrefix.Masked()},
+		},
+		Keys:     wgingress.KeyStore{Root: ingressSecretRoot},
+		Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg", NFT: "/usr/sbin/nft", Mutate: *apply,
 	}
 	server.Power = power.DefaultLinuxBackend(database, executor)
 	if err := networkapply.ServeBroker(ctx, listener, server); err != nil {

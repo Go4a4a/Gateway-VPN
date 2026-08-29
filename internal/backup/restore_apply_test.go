@@ -48,6 +48,9 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	}
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "restored.secret"),
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"),
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"),
 		filepath.Join(fixture.stateDirectory, "subscriptions", "restored.yaml"),
 		filepath.Join(fixture.stateDirectory, "tls", "cert.pem"),
 		filepath.Join(fixture.stateDirectory, "mihomo", "generations", "gen-restored", "config.yaml"),
@@ -55,6 +58,15 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	} {
 		if _, err := os.Stat(filename); err != nil {
 			t.Fatalf("restored file %s missing: %v", filename, err)
+		}
+	}
+	for filename, expected := range map[string]string{
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"):     "restored-wireguard-ingress-server-key",
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"): "restored-wireguard-ingress-peer-key",
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"): "restored-wireguard-ingress-peer-psk",
+	} {
+		if actual := strings.TrimSpace(string(mustReadFile(t, filename))); actual != expected {
+			t.Fatalf("restored WireGuard ingress secret %s = %q", filename, actual)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(fixture.stateDirectory, "secrets", "old.secret")); !errors.Is(err, os.ErrNotExist) {
@@ -355,6 +367,9 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	sourceState := filepath.Dir(snapshots.DatabasePath)
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "restored.secret"), "restored-secret")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "mihomo-api-secret"), "restored-mihomo-api-secret")
+	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "servers", "default.key"), "restored-wireguard-ingress-server-key")
+	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "peers", "peer-restored.key"), "restored-wireguard-ingress-peer-key")
+	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"), "restored-wireguard-ingress-peer-psk")
 	writeFixtureFile(t, filepath.Join(sourceState, "subscriptions", "restored.yaml"), "proxies: []")
 	writeFixtureFile(t, filepath.Join(sourceState, "tls", "cert.pem"), "restored-cert")
 	writeFixtureFile(t, filepath.Join(sourceState, "tls", "key.pem"), "restored-key")
@@ -396,6 +411,8 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "old.secret"), "old-secret")
+	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"), "old-wireguard-ingress-server-key")
+	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"), "old-wireguard-ingress-peer-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "subscriptions", "old.yaml"), "old")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "tls", "old.pem"), "old")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "mihomo", "generations", "gen-old", "config.yaml"), "old")
@@ -446,6 +463,8 @@ func assertOldRestoreFixtureLive(t *testing.T, fixture restoreApplyFixture) {
 	}
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "old.secret"),
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
+		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"),
 		filepath.Join(fixture.stateDirectory, "subscriptions", "old.yaml"),
 		filepath.Join(fixture.stateDirectory, "tls", "old.pem"),
 		filepath.Join(fixture.stateDirectory, "mihomo", "generations", "gen-old", "config.yaml"),

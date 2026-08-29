@@ -78,6 +78,7 @@ flush set inet gateway_vpn active_direct_context
 flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
 flush set inet gateway_vpn active_route_generation
+flush set inet gateway_vpn wireguard_ingress_allowed_v4
 add element inet gateway_vpn active_path_generation { 101 }
 add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }
 `),
@@ -87,6 +88,7 @@ flush set inet gateway_vpn active_direct_context
 flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
 flush set inet gateway_vpn active_route_generation
+flush set inet gateway_vpn wireguard_ingress_allowed_v4
 add element inet gateway_vpn active_path_generation { 202 }
 add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }
 `),
@@ -96,11 +98,13 @@ flush set inet gateway_vpn active_direct_context
 flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
 flush set inet gateway_vpn active_route_generation
+flush set inet gateway_vpn wireguard_ingress_allowed_v4
 add element inet gateway_vpn active_path_generation { 303 }
 add element inet gateway_vpn active_route_generation { 1 }
 add element inet gateway_vpn active_direct_interfaces { "wan0" }
 add element inet gateway_vpn active_direct_context { "wan0" . 0x00001101 }
 add element inet gateway_vpn active_direct_marks { "enp2s0" : 0x00001101 }
+add element inet gateway_vpn active_direct_marks { "wg-ingress" : 0x00001101 }
 `),
 	}
 	manifest := nftManifest{
@@ -109,6 +113,7 @@ add element inet gateway_vpn active_direct_marks { "enp2s0" : 0x00001101 }
 		Required: []string{
 			"table inet gateway_vpn", "policy drop", "gateway-vpn PATH_BLOCKED",
 			"counter user_upload", "counter user_download", "counter service_upload", "counter service_download",
+			"wireguard_ingress_allowed_v4",
 		},
 		Forbidden: []string{"flush ruleset", "policy accept", "LAN to HiLink direct accept"},
 	}

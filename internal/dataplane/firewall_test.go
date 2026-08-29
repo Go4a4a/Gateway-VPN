@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"gateway-vpn/internal/platformexec"
 	statepkg "gateway-vpn/internal/state"
 	"gateway-vpn/internal/uplink"
+	"gateway-vpn/internal/wgingress"
 )
 
 type firewallExecutor struct {
@@ -75,7 +79,8 @@ func (executor *firewallExecutor) Run(_ context.Context, request platformexec.Re
 
 func TestFirewallBackendAtomicallyActivatesAndBlocksOnlyOwnedGateCollections(t *testing.T) {
 	executor := &firewallExecutor{}
-	backend := FirewallBackend{Executor: executor, NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "enp2s0"}
+	backend, closeDatabase := testFirewallBackendWithPolicy(t, executor, "SUBSCRIPTION")
+	defer closeDatabase()
 	if err := backend.ActivatePath(context.Background(), 42); err != nil {
 		t.Fatalf("ActivatePath() error = %v", err)
 	}
@@ -90,6 +95,7 @@ func TestFirewallBackendAtomicallyActivatesAndBlocksOnlyOwnedGateCollections(t *
 		"flush map inet gateway_vpn active_direct_marks",
 		"flush set inet gateway_vpn active_path_generation",
 		"flush set inet gateway_vpn active_route_generation",
+		"flush set inet gateway_vpn wireguard_ingress_allowed_v4",
 		"add element inet gateway_vpn active_path_generation { 42 }",
 		`add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }`,
 	} {
@@ -116,7 +122,8 @@ func TestFirewallBackendAtomicallyActivatesAndBlocksOnlyOwnedGateCollections(t *
 
 func TestFirewallBackendRendersExactDirectContextAndNeverLeavesTUNOpen(t *testing.T) {
 	executor := &firewallExecutor{}
-	backend := FirewallBackend{Executor: executor, NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "enp2s0"}
+	backend, closeDatabase := testFirewallBackendWithPolicy(t, executor, "DIRECT")
+	defer closeDatabase()
 	desired := PathState{Active: true, Mode: PathModeDirect, Generation: 73, DirectInterface: "enx0001", DirectMark: 0x1101, RouteGeneration: 9}
 	if err := backend.apply(context.Background(), desired); err != nil {
 		t.Fatalf("apply(DIRECT) error = %v", err)
@@ -130,6 +137,7 @@ func TestFirewallBackendRendersExactDirectContextAndNeverLeavesTUNOpen(t *testin
 		`active_direct_interfaces { "enx0001" }`,
 		`active_direct_context { "enx0001" . 0x00001101 }`,
 		`active_direct_marks { "enp2s0" : 0x00001101 }`,
+		`active_direct_marks { "wg-ingress" : 0x00001101 }`,
 	} {
 		if !strings.Contains(payload, expected) {
 			t.Errorf("direct transaction missing %q:\n%s", expected, payload)
@@ -285,7 +293,9 @@ func TestFirewallBackendRejectsMissingMarkersWrongSchemaAndRedactsNftFailure(t *
 	if err := backend.ActivatePath(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "schema generation") {
 		t.Fatalf("ActivatePath(wrong schema) error = %v", err)
 	}
-	backend.Executor = &firewallExecutor{applyErr: errors.New("apply failed")}
+	applyExecutor := &firewallExecutor{applyErr: errors.New("apply failed")}
+	backend, closeDatabase := testFirewallBackendWithPolicy(t, applyExecutor, "SUBSCRIPTION")
+	defer closeDatabase()
 	if err := backend.ActivatePath(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "private nft detail") {
 		t.Fatalf("ActivatePath(apply failure) error = %v", err)
 	}
@@ -299,10 +309,78 @@ func TestRenderPathTransactionRejectsHalfActiveStates(t *testing.T) {
 		"direct-without-route":    {Active: true, Mode: PathModeDirect, Generation: 1, DirectInterface: "enx0001", DirectMark: 0x1101},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := renderPathTransaction(pathState, "gateway-vpn-tun", "enp2s0"); err == nil {
+			if _, err := renderPathTransaction(pathState, "gateway-vpn-tun", "enp2s0", nil); err == nil {
 				t.Fatal("renderPathTransaction() error = nil")
 			}
 		})
+	}
+}
+
+func TestWireGuardIngressPeerPolicyFiltersSourcesForActiveMethodAndQuality(t *testing.T) {
+	ctx := context.Background()
+	database, _, _, closeDatabase := serviceRepositories(t)
+	defer closeDatabase()
+	if err := accesspolicy.NewDirectPathRepository(database).Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+UPDATE runtime_state
+SET gateway_state='VERIFYING', path_state='PATH_VERIFYING',
+    active_uplink_id='modem-a', active_modem_id='modem-a',
+    active_path_id=NULL, active_direct_path_id='direct:path:modem-a',
+    active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id='access:direct', active_method_kind='DIRECT', active_quality_class='FULL'
+WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	secretRoot := filepath.Join(t.TempDir(), "wireguard-ingress")
+	repository := wgingress.Repository{Database: database, SecretRoot: secretRoot}
+	keys := wgingress.KeyStore{Root: secretRoot}
+	if _, err := repository.EnsureDefault(ctx, keys); err != nil {
+		t.Fatal(err)
+	}
+	create := func(name, mode string, block, whitelist bool, methods, routes []string) wgingress.Peer {
+		t.Helper()
+		pair, err := wgingress.GenerateKeyPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer, err := repository.CreatePeer(ctx, wgingress.PeerCreate{
+			Name: name, PeerKind: "ROUTER_ROUTED", KeyMode: "EXTERNAL", PublicKey: pair.Public,
+			PersistentKeepalive: 25, AccessPolicyMode: mode, AllowWhitelistOnly: whitelist,
+			BlockWhenUnqualified: block, BehindSubnets: routes,
+			ClientAllowedIPs: []string{"0.0.0.0/0"}, AllowedAccessMethodIDs: methods,
+		}, nil, "", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return peer
+	}
+	direct := create("Direct", "DIRECT_ONLY", true, true, nil, []string{"172.20.0.0/24"})
+	_ = create("VPN blocked", "VPN_ONLY", true, true, nil, nil)
+	fallback := create("Fallback", "AUTO", false, true, []string{"access:subscription:sub-a"}, nil)
+	noWhitelist := create("No whitelist", "AUTO", true, false, nil, nil)
+	backend := FirewallBackend{Database: database}
+	sources, err := backend.allowedWireGuardSources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{direct.AssignedAddress + "/32", "172.20.0.0/24", fallback.AssignedAddress + "/32", noWhitelist.AssignedAddress + "/32"}
+	sort.Strings(want)
+	if strings.Join(sources, ",") != strings.Join(want, ",") {
+		t.Fatalf("FULL allowed sources = %v, want %v", sources, want)
+	}
+	if _, err := database.Exec("UPDATE runtime_state SET active_quality_class='WHITELIST_ONLY' WHERE singleton_id=1"); err != nil {
+		t.Fatal(err)
+	}
+	sources, err = backend.allowedWireGuardSources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{noWhitelist.AssignedAddress + "/32"} {
+		if slices.Contains(sources, forbidden) {
+			t.Fatalf("WHITELIST_ONLY allowed forbidden source %s in %v", forbidden, sources)
+		}
 	}
 }
 
@@ -345,7 +423,22 @@ func TestFirewallBackendAgainstKernelNFTables(t *testing.T) {
 	defer func() {
 		_, _ = executor.Run(context.Background(), platformexec.Request{Executable: "/usr/sbin/nft", Arguments: []string{"delete", "table", "inet", firewall.TableName}})
 	}()
-	backend := FirewallBackend{Executor: executor, NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "lan0"}
+	database, _, _, closeDatabase := serviceRepositories(t)
+	defer closeDatabase()
+	if err := accesspolicy.NewDirectPathRepository(database).Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+UPDATE runtime_state
+SET gateway_state='VERIFYING', path_state='PATH_VERIFYING',
+    active_uplink_id='modem-a', active_modem_id='modem-a',
+    active_path_id=NULL, active_direct_path_id='direct:path:modem-a',
+    active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id='access:direct', active_method_kind='DIRECT', active_quality_class='FULL'
+WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	backend := FirewallBackend{Database: database, Executor: executor, NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "lan0"}
 	if err := backend.ActivatePath(ctx, 41); err != nil {
 		t.Fatalf("activate kernel TUN path: %v", err)
 	}
@@ -408,7 +501,7 @@ func observedJSON(pathState PathState) string {
 		case PathModeDirect:
 			directInterfaceElements = fmt.Sprintf(`,"elem":[%q]`, pathState.DirectInterface)
 			directContextElements = fmt.Sprintf(`,"elem":[{"concat":[%q,%d]}]`, pathState.DirectInterface, pathState.DirectMark)
-			directMapElements = fmt.Sprintf(`,"elem":[{"elem":{"val":"enp2s0","data":%d}}]`, pathState.DirectMark)
+			directMapElements = fmt.Sprintf(`,"elem":[{"elem":{"val":"enp2s0","data":%d}},{"elem":{"val":"wg-ingress","data":%d}}]`, pathState.DirectMark, pathState.DirectMark)
 			routeGenerationElements = fmt.Sprintf(`,"elem":[%d]`, pathState.RouteGeneration)
 		}
 	}
@@ -424,7 +517,10 @@ func observedJSON(pathState PathState) string {
 
 func healthyPathFirewallTable() string {
 	return `table inet gateway_vpn {
-set firewall_schema_generation { type mark; elements = { 3 }; }
+set firewall_schema_generation { type mark; elements = { 4 }; }
+set user_ingress_interfaces { type ifname; elements = { "enp2s0", "wg-ingress" }; }
+set wireguard_ingress_listeners { type ifname . inet_service; }
+set wireguard_ingress_allowed_v4 { type ipv4_addr; flags interval; }
 set active_tun_interfaces { type ifname; }
 set active_direct_interfaces { type ifname; }
 set active_direct_context { type ifname . mark; }
@@ -436,9 +532,33 @@ counter user_download
 counter service_upload
 counter service_download
 chain prerouting { type filter hook prerouting priority mangle; meta mark set iifname map @active_direct_marks }
+chain input { iifname . udp dport @wireguard_ingress_listeners; }
 chain forward { type filter hook forward priority filter; policy drop;
+ip saddr @wireguard_ingress_allowed_v4
 oifname @active_tun_interfaces
 oifname . meta mark @active_direct_context
 counter comment "gateway-vpn PATH_BLOCKED" }
 }`
+}
+
+func testFirewallBackendWithPolicy(t *testing.T, executor *firewallExecutor, kind string) (FirewallBackend, func()) {
+	t.Helper()
+	_ = kind
+	database, _, _, closeDatabase := serviceRepositories(t)
+	if err := accesspolicy.NewDirectPathRepository(database).Reconcile(context.Background()); err != nil {
+		closeDatabase()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+UPDATE runtime_state
+SET gateway_state='VERIFYING', path_state='PATH_VERIFYING',
+    active_uplink_id='modem-a', active_modem_id='modem-a',
+    active_path_id=NULL, active_direct_path_id='direct:path:modem-a',
+    active_subscription_id=NULL, active_node_id=NULL,
+    active_method_id='access:direct', active_method_kind='DIRECT', active_quality_class='FULL'
+WHERE singleton_id=1`); err != nil {
+		closeDatabase()
+		t.Fatal(err)
+	}
+	return FirewallBackend{Database: database, Executor: executor, NFT: "/usr/sbin/nft", TUNName: "gateway-vpn-tun", LANName: "enp2s0"}, closeDatabase
 }

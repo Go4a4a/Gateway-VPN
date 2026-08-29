@@ -3,6 +3,7 @@ package uplink
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,8 @@ const (
 	StateReady             = "UPLINK_READY"
 	StateSubnetConflict    = "UPLINK_SUBNET_CONFLICT"
 	StateDisabled          = "UPLINK_DISABLED"
+
+	ManagedLANInterfaceID = "netif:managed:lan"
 )
 
 type Repository struct {
@@ -228,6 +231,47 @@ WHERE network_interfaces.stable_identity_kind=excluded.stable_identity_kind
 		return NetworkInterface{}, errors.New("interface id is already bound to a different stable identity")
 	}
 	return repository.GetInterface(ctx, input.ID)
+}
+
+// EnsureManagedLANInterface publishes the installer-owned virtual LAN bridge
+// into the same read model as physical NICs. It is deliberately not observed
+// by the physical Ethernet probe and cannot become an uplink. WireGuard
+// ingress can therefore bind its local UDP listener to the actual L3 bridge
+// seen by nftables instead of incorrectly binding to one bridge member.
+func (repository *Repository) EnsureManagedLANInterface(ctx context.Context, ifname, address string) (NetworkInterface, error) {
+	if repository == nil || repository.database == nil || !validIfname(ifname) {
+		return NetworkInterface{}, errors.New("managed LAN repository and interface are required")
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(address))
+	if err != nil || !prefix.Addr().Is4() {
+		return NetworkInterface{}, errors.New("managed LAN IPv4 prefix is invalid")
+	}
+	digest := sha256.Sum256([]byte("gateway-vpn:managed-lan:" + ManagedLANInterfaceID))
+	item, err := repository.ObserveInterface(ctx, InterfaceObservation{
+		ID: ManagedLANInterfaceID, StableIdentityKind: "MANAGED_VIRTUAL",
+		StableIdentityHash: hex.EncodeToString(digest[:]), CurrentIfname: ifname,
+		CarrierState: "UNKNOWN", Addresses: []string{prefix.String()},
+	})
+	if err != nil {
+		return NetworkInterface{}, err
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	result, err := repository.database.ExecContext(ctx, `
+INSERT INTO interface_role_assignments(
+    id, network_interface_id, role, desired_generation, observed_generation,
+    state, created_at, updated_at
+) VALUES('role:managed:lan:management', ?, 'MANAGEMENT', 1, 1, 'ACTIVE', ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    network_interface_id=excluded.network_interface_id,
+    observed_generation=desired_generation,
+    state='ACTIVE', updated_at=excluded.updated_at`, ManagedLANInterfaceID, now, now)
+	if err != nil {
+		return NetworkInterface{}, fmt.Errorf("publish managed LAN role: %w", err)
+	}
+	if count, countErr := result.RowsAffected(); countErr != nil || count != 1 {
+		return NetworkInterface{}, errors.New("managed LAN role was not published")
+	}
+	return item, nil
 }
 
 func (repository *Repository) GetInterface(ctx context.Context, id string) (NetworkInterface, error) {

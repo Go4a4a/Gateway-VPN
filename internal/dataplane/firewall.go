@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,8 @@ const (
 	activeDirectMarkMap      = "active_direct_marks"
 	activeGenerationSet      = "active_path_generation"
 	activeRouteGenerationSet = "active_route_generation"
+	wireGuardAllowedV4Set    = "wireguard_ingress_allowed_v4"
+	wireGuardIngressName     = "wg-ingress"
 )
 
 type PathState struct {
@@ -143,11 +147,15 @@ func (backend *FirewallBackend) apply(ctx context.Context, desired PathState) er
 		"map " + activeDirectMarkMap,
 		"set " + activeGenerationSet,
 		"set " + activeRouteGenerationSet,
+		"set user_ingress_interfaces",
+		"set wireguard_ingress_listeners",
+		"set " + wireGuardAllowedV4Set,
 		"hook forward priority filter; policy drop",
 		"gateway-vpn PATH_BLOCKED",
 		"oifname @" + activeTUNSet,
 		"oifname . meta mark @" + activeDirectContextSet,
 		"map @" + activeDirectMarkMap,
+		"iifname . udp dport @wireguard_ingress_listeners",
 		"counter user_upload",
 		"counter user_download",
 		"counter service_upload",
@@ -164,7 +172,14 @@ func (backend *FirewallBackend) apply(ctx context.Context, desired PathState) er
 	if err := firewall.ValidateSchemaGenerationJSON([]byte(generation.Stdout)); err != nil {
 		return fmt.Errorf("validate owned data-plane schema generation: %w", err)
 	}
-	payload, err := renderPathTransaction(desired, backend.TUNName, backend.LANName)
+	var wireGuardSources []string
+	if desired.Active {
+		wireGuardSources, err = backend.allowedWireGuardSources(ctx)
+		if err != nil {
+			return fmt.Errorf("resolve WireGuard ingress access policy: %w", err)
+		}
+	}
+	payload, err := renderPathTransaction(desired, backend.TUNName, backend.LANName, wireGuardSources)
 	if err != nil {
 		return err
 	}
@@ -191,7 +206,7 @@ func (backend *FirewallBackend) validate() error {
 	return nil
 }
 
-func renderPathTransaction(state PathState, tunName, lanName string) ([]byte, error) {
+func renderPathTransaction(state PathState, tunName, lanName string, wireGuardSources []string) ([]byte, error) {
 	if state.Active {
 		switch state.Mode {
 		case PathModeTUN:
@@ -208,6 +223,21 @@ func renderPathTransaction(state PathState, tunName, lanName string) ([]byte, er
 	} else if state != (PathState{}) {
 		return nil, errors.New("blocked path state must be empty")
 	}
+	canonicalSources := make([]string, 0, len(wireGuardSources))
+	seenSources := make(map[string]struct{}, len(wireGuardSources))
+	for _, value := range wireGuardSources {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil || !prefix.Addr().Is4() || prefix.Addr().IsUnspecified() || prefix.Masked() != prefix {
+			return nil, errors.New("WireGuard ingress source policy contains an invalid IPv4 prefix")
+		}
+		canonical := prefix.String()
+		if _, exists := seenSources[canonical]; exists {
+			continue
+		}
+		seenSources[canonical] = struct{}{}
+		canonicalSources = append(canonicalSources, canonical)
+	}
+	sort.Strings(canonicalSources)
 	var builder strings.Builder
 	builder.WriteString("flush set inet ")
 	builder.WriteString(firewall.TableName)
@@ -239,7 +269,15 @@ func renderPathTransaction(state PathState, tunName, lanName string) ([]byte, er
 	builder.WriteByte(' ')
 	builder.WriteString(activeRouteGenerationSet)
 	builder.WriteByte('\n')
+	builder.WriteString("flush set inet ")
+	builder.WriteString(firewall.TableName)
+	builder.WriteByte(' ')
+	builder.WriteString(wireGuardAllowedV4Set)
+	builder.WriteByte('\n')
 	if state.Active {
+		for _, prefix := range canonicalSources {
+			fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, wireGuardAllowedV4Set, prefix)
+		}
 		builder.WriteString("add element inet ")
 		builder.WriteString(firewall.TableName)
 		builder.WriteByte(' ')
@@ -261,9 +299,92 @@ func renderPathTransaction(state PathState, tunName, lanName string) ([]byte, er
 			fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, activeDirectInterfaceSet, strconv.Quote(state.DirectInterface))
 			fmt.Fprintf(&builder, "add element inet %s %s { %s . %s }\n", firewall.TableName, activeDirectContextSet, strconv.Quote(state.DirectInterface), mark)
 			fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(lanName), mark)
+			fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(wireGuardIngressName), mark)
 		}
 	}
 	return []byte(builder.String()), nil
+}
+
+func (backend *FirewallBackend) allowedWireGuardSources(ctx context.Context) ([]string, error) {
+	if backend.Database == nil {
+		return nil, errors.New("WireGuard ingress policy database is unavailable")
+	}
+	var methodID, methodKind, quality string
+	err := backend.Database.QueryRowContext(ctx, `
+SELECT active_method_id, active_method_kind, active_quality_class
+FROM runtime_state
+WHERE singleton_id=1 AND gateway_state IN ('VERIFYING','ONLINE')
+  AND path_state IN ('PATH_VERIFYING','PATH_ACTIVE')
+  AND active_method_id IS NOT NULL AND active_method_kind IS NOT NULL
+  AND active_quality_class IS NOT NULL`).Scan(&methodID, &methodKind, &quality)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("active access method policy is unavailable")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read active access method policy: %w", err)
+	}
+	if methodKind != "DIRECT" && methodKind != "SUBSCRIPTION" || methodID == "" {
+		return nil, errors.New("active access method identity is invalid")
+	}
+	if quality != "FULL" && quality != "LIMITED" && quality != "WHITELIST_ONLY" {
+		return nil, errors.New("active access method is not qualified")
+	}
+	rows, err := backend.Database.QueryContext(ctx, `
+SELECT p.id, p.assigned_address, p.access_policy_mode,
+       p.allow_whitelist_only, p.block_when_unqualified,
+       (SELECT COUNT(*) FROM wireguard_ingress_peer_access_methods AS a WHERE a.peer_id=p.id),
+       (SELECT COUNT(*) FROM wireguard_ingress_peer_access_methods AS a WHERE a.peer_id=p.id AND a.access_method_id=?),
+       r.cidr
+FROM wireguard_ingress_peers AS p
+LEFT JOIN wireguard_ingress_peer_routes AS r
+  ON r.peer_id=p.id AND r.direction='INGRESS'
+WHERE p.enabled=1 AND p.revoked_at IS NULL
+ORDER BY p.display_number, r.cidr`, methodID)
+	if err != nil {
+		return nil, fmt.Errorf("read WireGuard ingress peer policy: %w", err)
+	}
+	defer rows.Close()
+	allowedPeers := make(map[string]bool)
+	seenPeers := make(map[string]bool)
+	prefixes := make(map[string]struct{})
+	for rows.Next() {
+		var peerID, assigned, mode string
+		var allowWhitelist, blockUnqualified, methodCount, selectedCount int
+		var route sql.NullString
+		if err := rows.Scan(&peerID, &assigned, &mode, &allowWhitelist, &blockUnqualified, &methodCount, &selectedCount, &route); err != nil {
+			return nil, err
+		}
+		if !seenPeers[peerID] {
+			modeMatches := mode == "AUTO" || mode == "DIRECT_ONLY" && methodKind == "DIRECT" || mode == "VPN_ONLY" && methodKind == "SUBSCRIPTION"
+			methodMatches := methodCount == 0 || selectedCount == 1
+			qualified := modeMatches && methodMatches
+			allowedPeers[peerID] = (qualified || blockUnqualified == 0) && (quality != "WHITELIST_ONLY" || allowWhitelist != 0)
+			seenPeers[peerID] = true
+			address, parseErr := netip.ParseAddr(assigned)
+			if parseErr != nil || !address.Is4() || address.IsUnspecified() {
+				return nil, errors.New("stored WireGuard ingress peer address is invalid")
+			}
+			if allowedPeers[peerID] {
+				prefixes[netip.PrefixFrom(address, 32).String()] = struct{}{}
+			}
+		}
+		if route.Valid && allowedPeers[peerID] {
+			prefix, parseErr := netip.ParsePrefix(route.String)
+			if parseErr != nil || !prefix.Addr().Is4() || prefix.Addr().IsUnspecified() || prefix.Masked() != prefix {
+				return nil, errors.New("stored WireGuard ingress peer route is invalid")
+			}
+			prefixes[prefix.String()] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(prefixes))
+	for prefix := range prefixes {
+		result = append(result, prefix)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func decodePathState(payload []byte, tunName, lanName string) (PathState, error) {
@@ -339,7 +460,7 @@ func decodePathState(payload []byte, tunName, lanName string) (PathState, error)
 		}
 		return PathState{Active: true, Mode: PathModeTUN, Generation: generation}, nil
 	}
-	if len(tunElements) != 0 || len(directInterfaceElements) != 1 || len(directContextElements) != 1 || len(directMarkElements) != 1 || len(routeGenerationElements) != 1 {
+	if len(tunElements) != 0 || len(directInterfaceElements) != 1 || len(directContextElements) != 1 || len(directMarkElements) != 2 || len(routeGenerationElements) != 1 {
 		return PathState{}, errors.New("active direct path set cardinality is invalid")
 	}
 	interfaceName := stringElement(directInterfaceElements[0])
@@ -347,9 +468,16 @@ func decodePathState(payload []byte, tunName, lanName string) (PathState, error)
 	if !ok || !validInterfaceName(interfaceName) || contextInterface != interfaceName || mark == 0 {
 		return PathState{}, errors.New("active direct path context is invalid")
 	}
-	mapInterface, mapMark, ok := directMapElement(directMarkElements[0])
-	if !ok || mapInterface != lanName || mapMark != mark {
-		return PathState{}, errors.New("active direct mark map is invalid")
+	markMap := make(map[string]uint32, len(directMarkElements))
+	for _, element := range directMarkElements {
+		mapInterface, mapMark, valid := directMapElement(element)
+		if !valid || mapMark != mark {
+			return PathState{}, errors.New("active direct mark map is invalid")
+		}
+		markMap[mapInterface] = mapMark
+	}
+	if len(markMap) != 2 || markMap[lanName] != mark || markMap[wireGuardIngressName] != mark {
+		return PathState{}, errors.New("active direct ingress mark map is incomplete")
 	}
 	routeGeneration, ok := uint32Element(routeGenerationElements[0])
 	if !ok || routeGeneration == 0 {

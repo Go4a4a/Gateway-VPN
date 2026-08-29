@@ -2,12 +2,16 @@ package watchdog
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +19,15 @@ import (
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/dataplane"
 	databasepkg "gateway-vpn/internal/db"
+	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/routing"
 	"gateway-vpn/internal/uplink"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
+
+var nftIngressListenerTuple = regexp.MustCompile(`"([A-Za-z0-9_.:-]{1,15})"\s+\.\s+([0-9]{1,5})`)
 
 func workerRuntimeHealth(heartbeat ControlHeartbeat, heartbeatErr error, now time.Time, policy Policy) (bool, string, map[string]any) {
 	details := map[string]any{"workers_total": len(heartbeat.Workers), "stale_workers": []string{}}
@@ -49,6 +57,86 @@ func workerRuntimeHealth(heartbeat ControlHeartbeat, heartbeatErr error, now tim
 		return false, "CRITICAL_WORKER_STALE", details
 	}
 	return true, "", details
+}
+
+func (probe *SystemProbe) loggingPipelineHealth(ctx context.Context) Observation {
+	observation := Observation{ComponentID: ComponentLogging, Applicable: true, Details: map[string]any{}}
+	if !probe.unitActive(ctx, unitJournald) {
+		observation.ErrorCode = "NAMESPACED_JOURNALD_INACTIVE"
+		return observation
+	}
+	database, err := databasepkg.OpenReadOnly(ctx, probe.DatabasePath)
+	if err != nil {
+		observation.ErrorCode = "LOGGING_DATABASE_UNAVAILABLE"
+		return observation
+	}
+	defer database.Close()
+	retention, err := (loggingpkg.RuntimeRepository{Database: database}).Get(ctx)
+	if err != nil {
+		observation.ErrorCode = "JOURNALD_RETENTION_STATE_UNAVAILABLE"
+		return observation
+	}
+	observation.Details["retention_state"] = retention.State
+	if retention.State != loggingpkg.RetentionApplied || retention.DesiredSHA256 == "" || retention.DesiredSHA256 != retention.AppliedSHA256 {
+		observation.ErrorCode = "JOURNALD_RETENTION_DIVERGED"
+		return observation
+	}
+	exportPolicy, err := (loggingpkg.ExportRepository{Database: database}).Get(ctx)
+	if err != nil {
+		observation.ErrorCode = "LOG_EXPORT_STATE_UNAVAILABLE"
+		return observation
+	}
+	observation.Details["export_state"] = exportPolicy.State
+	observation.Details["export_desired_generation"] = exportPolicy.DesiredGeneration
+	observation.Details["export_applied_generation"] = exportPolicy.AppliedGeneration
+	if !exportPolicy.Enabled {
+		if exportPolicy.State != loggingpkg.ExportDisabled || exportPolicy.AppliedGeneration != exportPolicy.DesiredGeneration {
+			observation.ErrorCode = "LOG_EXPORT_DISABLED_STATE_DIVERGED"
+			return observation
+		}
+		observation.Healthy = true
+		return observation
+	}
+	if exportPolicy.State != loggingpkg.ExportApplied || exportPolicy.AppliedGeneration != exportPolicy.DesiredGeneration {
+		observation.ErrorCode = "LOG_EXPORT_GENERATION_DIVERGED"
+		return observation
+	}
+	maximum := exportPolicy.MaxFileBytes
+	if divided := exportPolicy.MaxTotalBytes / int64(len(exportPolicy.Categories)); divided < maximum {
+		maximum = divided
+	}
+	for _, category := range exportPolicy.Categories {
+		filename := filepath.Join(probe.LogExportRoot, "current", category+".log")
+		info, err := os.Lstat(filename)
+		if err != nil {
+			observation.Details["invalid_category"] = category
+			observation.Details["invalid_reason"] = "missing_or_unreadable"
+			observation.ErrorCode = "LOG_EXPORT_FILE_INVALID"
+			return observation
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			observation.Details["invalid_category"] = category
+			observation.Details["invalid_reason"] = "unsafe_file_type"
+			observation.ErrorCode = "LOG_EXPORT_FILE_INVALID"
+			return observation
+		}
+		if info.Size() <= 0 || info.Size() > maximum {
+			observation.Details["invalid_category"] = category
+			observation.Details["invalid_reason"] = "size_out_of_bounds"
+			observation.Details["invalid_size_bytes"] = info.Size()
+			observation.ErrorCode = "LOG_EXPORT_FILE_INVALID"
+			return observation
+		}
+		if info.Mode().Perm() != 0o640 {
+			observation.Details["invalid_category"] = category
+			observation.Details["invalid_reason"] = "unsafe_permissions"
+			observation.ErrorCode = "LOG_EXPORT_FILE_INVALID"
+			return observation
+		}
+	}
+	observation.Details["categories"] = len(exportPolicy.Categories)
+	observation.Healthy = true
+	return observation
 }
 
 func (probe *SystemProbe) policyRoutingHealth(ctx context.Context) (bool, string, map[string]any) {
@@ -167,11 +255,15 @@ func (probe *SystemProbe) wireGuardIngressHealth(ctx context.Context) Observatio
 	}
 	defer database.Close()
 	var enabled, divergent int
+	var subnet, publicKey string
+	var listenPort int
 	err = database.QueryRowContext(ctx, `
-SELECT COUNT(*), COALESCE(SUM(CASE WHEN s.interface_name!='wg-ingress' OR r.applied_generation!=r.desired_generation OR r.state!='ACTIVE' THEN 1 ELSE 0 END), 0)
+SELECT COUNT(*),
+       COALESCE(SUM(CASE WHEN s.interface_name!='wg-ingress' OR r.applied_generation!=r.desired_generation OR r.state!='ACTIVE' THEN 1 ELSE 0 END), 0),
+       COALESCE(MAX(s.subnet_cidr), ''), COALESCE(MAX(s.listen_port), 0), COALESCE(MAX(s.public_key), '')
 FROM wireguard_ingress_servers AS s
 LEFT JOIN wireguard_ingress_runtime AS r ON r.server_id=s.id
-WHERE s.enabled=1`).Scan(&enabled, &divergent)
+WHERE s.enabled=1`).Scan(&enabled, &divergent, &subnet, &listenPort, &publicKey)
 	if err != nil {
 		observation.Applicable = true
 		observation.ErrorCode = "WG_INGRESS_STATE_UNAVAILABLE"
@@ -187,12 +279,175 @@ WHERE s.enabled=1`).Scan(&enabled, &divergent)
 		observation.ErrorCode = "WG_INGRESS_GENERATION_DIVERGED"
 		return observation
 	}
-	if _, err := probe.fixedOutput(ctx, probe.IP, "link", "show", "dev", "wg-ingress"); err != nil {
-		observation.ErrorCode = "WG_INGRESS_INTERFACE_MISSING"
+	prefix, err := netip.ParsePrefix(subnet)
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() < 16 || prefix.Bits() > 29 || !wgingress.ValidKey(publicKey) || listenPort < 1 || listenPort > 65535 {
+		observation.ErrorCode = "WG_INGRESS_CONFIG_INVALID"
 		return observation
 	}
+	serverAddress := prefix.Addr().Next().String() + "/" + strconv.Itoa(prefix.Bits())
+	links, err := probe.fixedOutput(ctx, probe.IP, "-json", "link", "show", "dev", wgingress.DefaultInterfaceName)
+	if err != nil || !jsonFlagsContain(links, "UP") {
+		observation.ErrorCode = "WG_INGRESS_INTERFACE_MISSING_OR_DOWN"
+		return observation
+	}
+	addresses, err := probe.fixedOutput(ctx, probe.IP, "-json", "-4", "address", "show", "dev", wgingress.DefaultInterfaceName)
+	if err != nil || !jsonAddressContains(addresses, serverAddress) {
+		observation.ErrorCode = "WG_INGRESS_ADDRESS_MISMATCH"
+		return observation
+	}
+	observedPublicKey, err := probe.fixedOutput(ctx, probe.WG, "show", wgingress.DefaultInterfaceName, "public-key")
+	if err != nil || strings.TrimSpace(observedPublicKey) != publicKey {
+		observation.ErrorCode = "WG_INGRESS_SERVER_KEY_MISMATCH"
+		return observation
+	}
+	observedPort, err := probe.fixedOutput(ctx, probe.WG, "show", wgingress.DefaultInterfaceName, "listen-port")
+	if err != nil || strings.TrimSpace(observedPort) != strconv.Itoa(listenPort) {
+		observation.ErrorCode = "WG_INGRESS_LISTEN_PORT_MISMATCH"
+		return observation
+	}
+	expectedPeers, expectedRoutes, err := ingressPeerContour(ctx, database)
+	if err != nil {
+		observation.ErrorCode = "WG_INGRESS_PEER_STATE_UNAVAILABLE"
+		return observation
+	}
+	observedPeers, err := probe.fixedOutput(ctx, probe.WG, "show", wgingress.DefaultInterfaceName, "peers")
+	if err != nil || !exactLineSet(observedPeers, expectedPeers) {
+		observation.ErrorCode = "WG_INGRESS_PEER_CONFIG_MISMATCH"
+		return observation
+	}
+	observedRoutes, err := probe.fixedOutput(ctx, probe.IP, "-N", "-json", "-4", "route", "show", "dev", wgingress.DefaultInterfaceName, "protocol", strconv.Itoa(routing.OwnedProtocol))
+	if err != nil || !jsonRouteSetExact(observedRoutes, wgingress.DefaultInterfaceName, routing.OwnedProtocol, expectedRoutes) {
+		observation.ErrorCode = "WG_INGRESS_PEER_ROUTE_MISMATCH"
+		return observation
+	}
+	expectedListeners, err := ingressListenerContour(ctx, database, listenPort)
+	if err != nil || len(expectedListeners) == 0 {
+		observation.ErrorCode = "WG_INGRESS_LISTENER_STATE_UNAVAILABLE"
+		return observation
+	}
+	listenerSet, err := probe.fixedOutput(ctx, probe.NFT, "list", "set", "inet", "gateway_vpn", "wireguard_ingress_listeners")
+	if err != nil || !nftListenerSetExact(listenerSet, expectedListeners) {
+		observation.ErrorCode = "WG_INGRESS_FIREWALL_LISTENER_MISMATCH"
+		return observation
+	}
+	observation.Details["enabled_peers"] = len(expectedPeers)
+	observation.Details["behind_subnets"] = len(expectedRoutes)
+	observation.Details["listen_interfaces"] = len(expectedListeners)
 	observation.Healthy = true
 	return observation
+}
+
+func ingressPeerContour(ctx context.Context, database *sql.DB) ([]string, map[string]struct{}, error) {
+	rows, err := database.QueryContext(ctx, `
+SELECT p.public_key, COALESCE(r.cidr, '')
+FROM wireguard_ingress_peers AS p
+LEFT JOIN wireguard_ingress_peer_routes AS r ON r.peer_id=p.id AND r.direction='INGRESS'
+WHERE p.enabled=1 AND p.revoked_at IS NULL
+ORDER BY p.public_key, r.cidr`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	peerSet := map[string]struct{}{}
+	routes := map[string]struct{}{}
+	for rows.Next() {
+		var key, route string
+		if err := rows.Scan(&key, &route); err != nil || !wgingress.ValidKey(key) {
+			return nil, nil, errors.New("stored WireGuard ingress peer contour is invalid")
+		}
+		peerSet[key] = struct{}{}
+		if route != "" {
+			prefix, parseErr := netip.ParsePrefix(route)
+			if parseErr != nil || !prefix.Addr().Is4() || prefix.String() != route {
+				return nil, nil, errors.New("stored WireGuard ingress route is invalid")
+			}
+			routes[route] = struct{}{}
+		}
+	}
+	peers := make([]string, 0, len(peerSet))
+	for key := range peerSet {
+		peers = append(peers, key)
+	}
+	sort.Strings(peers)
+	return peers, routes, rows.Err()
+}
+
+func ingressListenerContour(ctx context.Context, database *sql.DB, port int) (map[string]int, error) {
+	rows, err := database.QueryContext(ctx, `
+SELECT n.current_ifname
+FROM wireguard_ingress_listen_interfaces AS l
+JOIN network_interfaces AS n ON n.id=l.network_interface_id
+JOIN wireguard_ingress_servers AS s ON s.id=l.server_id
+WHERE s.enabled=1 ORDER BY l.priority`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]int{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil || name == "" || len(name) > 15 {
+			return nil, errors.New("stored WireGuard ingress listener is invalid")
+		}
+		if _, duplicate := result[name]; duplicate {
+			return nil, errors.New("stored WireGuard ingress listener is duplicated")
+		}
+		result[name] = port
+	}
+	return result, rows.Err()
+}
+
+func exactLineSet(output string, expected []string) bool {
+	actual := make([]string, 0)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if value := strings.TrimSpace(line); value != "" {
+			actual = append(actual, value)
+		}
+	}
+	sort.Strings(actual)
+	return slices.Equal(actual, expected)
+}
+
+func nftListenerSetExact(output string, expected map[string]int) bool {
+	matches := nftIngressListenerTuple.FindAllStringSubmatch(output, -1)
+	if len(matches) != len(expected) {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, match := range matches {
+		port, err := strconv.Atoi(match[2])
+		if err != nil || expected[match[1]] != port {
+			return false
+		}
+		if _, duplicate := seen[match[1]]; duplicate {
+			return false
+		}
+		seen[match[1]] = struct{}{}
+	}
+	return len(seen) == len(expected)
+}
+
+func jsonRouteSetExact(output, device string, protocol int, expected map[string]struct{}) bool {
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal([]byte(output), &rows) != nil || len(rows) != len(expected) {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		var destination, observedDevice string
+		if json.Unmarshal(row["dst"], &destination) != nil || json.Unmarshal(row["dev"], &observedDevice) != nil || observedDevice != device {
+			return false
+		}
+		observedProtocol, ok := jsonUint32(row["protocol"])
+		if !ok || observedProtocol != uint32(protocol) {
+			return false
+		}
+		if _, ok := expected[destination]; !ok {
+			return false
+		}
+		seen[destination] = struct{}{}
+	}
+	return len(seen) == len(expected)
 }
 
 func (probe *SystemProbe) convergenceHealth(ctx context.Context, now time.Time, policy Policy) (bool, string, map[string]any) {

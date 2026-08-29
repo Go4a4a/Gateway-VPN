@@ -20,7 +20,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 3 }", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 4 }", "user_ingress_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
@@ -714,6 +714,7 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft delete table inet gateway_vpn",
 		"nft flush ruleset",
 		"firewall_schema_generation",
+		`\[[[:space:]]*4[[:space:]]*\]`,
 		"active_tun_interfaces",
 		"useradd --system --no-create-home --shell /usr/sbin/nologin",
 		"gateway-vpn-mihomo",
@@ -764,6 +765,42 @@ func TestLANBridgeSSHHarnessCoversTwoMembersAndUplinkIsolation(t *testing.T) {
 		if !strings.Contains(harness, required) {
 			t.Errorf("LAN bridge SSH netns harness missing %q", required)
 		}
+	}
+}
+
+func TestWireGuardIngressHarnessCoversKernelHandshakeAndFailClosedLifecycle(t *testing.T) {
+	root := repositoryRoot(t)
+	harness := read(t, filepath.Join(root, "test", "netns", "wireguard_ingress.sh"))
+	workflow := read(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	dockerfile := read(t, filepath.Join(root, "test", "netns", "Dockerfile.ubuntu24"))
+	for _, required := range []string{
+		"GATEWAY_VPN_WG_INGRESS_INTEGRATION=1",
+		"TestBackendAgainstKernelWireGuardNamespace",
+		"gateway-vpn-wgingress-test",
+		"wireguard-tools",
+		"useradd --system --no-create-home --shell /usr/sbin/nologin",
+		"ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+	} {
+		if !strings.Contains(harness+workflow+dockerfile, required) {
+			t.Errorf("WireGuard ingress kernel gate missing %q", required)
+		}
+	}
+}
+
+func TestWebUIContextualHelpDecoratesLegacyAndDynamicControls(t *testing.T) {
+	root := repositoryRoot(t)
+	index := read(t, filepath.Join(root, "internal", "webapi", "static", "index.html"))
+	script := read(t, filepath.Join(root, "internal", "webapi", "static", "contextual-help.js"))
+	for _, required := range []string{
+		`src="/contextual-help.js"`, "MutationObserver", "querySelectorAll('label')",
+		"control.title", "label.title", "aria-label",
+	} {
+		if !strings.Contains(index+script, required) {
+			t.Errorf("contextual help layer missing %q", required)
+		}
+	}
+	if strings.Index(index, `src="/contextual-help.js"`) < strings.Index(index, `src="/wireguard-ingress.js"`) {
+		t.Fatal("contextual help must load after dynamic WebUI modules")
 	}
 }
 

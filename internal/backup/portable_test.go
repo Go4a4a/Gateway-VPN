@@ -22,14 +22,17 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	configurationPath := filepath.Join(configurationDirectory, "config.yaml")
 	files := map[string]string{
 		configurationPath: "version: 1\nsystem:\n  state_dir: /var/lib/gateway-vpn\n",
-		filepath.Join(stateDirectory, "secrets", "subscriptions", "sub-a.url"):                "https://subscription.example/private?token=subscription-secret",
-		filepath.Join(stateDirectory, "secrets", "wireguard.yaml"):                            "private_key: wireguard-private-secret",
-		filepath.Join(stateDirectory, "secrets", "mihomo-api-secret"):                         "mihomo-api-secret-value",
-		filepath.Join(stateDirectory, "subscriptions", "version-a", "nodes.json"):             `{"uuid":"proxy-private-secret"}`,
-		filepath.Join(stateDirectory, "tls", "key.pem"):                                       "tls-private-secret",
-		filepath.Join(stateDirectory, "tls", "cert.pem"):                                      "safe-certificate",
-		filepath.Join(stateDirectory, "mihomo", "generations", "generation-a", "config.yaml"): "password: mihomo-private-secret",
-		filepath.Join(stateDirectory, "mihomo", "state", "lkg-generation"):                    "generation-a\n",
+		filepath.Join(stateDirectory, "secrets", "subscriptions", "sub-a.url"):                  "https://subscription.example/private?token=subscription-secret",
+		filepath.Join(stateDirectory, "secrets", "wireguard.yaml"):                              "private_key: wireguard-private-secret",
+		filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"): "wireguard-ingress-server-private-secret",
+		filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-a.key"):    "wireguard-ingress-peer-private-secret",
+		filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-a.psk"):    "wireguard-ingress-peer-preshared-secret",
+		filepath.Join(stateDirectory, "secrets", "mihomo-api-secret"):                           "mihomo-api-secret-value",
+		filepath.Join(stateDirectory, "subscriptions", "version-a", "nodes.json"):               `{"uuid":"proxy-private-secret"}`,
+		filepath.Join(stateDirectory, "tls", "key.pem"):                                         "tls-private-secret",
+		filepath.Join(stateDirectory, "tls", "cert.pem"):                                        "safe-certificate",
+		filepath.Join(stateDirectory, "mihomo", "generations", "generation-a", "config.yaml"):   "password: mihomo-private-secret",
+		filepath.Join(stateDirectory, "mihomo", "state", "lkg-generation"):                      "generation-a\n",
 	}
 	for filename, content := range files {
 		if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
@@ -59,7 +62,11 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"subscription-secret", "wireguard-private-secret", "proxy-private-secret", "tls-private-secret", "mihomo-private-secret"} {
+	for _, secret := range []string{
+		"subscription-secret", "wireguard-private-secret", "wireguard-ingress-server-private-secret",
+		"wireguard-ingress-peer-private-secret", "wireguard-ingress-peer-preshared-secret",
+		"proxy-private-secret", "tls-private-secret", "mihomo-private-secret",
+	} {
 		if bytes.Contains(encrypted, []byte(secret)) {
 			t.Fatalf("encrypted artifact contains plaintext %q", secret)
 		}
@@ -94,6 +101,9 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	for _, name := range []string{
 		"manifest.json", "database/state.db", "config/config.yaml",
 		"state/secrets/subscriptions/sub-a.url", "state/secrets/wireguard.yaml",
+		"state/secrets/wireguard-ingress/servers/default.key",
+		"state/secrets/wireguard-ingress/peers/peer-a.key",
+		"state/secrets/wireguard-ingress/peers/peer-a.psk",
 		"state/subscriptions/version-a/nodes.json", "state/tls/key.pem", "state/tls/cert.pem",
 		"state/mihomo/generations/generation-a/config.yaml", "state/mihomo/state/lkg-generation",
 	} {
@@ -102,7 +112,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 		}
 	}
 	var manifest PortableManifest
-	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 22 || len(manifest.Files) != len(contents)-1 {
+	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 24 || len(manifest.Files) != len(contents)-1 {
 		t.Fatalf("portable manifest = %+v, %v", manifest, err)
 	}
 	extractedDatabase := filepath.Join(t.TempDir(), "state.db")

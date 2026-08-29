@@ -52,10 +52,16 @@ func run(args []string) int {
 	artifactBaseURL := flags.String("artifact-base-url", "", "versioned GitHub Release URL ending in slash")
 	interactive := flags.Bool("interactive", false, "select Gateway LAN settings on the target through a real terminal")
 	managementPeer := flags.String("management-peer", "", "optional current SSH client IP protected by interactive interface selection")
+	logReaderUser := flags.String("log-reader-user", "", "existing non-root Ubuntu account granted read-only SFTP log access")
 	lanInterface := flags.String("lan-interface", "", "explicit Ethernet interface connected to Keenetic WAN")
 	lanAddress := flags.String("lan-address", "", "explicit Gateway transit LAN IPv4 CIDR; defaults to 192.168.200.1/24 in automation mode")
 	enableDHCP := flags.Bool("enable-dhcp", false, "enable transit DHCP after validation")
 	disableSSH := flags.Bool("disable-ssh", false, "do not install/manage OpenSSH or open TCP/22 in the Gateway LAN firewall")
+	enableWGIngress := flags.Bool("enable-wireguard-ingress", false, "enable the standard ROUTED WireGuard client listener on the managed LAN")
+	wgEndpointHost := flags.String("wireguard-endpoint-host", "", "public IPv4 or DNS hostname for WireGuard client configs")
+	wgSubnetCIDR := flags.String("wireguard-subnet", "", "private canonical WireGuard ingress subnet")
+	wgListenPort := flags.Int("wireguard-listen-port", 0, "WireGuard ingress UDP listen port")
+	wgClientDNS := flags.String("wireguard-client-dns", "", "comma-separated external IPv4 DNS addresses for clients")
 	installDependencies := flags.Bool("install-dependencies", false, "install missing managed Gateway packages after dependency-plan validation")
 	bootNetworkPolicy := flags.String("boot-network-policy", "", "boot network policy: gateway-nonblocking or keep")
 	grubPolicy := flags.String("grub-policy", "", "GRUB policy: automatic-hidden, menu-5s, or keep")
@@ -66,7 +72,7 @@ func run(args []string) int {
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return 2
 	}
-	if *interactive && (*lanInterface != "" || *lanAddress != "" || *enableDHCP || *disableSSH || *installDependencies || *bootNetworkPolicy != "" || *grubPolicy != "" || *dependencyPreflightOnly || *apply || *jsonOutput) {
+	if *interactive && (*lanInterface != "" || *lanAddress != "" || *enableDHCP || *disableSSH || *enableWGIngress || *wgEndpointHost != "" || *wgSubnetCIDR != "" || *wgListenPort != 0 || *wgClientDNS != "" || *installDependencies || *bootNetworkPolicy != "" || *grubPolicy != "" || *dependencyPreflightOnly || *apply || *jsonOutput) {
 		fmt.Fprintln(os.Stderr, "--interactive chooses LAN, DHCP, SSH/SFTP, dependencies, boot-network, GRUB, and apply confirmation itself; explicit installation policy flags are not allowed")
 		return 2
 	}
@@ -120,11 +126,17 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
+		selection.LogReaderUser = *logReaderUser
 		*lanInterface = selection.LANInterface
 		*lanAddress = selection.LANAddress
 		*enableDHCP = selection.EnableDHCP
 		*disableSSH = !selection.EnableSSH
 		*installDependencies = selection.InstallDependencies
+		*enableWGIngress = selection.EnableWGIngress
+		*wgEndpointHost = selection.WGEndpointHost
+		*wgSubnetCIDR = selection.WGSubnetCIDR
+		*wgListenPort = selection.WGListenPort
+		*wgClientDNS = strings.Join(selection.WGClientDNS, ",")
 		*bootNetworkPolicy = string(selection.BootNetworkPolicy)
 		*grubPolicy = string(selection.GRUBPolicy)
 	}
@@ -146,7 +158,10 @@ func run(args []string) int {
 	installer := bootstrapinstall.Installer{Runner: bootstrapinstall.OSRunner{}, Bash: "/usr/bin/bash"}
 	options := bootstrapinstall.GatewayOptions{
 		LANInterface: *lanInterface, LANMembers: selection.LANMembers, LANAddress: *lanAddress, InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP,
-		DisableSSH: *disableSSH, BootNetworkPolicy: *bootNetworkPolicy, GRUBPolicy: *grubPolicy, Apply: *apply, DependencyPreflightOnly: *dependencyPreflightOnly,
+		LogReaderUser: *logReaderUser,
+		DisableSSH:    *disableSSH, EnableWGIngress: *enableWGIngress, WGEndpointHost: *wgEndpointHost, WGSubnetCIDR: *wgSubnetCIDR,
+		WGListenPort: *wgListenPort, WGClientDNS: splitCommaValues(*wgClientDNS),
+		BootNetworkPolicy: *bootNetworkPolicy, GRUBPolicy: *grubPolicy, Apply: *apply, DependencyPreflightOnly: *dependencyPreflightOnly,
 	}
 	if *interactive {
 		dryRun := options
@@ -267,6 +282,17 @@ func runInstallVPS(args []string) int {
 func usage(output *os.File) {
 	fmt.Fprintln(output, "usage: gateway-vpn-bootstrap --version")
 	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --interactive")
-	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --lan-interface IFACE [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply] [--json]")
+	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --lan-interface IFACE --log-reader-user USER [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply] [--json]")
 	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-vps --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --public-endpoint HOST:51821 --gateway-public-key KEY --admin-public-key KEY [--install-dependencies] [--allow-gateway-ssh] [--apply] [--json]")
+}
+
+func splitCommaValues(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

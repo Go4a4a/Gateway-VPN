@@ -48,6 +48,7 @@ import (
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -64,6 +65,7 @@ type Runtime struct {
 	Reconciler            *reconcile.Reconciler
 	Routing               interface{ SyncRouting(context.Context) error }
 	WireGuard             interface{ SyncWireGuard(context.Context) error }
+	WireGuardIngress      interface{ SyncWireGuardIngress(context.Context) error }
 	ModemRunner           *hilink.Runner
 	EthernetRunner        *ethernet.Runner
 	ModemRecovery         *modemrecovery.Runner
@@ -241,6 +243,9 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
+	if _, err := dataPlane.Uplinks.EnsureManagedLANInterface(ctx, configuration.Network.LANInterface, configuration.Network.LANAddress); err != nil {
+		return fail(fmt.Errorf("publish managed LAN interface: %w", err))
+	}
 	dataPlane.Reconciler.StartupRecovery = startupRecovery
 	systemLogger := logger.With("component", loggingpkg.ComponentSystem)
 	subscriptionLogger := logger.With("component", loggingpkg.ComponentSubscription)
@@ -355,8 +360,13 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		WireGuardRuntime:    &wireguardpkg.RuntimeStore{Database: database},
 		WireGuardConfigPath: filepath.Join(configuration.System.StateDir, "secrets", "wireguard.yaml"),
 		WireGuardSync:       networkBroker,
-		ModemRuntime:        networkBroker,
-		ModemRecovery:       recoveryController,
+		WireGuardIngress: &wgingress.Repository{
+			Database:   database,
+			SecretRoot: filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress"),
+		},
+		WireGuardIngressAdmin: networkBroker,
+		ModemRuntime:          networkBroker,
+		ModemRecovery:         recoveryController,
 		ModemReconcile: func(ctx context.Context) (hilink.CycleResult, error) {
 			return dataPlane.ModemRunner.Manager.Reconcile(ctx)
 		},
@@ -399,7 +409,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC(), workerProgress: workerProgress}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, WireGuardIngress: networkBroker, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC(), workerProgress: workerProgress}, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -632,6 +642,11 @@ func (application *Runtime) runReconcileLoop(ctx context.Context) error {
 		if application.WireGuard != nil {
 			if err := application.WireGuard.SyncWireGuard(ctx); err != nil && ctx.Err() == nil {
 				application.wireGuardLogger.Warn("WireGuard management synchronization failed", "error", err)
+			}
+		}
+		if application.WireGuardIngress != nil {
+			if err := application.WireGuardIngress.SyncWireGuardIngress(ctx); err != nil && ctx.Err() == nil {
+				application.wireGuardLogger.Warn("WireGuard ingress synchronization failed", "error", err)
 			}
 		}
 		if _, err := application.Reconciler.Reconcile(ctx); err != nil && ctx.Err() == nil {

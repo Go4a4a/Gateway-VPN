@@ -10,17 +10,23 @@ INSTALL_DEPENDENCIES=0
 DEPENDENCY_PREFLIGHT_ONLY=0
 ENABLE_DHCP=0
 ENABLE_SSH=1
+ENABLE_WIREGUARD_INGRESS=0
+WIREGUARD_ENDPOINT_HOST=""
+WIREGUARD_SUBNET=""
+WIREGUARD_LISTEN_PORT=""
+WIREGUARD_CLIENT_DNS=""
 RELEASE_DIR=""
 TRUSTED_UPDATE_KEY=""
 RELEASE_VERSION=""
 LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS="192.168.200.1/24"
+LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
 
 usage() {
-  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--apply]"
+  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --log-reader-user USER --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress --wireguard-endpoint-host HOST --wireguard-subnet CIDR --wireguard-listen-port PORT --wireguard-client-dns IP[,IP...]] [--apply]"
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
@@ -52,25 +58,41 @@ while (($#)); do
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
     --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
+    --log-reader-user) LOG_READER_USER=${2:?}; shift 2 ;;
     --boot-network-policy) BOOT_NETWORK_POLICY=${2:?}; shift 2 ;;
     --grub-policy) GRUB_POLICY=${2:?}; shift 2 ;;
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
     --dependency-preflight-only) DEPENDENCY_PREFLIGHT_ONLY=1; shift ;;
     --enable-dhcp) ENABLE_DHCP=1; shift ;;
     --disable-ssh) ENABLE_SSH=0; shift ;;
+    --enable-wireguard-ingress) ENABLE_WIREGUARD_INGRESS=1; shift ;;
+    --wireguard-endpoint-host) WIREGUARD_ENDPOINT_HOST=${2:?}; shift 2 ;;
+    --wireguard-subnet) WIREGUARD_SUBNET=${2:?}; shift 2 ;;
+    --wireguard-listen-port) WIREGUARD_LISTEN_PORT=${2:?}; shift 2 ;;
+    --wireguard-client-dns) WIREGUARD_CLIENT_DNS=${2:?}; shift 2 ;;
     --apply) APPLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" && -n "$BOOT_NETWORK_POLICY" && -n "$GRUB_POLICY" ]] || { usage >&2; exit 2; }
+[[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" && -n "$LOG_READER_USER" && -n "$BOOT_NETWORK_POLICY" && -n "$GRUB_POLICY" ]] || { usage >&2; exit 2; }
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
 [[ "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "Invalid LAN interface" >&2; exit 2; }
+[[ "$LOG_READER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$LOG_READER_USER" != root ]] || { echo "Log reader must be an existing non-root Ubuntu account" >&2; exit 2; }
+LOG_READER_PASSWD=$(getent passwd "$LOG_READER_USER")
+[[ -n "$LOG_READER_PASSWD" ]] || { echo "Selected SFTP log reader account does not exist" >&2; exit 2; }
+IFS=: read -r LOG_READER_NAME _ LOG_READER_UID _ _ _ LOG_READER_SHELL <<<"$LOG_READER_PASSWD"
+[[ "$LOG_READER_NAME" == "$LOG_READER_USER" && "$LOG_READER_UID" =~ ^[0-9]+$ && "$LOG_READER_UID" -ge 1000 && "$LOG_READER_SHELL" != */nologin && "$LOG_READER_SHELL" != */false ]] || { echo "Selected SFTP log reader must be a regular login-capable Ubuntu account" >&2; exit 2; }
 [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Invalid boot network policy" >&2; exit 2; }
 [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Invalid GRUB policy" >&2; exit 2; }
+if ((ENABLE_WIREGUARD_INGRESS)); then
+  [[ -n "$WIREGUARD_ENDPOINT_HOST" && -n "$WIREGUARD_SUBNET" && -n "$WIREGUARD_LISTEN_PORT" && -n "$WIREGUARD_CLIENT_DNS" ]] || { echo "Enabled WireGuard ingress requires endpoint, subnet, listen port, and client DNS" >&2; exit 2; }
+else
+  [[ -z "$WIREGUARD_ENDPOINT_HOST" && -z "$WIREGUARD_SUBNET" && -z "$WIREGUARD_LISTEN_PORT" && -z "$WIREGUARD_CLIENT_DNS" ]] || { echo "WireGuard ingress values require --enable-wireguard-ingress" >&2; exit 2; }
+fi
 LAN_MEMBER_NAMES=()
 LAN_MEMBER_WAS_UP_VALUES=()
 if [[ -n "$LAN_MEMBERS" ]]; then
@@ -120,11 +142,16 @@ TRUSTED_UPDATE_KEY=$(realpath -- "$TRUSTED_UPDATE_KEY")
 "$RELEASE_DIR/bin/gateway-vpnctl" release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --current-version 0.0.0 --current-schema 1
 RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 [[ "$RELEASE_VERSION_OUTPUT" == "gateway-vpn $RELEASE_VERSION "* ]] || { echo "Release binary version does not match --version" >&2; exit 1; }
+if ((ENABLE_WIREGUARD_INGRESS)); then
+  "$RELEASE_DIR/bin/gateway-vpn" wireguard-ingress-bootstrap \
+    --endpoint-host "$WIREGUARD_ENDPOINT_HOST" --subnet "$WIREGUARD_SUBNET" \
+    --listen-port "$WIREGUARD_LISTEN_PORT" --dns "$WIREGUARD_CLIENT_DNS"
+fi
 
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN release currently requires x86_64" >&2; exit 1; }
-for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp; do
+for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
@@ -157,6 +184,8 @@ if ! getent ahostsv4 github.com >/dev/null; then
      grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"log_reader_user\": \"$LOG_READER_USER\"" /var/lib/gateway-vpn/install-report.json &&
+     grep -Fq "\"wireguard_ingress_enabled\": $([[ $ENABLE_WIREGUARD_INGRESS == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json &&
      grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
@@ -397,6 +426,18 @@ if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery 
   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway LAN address differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway DHCP policy differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway SSH/SFTP policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq "\"log_reader_user\": \"$LOG_READER_USER\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway SFTP log-reader account differs; explicit reconfiguration is required" >&2; exit 1; }
+  id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers || { echo "Existing Gateway SFTP log-reader group membership is missing" >&2; exit 1; }
+  for log_dir in /var/log/gateway-vpn /var/log/gateway-vpn/current /var/log/gateway-vpn/archive /var/log/gateway-vpn/diagnostics; do
+    [[ -d "$log_dir" && ! -L "$log_dir" && $(stat -c '%U:%G:%a' "$log_dir") == "root:gateway-vpn-log-readers:2750" ]] || { echo "Existing Gateway log export directory is unsafe: $log_dir" >&2; exit 1; }
+  done
+  grep -Fq "\"wireguard_ingress_enabled\": $([[ $ENABLE_WIREGUARD_INGRESS == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway WireGuard ingress policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  if ((ENABLE_WIREGUARD_INGRESS)); then
+    grep -Fq "\"wireguard_endpoint_host\": \"$WIREGUARD_ENDPOINT_HOST\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway WireGuard endpoint differs; use WebUI safe apply" >&2; exit 1; }
+    grep -Fq "\"wireguard_subnet\": \"$WIREGUARD_SUBNET\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway WireGuard subnet differs; use WebUI safe apply" >&2; exit 1; }
+    grep -Fq "\"wireguard_listen_port\": $WIREGUARD_LISTEN_PORT" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway WireGuard listen port differs; use WebUI safe apply" >&2; exit 1; }
+    grep -Fq "\"wireguard_client_dns\": \"$WIREGUARD_CLIENT_DNS\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway WireGuard client DNS differs; use WebUI safe apply" >&2; exit 1; }
+  fi
   grep -Fxq "  disable_ssh_management: $([[ $ENABLE_SSH == 1 ]] && echo false || echo true)" /etc/gateway-vpn/config.yaml || { echo "Existing Gateway runtime SSH/SFTP policy differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway boot-network policy differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json || { echo "Existing Gateway GRUB policy differs; explicit reconfiguration is required" >&2; exit 1; }
@@ -474,6 +515,8 @@ echo "LAN: $LAN_INTERFACE / $LAN_ADDRESS"
 echo "LAN physical members: ${LAN_MEMBERS:-direct-interface mode}"
 echo "DHCP enable requested: $ENABLE_DHCP"
 echo "SSH/SFTP management requested: $ENABLE_SSH"
+echo "Read-only SFTP log account: $LOG_READER_USER"
+echo "WireGuard client ingress requested: $ENABLE_WIREGUARD_INGRESS"
 echo "Boot network policy: $BOOT_NETWORK_POLICY"
 echo "GRUB policy: $GRUB_POLICY"
 if ((EXISTING)); then
@@ -502,6 +545,10 @@ if ((EXISTING)); then
     /usr/sbin/sshd -t
     ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$'
   fi
+  if ((ENABLE_WIREGUARD_INGRESS)); then
+    ip -o -4 address show dev wg-ingress scope global | awk '{print $4}' | grep -Eq "/${WIREGUARD_SUBNET#*/}$" || { echo "Existing WireGuard ingress address is not active" >&2; exit 1; }
+    [[ $(wg show wg-ingress listen-port) == "$WIREGUARD_LISTEN_PORT" ]] || { echo "Existing WireGuard ingress port is not active" >&2; exit 1; }
+  fi
   echo "Gateway VPN $RELEASE_VERSION is already installed with the requested immutable release and LAN policy."
   exit 0
 fi
@@ -520,6 +567,10 @@ SSH_WAS_ENABLED=0
 systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_WAS_ENABLED=1
 SSH_WAS_ACTIVE=0
 systemctl is-active --quiet ssh.service 2>/dev/null && SSH_WAS_ACTIVE=1
+LOG_READER_WAS_MEMBER=0
+if getent group gateway-vpn-log-readers >/dev/null 2>&1 && id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers; then
+  LOG_READER_WAS_MEMBER=1
+fi
 install -d -m 0700 /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-privileged/install-transactions
 install -D -m 0700 "$ROOT_DIR/scripts/recover-gateway-install.sh" /usr/libexec/gateway-vpn-install-recovery
 install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-install-recovery.service" /etc/systemd/system/gateway-vpn-install-recovery.service
@@ -527,7 +578,7 @@ systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -571,11 +622,16 @@ install -D -m 0644 "$ROOT_DIR/packaging/sysusers.d/gateway-vpn.conf" /usr/lib/sy
 systemd-sysusers /usr/lib/sysusers.d/gateway-vpn.conf
 install -D -m 0644 "$ROOT_DIR/packaging/tmpfiles.d/gateway-vpn.conf" /usr/lib/tmpfiles.d/gateway-vpn.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/gateway-vpn.conf
+usermod -a -G gateway-vpn-log-readers "$LOG_READER_USER"
+id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers || { echo "Selected Ubuntu account did not receive read-only Gateway log access" >&2; exit 1; }
 install -d -m 0750 -o root -g gateway-vpn /etc/gateway-vpn/nftables
 SSH_NFT_RULE=""
 if ((ENABLE_SSH)); then
   SSH_NFT_RULE="        iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\""
 fi
+for log_dir in /var/log/gateway-vpn /var/log/gateway-vpn/current /var/log/gateway-vpn/archive /var/log/gateway-vpn/diagnostics; do
+  [[ -d "$log_dir" && ! -L "$log_dir" && $(stat -c '%U:%G:%a' "$log_dir") == "root:gateway-vpn-log-readers:2750" ]] || { echo "Installed Gateway log export directory is unsafe: $log_dir" >&2; exit 1; }
+done
 sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__SSH_RULE__|$SSH_NFT_RULE|g" "$ROOT_DIR/packaging/nftables/boot.nft.in" >/etc/gateway-vpn/nftables/boot.nft
 chown root:gateway-vpn /etc/gateway-vpn/nftables/boot.nft
 chmod 0640 /etc/gateway-vpn/nftables/boot.nft
@@ -721,6 +777,40 @@ for _ in {1..20}; do
   sleep 0.5
 done
 ((GATEWAY_RUNTIME_READY == 1)) || { echo "Installed Gateway services did not reach blocked management-ready state" >&2; exit 1; }
+LOG_EXPORT_READY=0
+for _ in {1..20}; do
+  LOG_EXPORT_READY=1
+  for category in all modems subscriptions access vpn-mihomo network wireguard-vps watchdog updates security-audit; do
+    logfile="/var/log/gateway-vpn/current/$category.log"
+    if [[ ! -f "$logfile" || -L "$logfile" || $(stat -c '%U:%G:%a' "$logfile") != "root:gateway-vpn-log-readers:640" ]]; then
+      LOG_EXPORT_READY=0
+      break
+    fi
+  done
+  ((LOG_EXPORT_READY == 0)) || break
+  sleep 0.5
+done
+((LOG_EXPORT_READY == 1)) || { echo "Redacted SFTP log exports did not converge" >&2; exit 1; }
+if ((ENABLE_WIREGUARD_INGRESS)); then
+  systemctl stop gateway-vpn-watchdog.service gateway-vpn.service
+  "$DEST/bin/gateway-vpn" wireguard-ingress-bootstrap --config /etc/gateway-vpn/config.yaml \
+    --endpoint-host "$WIREGUARD_ENDPOINT_HOST" --subnet "$WIREGUARD_SUBNET" \
+    --listen-port "$WIREGUARD_LISTEN_PORT" --dns "$WIREGUARD_CLIENT_DNS" --apply
+  systemctl restart gateway-vpn.service gateway-vpn-watchdog.service
+  WIREGUARD_INGRESS_READY=0
+  for _ in {1..20}; do
+    if systemctl is-active --quiet gateway-vpn.service &&
+       systemctl is-active --quiet gateway-vpn-watchdog.service &&
+       ip -o -4 address show dev wg-ingress scope global | awk '{print $4}' | grep -Eq "/${WIREGUARD_SUBNET#*/}$" &&
+       [[ $(wg show wg-ingress listen-port) == "$WIREGUARD_LISTEN_PORT" ]] &&
+       watchdog_runtime_ready; then
+      WIREGUARD_INGRESS_READY=1
+      break
+    fi
+    sleep 0.5
+  done
+  ((WIREGUARD_INGRESS_READY == 1)) || { echo "Initial WireGuard ingress did not remain healthy after service restart" >&2; exit 1; }
+fi
 if ((ENABLE_DHCP)); then
   systemctl is-active --quiet gateway-vpn-dnsmasq.service || { echo "Installed Gateway DHCP service is not active" >&2; exit 1; }
   [[ -d /var/lib/gateway-vpn-dnsmasq && ! -L /var/lib/gateway-vpn-dnsmasq && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq) == "gateway-vpn-dns:gateway-vpn:700" ]] || { echo "Installed Gateway dnsmasq state root ownership or mode is invalid" >&2; exit 1; }
@@ -750,7 +840,7 @@ if ((ENABLE_SSH)); then
   ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Installed Gateway SSH management service is not listening on IPv4 wildcard TCP/22" >&2; exit 1; }
 fi
 [[ -d /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || false
-printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": %s,\n  "boot_network_policy": "%s",\n  "grub_policy": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" "$([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >/var/lib/gateway-vpn/install-report.json
+printf '{\n  "version": "%s",\n  "profile": "ubuntu-24.04",\n  "lan_interface": "%s",\n  "lan_members": "%s",\n  "lan_address": "%s",\n  "dhcp_enabled": %s,\n  "lan_ssh_enabled": %s,\n  "log_reader_user": "%s",\n  "wireguard_ingress_enabled": %s,\n  "wireguard_endpoint_host": "%s",\n  "wireguard_subnet": "%s",\n  "wireguard_listen_port": %s,\n  "wireguard_client_dns": "%s",\n  "boot_network_policy": "%s",\n  "grub_policy": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_ADDRESS" "$([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" "$([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" "$LOG_READER_USER" "$([[ $ENABLE_WIREGUARD_INGRESS == 1 ]] && echo true || echo false)" "$WIREGUARD_ENDPOINT_HOST" "$WIREGUARD_SUBNET" "${WIREGUARD_LISTEN_PORT:-0}" "$WIREGUARD_CLIENT_DNS" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >/var/lib/gateway-vpn/install-report.json
 chmod 0600 /var/lib/gateway-vpn/install-report.json
 sync
 timestamp=$(date -u +%Y%m%dT%H%M%S%NZ)
@@ -772,7 +862,8 @@ echo "Installed Gateway VPN $RELEASE_VERSION. Mihomo starts only after a validat
 echo "WebUI: https://$LAN_IP:8443"
 if ((ENABLE_SSH)); then
   echo "SSH: ssh <ubuntu-user>@$LAN_IP"
-  echo "SFTP uses the same host, Ubuntu user and TCP/22: sftp <ubuntu-user>@$LAN_IP"
+  echo "SFTP uses the same host, Ubuntu user and TCP/22: sftp $LOG_READER_USER@$LAN_IP"
+  echo "Redacted logs for $LOG_READER_USER: /var/log/gateway-vpn/current/"
 else
   echo "SSH/SFTP management was intentionally disabled; WebUI remains available on the management LAN."
 fi

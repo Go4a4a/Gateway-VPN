@@ -15,12 +15,14 @@ import (
 
 	"gateway-vpn/internal/distribution"
 	"gateway-vpn/internal/netutil"
+	"gateway-vpn/internal/wgingress"
 	"gateway-vpn/internal/wireguard"
 )
 
 var (
 	interfacePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
 	ipv4CIDRPattern  = regexp.MustCompile(`^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[1-9]|[12][0-9]|30)$`)
+	linuxUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
 type CommandRequest struct {
@@ -73,9 +75,15 @@ type GatewayOptions struct {
 	LANInterface            string
 	LANMembers              []string
 	LANAddress              string
+	LogReaderUser           string
 	InstallDependencies     bool
 	EnableDHCP              bool
 	DisableSSH              bool
+	EnableWGIngress         bool
+	WGEndpointHost          string
+	WGSubnetCIDR            string
+	WGListenPort            int
+	WGClientDNS             []string
 	BootNetworkPolicy       string
 	GRUBPolicy              string
 	Apply                   bool
@@ -109,11 +117,18 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	if prepared.Artifact.Role != distribution.RoleGateway || prepared.VerifiedRelease.Release.GatewayVersion == "" || prepared.Manifest.ReleaseVersion != prepared.VerifiedRelease.Release.GatewayVersion || prepared.InstallerPath != filepath.Join(prepared.ReleaseRoot, "scripts", "install-gateway.sh") {
 		return InstallResult{}, errors.New("prepared artifact is not an independently verified Gateway release")
 	}
-	if !interfacePattern.MatchString(options.LANInterface) || !validIPv4CIDR(options.LANAddress) || !validLANMembers(options.LANInterface, options.LANMembers) {
+	if !interfacePattern.MatchString(options.LANInterface) || !validIPv4CIDR(options.LANAddress) || !validLANMembers(options.LANInterface, options.LANMembers) || !linuxUserPattern.MatchString(options.LogReaderUser) || options.LogReaderUser == "root" {
 		return InstallResult{}, errors.New("explicit valid Gateway LAN interface and CIDR are required")
 	}
 	if !validGatewayBootNetworkPolicy(options.BootNetworkPolicy) || !validGatewayGRUBPolicy(options.GRUBPolicy) {
 		return InstallResult{}, errors.New("explicit valid Gateway boot-network and GRUB policies are required")
+	}
+	if options.EnableWGIngress {
+		if err := wgingress.ValidateInitialServerOptions(options.WGEndpointHost, options.WGSubnetCIDR, options.WGListenPort, options.WGClientDNS); err != nil || prefixesOverlapCIDR(options.LANAddress, options.WGSubnetCIDR) {
+			return InstallResult{}, errors.New("explicit valid non-overlapping initial WireGuard ingress options are required")
+		}
+	} else if options.WGEndpointHost != "" || options.WGSubnetCIDR != "" || options.WGListenPort != 0 || len(options.WGClientDNS) != 0 {
+		return InstallResult{}, errors.New("WireGuard ingress options require explicit enablement")
 	}
 	if options.DependencyPreflightOnly && (options.Apply || !options.InstallDependencies) {
 		return InstallResult{}, errors.New("dependency-preflight-only requires a dependency-enabled dry-run")
@@ -125,6 +140,7 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		"--version", prepared.VerifiedRelease.Release.GatewayVersion,
 		"--lan-interface", options.LANInterface,
 		"--lan-address", options.LANAddress,
+		"--log-reader-user", options.LogReaderUser,
 		"--boot-network-policy", options.BootNetworkPolicy,
 		"--grub-policy", options.GRUBPolicy,
 	}
@@ -136,6 +152,15 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	}
 	if options.DisableSSH {
 		arguments = append(arguments, "--disable-ssh")
+	}
+	if options.EnableWGIngress {
+		arguments = append(arguments,
+			"--enable-wireguard-ingress",
+			"--wireguard-endpoint-host", options.WGEndpointHost,
+			"--wireguard-subnet", options.WGSubnetCIDR,
+			"--wireguard-listen-port", strconv.Itoa(options.WGListenPort),
+			"--wireguard-client-dns", strings.Join(options.WGClientDNS, ","),
+		)
 	}
 	if options.InstallDependencies {
 		arguments = append(arguments, "--install-dependencies")
@@ -251,6 +276,12 @@ func validIPv4CIDR(value string) bool {
 		return false
 	}
 	return netutil.ValidGatewayLAN(value)
+}
+
+func prefixesOverlapCIDR(left, right string) bool {
+	leftPrefix, leftErr := netip.ParsePrefix(left)
+	rightPrefix, rightErr := netip.ParsePrefix(right)
+	return leftErr != nil || rightErr != nil || leftPrefix.Masked().Overlaps(rightPrefix.Masked())
 }
 
 func validLANMembers(lanInterface string, members []string) bool {

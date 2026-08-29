@@ -4,5 +4,6 @@ flush set inet gateway_vpn active_direct_context
 flush map inet gateway_vpn active_direct_marks
 flush set inet gateway_vpn active_path_generation
 flush set inet gateway_vpn active_route_generation
+flush set inet gateway_vpn wireguard_ingress_allowed_v4
 add element inet gateway_vpn active_path_generation { 101 }
 add element inet gateway_vpn active_tun_interfaces { "gateway-vpn-tun" }

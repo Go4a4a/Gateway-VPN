@@ -182,42 +182,42 @@ func TestGatewayInstallerRunsReadOnlyPreflightBeforeApplyWithTypedArguments(t *t
 	defer prepared.Cleanup()
 	runner := &recordingRunner{}
 	result, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, EnableDHCP: true, DisableSSH: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "automatic-hidden", Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", InstallDependencies: true, EnableDHCP: true, DisableSSH: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "automatic-hidden", Apply: true,
 	})
 	if err != nil || result.Preflight != "PASSED" || result.Installation != "APPLIED" || len(runner.requests) != 2 {
 		t.Fatalf("InstallGateway() = %+v,%v requests=%d", result, err, len(runner.requests))
 	}
 	first, second := runner.requests[0], runner.requests[1]
-	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--disable-ssh") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(first.Arguments, "gateway-nonblocking") || !contains(first.Arguments, "automatic-hidden") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
+	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--disable-ssh") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "--log-reader-user") || !contains(first.Arguments, "ubuntu") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(first.Arguments, "gateway-nonblocking") || !contains(first.Arguments, "automatic-hidden") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
 		t.Fatalf("installer requests = %+v", runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 10}}
 	result, err = (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
 	})
 	if err != nil || result.Preflight != "PASSED" || result.Installation != "APPLIED" || len(runner.requests) != 2 {
 		t.Fatalf("Gateway APT index refresh continuation = %+v,%v requests=%+v", result, err, runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 20}}
 	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true,
 	}); err == nil || len(runner.requests) != 1 {
 		t.Fatalf("unsafe Gateway APT plan reached apply: requests=%+v err=%v", runner.requests, err)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 10}}
 	result, err = (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", DependencyPreflightOnly: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", InstallDependencies: true, BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", DependencyPreflightOnly: true,
 	})
 	if err != nil || result.Preflight != "DEPENDENCY_GATE_PASSED_OR_REFRESH_REQUIRED" || result.Installation != "NOT_REQUESTED" || len(runner.requests) != 1 || !contains(runner.requests[0].Arguments, "--dependency-preflight-only") {
 		t.Fatalf("orchestrated Gateway dependency gate = %+v,%v requests=%+v", result, err, runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1}
-	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true}); err == nil || len(runner.requests) != 1 {
+	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", Apply: true}); err == nil || len(runner.requests) != 1 {
 		t.Fatalf("failed preflight did not stop apply: requests=%d err=%v", len(runner.requests), err)
 	}
 	runner = &recordingRunner{}
 	if _, err := (Installer{Runner: runner, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
-		LANInterface: "gateway-vpn-lan", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep",
+		LANInterface: "gateway-vpn-lan", LANMembers: []string{"enp2s0", "enp3s0"}, LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu", BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep",
 	}); err != nil || len(runner.requests) != 1 || !contains(runner.requests[0].Arguments, "--lan-members") || !contains(runner.requests[0].Arguments, "enp2s0,enp3s0") {
 		t.Fatalf("multi-port Gateway arguments = %+v, %v", runner.requests, err)
 	}

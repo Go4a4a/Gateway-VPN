@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/traffic"
+	"gateway-vpn/internal/wgingress"
 )
 
 const maxBrokerMessageBytes = 64 << 10
@@ -30,6 +31,7 @@ type BrokerServer struct {
 	Routing     RoutingAdmin
 	Bootstrap   BootstrapAdmin
 	WireGuard   WireGuardAdmin
+	Ingress     WireGuardIngressAdmin
 	Logging     LoggingAdmin
 	Journal     JournalAdmin
 	Diagnostics HostDiagnosticsAdmin
@@ -73,6 +75,23 @@ type BootstrapAdmin interface {
 // protected configuration and SQLite rather than accepted across HTTP.
 type WireGuardAdmin interface {
 	SyncWireGuard(context.Context) error
+}
+
+// WireGuardIngressAdmin owns the root-only key files and kernel interface for
+// the optional client/data-plane WireGuard server. Inputs are fixed typed
+// domain objects; no path, executable, nft expression or command crosses the
+// privilege boundary.
+type WireGuardIngressAdmin interface {
+	Sync(context.Context) error
+	UpdateServer(context.Context, wgingress.ServerUpdate) (wgingress.Server, error)
+	CreatePeer(context.Context, wgingress.PeerCreate) (wgingress.Peer, error)
+	UpdatePeer(context.Context, string, wgingress.PeerUpdate) (wgingress.Peer, error)
+	RevokePeer(context.Context, string) (wgingress.Peer, error)
+	DeletePeer(context.Context, string) error
+	RotatePeer(context.Context, string) (wgingress.Peer, error)
+	RotateServer(context.Context) (wgingress.Server, error)
+	ProbePeer(context.Context, string) (wgingress.Peer, error)
+	ExportPeerConfig(context.Context, string) (wgingress.ExportedConfig, error)
 }
 
 // LoggingAdmin exposes only parameter-free convergence. The root
@@ -230,6 +249,16 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	if wireGuardAdmin != nil {
 		mux.HandleFunc("POST /v1/wireguard/sync", server.syncWireGuard)
 	}
+	mux.HandleFunc("POST /v1/wireguard/ingress/sync", server.syncWireGuardIngress)
+	mux.HandleFunc("POST /v1/wireguard/ingress/server/update", server.updateWireGuardIngressServer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/server/rotate", server.rotateWireGuardIngressServer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/create", server.createWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/update", server.updateWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/revoke", server.revokeWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/delete", server.deleteWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/rotate", server.rotateWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/probe", server.probeWireGuardIngressPeer)
+	mux.HandleFunc("POST /v1/wireguard/ingress/peers/export", server.exportWireGuardIngressPeer)
 	if loggingAdmin != nil {
 		mux.HandleFunc("POST /v1/logging/sync", server.syncLogging)
 	}
@@ -647,6 +676,169 @@ func (server *BrokerServer) recover(writer http.ResponseWriter, request *http.Re
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func (server *BrokerServer) syncWireGuardIngress(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	if err := server.Ingress.Sync(request.Context()); err != nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_SYNC_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *BrokerServer) updateWireGuardIngressServer(writer http.ResponseWriter, request *http.Request) {
+	var input wgingress.ServerUpdate
+	if err := decodeBrokerJSON(request, &input); err != nil || wgingress.ValidateServerUpdate(input) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_SERVER")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	item, err := server.Ingress.UpdateServer(request.Context(), input)
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_SERVER_REJECTED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+func (server *BrokerServer) rotateWireGuardIngressServer(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	item, err := server.Ingress.RotateServer(request.Context())
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_ROTATION_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+func (server *BrokerServer) createWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	var input wgingress.PeerCreate
+	if err := decodeBrokerJSON(request, &input); err != nil || wgingress.ValidatePeerCreate(input) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	item, err := server.Ingress.CreatePeer(request.Context(), input)
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_REJECTED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusCreated, item)
+}
+
+type wireGuardIngressPeerMutation struct {
+	PeerID string                `json:"peer_id"`
+	Update *wgingress.PeerUpdate `json:"update,omitempty"`
+}
+
+func (server *BrokerServer) updateWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	var input wireGuardIngressPeerMutation
+	if err := decodeBrokerJSON(request, &input); err != nil || !safeID(input.PeerID) || input.Update == nil || wgingress.ValidatePeerUpdate(*input.Update) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	item, err := server.Ingress.UpdatePeer(request.Context(), input.PeerID, *input.Update)
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_REJECTED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+func (server *BrokerServer) revokeWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	server.wireGuardIngressPeerAction(writer, request, "REVOKE")
+}
+
+func (server *BrokerServer) deleteWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	server.wireGuardIngressPeerAction(writer, request, "DELETE")
+}
+
+func (server *BrokerServer) rotateWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	server.wireGuardIngressPeerAction(writer, request, "ROTATE")
+}
+
+func (server *BrokerServer) probeWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	server.wireGuardIngressPeerAction(writer, request, "PROBE")
+}
+
+func (server *BrokerServer) exportWireGuardIngressPeer(writer http.ResponseWriter, request *http.Request) {
+	var input wireGuardIngressPeerMutation
+	if err := decodeBrokerJSON(request, &input); err != nil || !safeID(input.PeerID) || input.Update != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	item, err := server.Ingress.ExportPeerConfig(request.Context(), input.PeerID)
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_CONFIG_UNAVAILABLE")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+func (server *BrokerServer) wireGuardIngressPeerAction(writer http.ResponseWriter, request *http.Request, action string) {
+	var input wireGuardIngressPeerMutation
+	if err := decodeBrokerJSON(request, &input); err != nil || !safeID(input.PeerID) || input.Update != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_WIREGUARD_INGRESS_PEER")
+		return
+	}
+	if server.Ingress == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_UNAVAILABLE")
+		return
+	}
+	var item wgingress.Peer
+	var err error
+	switch action {
+	case "REVOKE":
+		item, err = server.Ingress.RevokePeer(request.Context(), input.PeerID)
+	case "DELETE":
+		err = server.Ingress.DeletePeer(request.Context(), input.PeerID)
+	case "ROTATE":
+		item, err = server.Ingress.RotatePeer(request.Context(), input.PeerID)
+	case "PROBE":
+		item, err = server.Ingress.ProbePeer(request.Context(), input.PeerID)
+	default:
+		err = errors.New("unsupported WireGuard ingress action")
+	}
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_ACTION_FAILED")
+		return
+	}
+	if action == "DELETE" {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
 type BrokerClient struct {
 	client *http.Client
 }
@@ -725,6 +917,62 @@ func (client *BrokerClient) SyncRouting(ctx context.Context) error {
 
 func (client *BrokerClient) SyncWireGuard(ctx context.Context) error {
 	return client.call(ctx, "/v1/wireguard/sync", struct{}{}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) SyncWireGuardIngress(ctx context.Context) error {
+	return client.call(ctx, "/v1/wireguard/ingress/sync", struct{}{}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) UpdateWireGuardIngressServer(ctx context.Context, input wgingress.ServerUpdate) (wgingress.Server, error) {
+	var result wgingress.Server
+	err := client.call(ctx, "/v1/wireguard/ingress/server/update", input, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) RotateWireGuardIngressServer(ctx context.Context) (wgingress.Server, error) {
+	var result wgingress.Server
+	err := client.call(ctx, "/v1/wireguard/ingress/server/rotate", struct{}{}, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) CreateWireGuardIngressPeer(ctx context.Context, input wgingress.PeerCreate) (wgingress.Peer, error) {
+	var result wgingress.Peer
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/create", input, http.StatusCreated, &result)
+	return result, err
+}
+
+func (client *BrokerClient) UpdateWireGuardIngressPeer(ctx context.Context, id string, input wgingress.PeerUpdate) (wgingress.Peer, error) {
+	var result wgingress.Peer
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/update", wireGuardIngressPeerMutation{PeerID: id, Update: &input}, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) RevokeWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	var result wgingress.Peer
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/revoke", wireGuardIngressPeerMutation{PeerID: id}, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) DeleteWireGuardIngressPeer(ctx context.Context, id string) error {
+	return client.call(ctx, "/v1/wireguard/ingress/peers/delete", wireGuardIngressPeerMutation{PeerID: id}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) RotateWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	var result wgingress.Peer
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/rotate", wireGuardIngressPeerMutation{PeerID: id}, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) ProbeWireGuardIngressPeer(ctx context.Context, id string) (wgingress.Peer, error) {
+	var result wgingress.Peer
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/probe", wireGuardIngressPeerMutation{PeerID: id}, http.StatusOK, &result)
+	return result, err
+}
+
+func (client *BrokerClient) ExportWireGuardIngressPeer(ctx context.Context, id string) (wgingress.ExportedConfig, error) {
+	var result wgingress.ExportedConfig
+	err := client.call(ctx, "/v1/wireguard/ingress/peers/export", wireGuardIngressPeerMutation{PeerID: id}, http.StatusOK, &result)
+	return result, err
 }
 
 func (client *BrokerClient) SyncLogging(ctx context.Context) error {

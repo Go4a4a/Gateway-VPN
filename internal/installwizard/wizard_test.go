@@ -37,7 +37,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 	}
 	// First select the addressed HiLink and the default-route NIC, then the
 	// unused Ethernet intended for Keenetic WAN.
-	input := strings.NewReader("4\n2\n\n\n\n\n\n\n\n")
+	input := strings.NewReader("4\n2\n\n\n\n\n\n\n\n\n\n")
 	output := new(bytes.Buffer)
 	session, err := NewSession(executor, input, output)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 
 func TestInteractiveSelectionValidatesCustomCIDRAndDHCPPrefix(t *testing.T) {
 	executor := cleanWizardExecutor()
-	input := strings.NewReader("2\n\n10.42.0.1/16\n10.42.0.1/24\nno\nno\n2\n3\n")
+	input := strings.NewReader("2\n\n10.42.0.1/16\n10.42.0.1/24\nno\nno\nno\n2\n3\n")
 	output := new(bytes.Buffer)
 	session, _ := NewSession(executor, input, output)
 	session.inspectBoot = configurableGRUB
@@ -115,7 +115,7 @@ func TestInteractiveCancellationAndExactFinalConfirmation(t *testing.T) {
 }
 
 func TestUnknownBootloaderIsPreservedWithoutUnsafePrompt(t *testing.T) {
-	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n"), new(bytes.Buffer))
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n\n\n"), new(bytes.Buffer))
 	session.inspectBoot = func() bootObservation {
 		return bootObservation{bootloader: "неизвестный", firmware: "UEFI", detail: "нет подтверждённого GRUB"}
 	}
@@ -130,7 +130,7 @@ func TestUnknownBootloaderIsPreservedWithoutUnsafePrompt(t *testing.T) {
 
 func TestWindowsBootEntryMakesVisibleBoundedMenuTheRecommendation(t *testing.T) {
 	output := new(bytes.Buffer)
-	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n\n"), output)
+	session, _ := NewSession(cleanWizardExecutor(), strings.NewReader("2\n\n\n\n\n\n\n\n"), output)
 	session.inspectBoot = func() bootObservation {
 		return bootObservation{bootloader: "GRUB", configurable: true, firmware: "UEFI", detail: "Windows detected", windowsEntry: true}
 	}
@@ -145,6 +145,23 @@ func TestWindowsBootEntryMakesVisibleBoundedMenuTheRecommendation(t *testing.T) 
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("Windows-safe explanation missing %q: %s", expected, output.String())
 		}
+	}
+}
+
+func TestInteractiveSelectionCanEnableInitialWireGuardIngress(t *testing.T) {
+	input := strings.NewReader("2\n\n\n\n\nyes\nvpn.example.org\n\n\n\n\n\n")
+	output := new(bytes.Buffer)
+	session, _ := NewSession(cleanWizardExecutor(), input, output)
+	session.inspectBoot = configurableGRUB
+	selection, err := session.Select(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.EnableWGIngress || selection.WGEndpointHost != "vpn.example.org" || selection.WGSubnetCIDR != "10.90.0.0/24" || selection.WGListenPort != 51820 || strings.Join(selection.WGClientDNS, ",") != "1.1.1.1,9.9.9.9" {
+		t.Fatalf("WireGuard selection = %+v", selection)
+	}
+	if !strings.Contains(output.String(), "проброс") || !strings.Contains(output.String(), "10.90.0.1 не заявляется DNS") {
+		t.Fatalf("WireGuard explanation missing: %s", output.String())
 	}
 }
 

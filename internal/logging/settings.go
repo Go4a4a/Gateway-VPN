@@ -54,6 +54,11 @@ var componentOrder = []string{
 	ComponentAuthAudit,
 }
 
+var categoryOrder = []string{
+	"all", "modems", "subscriptions", "access", "vpn-mihomo", "network",
+	"wireguard-vps", "watchdog", "updates", "security-audit",
+}
+
 type Settings struct {
 	SchemaVersion                 int               `json:"schema_version"`
 	GlobalLevel                   string            `json:"global_level"`
@@ -80,6 +85,22 @@ type UpdateInput struct {
 
 func Components() []string {
 	return append([]string(nil), componentOrder...)
+}
+
+// Categories are stable user-facing log views and exported-file names. They
+// intentionally group low-level components without changing logger severity or
+// recovery semantics.
+func Categories() []string {
+	return append([]string(nil), categoryOrder...)
+}
+
+func validCategory(category string) bool {
+	for _, current := range categoryOrder {
+		if current == category {
+			return true
+		}
+	}
+	return false
 }
 
 func DefaultSettings() Settings {

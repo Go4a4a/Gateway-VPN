@@ -705,7 +705,7 @@ func TestJournalAPIUsesAllowlistedFiltersPaginationAndSessionRateLimit(t *testin
 	}}
 	server.dependencies.Journal = journal
 	cookie, _ := login(t, server)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs?limit=10&level=warning&level=error&component=path_health&path_id=path-a&search=failure", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs?limit=10&level=warning&level=error&component=path_health&category=access&path_id=path-a&search=failure", nil)
 	request.AddCookie(cookie)
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
@@ -713,8 +713,15 @@ func TestJournalAPIUsesAllowlistedFiltersPaginationAndSessionRateLimit(t *testin
 		t.Fatalf("journal query = %d queries=%+v %s", response.Code, journal.queries, response.Body.String())
 	}
 	query := journal.queries[0]
-	if query.Limit != 10 || len(query.Levels) != 2 || query.Levels[0] != loggingpkg.LevelWarning || query.Levels[1] != loggingpkg.LevelError || query.Component != loggingpkg.ComponentPathHealth || query.PathID != "path-a" || query.Search != "failure" {
+	if query.Limit != 10 || len(query.Levels) != 2 || query.Levels[0] != loggingpkg.LevelWarning || query.Levels[1] != loggingpkg.LevelError || query.Component != loggingpkg.ComponentPathHealth || query.Category != "access" || query.PathID != "path-a" || query.Search != "failure" {
 		t.Fatalf("normalized journal query = %+v", query)
+	}
+	invalidCategory := httptest.NewRequest(http.MethodGet, "/api/v1/logs?category=arbitrary-unit", nil)
+	invalidCategory.AddCookie(cookie)
+	invalidCategoryResponse := httptest.NewRecorder()
+	server.ServeHTTP(invalidCategoryResponse, invalidCategory)
+	if invalidCategoryResponse.Code != http.StatusBadRequest || len(journal.queries) != 1 {
+		t.Fatalf("unknown journal category = %d calls=%d", invalidCategoryResponse.Code, len(journal.queries))
 	}
 	unknown := httptest.NewRequest(http.MethodGet, "/api/v1/logs?journalctl_argument=--all", nil)
 	unknown.AddCookie(cookie)
@@ -730,10 +737,10 @@ func TestJournalAPIUsesAllowlistedFiltersPaginationAndSessionRateLimit(t *testin
 	if unsafeResponse.Code != http.StatusBadRequest || len(journal.queries) != 1 {
 		t.Fatalf("unsafe journal cursor = %d calls=%d", unsafeResponse.Code, len(journal.queries))
 	}
-	// Three requests above already consumed the intentionally strict session
+	// Four requests above already consumed the intentionally strict session
 	// budget. Fill the remaining slots and verify the next request is rejected
 	// without reaching the privileged reader.
-	for index := 3; index < journalQueryLimit; index++ {
+	for index := 4; index < journalQueryLimit; index++ {
 		current := httptest.NewRequest(http.MethodGet, "/api/v1/logs?limit=1", nil)
 		current.AddCookie(cookie)
 		recorder := httptest.NewRecorder()

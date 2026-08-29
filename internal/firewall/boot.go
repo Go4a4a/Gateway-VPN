@@ -16,7 +16,7 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 3
+	SchemaGeneration = 4
 )
 
 type BootConfig struct {
@@ -95,6 +95,20 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		type mark
 	}
 
+	set user_ingress_interfaces {
+		type ifname
+		elements = { %s, "wg-ingress" }
+	}
+
+	set wireguard_ingress_listeners {
+		type ifname . inet_service
+	}
+
+	set wireguard_ingress_allowed_v4 {
+		type ipv4_addr
+		flags interval
+	}
+
 	set active_tun_interfaces {
         type ifname
     }
@@ -137,7 +151,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 
     chain prerouting {
 		type filter hook prerouting priority mangle;
-		meta nfproto ipv4 iifname %s meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct modem mark"
+        meta nfproto ipv4 iifname @user_ingress_interfaces meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct uplink mark"
 	}
 
     chain input {
@@ -149,8 +163,11 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         iifname %s udp sport 68 udp dport 67 accept comment "gateway-vpn LAN DHCP request"
         iifname %s udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
+		iifname "wg-ingress" udp dport 53 accept comment "gateway-vpn WireGuard client DNS UDP"
+		iifname "wg-ingress" tcp dport 53 accept comment "gateway-vpn WireGuard client DNS TCP"
         iifname %s tcp dport %d accept comment "gateway-vpn LAN API"
 %s        iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
+		iifname . udp dport @wireguard_ingress_listeners accept comment "gateway-vpn selected WireGuard ingress listener"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
 
@@ -158,15 +175,20 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         type filter hook forward priority filter; policy drop;
         ct state invalid drop
         meta nfproto ipv4 iifname %s oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
+		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified TUN"
         meta nfproto ipv4 iifname @active_tun_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
-		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct modem"
-		meta nfproto ipv4 iifname @active_direct_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct modem to LAN"
+		meta nfproto ipv4 iifname @active_tun_interfaces oifname "wg-ingress" ip daddr @wireguard_ingress_allowed_v4 ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to allowed WireGuard client"
+		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct uplink"
+		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified direct uplink"
+		meta nfproto ipv4 iifname @active_direct_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct uplink to LAN"
+		meta nfproto ipv4 iifname @active_direct_interfaces oifname "wg-ingress" ip daddr @wireguard_ingress_allowed_v4 ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct uplink to allowed WireGuard client"
         counter comment "gateway-vpn PATH_BLOCKED"
     }
 
 	chain postrouting {
 		type nat hook postrouting priority srcnat;
-		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct modem NAT"
+		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct LAN NAT"
+		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct WireGuard NAT"
 	}
 
     chain output {

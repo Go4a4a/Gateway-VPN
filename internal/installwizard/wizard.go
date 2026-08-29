@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/installpreflight"
 	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/platformexec"
+	"gateway-vpn/internal/wgingress"
 )
 
 const inventoryLimit = 4 << 20
@@ -51,7 +52,13 @@ type Selection struct {
 	LANAddress          string
 	EnableDHCP          bool
 	EnableSSH           bool
+	LogReaderUser       string
 	InstallDependencies bool
+	EnableWGIngress     bool
+	WGEndpointHost      string
+	WGSubnetCIDR        string
+	WGListenPort        int
+	WGClientDNS         []string
 	BootNetworkPolicy   BootNetworkPolicy
 	GRUBPolicy          GRUBPolicy
 }
@@ -191,14 +198,31 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 		return Selection{}, err
 	}
 	fmt.Fprintln(session.output)
-	fmt.Fprintln(session.output, "6. Ожидание сети при загрузке Ubuntu")
+	fmt.Fprintln(session.output, "6. Входящий WireGuard для клиентов (необязательно)")
+	fmt.Fprintln(session.output, "Этот режим принимает трафик телефонов, ПК или роутеров по WireGuard и проводит его через выбранный Gateway метод доступа.")
+	fmt.Fprintln(session.output, "Если Gateway стоит за роутером, на роутере понадобится проброс выбранного UDP-порта на LAN-адрес Gateway. Клиентов можно будет создать в WebUI.")
+	enableWGIngress, err := session.yesNo("Включить WireGuard-сервер для клиентов сразу?", false)
+	if err != nil {
+		return Selection{}, err
+	}
+	var wgEndpointHost, wgSubnetCIDR string
+	var wgListenPort int
+	var wgClientDNS []string
+	if enableWGIngress {
+		wgEndpointHost, wgSubnetCIDR, wgListenPort, wgClientDNS, err = session.chooseWireGuardIngress(ctx, lanAddress)
+		if err != nil {
+			return Selection{}, err
+		}
+	}
+	fmt.Fprintln(session.output)
+	fmt.Fprintln(session.output, "7. Ожидание сети при загрузке Ubuntu")
 	fmt.Fprintln(session.output, "HiLink и Ethernet могут быть отключены, медленно запускаться или временно зависнуть. Gateway должен загрузиться и открыть управление независимо от них.")
 	bootNetworkPolicy, err := session.chooseBootNetworkPolicy()
 	if err != nil {
 		return Selection{}, err
 	}
 	fmt.Fprintln(session.output)
-	fmt.Fprintln(session.output, "7. Меню загрузчика GRUB")
+	fmt.Fprintln(session.output, "8. Меню загрузчика GRUB")
 	fmt.Fprintf(session.output, "Обнаружено: %s; режим прошивки: %s. %s\n", boot.bootloader, boot.firmware, boot.detail)
 	grubPolicy, err := session.chooseGRUBPolicy(boot)
 	if err != nil {
@@ -208,6 +232,8 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 	return Selection{
 		LANInterface: LANInterface, LANMembers: interfaceNames(selected), LANAddress: lanAddress,
 		EnableDHCP: enableDHCP, EnableSSH: enableSSH, InstallDependencies: installDependencies,
+		EnableWGIngress: enableWGIngress, WGEndpointHost: wgEndpointHost, WGSubnetCIDR: wgSubnetCIDR,
+		WGListenPort: wgListenPort, WGClientDNS: wgClientDNS,
 		BootNetworkPolicy: bootNetworkPolicy, GRUBPolicy: grubPolicy,
 	}, nil
 }
@@ -224,6 +250,12 @@ func (session *Session) ConfirmApply(version, preflight string, selection Select
 	fmt.Fprintf(session.output, "  Адрес Gateway для Keenetic:      %s\n", selection.LANAddress)
 	fmt.Fprintf(session.output, "  Автонастройка Keenetic (DHCP):   %s\n", yesNoText(selection.EnableDHCP))
 	fmt.Fprintf(session.output, "  Удалённое управление SSH/SFTP:  %s\n", yesNoText(selection.EnableSSH))
+	fmt.Fprintf(session.output, "  SFTP-доступ к redacted-логам:   %s\n", selection.LogReaderUser)
+	fmt.Fprintf(session.output, "  WireGuard для клиентов:       %s\n", yesNoText(selection.EnableWGIngress))
+	if selection.EnableWGIngress {
+		fmt.Fprintf(session.output, "  WireGuard endpoint:              %s:%d\n", selection.WGEndpointHost, selection.WGListenPort)
+		fmt.Fprintf(session.output, "  WireGuard tunnel/DNS:            %s / %s\n", selection.WGSubnetCIDR, strings.Join(selection.WGClientDNS, ", "))
+	}
 	fmt.Fprintf(session.output, "  Недостающие пакеты:              %s\n", allowDenyText(selection.InstallDependencies))
 	fmt.Fprintf(session.output, "  Ожидание внешней сети при boot:  %s\n", bootNetworkPolicyText(selection.BootNetworkPolicy))
 	fmt.Fprintf(session.output, "  Меню GRUB:                       %s\n", grubPolicyText(selection.GRUBPolicy))
@@ -472,6 +504,79 @@ func (session *Session) chooseLAN(ctx context.Context, interfaceName string, dhc
 		}
 		return answer, nil
 	}
+}
+
+func (session *Session) chooseWireGuardIngress(ctx context.Context, lanAddress string) (string, string, int, []string, error) {
+	fmt.Fprintln(session.output, "Первичная топология — ROUTED с приёмом на management/LAN-мосте. Сложный ONE_ARM и другие listener/uplink можно безопасно назначить позже в WebUI, когда виден полный inventory.")
+	for {
+		endpoint, err := session.value("Публичный IP или DNS-имя роутера/VPS (без порта): ", "")
+		if err != nil {
+			return "", "", 0, nil, err
+		}
+		subnet, err := session.value("Подсеть WireGuard [10.90.0.0/24]: ", wgingress.DefaultSubnet)
+		if err != nil {
+			return "", "", 0, nil, err
+		}
+		portText, err := session.value("Входящий UDP-порт [51820]: ", strconv.Itoa(wgingress.DefaultListenPort))
+		if err != nil {
+			return "", "", 0, nil, err
+		}
+		dnsText, err := session.value("Внешние DNS для клиентов через запятую [1.1.1.1,9.9.9.9]: ", "1.1.1.1,9.9.9.9")
+		if err != nil {
+			return "", "", 0, nil, err
+		}
+		port, portErr := strconv.Atoi(portText)
+		dns := splitCommaList(dnsText)
+		if portErr != nil || wgingress.ValidateInitialServerOptions(endpoint, subnet, port, dns) != nil {
+			fmt.Fprintln(session.output, "Неверные WireGuard-параметры: нужны корректные host/IP, частная каноническая /16…/29, UDP 1…65535 кроме 51821 и внешние IPv4 DNS.")
+			continue
+		}
+		wgPrefix, _ := netip.ParsePrefix(subnet)
+		lanPrefix, lanErr := netip.ParsePrefix(lanAddress)
+		if lanErr != nil || wgPrefix.Overlaps(lanPrefix.Masked()) {
+			fmt.Fprintln(session.output, "WireGuard-подсеть пересекается с выбранной LAN-подсетью; выберите другую.")
+			continue
+		}
+		wgHostCIDR := netip.PrefixFrom(wgPrefix.Addr().Next(), wgPrefix.Bits()).String()
+		if err := installpreflight.CheckGatewayLAN(ctx, session.executor, installpreflight.LANOptions{Interface: wgingress.DefaultInterfaceName, CIDR: wgHostCIDR, IPPath: session.ipPath}); err != nil {
+			fmt.Fprintf(session.output, "WireGuard-подсеть конфликтует с сетью этого ПК: %v\n", err)
+			continue
+		}
+		fmt.Fprintln(session.output, "DNS-адреса будут переданы клиентам и пойдут через текущий проверенный метод доступа; локальный 10.90.0.1 не заявляется DNS-сервером.")
+		return strings.TrimSpace(endpoint), wgPrefix.String(), port, dns, nil
+	}
+}
+
+func (session *Session) value(prompt, defaultValue string) (string, error) {
+	for {
+		fmt.Fprint(session.output, prompt)
+		answer, err := session.readLine()
+		if err != nil {
+			return "", err
+		}
+		answer = strings.TrimSpace(answer)
+		if strings.EqualFold(answer, "q") || strings.EqualFold(answer, "quit") || strings.EqualFold(answer, "cancel") {
+			return "", ErrCancelled
+		}
+		if answer == "" {
+			answer = defaultValue
+		}
+		if answer != "" {
+			return answer, nil
+		}
+		fmt.Fprintln(session.output, "Значение не может быть пустым; q отменяет установку.")
+	}
+}
+
+func splitCommaList(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (session *Session) chooseBootNetworkPolicy() (BootNetworkPolicy, error) {
