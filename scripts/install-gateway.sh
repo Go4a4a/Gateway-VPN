@@ -72,7 +72,7 @@ host_upgrade_inner_authorized() {
   [[ $(sed -n 's/^format=//p' "$marker") == 1 ]] || return 1
   [[ $(sed -n 's/^transaction_id=//p' "$marker") =~ ^host-upgrade-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$ ]] || return 1
   [[ $(sed -n 's/^state=//p' "$marker") == APPLYING ]] || return 1
-  [[ $(sed -n 's/^old_version=//p' "$marker") =~ $VERSION_PATTERN ]] || return 1
+  [[ $(sed -n 's/^old_version=//p' "$marker") =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || return 1
   [[ $(sed -n 's/^new_version=//p' "$marker") == "$RELEASE_VERSION" ]] || return 1
   [[ $(sed -n 's/^log_reader_user=//p' "$marker") == "$LOG_READER_USER" ]] || return 1
   [[ $(sed -n 's/^log_reader_group_existed=//p' "$marker") =~ ^[01]$ ]] || return 1

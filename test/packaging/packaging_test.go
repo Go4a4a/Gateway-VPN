@@ -159,7 +159,8 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Count(installer, "host_upgrade_inner_authorized") < 3 ||
 		!strings.Contains(installer, `[[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a' "$marker") == "0:0:600" ]]`) ||
-		!strings.Contains(installer, `[[ $(sed -n 's/^state=//p' "$marker") == APPLYING ]]`) {
+		!strings.Contains(installer, `[[ $(sed -n 's/^state=//p' "$marker") == APPLYING ]]`) ||
+		strings.Contains(installer, "$VERSION_PATTERN") {
 		t.Fatal("inner host-upgrade NTP/DNS exception is not bound to the strict inherited transaction marker")
 	}
 	for _, required := range []string{
