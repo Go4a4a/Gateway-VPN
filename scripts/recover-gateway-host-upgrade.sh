@@ -17,6 +17,13 @@ fi
 exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
 
+RECOVERY_HELPER=/usr/libexec/gateway-vpn-host-upgrade-recovery
+RECOVERY_UNIT=/etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
+RECOVERY_WANTS=/etc/systemd/system/multi-user.target.wants/gateway-vpn-host-upgrade-recovery.service
+[[ $(realpath -e -- "$0") == "$RECOVERY_HELPER" && -f $RECOVERY_HELPER && ! -L $RECOVERY_HELPER && $(stat -c '%u:%g:%a' "$RECOVERY_HELPER") == 0:0:700 ]] || { echo "Host-upgrade recovery helper is unsafe" >&2; exit 1; }
+[[ -f $RECOVERY_UNIT && ! -L $RECOVERY_UNIT && $(stat -c '%u:%g:%a' "$RECOVERY_UNIT") == 0:0:644 ]] || { echo "Host-upgrade recovery unit is unsafe" >&2; exit 1; }
+[[ -L $RECOVERY_WANTS && $(readlink "$RECOVERY_WANTS") == "$RECOVERY_UNIT" ]] || { echo "Host-upgrade boot recovery is not enabled" >&2; exit 1; }
+
 [[ -d $ROOT && ! -L $ROOT && $(stat -c '%u:%g:%a' "$ROOT") == 0:0:700 ]] || { echo "Host-upgrade transaction root is unsafe" >&2; exit 1; }
 [[ -f $ACTIVE && ! -L $ACTIVE && $(stat -c '%u:%g:%a' "$ACTIVE") == 0:0:600 ]] || { echo "Host-upgrade active marker is unsafe" >&2; exit 1; }
 MARKER_BYTES=$(stat -c '%s' "$ACTIVE")
@@ -56,6 +63,16 @@ TOOLING=$TRANSACTION/tooling
 [[ -f $ROOTFS/var/lib/gateway-vpn/state.db && ! -L $ROOTFS/var/lib/gateway-vpn/state.db ]] || { echo "Host-upgrade snapshot lacks the old database" >&2; exit 1; }
 [[ -L $ROOTFS/opt/gateway-vpn/current && $(readlink "$ROOTFS/opt/gateway-vpn/current") == releases/v$OLD_VERSION ]] || { echo "Host-upgrade snapshot current pointer is invalid" >&2; exit 1; }
 [[ -L $ROOTFS/opt/gateway-vpn/recovery && $(readlink "$ROOTFS/opt/gateway-vpn/recovery") == releases/v$OLD_VERSION ]] || { echo "Host-upgrade snapshot recovery pointer is invalid" >&2; exit 1; }
+OLD_RECOVERY_HELPER=$ROOTFS$RECOVERY_HELPER
+OLD_RECOVERY_UNIT=$ROOTFS$RECOVERY_UNIT
+OLD_RECOVERY_WANTS=$ROOTFS$RECOVERY_WANTS
+if [[ -e $OLD_RECOVERY_HELPER || -L $OLD_RECOVERY_HELPER || -e $OLD_RECOVERY_UNIT || -L $OLD_RECOVERY_UNIT ]]; then
+  [[ -f $OLD_RECOVERY_HELPER && ! -L $OLD_RECOVERY_HELPER && $(stat -c '%u:%g:%a' "$OLD_RECOVERY_HELPER") == 0:0:700 ]] || { echo "Snapshotted host-upgrade recovery helper is unsafe" >&2; exit 1; }
+  [[ -f $OLD_RECOVERY_UNIT && ! -L $OLD_RECOVERY_UNIT && $(stat -c '%u:%g:%a' "$OLD_RECOVERY_UNIT") == 0:0:644 ]] || { echo "Snapshotted host-upgrade recovery unit is unsafe" >&2; exit 1; }
+fi
+if [[ -e $OLD_RECOVERY_WANTS || -L $OLD_RECOVERY_WANTS ]]; then
+  [[ -f $OLD_RECOVERY_UNIT && -L $OLD_RECOVERY_WANTS && $(readlink "$OLD_RECOVERY_WANTS") == "$RECOVERY_UNIT" ]] || { echo "Snapshotted host-upgrade recovery enablement is unsafe" >&2; exit 1; }
+fi
 
 gateway_units=(
   gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
@@ -73,9 +90,11 @@ systemctl stop 'gateway-vpn-power-cycle@*.service' 'gateway-vpn-network-rollback
 # table remains installed until the restored release atomically replaces it.
 rm -rf /opt/gateway-vpn /etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-dnsmasq /var/log/gateway-vpn
 shopt -s nullglob
-rm -f /etc/systemd/system/gateway-vpn*.service /etc/systemd/system/gateway-vpn*.socket /etc/systemd/system/gateway-vpn*.timer
+for path in /etc/systemd/system/gateway-vpn*.service /etc/systemd/system/gateway-vpn*.socket /etc/systemd/system/gateway-vpn*.timer; do
+  [[ $path == "$RECOVERY_UNIT" ]] || rm -f -- "$path"
+done
 for link in /etc/systemd/system/*.target.wants/gateway-vpn* /etc/systemd/system/*.service.wants/gateway-vpn*; do
-  [[ -L $link ]] && rm -f -- "$link"
+  [[ $link == "$RECOVERY_WANTS" ]] || { [[ -L $link ]] && rm -f -- "$link"; }
 done
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
 rm -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf
@@ -83,7 +102,7 @@ rm -f /etc/default/grub.d/90-gateway-vpn.cfg
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf
-rm -f /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-host-upgrade-recovery
+rm -f /usr/libexec/gateway-vpn-install-recovery
 shopt -u nullglob
 
 restore_snapshot_item() {
@@ -106,6 +125,7 @@ for source in \
   "$ROOTFS"/usr/lib/sysusers.d/gateway-vpn.conf "$ROOTFS"/usr/lib/tmpfiles.d/gateway-vpn.conf \
   "$ROOTFS"/usr/libexec/gateway-vpn-install-recovery "$ROOTFS"/usr/libexec/gateway-vpn-host-upgrade-recovery \
   "$ROOTFS"/boot/grub/grub.cfg "$ROOTFS"/boot/grub/grubenv; do
+  [[ ${source#"$ROOTFS"} == "$RECOVERY_UNIT" || ${source#"$ROOTFS"} == "$RECOVERY_HELPER" ]] && continue
   restore_snapshot_item "${source#"$ROOTFS"}"
 done
 shopt -u nullglob
@@ -182,6 +202,14 @@ nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
 START_UNITS=(gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-watchdog.service gateway-vpn.service gateway-vpn-update-finalize.timer)
 [[ ! -f /etc/gateway-vpn/dnsmasq.conf ]] || START_UNITS+=(gateway-vpn-dnsmasq.service)
 [[ ! -f /var/lib/gateway-vpn/mihomo/active/config.yaml ]] || START_UNITS+=(gateway-vpn-mihomo.service)
+restore_recovery_guard_projection() {
+  systemctl disable gateway-vpn-host-upgrade-recovery.service >/dev/null 2>&1 || true
+  rm -f -- "$RECOVERY_WANTS" "$RECOVERY_UNIT" "$RECOVERY_HELPER"
+  restore_snapshot_item "$RECOVERY_HELPER"
+  restore_snapshot_item "$RECOVERY_UNIT"
+  restore_snapshot_item "$RECOVERY_WANTS"
+  systemctl daemon-reload
+}
 if [[ ${GATEWAY_VPN_HOST_UPGRADE_RECOVERY_BOOT:-} == 1 ]]; then
   # The recovery unit is ordered Before these services. Queue their jobs and
   # return so systemd can satisfy that ordering without a start-job deadlock.
@@ -189,6 +217,7 @@ if [[ ${GATEWAY_VPN_HOST_UPGRADE_RECOVERY_BOOT:-} == 1 ]]; then
   ROLLED_BACK=$TRANSACTION/rolled-back-$(date -u +%Y%m%dT%H%M%SZ)
   mv -T "$ACTIVE" "$ROLLED_BACK"
   sync -f "$ROOT"
+  restore_recovery_guard_projection
 else
   systemctl start "${START_UNITS[@]}"
   for unit in gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket gateway-vpn.service; do
@@ -199,5 +228,6 @@ else
   ROLLED_BACK=$TRANSACTION/rolled-back-$(date -u +%Y%m%dT%H%M%SZ)
   mv -T "$ACTIVE" "$ROLLED_BACK"
   sync -f "$ROOT"
+  restore_recovery_guard_projection
 fi
 echo "Gateway VPN host-contract upgrade rolled back to $OLD_VERSION; interrupted candidate was $NEW_VERSION"

@@ -181,6 +181,7 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"Host upgrade cannot change WireGuard ingress policy",
 		"Host upgrade cannot change boot or GRUB policy",
 		`database-verify --database "$ROOTFS/var/lib/gateway-vpn/state.db"`,
+		`/etc/systemd/system/multi-user.target.wants/gateway-vpn-host-upgrade-recovery.service`,
 		`install -m 0700 "$OLD_RELEASE/bin/gateway-vpnctl" "$TOOLING/old-gateway-vpnctl"`,
 		"write_marker SNAPSHOT_READY",
 		"write_marker APPLYING",
@@ -226,6 +227,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		`ip -4 address replace "$LAN_ADDRESS" dev "$LAN_INTERFACE"`,
 		`systemctl start --no-block "${START_UNITS[@]}"`,
 		`[[ ! -f /var/lib/gateway-vpn/mihomo/active/config.yaml ]] || START_UNITS+=(gateway-vpn-mihomo.service)`,
+		`[[ $path == "$RECOVERY_UNIT" ]] || rm -f -- "$path"`,
+		`[[ $link == "$RECOVERY_WANTS" ]] ||`,
+		"restore_recovery_guard_projection",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("host-upgrade recovery missing %q", required)
@@ -233,6 +237,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Contains(recovery, `cp -a "$ROOTFS"/. /`) {
 		t.Fatal("host-upgrade recovery can overwrite host directory metadata from synthetic snapshot parents")
+	}
+	if strings.LastIndex(recovery, `mv -T "$ACTIVE" "$ROLLED_BACK"`) > strings.LastIndex(recovery, "restore_recovery_guard_projection") {
+		t.Fatal("host-upgrade recovery removes its boot guardian before the terminal rollback marker is durable")
 	}
 	if !strings.Contains(installRecovery, `if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then`) ||
 		!strings.Contains(installer, "if ((HOST_UPGRADE_INNER == 0)); then\n    flock -u 9") {
