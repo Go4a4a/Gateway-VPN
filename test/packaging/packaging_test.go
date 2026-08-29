@@ -145,6 +145,8 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		`exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`,
 		"--host-upgrade-inner",
 		"Inherited host-upgrade transaction lock is invalid",
+		"host_upgrade_inner_authorized",
+		"Gateway NTP status became unavailable after fail-closed quiesce; continuing with the verified outer host-upgrade preflight",
 		"Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification",
 		"Requested Gateway version does not match signed release metadata",
 	} {
@@ -154,6 +156,11 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Index(installer, `gateway-install-preflight --lan-interface`) > strings.Index(installer, `exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`) {
 		t.Fatal("host-upgrade dispatch occurs before the complete local host preflight")
+	}
+	if strings.Count(installer, "host_upgrade_inner_authorized") < 3 ||
+		!strings.Contains(installer, `[[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a' "$marker") == "0:0:600" ]]`) ||
+		!strings.Contains(installer, `[[ $(sed -n 's/^state=//p' "$marker") == APPLYING ]]`) {
+		t.Fatal("inner host-upgrade NTP/DNS exception is not bound to the strict inherited transaction marker")
 	}
 	for _, required := range []string{
 		`OLD_METADATA_VERSION=$(release_string gateway_version`,
@@ -273,7 +280,7 @@ func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
 	}
 }
 
-func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectDNS(t *testing.T) {
+func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectNetworkPreflight(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	for _, required := range []string{
@@ -287,7 +294,7 @@ func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectD
 		`grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json`,
 		"HOST_UPGRADE_REQUIRED=0",
 		"INNER_UPGRADE_HINT=0",
-		`$(readlink -f /proc/$$/fd/9) == /run/lock/gateway-vpn-install.lock`,
+		`$(readlink -f /proc/$$/fd/9) == "$lock"`,
 		"COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1",
 		"continuing with strict signed existing/upgrade verification",
 	} {

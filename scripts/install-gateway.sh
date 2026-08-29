@@ -54,6 +54,31 @@ watchdog_runtime_ready() {
   grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
 }
 
+host_upgrade_inner_authorized() {
+  local lock=/run/lock/gateway-vpn-install.lock marker=/var/lib/gateway-vpn-host-upgrade/active marker_size key
+  ((HOST_UPGRADE_INNER == 1)) || return 1
+  [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 ]] || return 1
+  [[ -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == "$lock" ]] || return 1
+  [[ -f $lock && ! -L $lock && $(stat -c '%u:%g:%a' "$lock") == "0:0:600" ]] || return 1
+  [[ -d /var/lib/gateway-vpn-host-upgrade && ! -L /var/lib/gateway-vpn-host-upgrade && $(stat -c '%u:%g:%a' /var/lib/gateway-vpn-host-upgrade) == "0:0:700" ]] || return 1
+  [[ -f $marker && ! -L $marker && $(stat -c '%u:%g:%a' "$marker") == "0:0:600" ]] || return 1
+  marker_size=$(stat -c '%s' "$marker")
+  [[ $marker_size =~ ^[0-9]+$ ]] && ((marker_size > 0 && marker_size <= 1024)) || return 1
+  [[ $(wc -l <"$marker") == 8 ]] || return 1
+  [[ $(grep -Ec '^(format|transaction_id|state|old_version|new_version|log_reader_user|log_reader_group_existed|log_reader_was_member)=' "$marker") == 8 ]] || return 1
+  for key in format transaction_id state old_version new_version log_reader_user log_reader_group_existed log_reader_was_member; do
+    [[ $(grep -c "^${key}=" "$marker") == 1 ]] || return 1
+  done
+  [[ $(sed -n 's/^format=//p' "$marker") == 1 ]] || return 1
+  [[ $(sed -n 's/^transaction_id=//p' "$marker") =~ ^host-upgrade-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$ ]] || return 1
+  [[ $(sed -n 's/^state=//p' "$marker") == APPLYING ]] || return 1
+  [[ $(sed -n 's/^old_version=//p' "$marker") =~ $VERSION_PATTERN ]] || return 1
+  [[ $(sed -n 's/^new_version=//p' "$marker") == "$RELEASE_VERSION" ]] || return 1
+  [[ $(sed -n 's/^log_reader_user=//p' "$marker") == "$LOG_READER_USER" ]] || return 1
+  [[ $(sed -n 's/^log_reader_group_existed=//p' "$marker") =~ ^[01]$ ]] || return 1
+  [[ $(sed -n 's/^log_reader_was_member=//p' "$marker") =~ ^[01]$ ]] || return 1
+}
+
 # Ubuntu's ssh.service creates this fixed privilege-separation directory via
 # RuntimeDirectory=sshd before its own OpenSSH configuration check.  A
 # clean host does not have the directory immediately after openssh-server is
@@ -228,7 +253,12 @@ if [[ "$GRUB_POLICY" != keep ]]; then
     [[ "$GRUB_POLICY" == automatic-hidden && -f "$ROOT_DIR/packaging/grub/90-gateway-vpn-automatic.cfg" ]] || { echo "Signed Gateway GRUB policy is missing" >&2; exit 1; }
   }
 fi
-[[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) == yes ]] || { echo "Gateway clock is not reported as NTP-synchronized" >&2; exit 1; }
+INNER_UPGRADE_HINT=0
+host_upgrade_inner_authorized && INNER_UPGRADE_HINT=1
+if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) != yes ]]; then
+  ((INNER_UPGRADE_HINT == 1)) || { echo "Gateway clock is not reported as NTP-synchronized" >&2; exit 1; }
+  echo "Gateway NTP status became unavailable after fail-closed quiesce; continuing with the verified outer host-upgrade preflight"
+fi
 if ! getent ahostsv4 github.com >/dev/null; then
   COMPLETED_INSTALL_HINT=0
   if [[ -f /var/lib/gateway-vpn/install-report.json && ! -L /var/lib/gateway-vpn/install-report.json &&
@@ -247,10 +277,6 @@ if ! getent ahostsv4 github.com >/dev/null; then
      grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
   fi
-  INNER_UPGRADE_HINT=0
-  if ((HOST_UPGRADE_INNER)) && [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 && -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == /run/lock/gateway-vpn-install.lock && -f /var/lib/gateway-vpn-host-upgrade/active ]]; then
-    INNER_UPGRADE_HINT=1
-  fi
   ((COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
   echo "Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification"
 fi
@@ -267,7 +293,7 @@ if ((APPLY)); then
   fi
   [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
   if ((HOST_UPGRADE_INNER)); then
-    [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 && -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == "$LOCK_FILE" && -f /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Inherited host-upgrade transaction lock is invalid" >&2; exit 1; }
+    host_upgrade_inner_authorized || { echo "Inherited host-upgrade transaction lock is invalid" >&2; exit 1; }
   else
     exec 9<>"$LOCK_FILE"
     flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
