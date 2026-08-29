@@ -47,6 +47,7 @@ for executable in \
   /opt/gateway-vpn/current/libexec/mihomo \
   /opt/gateway-vpn/recovery/bin/gateway-vpn \
   /usr/libexec/gateway-vpn-install-recovery \
+  /usr/libexec/gateway-vpn-host-upgrade-recovery \
   /usr/libexec/gateway-vpn-vps-install-recovery; do
   install -m 0755 /usr/bin/true "$executable"
 done

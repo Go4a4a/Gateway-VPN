@@ -2051,6 +2051,9 @@ gateway-vpn/
 │   └── tmpfiles.d/
 ├── scripts/
 │   ├── install-gateway.sh
+│   ├── recover-gateway-install.sh
+│   ├── upgrade-gateway-host.sh
+│   ├── recover-gateway-host-upgrade.sh
 │   ├── install-vps.sh
 │   ├── update.sh
 │   └── uninstall.sh
@@ -2142,6 +2145,16 @@ Systemd запускает `/opt/gateway-vpn/current/bin/gateway-vpn`. Новы�
 
 Pointer-only update дополнительно принимает candidate только при точном совпадении подписанного `host_contract_sha256`, вычисленного по полному набору root-owned lifecycle assets: systemd units, networkd policy, boot wait-online, GRUB, nftables, sysctl, journald, dnsmasq, sysusers/tmpfiles и first-install recovery helper. Изменение этих файлов нельзя молча проигнорировать при переключении binaries: такой artifact отклоняется до host mutation и требует отдельной подписанной installer-upgrade transaction. После успешного stability window и повторной health-проверки `recovery` symlink атомарно переводится на новый проверенный release; до этого момента он остаётся на старом release для rollback. Поэтому следующую update-транзакцию всегда выполняет последний finalized trusted updater, а не произвольно давний binary.
 
+Signed installer-upgrade для изменившегося host contract является отдельной root-транзакцией, а не ослабленным pointer-update:
+
+1. разрешён только из finalized состояния, где `current` и `recovery` указывают на один старый release, отсутствуют pending install/update/restore/network transactions, а LAN/DHCP/SSH/SFTP/`wg-ingress`/boot/GRUB параметры точно совпадают с действующим installation report;
+2. старое дерево проверяется verifier-ом старого подписанного release, candidate — verifier-ом candidate; `release.json.gateway_version`, запрошенная version и фактический `gateway-vpn --version` обязаны совпасть;
+3. до mutation проверяется точная gap-free migration history старой SQLite, затем data path переводится в `PATH_BLOCKED`, control/data services останавливаются и создаётся cold root-only snapshot старого `/opt`, `/etc`, SQLite с WAL/SHM, privileged transaction state, Gateway-owned systemd/networkd/sysctl/GRUB/journald/tmpfiles/sysusers files и экспортированных логов;
+4. recovery helper и его boot unit устанавливаются до durable active marker. Snapshot восстанавливается только по фиксированному allowlist Gateway-owned destinations; копирование synthetic snapshot root поверх `/` запрещено;
+5. candidate installer наследует уже захваченный `flock`, не может освободить внешний lock либо удалить внешний recovery helper и сохраняет persistent config/secrets. После запуска candidate проверяются exact schema/history, services, watchdog и blocked firewall;
+6. новый completed-install marker объединяется со старым так, чтобы будущий uninstall по-прежнему восстанавливал исходные до самой первой установки sysctl/link/SSH/group/boot значения, а не состояние непосредственно перед upgrade;
+7. любая ошибка или reboot/SIGKILL при живом marker запускает независимое восстановление старого signed tree, исходной DB/config/secrets/host projection и только после постановки старых service jobs переводит marker в terminal rollback. При ошибке самого rollback marker сохраняется, а data path остаётся закрыт.
+
 Down-migration новой БД старым binary не используется: rollback всегда восстанавливает snapshot до migration.
 
 ### 17.4 GitHub zero-to-ready deployment
@@ -2186,8 +2199,12 @@ Zero-to-ready workflow обязан:
 - останавливает services;
 - удаляет только rules/tables, принадлежащие Gateway VPN;
 - не выполняет глобальный `flush ruleset`;
-- сохраняет backup по умолчанию;
-- не удаляет пользовательские WireGuard keys без отдельного подтверждения.
+- восстанавливает записанные перед первой установкой forwarding/IPv6, LAN bridge/member/link, SSH service/socket, log-reader membership, boot/network и GRUB состояния только для owned/snapshotted изменений Gateway VPN;
+- режим `Сохранить данные` удаляет программу, units и `/etc/gateway-vpn`, но сохраняет `/var/lib/gateway-vpn` для повторной установки; режим `Полное удаление` после отдельного подтверждения удаляет также DB, secrets, keys, backups и log exports, предварительно предлагая оператору явный экспорт;
+- установленные OS packages по умолчанию не удаляются: после установки они могли стать общими зависимостями другого ПО. Optional dependency cleanup является отдельным expert-действием, допускается только после APT simulation и запрещается при любом removal постороннего пакета;
+- WebUI использует password re-auth, точную русскую фразу, предварительный impact report и отдельный фиксированный root-owned systemd job. После принятия job WebUI закономерно становится недоступен; terminal receipt сохраняется вне удаляемого application tree;
+- перед удалённым apply явно предупреждает, что восстановление прежнего LAN/SSH состояния может оборвать текущую сессию;
+- не обещает factory reset или побайтовое состояние всей Ubuntu: изменения пользователя, других программ, package security updates и не-owned host state не откатываются.
 
 ---
 
@@ -2352,6 +2369,8 @@ Linux network namespaces моделируют:
 | Gateway VPN nftables table удалена | LAN quarantine, восстановление guard, повторная verification | нет |
 | Reboot | старт с blocked ruleset, затем verification | нет |
 | IPv6 router advertisement | ignored/dropped | нет |
+| Reboot/SIGKILL во время signed host-contract upgrade | boot recovery восстанавливает старые signed release + DB + owned host projection; marker сохраняется до успешного rollback | нет |
+| Ошибка либо разрыв WebUI во время uninstall | root job продолжает по durable marker; при незавершённом restore исходных owned состояний повторяет recovery и не выдаёт ложный success | нет |
 
 ### 18.5 Обязательные fixtures
 

@@ -37,6 +37,7 @@ const (
 	LegacyHashFilename    = "manifest.sha256"
 	MaximumManifestBytes  = int64(256 << 10)
 	MaximumReleaseBytes   = int64(64 << 10)
+	maximumHostFileBytes  = int64(256 << 10)
 	MaximumSignatureBytes = int64(1024)
 	MaximumArtifactBytes  = int64(768 << 20)
 	MaximumFileBytes      = int64(512 << 20)
@@ -520,6 +521,7 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd/gateway-vpn-firewall-guard.service",
 	"packaging/systemd/gateway-vpn-network-broker.socket",
 	"packaging/systemd/gateway-vpn-power-cycle@.service",
+	"packaging/systemd/gateway-vpn-host-upgrade-recovery.service",
 	"packaging/systemd/gateway-vpn-update.service",
 	"packaging/systemd/gateway-vpn-update-recovery.service",
 	"packaging/systemd/gateway-vpn-update-resume.service",
@@ -532,7 +534,11 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd-wait-online/gateway-vpn.conf",
 	"packaging/sysusers.d/gateway-vpn.conf",
 	"packaging/tmpfiles.d/gateway-vpn.conf",
+	"scripts/install-gateway.sh",
 	"scripts/recover-gateway-install.sh",
+	"scripts/upgrade-gateway-host.sh",
+	"scripts/recover-gateway-host-upgrade.sh",
+	"scripts/uninstall.sh",
 }
 
 var hostContractDirectories = []string{
@@ -549,7 +555,11 @@ var hostContractDirectories = []string{
 }
 
 var hostContractStandaloneFiles = []string{
+	"scripts/install-gateway.sh",
 	"scripts/recover-gateway-install.sh",
+	"scripts/upgrade-gateway-host.sh",
+	"scripts/recover-gateway-host-upgrade.sh",
+	"scripts/uninstall.sh",
 }
 
 type hostContractFile struct {
@@ -570,7 +580,7 @@ func ComputeHostContractSHA256(root string) (string, error) {
 	files := make([]hostContractFile, 0, 48)
 	seen := make(map[string]bool, 48)
 	addFile := func(path string, info os.FileInfo) error {
-		if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaximumReleaseBytes {
+		if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumHostFileBytes {
 			return errors.New("release host lifecycle contract contains an invalid file")
 		}
 		relative, err := filepath.Rel(root, path)
@@ -581,7 +591,7 @@ func ComputeHostContractSHA256(root string) (string, error) {
 		if !safeRelativePath(relative) || seen[relative] {
 			return errors.New("release host lifecycle contract path is invalid or duplicated")
 		}
-		digest, bytesRead, err := hashFile(path, MaximumReleaseBytes)
+		digest, bytesRead, err := hashFile(path, maximumHostFileBytes)
 		if err != nil || bytesRead != info.Size() {
 			return errors.New("hash release host lifecycle contract file failed")
 		}

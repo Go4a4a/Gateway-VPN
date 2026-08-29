@@ -15,8 +15,12 @@ if [[ ! -e "$LOCK_FILE" && ! -L "$LOCK_FILE" ]]; then
   (set -o noclobber; : >"$LOCK_FILE") || { echo "Cannot create Gateway transaction lock safely" >&2; exit 1; }
 fi
 [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
-exec 9<>"$LOCK_FILE"
-flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
+if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 ]]; then
+  [[ -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == "$LOCK_FILE" && -f /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Inherited host-upgrade recovery lock is invalid" >&2; exit 1; }
+else
+  exec 9<>"$LOCK_FILE"
+  flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
+fi
 [[ -f "$MARKER" && ! -L "$MARKER" && $(stat -c '%u:%g:%a' "$MARKER") == "0:0:600" ]] || { echo "Gateway recovery marker ownership or mode is invalid" >&2; exit 1; }
 MARKER_BYTES=$(stat -c '%s' "$MARKER")
 [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Gateway recovery marker size is invalid" >&2; exit 1; }
@@ -127,6 +131,9 @@ UNITS=(
   gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service
   gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service
 )
+if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then
+  UNITS+=(gateway-vpn-host-upgrade-recovery.service)
+fi
 systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' >/dev/null 2>&1 || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' >/dev/null 2>&1 || true
@@ -199,21 +206,32 @@ rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway
 rm -rf /etc/gateway-vpn || record_failure "remove owned Gateway config"
 rm -f /opt/gateway-vpn/current /opt/gateway-vpn/recovery /opt/gateway-vpn/.current.new /opt/gateway-vpn/.recovery.new || record_failure "remove release pointers"
 rm -rf "/opt/gateway-vpn/releases/v$VERSION" || record_failure "remove failed release"
-for unit_file in \
+UNIT_FILES=( \
   gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service \
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service \
   gateway-vpn-power-cycle@.service \
   gateway-vpn-database-restore-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service \
-  gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
+  gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer
+)
+if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then
+  UNIT_FILES+=(gateway-vpn-host-upgrade-recovery.service)
+fi
+for unit_file in "${UNIT_FILES[@]}"; do
   rm -f "/etc/systemd/system/$unit_file" || record_failure "remove owned unit $unit_file"
 done
+if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then
+  rm -f /usr/libexec/gateway-vpn-host-upgrade-recovery || record_failure "remove owned host-upgrade recovery helper"
+fi
 rm -f /var/lib/gateway-vpn/install-report.json || record_failure "remove incomplete install report"
 rm -f /run/gateway-vpn-install-authorized || record_failure "remove ephemeral service-start authorization"
 rm -rf /var/lib/gateway-vpn-dnsmasq || record_failure "remove newly created dnsmasq state root"
 if ((PRESERVE_STATE_ROOT == 0)); then
   rm -rf /var/lib/gateway-vpn || record_failure "remove newly created Gateway state root"
   rm -rf /var/log/gateway-vpn || record_failure "remove newly created Gateway log export root"
+fi
+if [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]]; then
+  rm -rf /var/lib/gateway-vpn-host-upgrade || record_failure "remove unused host-upgrade transaction root"
 fi
 networkctl reload || record_failure "reload networkd after policy cleanup"
 systemctl daemon-reload || record_failure "reload systemd after owned-state cleanup"

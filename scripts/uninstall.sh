@@ -26,6 +26,7 @@ fi
 exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-privileged/install-transactions/active && ! -L /var/lib/gateway-vpn-privileged/install-transactions/active ]] || { echo "Recover the interrupted Gateway install before uninstall" >&2; exit 1; }
+[[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted Gateway host upgrade before uninstall" >&2; exit 1; }
 
 validate_marker_lan() {
   local cidr=$1 ip prefix a b c d octet ip_value host_mask network_value broadcast_value wg_start wg_end
@@ -150,13 +151,14 @@ restore_systemd_unit_state() {
     ! systemctl is-active --quiet "$unit"
   fi
 }
-systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service 2>/dev/null || true
+systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 2>/dev/null || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
 rm -f /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-mihomo.service /etc/systemd/system/gateway-vpn-dnsmasq.service /etc/systemd/system/gateway-vpn-firewall.service
 rm -f /etc/systemd/system/gateway-vpn-network-broker.socket /etc/systemd/system/gateway-vpn-network-broker.service /etc/systemd/system/gateway-vpn-network-recovery.service /etc/systemd/system/gateway-vpn-network-rollback@.timer /etc/systemd/system/gateway-vpn-network-rollback@.service /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service /etc/systemd/system/gateway-vpn-database-restore.service /etc/systemd/system/gateway-vpn-database-restore-resume.service /etc/systemd/system/gateway-vpn-firewall-guard.service
 rm -f /etc/systemd/system/gateway-vpn-update.service /etc/systemd/system/gateway-vpn-update-recovery.service /etc/systemd/system/gateway-vpn-update-resume.service /etc/systemd/system/gateway-vpn-update-finalize.service /etc/systemd/system/gateway-vpn-update-finalize.timer
 rm -f /etc/systemd/system/gateway-vpn-power-cycle@.service
+rm -f /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
@@ -214,11 +216,12 @@ rm -rf /etc/gateway-vpn /opt/gateway-vpn
 rm -f /var/lib/gateway-vpn/install-report.json
 rm -rf /var/lib/gateway-vpn-dnsmasq
 rm -f /run/gateway-vpn-install-authorized
-rm -f /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery
+rm -f /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-host-upgrade-recovery
 if ((PURGE_DATA)); then
   [[ -f /var/lib/gateway-vpn/state.db ]] && cp --reflink=auto --sparse=always /var/lib/gateway-vpn/state.db "/root/gateway-vpn-state-$(date -u +%Y%m%dT%H%M%SZ).db"
   rm -rf /var/lib/gateway-vpn
   rm -rf /var/lib/gateway-vpn-privileged
+  rm -rf /var/lib/gateway-vpn-host-upgrade
 fi
 networkctl reload
 systemctl daemon-reload

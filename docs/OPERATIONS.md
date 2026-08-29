@@ -767,6 +767,29 @@ sudo nft list table inet gateway_vpn
 
 Не удаляйте staging, root journal, snapshot, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering. Exact privileged Ubuntu 24.04 Docker/systemd install/update/rollback/finalize/reboot gate пройден; bare-metal reboot/power-cut и 24/72h hardware endurance остаются обязательными до production acceptance.
 
+### Подписанное обновление host contract
+
+Если `host_contract_sha256` candidate отличается, обычный WebUI pointer-update правильно отклоняет artifact до mutation. Обновление выполняется той же version-pinned bootstrap/installer командой новой версии: candidate installer обнаруживает finalized старую установку и передаёт работу `scripts/upgrade-gateway-host.sh`. Helper напрямую вручную не запускается.
+
+Host-upgrade не совмещается с перенастройкой LAN, DHCP, SSH/SFTP, log-reader, `wg-ingress`, wait-online или GRUB. Сначала примените/откатите отдельную safe configuration transaction, затем повторите upgrade с параметрами действующего installation report. Старый release проверяет собственный signed tree своим verifier-ом; новый verifier проверяет candidate и точную gap-free migration history DB.
+
+После `PATH_BLOCKED` и остановки runtime создаётся cold root-only snapshot под `/var/lib/gateway-vpn-host-upgrade/transactions/<id>/snapshot`. В него входят старые release pointers/tree, SQLite/WAL/SHM, config/secrets, privileged state и только фиксированные Gateway-owned host files. Synthetic snapshot parents никогда не копируются поверх `/etc`, `/usr`, `/var` или `/boot`; recovery восстанавливает отдельный allowlist destinations. Candidate first-install rollback наследует внешний FD lock и не имеет права удалить host-upgrade recovery helper.
+
+Durable marker `/var/lib/gateway-vpn-host-upgrade/active` существует от готового snapshot до полной проверки candidate. Ошибка, SIGKILL либо новый boot вызывает `gateway-vpn-host-upgrade-recovery.service`, который возвращает старую signed release+DB pair, LAN/policies/services и оставляет firewall в `PATH_BLOCKED`. Старый pre-first-install marker переносится в новый completed marker, поэтому последующий uninstall восстанавливает состояние ОС до самой первой установки, а не до последнего upgrade.
+
+Диагностика:
+
+```bash
+sudo systemctl status gateway-vpn-host-upgrade-recovery.service
+sudo journalctl --namespace=gateway-vpn -u gateway-vpn-host-upgrade-recovery.service
+sudo ls -la /var/lib/gateway-vpn-host-upgrade/
+sudo readlink /opt/gateway-vpn/current
+sudo readlink /opt/gateway-vpn/recovery
+sudo nft list chain inet gateway_vpn forward
+```
+
+Не удаляйте `active`, transaction/tooling/snapshot или recovery unit вручную. Если recovery завершился ошибкой, marker намеренно остаётся и следующий boot может повторить идемпотентное восстановление. Exact success/failure/new-PID1 matrix относится только к тому candidate, для которого сохранено evidence; bare-metal power cut остаётся отдельным gate.
+
 ## Входящий WireGuard для клиентов
 
 Вкладка **WireGuard-клиенты** управляет отдельным интерфейсом `wg-ingress`; он не является служебным `wg-mgmt`. Сервер можно включить при первой интерактивной установке либо позднее в WebUI. Standard routed profile использует отдельную private subnet (по умолчанию `10.90.0.0/24`), UDP port и public endpoint для готовых клиентских профилей. Если Gateway находится за Keenetic/другим NAT, этот UDP port нужно пробросить на LAN-адрес Gateway. Firewall принимает его только на выбранных listener interfaces; disabled или failed apply полностью удаляет `wg-ingress` из kernel.
@@ -837,4 +860,8 @@ Guard никогда не выполняет `nft flush ruleset` и не вос�
 
 ## Удаление
 
-`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` удаляет units/program/config, но сохраняет `/var/lib/gateway-vpn`. `--purge-data --apply` сначала сохраняет копию SQLite в `/root`, затем удаляет runtime data. Host firewall/network после удаления восстанавливаются только явной административной операцией.
+`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` закрывает data path, удаляет units/program/config и owned nftables/networkd/sysctl/journald/GRUB projection, восстанавливает сохранённые перед первой установкой forwarding/IPv6, LAN link/bridge members, SSH service/socket и log-reader membership, но сохраняет `/var/lib/gateway-vpn` для повторной установки. `--purge-data --apply` дополнительно удаляет application DB/secrets/keys/backups; текущая CLI перед purge сохраняет root-only копию SQLite в `/root`.
+
+Удаление не является factory reset Ubuntu. Установленные системные packages не удаляются автоматически, чужие firewall/network rules не изменяются, а изменения, сделанные оператором или другим ПО после установки, не угадываются и не откатываются. После удаления owned firewall table оператор обязан убедиться, что обычная host firewall policy соответствует его требованиям. Восстановление прежней сети либо отключение SSH, который до установки был выключен, может оборвать текущую сессию.
+
+WebUI contract для **Система и безопасность → Удаление Gateway VPN** требует password re-auth, точной фразы, выбора `Сохранить данные`/`Полностью удалить`, downloadable backup и точного impact preview. HTTP-процесс только ставит fixed root-owned uninstall job; после его принятия исчезновение WebUI ожидаемо. Реализация WebUI trigger и durable terminal receipt остаётся отдельным незавершённым increment и не считается готовой по наличию CLI script.

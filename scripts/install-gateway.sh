@@ -24,6 +24,7 @@ LAN_ADDRESS="192.168.200.1/24"
 LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
+HOST_UPGRADE_INNER=0
 
 usage() {
   echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --log-reader-user USER --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress --wireguard-endpoint-host HOST --wireguard-subnet CIDR --wireguard-listen-port PORT --wireguard-client-dns IP[,IP...]] [--apply]"
@@ -118,6 +119,7 @@ while (($#)); do
     --wireguard-subnet) WIREGUARD_SUBNET=${2:?}; shift 2 ;;
     --wireguard-listen-port) WIREGUARD_LISTEN_PORT=${2:?}; shift 2 ;;
     --wireguard-client-dns) WIREGUARD_CLIENT_DNS=${2:?}; shift 2 ;;
+    --host-upgrade-inner) HOST_UPGRADE_INNER=1; shift ;;
     --apply) APPLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -126,6 +128,7 @@ done
 
 [[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" && -n "$LOG_READER_USER" && -n "$BOOT_NETWORK_POLICY" && -n "$GRUB_POLICY" ]] || { usage >&2; exit 2; }
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
+((HOST_UPGRADE_INNER == 0)) || [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 ]] || { echo "--host-upgrade-inner is reserved for the signed host-upgrade transaction" >&2; exit 2; }
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]] || { echo "Invalid version" >&2; exit 2; }
 [[ "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "Invalid LAN interface" >&2; exit 2; }
@@ -184,10 +187,12 @@ fi
 RELEASE_DIR=$(realpath -- "$RELEASE_DIR")
 TRUSTED_UPDATE_KEY=$(realpath -- "$TRUSTED_UPDATE_KEY")
 [[ -f "$TRUSTED_UPDATE_KEY" && ! -L "$TRUSTED_UPDATE_KEY" ]] || { echo "Trusted update public key must be a regular non-symlink file" >&2; exit 1; }
-[[ -x "$RELEASE_DIR/bin/gateway-vpn" && -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/libexec/mihomo" && -x "$RELEASE_DIR/scripts/recover-gateway-install.sh" ]] || { echo "Release binaries or recovery helper are incomplete" >&2; exit 1; }
+[[ -x "$RELEASE_DIR/bin/gateway-vpn" && -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/libexec/mihomo" && -x "$RELEASE_DIR/scripts/recover-gateway-install.sh" && -x "$RELEASE_DIR/scripts/upgrade-gateway-host.sh" && -x "$RELEASE_DIR/scripts/recover-gateway-host-upgrade.sh" ]] || { echo "Release binaries or recovery helpers are incomplete" >&2; exit 1; }
 [[ -f "$RELEASE_DIR/manifest.sha256" && -f "$RELEASE_DIR/manifest.json" && -f "$RELEASE_DIR/release.sig" && -f "$RELEASE_DIR/release.json" ]] || { echo "Signed release requires release metadata, file manifest and detached signature" >&2; exit 1; }
 (cd -- "$RELEASE_DIR" && sha256sum --check --strict manifest.sha256)
 "$RELEASE_DIR/bin/gateway-vpnctl" release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --current-version 0.0.0 --current-schema 1
+SIGNED_RELEASE_VERSION=$(sed -n 's/^[[:space:]]*"gateway_version": "\([^"]*\)",\{0,1\}$/\1/p' "$RELEASE_DIR/release.json")
+[[ "$SIGNED_RELEASE_VERSION" == "$RELEASE_VERSION" ]] || { echo "Requested Gateway version does not match signed release metadata" >&2; exit 1; }
 RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 [[ "$RELEASE_VERSION_OUTPUT" == "gateway-vpn $RELEASE_VERSION "* ]] || { echo "Release binary version does not match --version" >&2; exit 1; }
 if ((ENABLE_WIREGUARD_INGRESS)); then
@@ -199,9 +204,25 @@ fi
 source /etc/os-release
 [[ ${ID:-} == ubuntu && ${VERSION_ID:-} == 24.04 ]] || { echo "Gateway VPN requires Ubuntu 24.04" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN release currently requires x86_64" >&2; exit 1; }
-for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm rmdir sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd; do
+for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm rmdir sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd groupdel od; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
+if ((HOST_UPGRADE_INNER == 0)) && [[ -L /opt/gateway-vpn/current ]] && [[ $(readlink /opt/gateway-vpn/current) != "releases/v$RELEASE_VERSION" ]]; then
+  HOST_UPGRADE_ARGS=(
+    --release-dir "$RELEASE_DIR" --trusted-update-key "$TRUSTED_UPDATE_KEY" --version "$RELEASE_VERSION"
+    --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
+    --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY"
+  )
+  [[ -z $LAN_MEMBERS ]] || HOST_UPGRADE_ARGS+=(--lan-members "$LAN_MEMBERS")
+  ((INSTALL_DEPENDENCIES == 0)) || HOST_UPGRADE_ARGS+=(--install-dependencies)
+  ((ENABLE_DHCP == 0)) || HOST_UPGRADE_ARGS+=(--enable-dhcp)
+  ((ENABLE_SSH == 1)) || HOST_UPGRADE_ARGS+=(--disable-ssh)
+  if ((ENABLE_WIREGUARD_INGRESS)); then
+    HOST_UPGRADE_ARGS+=(--enable-wireguard-ingress --wireguard-endpoint-host "$WIREGUARD_ENDPOINT_HOST" --wireguard-subnet "$WIREGUARD_SUBNET" --wireguard-listen-port "$WIREGUARD_LISTEN_PORT" --wireguard-client-dns "$WIREGUARD_CLIENT_DNS")
+  fi
+  ((APPLY == 0)) || HOST_UPGRADE_ARGS+=(--apply)
+  exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh" "${HOST_UPGRADE_ARGS[@]}"
+fi
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
   [[ -f "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" ]] || { echo "Signed Gateway boot-network policy is missing" >&2; exit 1; }
 fi
@@ -253,8 +274,12 @@ if ((APPLY)); then
     (set -o noclobber; : >"$LOCK_FILE") || { echo "Cannot create Gateway transaction lock safely" >&2; exit 1; }
   fi
   [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
-  exec 9<>"$LOCK_FILE"
-  flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
+  if ((HOST_UPGRADE_INNER)); then
+    [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 && -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == "$LOCK_FILE" && -f /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Inherited host-upgrade transaction lock is invalid" >&2; exit 1; }
+  else
+    exec 9<>"$LOCK_FILE"
+    flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
+  fi
 fi
 [[ ! -e /var/lib/gateway-vpn-privileged/install-transactions/active && ! -L /var/lib/gateway-vpn-privileged/install-transactions/active ]] || { echo "Interrupted Gateway installation requires recovery before retry" >&2; exit 1; }
 [[ ! -e /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized ]] || { echo "Stale Gateway install authorization artifact requires operator recovery" >&2; exit 1; }
@@ -446,7 +471,13 @@ fi
 
 DEST="/opt/gateway-vpn/releases/v$RELEASE_VERSION"
 EXISTING=0
-if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery || -e /etc/gateway-vpn || -e /var/lib/gateway-vpn/install-report.json ]]; then
+EXISTING_PROJECTION=0
+if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery || -e /var/lib/gateway-vpn/install-report.json ]]; then
+  EXISTING_PROJECTION=1
+elif ((HOST_UPGRADE_INNER == 0)) && [[ -e /etc/gateway-vpn || -L /etc/gateway-vpn ]]; then
+  EXISTING_PROJECTION=1
+fi
+if ((EXISTING_PROJECTION)); then
   [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" && -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] || { echo "Partial or conflicting Gateway VPN installation exists" >&2; exit 1; }
   for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/05-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /etc/systemd/system/gateway-vpn-power-cycle@.service /usr/libexec/gateway-vpn-install-recovery; do
     [[ -f "$installed_asset" && ! -L "$installed_asset" ]] || { echo "Installed Gateway asset is missing or unsafe: $installed_asset" >&2; exit 1; }
@@ -548,6 +579,9 @@ else
     /etc/systemd/system/gateway-vpn-power-cycle@.service \
     /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service \
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
+    if ((HOST_UPGRADE_INNER)) && [[ "$conflict" == /var/lib/gateway-vpn-dnsmasq ]]; then
+      continue
+    fi
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict" >&2; exit 1; }
   done
   if find /etc/systemd/network -maxdepth 1 -name '06-gateway-vpn-lan-*.network' -print -quit | grep -q .; then
@@ -559,8 +593,12 @@ else
     exit 1
   fi
   if nft list table inet gateway_vpn >/dev/null 2>&1; then
-    echo "Unmanaged table inet gateway_vpn already exists" >&2
-    exit 1
+    if ((HOST_UPGRADE_INNER)); then
+      nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED' || { echo "Inherited Gateway firewall is not fail-closed" >&2; exit 1; }
+    else
+      echo "Unmanaged table inet gateway_vpn already exists" >&2
+      exit 1
+    fi
   fi
 fi
 echo "Validated Ubuntu 24.04 release $RELEASE_VERSION"
@@ -632,8 +670,11 @@ fi
 install -d -m 0700 /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-privileged/install-transactions
 install -D -m 0700 "$ROOT_DIR/scripts/recover-gateway-install.sh" /usr/libexec/gateway-vpn-install-recovery
 install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-install-recovery.service" /etc/systemd/system/gateway-vpn-install-recovery.service
+install -d -m 0700 /var/lib/gateway-vpn-host-upgrade
+install -D -m 0700 "$ROOT_DIR/scripts/recover-gateway-host-upgrade.sh" /usr/libexec/gateway-vpn-host-upgrade-recovery
+install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-host-upgrade-recovery.service" /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
 systemctl daemon-reload
-systemctl enable gateway-vpn-install-recovery.service
+systemctl enable gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
 printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
@@ -646,8 +687,10 @@ rollback_install() {
   local code=${1:-1}
   trap - ERR INT TERM EXIT
   ((code != 0)) || exit 0
-  flock -u 9 || true
-  exec 9>&-
+  if ((HOST_UPGRADE_INNER == 0)); then
+    flock -u 9 || true
+    exec 9>&-
+  fi
   if [[ -x /usr/libexec/gateway-vpn-install-recovery ]]; then
     /usr/libexec/gateway-vpn-install-recovery || true
   fi
@@ -694,14 +737,20 @@ done
 sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__SSH_RULE__|$SSH_NFT_RULE|g" "$ROOT_DIR/packaging/nftables/boot.nft.in" >/etc/gateway-vpn/nftables/boot.nft
 chown root:gateway-vpn /etc/gateway-vpn/nftables/boot.nft
 chmod 0640 /etc/gateway-vpn/nftables/boot.nft
-nft --check --file /etc/gateway-vpn/nftables/boot.nft
+if ((HOST_UPGRADE_INNER)); then
+  "$RELEASE_DIR/bin/gateway-vpn" firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+else
+  nft --check --file /etc/gateway-vpn/nftables/boot.nft
+fi
 if ((ENABLE_SSH)); then
   grep -Fq "iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"" /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway SSH firewall rule is not scoped to the selected management LAN" >&2; exit 1; }
   [[ $(grep -Ec 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft) == 1 ]] || { echo "Gateway firewall must contain exactly one LAN-scoped SSH rule" >&2; exit 1; }
 else
   ! grep -Eq 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway firewall unexpectedly exposes SSH while SSH/SFTP management is disabled" >&2; exit 1; }
 fi
-nft --file /etc/gateway-vpn/nftables/boot.nft
+if ((HOST_UPGRADE_INNER == 0)); then
+  nft --file /etc/gateway-vpn/nftables/boot.nft
+fi
 nft list table inet gateway_vpn >/dev/null
 if ((${#MISSING_LATE_PACKAGES[@]})); then
   simulate_dependency_install || { echo "Late Gateway dependency simulation failed after PATH_BLOCKED firewall activation" >&2; exit 1; }
@@ -778,6 +827,7 @@ for unit in gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewal
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service \
   gateway-vpn-power-cycle@.service \
+  gateway-vpn-host-upgrade-recovery.service \
   gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   install -D -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "/etc/systemd/system/$unit"
@@ -791,7 +841,7 @@ chmod 0600 /run/gateway-vpn-install-authorized
 [[ -f /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-install-authorized) == "0:0:600" ]] || { echo "Ephemeral Gateway service-start authorization is unsafe" >&2; exit 1; }
 systemctl daemon-reload
 systemctl try-restart systemd-journald@gateway-vpn.service
-systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service
+systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service gateway-vpn-host-upgrade-recovery.service
 systemctl enable --now gateway-vpn-update-finalize.timer
 systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service

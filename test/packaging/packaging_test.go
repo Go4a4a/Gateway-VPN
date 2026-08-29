@@ -133,6 +133,87 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	}
 }
 
+func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	upgrader := read(t, filepath.Join(root, "scripts", "upgrade-gateway-host.sh"))
+	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-host-upgrade.sh"))
+	installRecovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
+	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-host-upgrade-recovery.service"))
+
+	for _, required := range []string{
+		`exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`,
+		"--host-upgrade-inner",
+		"Inherited host-upgrade transaction lock is invalid",
+		"Requested Gateway version does not match signed release metadata",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer host-upgrade dispatch missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`OLD_METADATA_VERSION=$(release_string gateway_version`,
+		`NEW_METADATA_VERSION=$(release_string gateway_version`,
+		`"$OLD_RELEASE/bin/gateway-vpnctl" release-verify`,
+		`"$RELEASE_DIR/bin/gateway-vpnctl" release-verify`,
+		"validate_completed_install_marker",
+		"Host upgrade cannot combine release replacement with LAN reconfiguration",
+		"Host upgrade cannot change DHCP policy",
+		"Host upgrade cannot change SSH/SFTP policy",
+		"Host upgrade cannot change WireGuard ingress policy",
+		"Host upgrade cannot change boot or GRUB policy",
+		`database-verify --database "$ROOTFS/var/lib/gateway-vpn/state.db"`,
+		`install -m 0700 "$OLD_RELEASE/bin/gateway-vpnctl" "$TOOLING/old-gateway-vpnctl"`,
+		"write_marker SNAPSHOT_READY",
+		"write_marker APPLYING",
+		"write_marker CANDIDATE_READY",
+		`GATEWAY_VPN_HOST_UPGRADE_INNER=1 "$RELEASE_DIR/scripts/install-gateway.sh"`,
+		`--trusted-update-key "$TOOLING/update-signing.pub"`,
+		"Merged host-upgrade install marker does not preserve the original OS state",
+	} {
+		if !strings.Contains(upgrader, required) {
+			t.Errorf("signed host upgrade contract missing %q", required)
+		}
+	}
+	if strings.Contains(upgrader, "rm -rf /etc/gateway-vpn") {
+		t.Fatal("host upgrade destroys persistent Gateway configuration instead of preserving it")
+	}
+	for _, required := range []string{
+		"ConditionPathExists=/var/lib/gateway-vpn-host-upgrade/active",
+		"Before=gateway-vpn-install-recovery.service gateway-vpn-firewall.service",
+		"GATEWAY_VPN_HOST_UPGRADE_RECOVERY_BOOT=1",
+		"ReadWritePaths=/etc /boot/grub",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Errorf("host-upgrade boot recovery unit missing %q", required)
+		}
+	}
+	if strings.Contains(unit, "ProtectKernelTunables=yes") {
+		t.Fatal("host-upgrade recovery cannot restore snapshotted sysctls while ProtectKernelTunables is enabled")
+	}
+	for _, required := range []string{
+		`verifier=$TOOLING/gateway-vpnctl`,
+		`old_verifier=$TOOLING/old-gateway-vpnctl`,
+		`restore_snapshot_item()`,
+		`"$old_verifier" release-verify --release-dir "/opt/gateway-vpn/releases/v$OLD_VERSION"`,
+		`ip link add name "$LAN_INTERFACE" type bridge`,
+		`ip -4 address replace "$LAN_ADDRESS" dev "$LAN_INTERFACE"`,
+		`systemctl start --no-block "${START_UNITS[@]}"`,
+		`[[ ! -f /var/lib/gateway-vpn/mihomo/active/config.yaml ]] || START_UNITS+=(gateway-vpn-mihomo.service)`,
+	} {
+		if !strings.Contains(recovery, required) {
+			t.Errorf("host-upgrade recovery missing %q", required)
+		}
+	}
+	if strings.Contains(recovery, `cp -a "$ROOTFS"/. /`) {
+		t.Fatal("host-upgrade recovery can overwrite host directory metadata from synthetic snapshot parents")
+	}
+	if !strings.Contains(installRecovery, `if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then`) ||
+		!strings.Contains(installer, "if ((HOST_UPGRADE_INNER == 0)); then\n    flock -u 9") {
+		t.Fatal("nested first-install rollback can release the outer lock or remove its recovery helper")
+	}
+}
+
 func TestGatewayInstallerPreparesFixedOpenSSHRuntimeDirectorySafely(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))

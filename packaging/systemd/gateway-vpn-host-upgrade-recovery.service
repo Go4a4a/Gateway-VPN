@@ -1,0 +1,40 @@
+[Unit]
+Description=Recover an interrupted Gateway VPN signed host-contract upgrade
+Documentation=file:///opt/gateway-vpn/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target
+Before=gateway-vpn-install-recovery.service gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn.service
+ConditionPathExists=/var/lib/gateway-vpn-host-upgrade/active
+
+[Service]
+LogNamespace=gateway-vpn
+Type=oneshot
+Environment=GATEWAY_VPN_HOST_UPGRADE_RECOVERY_UNIT=1
+Environment=GATEWAY_VPN_HOST_UPGRADE_RECOVERY_BOOT=1
+ExecStart=/usr/libexec/gateway-vpn-host-upgrade-recovery --apply
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ReadOnlyPaths=/usr
+ReadWritePaths=/etc /boot/grub /usr/libexec /usr/lib/sysusers.d /usr/lib/tmpfiles.d /opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-dnsmasq /var/lib/gateway-vpn-host-upgrade /var/log/gateway-vpn /run
+
+[Install]
+WantedBy=multi-user.target

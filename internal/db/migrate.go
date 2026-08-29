@@ -61,6 +61,34 @@ func ReadSchemaVersion(ctx context.Context, database *sql.DB) (int64, error) {
 	return version, nil
 }
 
+// VerifyMigrationHistory validates the exact, gap-free migration prefix
+// without applying or otherwise mutating it. A numerically correct maximum
+// version alone is not sufficient evidence for a safe rollback snapshot.
+func VerifyMigrationHistory(ctx context.Context, database *sql.DB, expected int64) error {
+	available, err := loadMigrations(migrations.Files)
+	if err != nil {
+		return err
+	}
+	if expected < 1 || expected > int64(len(available)) {
+		return errors.New("expected migration history is outside the embedded migration set")
+	}
+	applied, err := readAppliedMigrations(ctx, database)
+	if err != nil {
+		return err
+	}
+	if int64(len(applied)) != expected {
+		return errors.New("applied migration history is not an exact prefix")
+	}
+	for version := int64(1); version <= expected; version++ {
+		item := available[version-1]
+		checksum, exists := applied[version]
+		if !exists || checksum != item.Checksum {
+			return fmt.Errorf("migration history mismatch at version %d", version)
+		}
+	}
+	return nil
+}
+
 func SchemaVersion(ctx context.Context, database *sql.DB) (int64, error) {
 	if err := ensureMigrationTable(ctx, database); err != nil {
 		return 0, err

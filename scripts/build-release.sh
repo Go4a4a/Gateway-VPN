@@ -35,7 +35,7 @@ LDFLAGS="-s -w -X gateway-vpn/internal/buildinfo.Version=$VERSION -X gateway-vpn
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$BOOTSTRAP" ./cmd/gateway-vpn-bootstrap
 )
 install -m 0755 "$MIHOMO_BINARY" "$DEST/libexec/mihomo"
-install -m 0755 "$ROOT/scripts/install-gateway.sh" "$ROOT/scripts/recover-gateway-install.sh" "$ROOT/scripts/uninstall.sh" "$DEST/scripts/"
+install -m 0755 "$ROOT/scripts/install-gateway.sh" "$ROOT/scripts/recover-gateway-install.sh" "$ROOT/scripts/upgrade-gateway-host.sh" "$ROOT/scripts/recover-gateway-host-upgrade.sh" "$ROOT/scripts/uninstall.sh" "$DEST/scripts/"
 install -m 0644 "$ROOT/config.example.yaml" "$DEST/config.example.yaml"
 while IFS= read -r -d '' source; do
   relative=${source#"$ROOT/"}
