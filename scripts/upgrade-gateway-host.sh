@@ -102,6 +102,30 @@ NEW_METADATA_VERSION=$(release_string gateway_version "$RELEASE_DIR/release.json
 
 report_string() { sed -n "s/^[[:space:]]*\"$1\": \"\([^\"]*\)\",\{0,1\}$/\1/p" /var/lib/gateway-vpn/install-report.json; }
 report_bool() { sed -n "s/^[[:space:]]*\"$1\": \(true\|false\),\{0,1\}$/\1/p" /var/lib/gateway-vpn/install-report.json; }
+
+candidate_runtime_ready() {
+  local now status_mtime control_mtime status_age control_age status_size control_size
+  [[ -f /run/gateway-vpn-watchdog/status.json && ! -L /run/gateway-vpn-watchdog/status.json ]] || return 1
+  [[ -f /run/gateway-vpn-watchdog/control.json && ! -L /run/gateway-vpn-watchdog/control.json ]] || return 1
+  [[ $(stat -c '%U:%G:%a' /run/gateway-vpn-watchdog/status.json) == "root:gateway-vpn:640" ]] || return 1
+  [[ $(stat -c '%U:%G:%a' /run/gateway-vpn-watchdog/control.json) == "gateway-vpn:gateway-vpn:640" ]] || return 1
+  status_size=$(stat -c '%s' /run/gateway-vpn-watchdog/status.json)
+  control_size=$(stat -c '%s' /run/gateway-vpn-watchdog/control.json)
+  [[ $status_size =~ ^[0-9]+$ && $control_size =~ ^[0-9]+$ ]] || return 1
+  ((status_size > 0 && status_size <= 131072 && control_size > 0 && control_size <= 65536)) || return 1
+  now=$(date +%s)
+  status_mtime=$(stat -c '%Y' /run/gateway-vpn-watchdog/status.json)
+  control_mtime=$(stat -c '%Y' /run/gateway-vpn-watchdog/control.json)
+  [[ $now =~ ^[0-9]+$ && $status_mtime =~ ^[0-9]+$ && $control_mtime =~ ^[0-9]+$ ]] || return 1
+  status_age=$((now - status_mtime))
+  control_age=$((now - control_mtime))
+  ((status_age >= -5 && status_age <= 30 && control_age >= -5 && control_age <= 30)) || return 1
+  grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/status.json || return 1
+  grep -Fq '"overall_state":"HEALTHY"' /run/gateway-vpn-watchdog/status.json || return 1
+  grep -Fq '"schema_version":2' /run/gateway-vpn-watchdog/control.json || return 1
+  grep -Fq '"database_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
+  grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
+}
 REPORT_VERSION=$(report_string version)
 REPORT_LAN_INTERFACE=$(report_string lan_interface)
 REPORT_LAN_MEMBERS=$(report_string lan_members)
@@ -333,12 +357,22 @@ GATEWAY_VPN_HOST_UPGRADE_INNER=1 "$RELEASE_DIR/scripts/install-gateway.sh" "${IN
 
 [[ $(readlink /opt/gateway-vpn/current) == releases/v$RELEASE_VERSION && $(readlink /opt/gateway-vpn/recovery) == releases/v$RELEASE_VERSION ]] || { echo "Candidate release pointers did not converge" >&2; exit 1; }
 "/opt/gateway-vpn/releases/v$RELEASE_VERSION/bin/gateway-vpnctl" database-verify --database /var/lib/gateway-vpn/state.db --expected-schema "$NEW_SCHEMA" --json >/dev/null
-systemctl is-active --quiet gateway-vpn-firewall.service
-systemctl is-active --quiet gateway-vpn-firewall-guard.service
-systemctl is-active --quiet gateway-vpn-watchdog.service
-systemctl is-active --quiet gateway-vpn-network-broker.socket
-systemctl is-active --quiet gateway-vpn.service
-grep -Fq '"overall_state":"HEALTHY"' /run/gateway-vpn-watchdog/status.json
+CANDIDATE_RUNTIME_READY=0
+for _ in {1..60}; do
+  if systemctl is-active --quiet gateway-vpn-firewall.service &&
+     systemctl is-active --quiet gateway-vpn-firewall-guard.service &&
+     systemctl is-active --quiet gateway-vpn-watchdog.service &&
+     systemctl is-active --quiet gateway-vpn-network-broker.socket &&
+     systemctl is-active --quiet gateway-vpn-network-broker.service &&
+     systemctl is-active --quiet gateway-vpn.service &&
+     { ((ENABLE_DHCP == 0)) || systemctl is-active --quiet gateway-vpn-dnsmasq.service; } &&
+     candidate_runtime_ready; then
+    CANDIDATE_RUNTIME_READY=1
+    break
+  fi
+  sleep 0.5
+done
+((CANDIDATE_RUNTIME_READY == 1)) || { echo "Candidate Gateway runtime did not converge to a fresh healthy state" >&2; exit 1; }
 grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json
 nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
 
