@@ -145,11 +145,15 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		`exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`,
 		"--host-upgrade-inner",
 		"Inherited host-upgrade transaction lock is invalid",
+		"Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification",
 		"Requested Gateway version does not match signed release metadata",
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("Gateway installer host-upgrade dispatch missing %q", required)
 		}
+	}
+	if strings.Index(installer, `gateway-install-preflight --lan-interface`) > strings.Index(installer, `exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh"`) {
+		t.Fatal("host-upgrade dispatch occurs before the complete local host preflight")
 	}
 	for _, required := range []string{
 		`OLD_METADATA_VERSION=$(release_string gateway_version`,
@@ -266,7 +270,7 @@ func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
 	}
 }
 
-func TestGatewayInstallerAllowsOnlyStrictCompletedInstallToBypassDirectDNS(t *testing.T) {
+func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectDNS(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	for _, required := range []string{
@@ -278,8 +282,11 @@ func TestGatewayInstallerAllowsOnlyStrictCompletedInstallToBypassDirectDNS(t *te
 		`grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json`,
 		`grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json`,
 		`grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json`,
-		"((COMPLETED_INSTALL_HINT == 1)) || { echo \"Gateway DNS resolution failed\"",
-		"continuing with strict existing-install verification",
+		"HOST_UPGRADE_REQUIRED=0",
+		"INNER_UPGRADE_HINT=0",
+		`$(readlink -f /proc/$$/fd/9) == /run/lock/gateway-vpn-install.lock`,
+		"COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1",
+		"continuing with strict signed existing/upgrade verification",
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("Gateway installer completed-install DNS exception missing %q", required)

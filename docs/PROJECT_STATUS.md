@@ -343,6 +343,8 @@
 
 **Superseded exact build:** commit `3a84a522568ece08d7d28dda91fa46a02d903c0d` дважды offline собрал 85 побайтно одинаковых files как `0.1.0-successor.g3a84a52` (Gateway SHA-256 `f1572d5507f6381b0ab080aaebce0a4893317bfb104efcc212b2c84655867088`). Artifact не запускался как upgrade и сразу признан superseded после обнаружения legacy socket-marker defect; tag/Release не создавались. Следующий exact candidate обязан включать исправленный merge.
 
+**Первый apply-gate исправленного marker:** exact `d44456f` воспроизводимо собран, а dry-run public schema `16 → 24` прошёл. Apply создал cold snapshot/marker, затем inner installer безопасно остановился на `Gateway DNS resolution failed`: внешний dispatch выполнялся до DNS/resources/APT/kernel/network preflight, а inner повторял DNS уже после преднамеренного `PATH_BLOCKED`. Recovery полностью вернул public release+schema 16, active marker отсутствует, firewall blocked и control active. Порядок изменён: весь host preflight выполняется до dispatch; inner после quiesce допускает отсутствие DNS только при exact inherited FD9 + active root marker и повторяет все локальные invariants.
+
 **Не проверено:** candidate ещё не собран как exact committed disposable-signed artifact; public baseline schema 16 не обновлялся до schema 24. Success, injected failure, process interruption и новый PID 1 с пустым `/run` пока не являются доказанными. Bare-metal power cut остаётся отдельным hardware gate.
 
 **Следующий шаг:** commit/push текущего increment, exact offline candidate build и privileged Ubuntu 24.04 public-baseline `16 → 24` success/rollback/new-PID1 recovery matrix. После стабилизации реализовать DEV-195 WebUI uninstall job и расширить CLI purge до полного bounded cleanup/receipt.

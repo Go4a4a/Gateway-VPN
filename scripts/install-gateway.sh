@@ -207,21 +207,9 @@ source /etc/os-release
 for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm rmdir sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd groupdel od; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
+HOST_UPGRADE_REQUIRED=0
 if ((HOST_UPGRADE_INNER == 0)) && [[ -L /opt/gateway-vpn/current ]] && [[ $(readlink /opt/gateway-vpn/current) != "releases/v$RELEASE_VERSION" ]]; then
-  HOST_UPGRADE_ARGS=(
-    --release-dir "$RELEASE_DIR" --trusted-update-key "$TRUSTED_UPDATE_KEY" --version "$RELEASE_VERSION"
-    --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
-    --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY"
-  )
-  [[ -z $LAN_MEMBERS ]] || HOST_UPGRADE_ARGS+=(--lan-members "$LAN_MEMBERS")
-  ((INSTALL_DEPENDENCIES == 0)) || HOST_UPGRADE_ARGS+=(--install-dependencies)
-  ((ENABLE_DHCP == 0)) || HOST_UPGRADE_ARGS+=(--enable-dhcp)
-  ((ENABLE_SSH == 1)) || HOST_UPGRADE_ARGS+=(--disable-ssh)
-  if ((ENABLE_WIREGUARD_INGRESS)); then
-    HOST_UPGRADE_ARGS+=(--enable-wireguard-ingress --wireguard-endpoint-host "$WIREGUARD_ENDPOINT_HOST" --wireguard-subnet "$WIREGUARD_SUBNET" --wireguard-listen-port "$WIREGUARD_LISTEN_PORT" --wireguard-client-dns "$WIREGUARD_CLIENT_DNS")
-  fi
-  ((APPLY == 0)) || HOST_UPGRADE_ARGS+=(--apply)
-  exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh" "${HOST_UPGRADE_ARGS[@]}"
+  HOST_UPGRADE_REQUIRED=1
 fi
 if [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking ]]; then
   [[ -f "$ROOT_DIR/packaging/systemd-wait-online/gateway-vpn.conf" ]] || { echo "Signed Gateway boot-network policy is missing" >&2; exit 1; }
@@ -259,8 +247,12 @@ if ! getent ahostsv4 github.com >/dev/null; then
      grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
     COMPLETED_INSTALL_HINT=1
   fi
-  ((COMPLETED_INSTALL_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
-  echo "Gateway DNS is blocked by the installed fail-closed policy; continuing with strict existing-install verification"
+  INNER_UPGRADE_HINT=0
+  if ((HOST_UPGRADE_INNER)) && [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 && -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == /run/lock/gateway-vpn-install.lock && -f /var/lib/gateway-vpn-host-upgrade/active ]]; then
+    INNER_UPGRADE_HINT=1
+  fi
+  ((COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
+  echo "Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification"
 fi
 AVAILABLE_KIB=$(df --output=avail / | awk 'NR==2 {print $1}')
 MEMORY_KIB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
@@ -467,6 +459,23 @@ fi
 if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
   echo "Active UFW/firewalld conflicts with the owned Gateway VPN ruleset" >&2
   exit 1
+fi
+
+if ((HOST_UPGRADE_REQUIRED)); then
+  HOST_UPGRADE_ARGS=(
+    --release-dir "$RELEASE_DIR" --trusted-update-key "$TRUSTED_UPDATE_KEY" --version "$RELEASE_VERSION"
+    --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
+    --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY"
+  )
+  [[ -z $LAN_MEMBERS ]] || HOST_UPGRADE_ARGS+=(--lan-members "$LAN_MEMBERS")
+  ((INSTALL_DEPENDENCIES == 0)) || HOST_UPGRADE_ARGS+=(--install-dependencies)
+  ((ENABLE_DHCP == 0)) || HOST_UPGRADE_ARGS+=(--enable-dhcp)
+  ((ENABLE_SSH == 1)) || HOST_UPGRADE_ARGS+=(--disable-ssh)
+  if ((ENABLE_WIREGUARD_INGRESS)); then
+    HOST_UPGRADE_ARGS+=(--enable-wireguard-ingress --wireguard-endpoint-host "$WIREGUARD_ENDPOINT_HOST" --wireguard-subnet "$WIREGUARD_SUBNET" --wireguard-listen-port "$WIREGUARD_LISTEN_PORT" --wireguard-client-dns "$WIREGUARD_CLIENT_DNS")
+  fi
+  ((APPLY == 0)) || HOST_UPGRADE_ARGS+=(--apply)
+  exec "$ROOT_DIR/scripts/upgrade-gateway-host.sh" "${HOST_UPGRADE_ARGS[@]}"
 fi
 
 DEST="/opt/gateway-vpn/releases/v$RELEASE_VERSION"
