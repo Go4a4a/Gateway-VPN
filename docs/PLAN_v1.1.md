@@ -9,6 +9,7 @@
 **Поправка 2026-08-26:** добавлен обязательный contract круглосуточного самоконтроля и bounded recovery (§9.8); остальные ранее зафиксированные решения версии 1.1 не переписаны
 **Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
 **Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 17 компонентов, включая отдельный `logging_pipeline`, с per-component recovery mode и классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
+**Поправка 2026-08-30:** односерверный `wg-mgmt` расширяется в successor до many-to-many Management Fabric `1..N Gateway ↔ 1..N VPS`; добавлены независимые одновременно активные management links, optional end-to-end `wg-admin` через VPS UDP relay, публикация Gateway/Keenetic/local resources с ACL и alias-prefix для пересекающихся домашних подсетей, несколько способов доступа в LAN без обязательной замены обычного WAN Keenetic, безопасное переключение topology profiles после установки и сгруппированная навигация WebUI
 
 ---
 
@@ -51,10 +52,10 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - автоматически выбирает подтверждённый путь `метод → модем → [VPN-узел]` и переключает его при отказе или появлении более функционального пути;
 - не допускает неуправляемый прямой выход: direct разрешается только как явно включённый и проверенный метод через выбранный модем;
 - предоставляет локальный Web UI и API;
-- сохраняет управление через независимый WireGuard-туннель Gateway → VPS;
+- сохраняет управление через один или несколько независимых WireGuard-туннелей Gateway → VPS;
 - собирает состояние, события и статистику трафика.
 
-### 1.2 Что входит в MVP
+### 1.2 Что входит в поддерживаемый MVP/successor scope
 
 - несколько одновременно подключённых HiLink USB-Ethernet модемов с приоритетами;
 - один или несколько Ethernet-uplink в дополнение к HiLink либо вместо них; DHCP и статический IPv4 поддерживаются, PPPoE не входит в проект;
@@ -73,7 +74,8 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - fail-safe nftables с атомарным открытием только выбранного direct- или TUN-пути;
 - DHCP и DNS на транзитной сети Gateway → Keenetic;
 - HTTPS Web UI, REST API и CLI;
-- удалённый доступ к самому Gateway через VPS WireGuard;
+- удалённый доступ к самому Gateway через один или несколько VPS WireGuard;
+- successor Management Fabric для нескольких Gateway на одном VPS и одного Gateway на нескольких VPS, с явной публикацией разрешённых локальных ресурсов;
 - SQLite, структурированные события и учёт трафика;
 - idempotent install/update/uninstall scripts;
 - backup, restore и diagnostic bundle.
@@ -86,7 +88,7 @@ Gateway VPN — домашний IPv4-шлюз, который:
 
 Successor-модель обобщает это правило до `1..N` enabled uplinks. HiLink остаётся специализированным uplink с USB identity, telemetry и recovery, Ethernet — uplink со stable NIC identity, DHCP/static IPv4 и собственным gateway. Наличие только одного uplink само по себе ничего не блокирует: Gateway перебирает через него direct и все разрешённые VPN-методы, использует лучший `FULL`, а при его отсутствии — лучший разрешённый `LIMITED/WHITELIST_ONLY`. Пользовательский Internet отсутствует только когда через единственный физический uplink не осталось ни одного пригодного пути; Web UI/SSH/SFTP и recovery продолжают работать через management/LAN.
 
-### 1.3 Что не входит в MVP
+### 1.3 Что не входит в поддерживаемый scope
 
 - собственный VPN-протокол;
 - поддержка QMI, MBIM, PPP и Stick-прошивок модемов;
@@ -94,8 +96,8 @@ Successor-модель обобщает это правило до `1..N` enable
 - IPv6-транзит;
 - балансировка одной пользовательской сессии между подписками;
 - полноценный многопользовательский RBAC;
-- доступ через VPS к домашней сети `192.168.50.0/24` за Keenetic;
-- QMI/MBIM/PPP, Ethernet WAN и другие не-HiLink типы uplink;
+- неограниченный неаудируемый доступ через VPS ко всем локальным сетям; successor допускает только явно опубликованные ресурсы/подсети через ACL и проверенный return path;
+- QMI/MBIM/PPP/PPPoE и другие типы uplink, кроме поддерживаемых `HILINK` и обычного IPv4 `ETHERNET` DHCP/static;
 - одновременная работа HiLink-модемов с пересекающимися management-подсетями;
 - агрегация пропускной способности или распределение одной пользовательской сессии между модемами;
 - мобильное приложение;
@@ -250,10 +252,12 @@ Management plane имеет отдельное исключение в firewall 
 | Gateway transit IP | `192.168.200.1/24` | DHCP gateway и DNS |
 | Keenetic WAN | DHCP reservation, например `192.168.200.2` | WAN Keenetic |
 | Home LAN | `192.168.50.0/24` | устройства за Keenetic |
-| WireGuard management | `10.80.0.0/24` | VPS, Gateway, администраторы |
-| VPS WireGuard | `10.80.0.1/24` | management router |
-| Gateway WireGuard | `10.80.0.2/32` | удалённое управление |
-| Admin peers | `10.80.0.10/32` и далее | ПК/телефон администратора |
+| WireGuard management link #1 | `10.80.0.0/24` по умолчанию | первый VPS, Gateway, администраторы |
+| Дополнительный management link #N | отдельная выбранная непересекающаяся subnet | независимый VPS link |
+| VPS WireGuard #1 | `10.80.0.1/24` | management router первого link |
+| Gateway WireGuard #1 | `10.80.0.2/32` | удалённое управление через первый VPS |
+| Admin peers #1 | `10.80.0.10/32` и далее | ПК/телефон администратора на первом VPS |
+| Published resource pools | выбираемые conflict-free private prefixes | уникальные alias сетей/ресурсов разных Gateway |
 | WireGuard ingress | выбираемая private IPv4 subnet, например `10.90.0.0/24` | Keenetic/clients → Gateway data plane |
 
 Подсети не должны пересекаться. Адрес и subnet каждого HiLink считаются обнаруживаемыми параметрами, а не константами. Совпадающие management-подсети не исправляются метриками или priority: конфликтующий модем помещается в quarantine до изменения его подсети.
@@ -268,7 +272,8 @@ Management plane имеет отдельное исключение в firewall 
 | `uplink_ethernet_<id>` | `enp3s0` | stable NIC identity + explicit adopted uplink record |
 | `lan_keenetic` | `gateway-vpn-lan` | owned Linux bridge; один или несколько явно подтверждённых физических Ethernet members |
 | `tun_mihomo` | `gateway-vpn-tun` | фиксированное имя в Mihomo |
-| `wg_management` | `wg-mgmt` | фиксированное имя |
+| `wg_management_<link_id>` | `wg-mgmt` для совместимого первого link, затем bounded `gvm<N>` | отдельный management link к конкретному VPS; имя стабильно по link slot и укладывается в Linux IFNAMSIZ |
+| `wg_admin` | `wg-admin` | optional end-to-end administrator tunnel, доставляемый через VPS UDP relay без расшифровки admin traffic на VPS |
 | `wg_ingress` | `wg-ingress` | отдельный optional server для пользовательского/роутерного трафика |
 
 ### 4.3 Multi-uplink policy routing
@@ -323,6 +328,8 @@ Keenetic может оставить link-local IPv6 или ULA внутри д�
 4. **Смешанный:** `wg-ingress` или Ethernet LAN принимает трафик, а набор uplinks включает Ethernet и любое поддерживаемое количество HiLink.
 
 Обычная physical NIC не назначается одновременно member-ом LAN bridge и Ethernet uplink. Исключение — однокарточный WireGuard-профиль: физическая карта имеет shared `MANAGEMENT + WG_ENDPOINT + ETHERNET_UPLINK` role, а пользовательский plaintext входит только через `wg-ingress`. Сам Gateway, UDP endpoint, proxy/DNS/subscription/VPS service flows обязательно исключаются из возвращающей политики Keenetic; preflight проверяет маршрут к upstream gateway, отдельные marks и отсутствие route recursion.
+
+Все четыре topology profiles являются изменяемыми после установки через WebUI, а не одноразовым выбором мастера. Переход создаёт один durable safe-apply transaction для roles, networkd, DHCP/DNS, firewall, policy routing, `wg-ingress` и API bind; старый management address/path сохраняется на grace period, новый path требует подтверждения, timeout/process crash/reboot выполняют out-of-process rollback. Если candidate затрагивает единственный доступный management path и нет подтверждённого `wg-mgmt`, другого LAN-порта либо локальной консоли, apply блокируется до появления альтернативного пути. Физическое перемещение кабеля и внешняя настройка Keenetic показываются как явные prerequisites и не объявляются автоматически выполненными.
 
 ### 4.6 Stable identity, назначение и замена сетевой карты
 
@@ -1103,7 +1110,7 @@ Failback или переход на восстановившийся более 
 - `EXTERNAL_CONNECTIVITY_FAILURE`: все модемы offline, mobile registration отсутствует, подписки/узлы/targets либо VPS недоступны при исправном локальном control plane;
 - `MAINTENANCE_TRANSACTION`: install/update/restore/safe network apply выполняется или восстанавливается.
 
-Фиксированный signed contour включает: WebUI/API и control plane; SQLite; firewall guard и целостность owned ruleset; privileged network broker; `systemd-networkd`; LAN DNS/DHCP; OpenSSH/SFTP, если он включён; Mihomo/TUN; WireGuard management; optional WireGuard ingress; policy routing; критические фоновые workers; convergence desired/observed generations; verified SQLite backup и WAL; disk/memory/file-descriptor resources. Для WireGuard проверяются interface/address/peer/fwmark, owned management и endpoint routes, generation state и свежесть handshake. Старый handshake при исправном локальном интерфейсе/маршрутах является `EXTERNAL_CONNECTIVITY_FAILURE`, а не основанием для restart.
+Фиксированный signed contour включает: WebUI/API и control plane; SQLite; firewall guard и целостность owned ruleset; privileged network broker; `systemd-networkd`; LAN DNS/DHCP; OpenSSH/SFTP, если он включён; Mihomo/TUN; WireGuard management; optional WireGuard ingress; policy routing; критические фоновые workers; convergence desired/observed generations; verified SQLite backup и WAL; disk/memory/file-descriptor resources; logging export pipeline. Successor добавляет два отдельных компонента: восемнадцатый `management_fabric_routes`, который сверяет per-VPS links, published-resource routes/alias mappings и обе ACL projections, и девятнадцатый `wireguard_admin`, который проверяет optional end-to-end admin interface/relay/peers без объединения их с outer link liveness. Для WireGuard проверяются interface/address/peer/fwmark, owned management и endpoint routes, generation state и свежесть handshake. Старый handshake при исправном локальном интерфейсе/маршрутах является `EXTERNAL_CONNECTIVITY_FAILURE`, а не основанием для restart.
 
 Лестница автоматического восстановления строго ограничена и журналируется:
 
@@ -1150,11 +1157,14 @@ watchdog:
     openssh_sftp: RESTART
     mihomo: RESTART
     wireguard_management: RESTART
+    wireguard_admin: RESTART
     wireguard_ingress: RESTART
     policy_routing: RESTART
+    management_fabric_routes: RECONCILE
     worker_runtime: RESTART
     configuration_convergence: RESTART
     database_backup: RESTART
+    logging_pipeline: RESTART
     resources: MONITOR_ONLY
   host_reboot_enabled: false
   reboot_after_critical_seconds: 900
@@ -1162,21 +1172,21 @@ watchdog:
   reboot_grace_seconds: 60
 ```
 
-Для каждого компонента выбирается только один поддерживаемый режим: `MONITOR_ONLY`, `RECONCILE` или `RESTART`; WebUI не может добавить unit, executable, interface, route либо command. Список компонентов, допустимые для каждого режима действия, порядок restart, fixed executable/systemd unit names и признаки critical failure зашиты в signed release. Изменение policy не сбрасывает durable restart/reboot history. Web UI показывает effective policy, состояние каждого компонента, last success/failure/recovery, число попыток и причину suppression. Все автоматические actions попадают в events/journald и diagnostic bundle без secrets.
+Для каждого из девятнадцати компонентов successor выбирается только один поддерживаемый режим: `MONITOR_ONLY`, `RECONCILE` или `RESTART`; WebUI не может добавить unit, executable, interface, route либо command. Список компонентов, допустимые для каждого режима действия, порядок restart, fixed executable/systemd unit names и признаки critical failure зашиты в signed release. Изменение policy не сбрасывает durable restart/reboot history. Web UI показывает effective policy, состояние каждого компонента, last success/failure/recovery, число попыток и причину suppression. Все автоматические actions попадают в events/journald и diagnostic bundle без secrets.
 
 ---
 
 ## 10. WireGuard management plane
 
-### 10.1 Границы MVP
+### 10.1 Базовый совместимый профиль и граница successor
 
-WireGuard предоставляет удалённый доступ к:
+Базовый односерверный профиль WireGuard предоставляет удалённый доступ к:
 
 - Web UI/API Gateway на `10.80.0.2`;
 - SSH Gateway, если функция включена;
 - диагностике Gateway.
 
-Маршрут в `192.168.200.0/24` или `192.168.50.0/24` на Gateway peer в MVP не добавляется.
+Маршрут в `192.168.200.0/24` или `192.168.50.0/24` на Gateway peer автоматически не добавляется. Доступ к Keenetic и локальным сетям является отдельной default-off публикацией ресурса по §§10.8–10.10, а не расширением любых `AllowedIPs` без ACL.
 
 ### 10.2 Gateway
 
@@ -1194,7 +1204,7 @@ PersistentKeepalive = 25
 
 WireGuard management использует собственный выбор uplink и не привязан к active VPN path. Для каждого online modem отдельно хранится `management_reachability_state`: `UNTESTED`, `PROBING`, `REACHABLE`, `BLOCKED` или `STALE`. По умолчанию выбирается modem с наименьшим значением priority среди `MODEM_READY`, для которых VPS endpoint подтверждён; если подтверждённых ещё нет, candidates пробуются последовательно по priority. Для IP-адреса VPS создаётся modem-specific host route в table выбранного модема; endpoint исключается из Mihomo TUN и пользовательского traffic accounting.
 
-Поскольку Gateway имеет `Address = 10.80.0.2/32`, controller отдельно и идемпотентно владеет маршрутом `10.80.0.0/24 dev wg-mgmt protocol 186`. Watchdog требует его точного наличия; route не выводится через active subscription или modem table и удаляется вместе с managed WireGuard contour.
+Поскольку Gateway имеет `Address = 10.80.0.2/32`, controller отдельно и идемпотентно владеет маршрутом `10.80.0.0/24 dev wg-mgmt protocol 186` для совместимого первого link. Watchdog требует его точного наличия; route не выводится через active subscription или modem table и удаляется вместе с managed WireGuard contour. Каждый дополнительный link получает такой же owned route только к собственной непересекающейся management subnet через свой `gvm<N>`; общий wildcard route ко всем private networks запрещён.
 
 При disconnect management-модема контроллер:
 
@@ -1244,14 +1254,17 @@ AllowedIPs = 10.80.0.1/32, 10.80.0.2/32
 PersistentKeepalive = 25
 ```
 
-### 10.5 Будущий доступ к Home LAN
+### 10.5 Доступ к Keenetic и Home LAN
 
-Добавление `192.168.50.0/24` требует отдельного design/acceptance этапа:
+Обычный режим остаётся неизменным: Keenetic получает Internet через свой WAN от Gateway. Удалённый management path не заменяет WAN, DHCP/NAT или default route Keenetic. Доступ через VPS к локальным ресурсам выключен по умолчанию и включается для каждого ресурса одним из проверяемых профилей:
 
-- статический маршрут и firewall на Keenetic либо WireGuard peer на Keenetic;
-- соответствующий `AllowedIPs` только у Gateway peer на VPS;
-- правила forwarding без доступа к data plane;
-- проверка обратного маршрута и отсутствия конфликтов подсетей.
+1. `GATEWAY_ONLY` — только WebUI/API/SSH/SFTP самого Gateway;
+2. `KEENETIC_WAN` — только явно разрешённые management ports транзитного WAN-адреса Keenetic; требуется подтверждённое разрешение сервиса/firewall Keenetic;
+3. `VIA_KEENETIC_WAN_ROUTED` — Gateway маршрутизирует разрешённые host/subnet destinations через WAN-адрес Keenetic; Keenetic должен иметь явное WAN→LAN firewall rule и проверенный обратный путь;
+4. `VIA_WG_ROUTER` — отдельный Keenetic/router peer типа `ROUTER_ROUTED` объявляет behind-subnets; обычный Internet Keenetic по-прежнему идёт через WAN, а WireGuard переносит только заданные management/local prefixes без `0.0.0.0/0`;
+5. `VIA_DEDICATED_LAN` — отдельный Ethernet/VLAN Gateway подключён к LAN-side Keenetic/switch как management-only interface без default route и DHCP server.
+
+`VIA_WG_ROUTER` может использовать существующий отдельный `wg-ingress` peer, но только через новое строгое правило `разрешённый wg-mgmt admin → разрешённый ROUTER_ROUTED peer/resource`; management и ingress keys/interfaces не объединяются. `VIA_KEENETIC_WAN_ROUTED` и `KEENETIC_WAN` не считаются готовыми только из-за ping: проверяются нужный TCP/UDP port, forward policy и return traffic. Gateway не пытается тайно изменить Keenetic; WebUI показывает точные внешние шаги и оставляет resource в `WAITING_EXTERNAL_CONFIGURATION`, пока fresh probe не подтвердит путь.
 
 ### 10.6 Входящий WireGuard `wg-ingress`
 
@@ -1270,6 +1283,92 @@ Web UI имеет отдельную вкладку **«WireGuard-клиенты
 Peer по умолчанию получает policy **«Автоматический общий путь»**. Дополнительно разрешены bounded profiles: только выбранные access methods, VPN-only без direct fallback, разрешение/запрет `WHITELIST_ONLY`, либо block при отсутствии подходящего пути. Arbitrary nft/ip commands и произвольные marks из Web UI не принимаются.
 
 Однокарточный режим официально поддерживается: outer `wg-ingress` UDP приходит через shared Ethernet, decapsulated traffic классифицируется по `iifname=wg-ingress`, а Mihomo proxy sockets/direct SNAT выходят через тот же physical uplink с другим mark/conntrack generation. Firewall принимает listen port только на явно выбранных interfaces; по умолчанию это local Ethernet, публичная WAN exposure является отдельной default-off policy. Endpoint, собственный address Gateway и service/proxy flows обязаны обходить возвращающую WireGuard policy Keenetic. Apply отклоняется при route recursion, overlapping peer AllowedIPs, duplicate address/public key, management subnet overlap или отсутствии гарантированного return path.
+
+### 10.7 Many-to-many Management Fabric
+
+Successor поддерживает одновременно:
+
+- `1 VPS → N Gateway`: один VPS имеет уникальный peer `/32`, immutable `site_id` и public key для каждого Gateway;
+- `1 Gateway → N VPS`: Gateway хранит несколько независимых `management_link`, каждый со своим VPS endpoint, WireGuard keypair, interface slot, непересекающейся subnet/address и route generation;
+- `N Gateway ↔ N VPS`: один Gateway может быть зарегистрирован на нескольких VPS, а один VPS — обслуживать несколько Gateway без общей private key или общей writable policy.
+
+Все enabled management links поддерживаются активными одновременно. Priority не выключает резервный туннель: он влияет только на preferred URL/config и порядок выбора при явно управляемом admin-side failover. Каждый link независимо выбирает physical uplink по policy `AUTO`, `PINNED_WITH_FALLBACK` либо `PINNED_ONLY`, создаёт endpoint host route в его table и не зависит от active user subscription path. Отказ одного VPS/link не изменяет data plane и не перезапускает другие links.
+
+Первый существующий `wg-mgmt` является совместимым link slot 0. Новые links получают bounded Linux-safe names `gvm1`, `gvm2`, …; slot не переиспользуется автоматически после удаления. Одинаковые management subnet, Gateway/admin addresses или перекрывающиеся `AllowedIPs` разных peers отклоняются до apply. Пример `10.80.0.0/24` остаётся только default первого link, а мастер предлагает свободные непересекающиеся ranges после проверки всех host/uplink/transit/ingress/local routes.
+
+Gateway не требует внешнего IP или port forwarding: каждый link сам инициирует UDP к VPS и использует `PersistentKeepalive`. VPS endpoint может иметь несколько заранее подтверждённых IP/port candidates; DNS разрешается отдельно через каждый eligible uplink, последний успешный IP сохраняется до bounded expiry. Автоматический management-over-Mihomo не включается: он создаёт зависимость от data plane и допускается только как будущий отдельный profile после доказанного loop-free UDP path.
+
+### 10.8 Идентичность, pairing и ключи
+
+- каждый Gateway имеет immutable random `site_id` и изменяемое понятное имя;
+- каждый `Gateway ↔ VPS` link имеет отдельную WireGuard keypair; private key не покидает создавшую её сторону и хранится только root-owned secret file;
+- VPS создаёт одноразовый bounded pairing bundle/token с endpoint, VPS public key, назначенными addresses/prefixes, expiry и fingerprint; Gateway показывает fingerprint до подтверждения и возвращает только свой public key;
+- повторное использование, истёкший token, subnet collision или несовпадающий fingerprint отклоняются без частично активного peer;
+- rotation выполняется make-before-break: новый peer/link обязан получить handshake и пройти management probe до отзыва старого;
+- один admin device получает отдельный key/address на каждом VPS, shared administrator configs запрещены; revoke удаляет peer и ACL generation до успешного ответа.
+
+Restore на заменяющее железо имеет два разных режима. **«Восстановить тот же Gateway»** сохраняет `site_id`, но требует отозвать/заменить прежние link keys до снятия quarantine; одновременно active старый и восстановленный экземпляры с одной identity запрещены и обнаруживаются как endpoint flap. **«Создать новый Gateway из настроек»** всегда генерирует новый `site_id`, все management/admin keys и pairing, не копируя сетевую identity исходного site.
+
+VPS не хранит пароль WebUI Gateway, subscription URLs, proxy credentials либо Gateway private keys. Optional VPS Hub показывает зарегистрированные Gateway, links/resources и открывает их собственные HTTPS WebUI, но не подменяет их аутентификацию.
+
+### 10.9 Публикуемые локальные ресурсы
+
+Management Fabric маршрутизирует не произвольную LAN, а typed сущности `management_resource`:
+
+- `GATEWAY_SERVICE` — WebUI/API/SSH/SFTP Gateway;
+- `KEENETIC_SERVICE` — конкретный host/protocol/port Keenetic;
+- `LOCAL_HOST` — один локальный IPv4 и разрешённые protocols/ports;
+- `LOCAL_SUBNET` — целая явно подтверждённая IPv4 subnet;
+- `CUSTOM_SERVICE` — один host/port с проверяемым health probe.
+
+Resource хранит local destination, access profile из §10.5, enabled, health, local route generation и список допущенных administrators/groups. Отдельная `resource publication` для каждого VPS link хранит собственный published alias address/prefix и applied ACL generation. `LOCAL_SUBNET` является advanced destructive-scope permission с отдельным impact preview; default — минимальные host/port resources. L2 bridging, broadcast discovery, mDNS/SSDP relay и Internet forwarding через management fabric по умолчанию отсутствуют.
+
+### 10.10 Пересекающиеся локальные подсети
+
+Несколько Gateway часто имеют одинаковые `192.168.50.0/24` или `192.168.1.0/24`; VPS не может назначить один destination prefix разным WireGuard peers. Поэтому каждой комбинации `site × resource × VPS link` выделяется уникальный непересекающийся published alias prefix из resource pool соответствующего VPS. Например, локальные `192.168.50.0/24` двух Gateway на VPS-A могут публиковаться как `10.96.1.0/24` и `10.96.2.0/24`; публикация первого Gateway через VPS-B получает ещё один отличный prefix из pool VPS-B.
+
+Gateway выполняет только owned typed L3 alias translation `published prefix ↔ local prefix` и при необходимости source translation на подтверждённый return-path address; nftables/conntrack generation применяется атомарно вместе с route и ACL. Alias не меняет адреса устройств и никогда не используется data plane. Pool/alias проверяются против всех connected/static/policy/WireGuard/uplink subnets на Gateway, VPS и admin profile; конфликт блокирует apply.
+
+Portable baseline выдаёт администратору отдельный конфиг/management address и отдельные resource aliases для каждого VPS, поэтому оба tunnels могут быть подняты с непересекающимися routes. UI показывает оба адреса одного logical resource как **«через VPS-A»** и **«через VPS-B»**. Один WireGuard interface с двумя peers и одинаковыми `AllowedIPs` запрещён: стандартный WireGuard не выполняет health-based peer selection. Полностью прозрачный failover одного и того же alias через несколько VPS требует отдельного управляемого admin client/OS route metrics и не заявляется без такого компонента.
+
+### 10.11 Двухсторонние ACL и изоляция
+
+VPS и Gateway независимо применяют одну versioned access generation:
+
+- `admin peer → разрешённые site/resource alias prefixes → разрешённые protocols/ports`;
+- Gateway↔Gateway, admin↔admin, management→user Internet и доступ к непубликованной LAN запрещены;
+- source address проверяется WireGuard `AllowedIPs`, затем VPS firewall и повторно Gateway firewall;
+- произвольные route, nft expression, interface или command из WebUI/API не принимаются;
+- изменение ACL/resources выполняется make-before-break, требует acknowledgement всех required VPS и откатывается при несовпадении generation;
+- partial VPS outage не удаляет рабочую предыдущую ACL generation на остальных VPS; UI показывает `APPLIED`, `PARTIAL`, `PENDING_RETRY` либо `ROLLED_BACK` по каждому link.
+
+#### 10.11.1 Trust modes и end-to-end administrator tunnel
+
+Базовый `ROUTED_HUB` заканчивает admin WireGuard на VPS и затем маршрутизирует трафик в outer Gateway link. Он прост и достаточен для HTTPS WebUI/SSH/SFTP, которые имеют собственное шифрование и аутентификацию, но полностью скомпрометированный VPS технически способен видеть network metadata и имитировать source address admin peer внутри доверенного management link. Double ACL защищает от ошибки/обычного чужого peer, но не выдаётся за криптографическую защиту от владельца VPS private key.
+
+Для доступа к Keenetic/local resources рекомендован `END_TO_END_RELAY`:
+
+1. Gateway поднимает отдельный `wg-admin` с administrator peers и root-only keys;
+2. VPS выделяет этому site allowlisted public UDP relay port и пересылает только зашифрованные WireGuard datagrams через outer management link на `wg-admin` listen port Gateway;
+3. inner tunnel завершается на Gateway, поэтому VPS не имеет admin private/session key, не расшифровывает payload и не может создать валидный admin packet;
+4. Gateway ACL связывает resource grants с authenticated inner admin peer/address; outer VPS peer получает только health/pairing/relay permissions и не получает прямой local-resource forwarding;
+5. компрометированный VPS всё ещё может блокировать/replay старые UDP datagrams или создать DoS, но не расшифровать сессию и не имитировать новый authenticated admin traffic.
+
+Каждый relay имеет bounded fixed port allocation, rate limit, source-independent WireGuard authentication и отдельную operation generation. Portable config использует конкретный VPS relay endpoint; резервный VPS выдаёт второй config/endpoint. Автоматически помещать один и тот же `AllowedIPs` двум peer endpoints нельзя. `ROUTED_HUB` для raw local resources допускается только отдельным предупреждаемым opt-in; WebUI/SSH всё равно сохраняют собственную authentication независимо от trust mode.
+
+### 10.12 Состояния, watchdog и восстановление
+
+Каждый management link имеет состояния `DISABLED`, `CONFIGURED`, `CONNECTING`, `REACHABLE`, `DEGRADED`, `ENDPOINT_UNREACHABLE`, `AUTH_FAILED`, `ROUTE_CONFLICT` и `STALE`. Наблюдаются interface/key/address, endpoint DNS/IP, selected uplink/table/fwmark, latest handshake, RX/TX progress, RTT, VPS acknowledgement, resource route/ACL generation и freshness probes.
+
+Recovery выполняется только для неисправного link: re-resolve endpoint → сменить eligible uplink → idempotent route reconcile → `wg syncconf` → recreate конкретного interface после budget. Недоступность внешнего VPS классифицируется как external outage, не вызывает restart других links или reboot host. Corrupt local key/config, исчезнувший owned route либо generation mismatch являются local failure и проходят bounded recovery. Watchdog отдельно подтверждает, что management paths не попали в Mihomo/user traffic accounting и не создали main-table default route.
+
+### 10.13 WebUI и VPS Hub
+
+Gateway WebUI получает отдельную предметную группу **«Удалённый доступ»** с подстраницами **«VPS и каналы»**, **«Администраторы»**, **«Локальные ресурсы»** и **«Матрица доступа»**. На ней видны все links одновременно, selected uplink, endpoint/handshake/RTT, pairing/rotation, `ROUTED_HUB`/`END_TO_END_RELAY`, relay port/inner peer health, resource access profile, external prerequisites, alias, ACL generation и точная причина недоступности.
+
+VPS Hub является минимальным отдельным WebUI/API VPS-роли, доступным только через admin WireGuard либо localhost. Он управляет Gateway public peers, admin peers, assigned prefixes и ACL, показывает handshake/last seen и ссылки на WebUI каждого Gateway. Он не является публичным reverse proxy и не хранит Gateway passwords/secrets. Pairing и любое route/ACL изменение имеют operation ID, durable stages, audit, retry и terminal receipt.
+
+Для удобства VPS Hub может выдавать только внутри admin tunnel локальные DNS-имена Gateway/resources в отдельной выбранной private zone; IP/alias всегда остаются видимыми и пригодными как fallback. Имена нормализуются, не публикуются в public DNS и не являются identity/ACL key. WebUI показывает для одного logical resource все варианты **«через VPS …»**, копируемый адрес/имя и кнопку проверки именно этого пути.
 
 ---
 
@@ -1619,6 +1718,23 @@ Functional score и selection explanation являются server-side данн�
 
 Runtime active tuple получает `active_uplink_id`; legacy `active_modem_id` читается только при migration и затем не является источником выбора. Существующие path IDs сохраняются без изменения, а отдельная migration map фиксирует соответствие legacy modem ID и нового uplink ID, чтобы events/history и LKG не стали указывать на другую комбинацию. Перед migration создаётся SQLite Online Backup; downgrade использует pre-migration snapshot, а не обратное преобразование generic schema.
 
+### 12.2.3 Successor migration: Management Fabric
+
+Management Fabric добавляется новой gap-free migration без изменения существующего link до проверки новой проекции:
+
+- `gateway_sites` — singleton immutable `site_id`, display name и current identity generation;
+- `vps_nodes` — endpoint candidates, verified fingerprint/public key, enabled и metadata без private credentials;
+- `management_links` — VPS, stable interface slot, local/remote addresses, management subnet, secret refs, uplink policy, desired/applied route generation и state;
+- `management_link_endpoints` — resolved/probed IP/port/uplink candidates, freshness и redacted failure code;
+- `management_admins` и `management_admin_vps_peers` — administrator identity, per-VPS public peer/address, revoke state и config grant metadata;
+- `management_admin_tunnels` и `management_admin_relays` — optional Gateway-terminated `wg-admin` peers, per-VPS UDP relay allocation, desired/applied generation и trust mode;
+- `management_resources` — type, local destination, access profile, protocols/ports, health и external prerequisite state;
+- `management_resource_publications` — resource×VPS-link alias address/prefix, desired/applied route/ACL generations и publication state;
+- `management_resource_acl` — explicit administrator/group→resource grants;
+- `management_fabric_generations` и `management_fabric_operations` — desired/per-VPS applied generations, retry/rollback stages и terminal receipts.
+
+WireGuard private keys/PSK, reusable pairing secrets и downloadable admin private configs в SQLite не хранятся. Существующий `wg-mgmt` импортируется как link slot 0 только после проверки exact interface/address/route/peer; при неоднозначности migration оставляет прежний runtime неизменным и требует ручного adoption. VPS-role database использует те же IDs/generations для public peers, relay allocation и ACL projection, но не получает Gateway application DB или credentials.
+
 ### 12.3 Retention
 
 - raw health samples: 7 дней по умолчанию;
@@ -1792,6 +1908,20 @@ POST   /api/v1/settings/network/apply/{id}/confirm
 GET    /api/v1/wireguard/status
 POST   /api/v1/wireguard/configure
 
+GET    /api/v1/management/vps
+POST   /api/v1/management/vps/pair
+POST   /api/v1/management/vps/{id}/rotate
+DELETE /api/v1/management/vps/{id}
+GET    /api/v1/management/admins
+POST   /api/v1/management/admins
+POST   /api/v1/management/admins/{id}/revoke
+GET    /api/v1/management/resources
+POST   /api/v1/management/resources
+PUT    /api/v1/management/resources/{id}
+DELETE /api/v1/management/resources/{id}
+GET    /api/v1/management/access-matrix
+POST   /api/v1/management/apply
+
 POST   /api/v1/system/backup
 POST   /api/v1/system/restore
 GET    /api/v1/system/power/capabilities
@@ -1806,23 +1936,43 @@ POST   /api/v1/system/power-cycle
 
 ### 14.3 Web UI
 
-Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах:
+Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах. Sidebar не является плоским списком из десятков пунктов: он показывает шесть понятных групп, внутри которых открываются самостоятельные вкладки/подвкладки. Последняя выбранная подстраница и фильтры сохраняются локально, breadcrumbs и deep links ведут к конкретному объекту, а mobile navigation использует тот же порядок в drawer.
 
-1. **Обзор:** Gateway state, active tuple `метод → uplink → [подписка → node]`, quality, причина последнего переключения, WireGuard, traffic и основные предупреждения.
-2. **Способы доступа:** единый ordered list `Прямой интернет + подписки`, enable/priority, текущий выбор, FULL/LIMITED explanation, startup gate и временный direct-only mode.
-3. **Выходы в интернет:** единый ordered list Ethernet/HiLink uplinks, enable/priority, DHCP/static IPv4, exact interface/gateway, direct/VPN matrix, safe replacement и reason текущего выбора.
-4. **Модемы:** HiLink-specialized discovery/adoption, CRUD, operator/telemetry, hot-plug, recovery ladder, direct status и статусы всех подписок через выбранный модем.
-5. **Подписки:** CRUD, refresh/LKG, masked URL, candidate counts, раскрываемые server policies и статусы подписки через каждый uplink.
-6. **Матрица путей:** direct и полная таблица `uplink × подписка`, фильтры, freshness, выбранная node, quality, score, latency, reason code, manual probe/activate.
-7. **Серверы проверки доступа:** отдельные группы `Полноценный интернет`, `Сайты белого списка — только напрямую` и read-only service endpoints; ordered CRUD, required/optional, timeout, условие успеха, interval и priority.
-8. **Правила отбора серверов:** ordered node-name matchers, preview по подпискам и fallback policy.
-9. **VPN-серверы:** исходное имя, подписка, `AUTO/INCLUDE/EXCLUDE`, preferred rank, candidate source, matched rule и раскрываемая матрица результатов по uplinks/targets.
-10. **Состояние и операции:** persistent scrolling operation panel, uplink/path/target health, stages, timeline, target outages, probe budget и объяснение failover; completed entries можно очистить.
-11. **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
-12. **WireGuard-клиенты:** `wg-ingress` server, peers, managed/external keys, standard configs/QR, policies, handshake/RX/TX и per-peer log.
-13. **Удалённое управление:** VPS peer, выбранный management-uplink, handshake и admin peers `wg-mgmt`.
-14. **Сеть и интерфейсы:** physical inventory, понятные ingress/management/uplink roles, topology profile, transit LAN, DHCP/DNS, replacement, routing tables/marks read-only и safe apply.
-15. **Система и безопасность:** версии, update, backup/restore, users/sessions, TLS, diagnostic bundle, отдельная карточка **Самоконтроль 24/7** с component health, recovery history и bounded watchdog settings, а также отдельная карточка **Питание** для ручных reboot/shutdown и capability-gated RTC power-cycle.
+1. **Обзор**
+   - **Состояние Gateway:** active tuple `метод → uplink → [подписка → node]`, quality, причина переключения, management links, traffic и критические предупреждения.
+   - **Состояние и операции:** persistent operation panel, stages/timeline, outages, probe budget и объяснение failover.
+
+2. **Интернет и VPN**
+   - **Способы доступа:** ordered list `Прямой интернет + подписки`, enable/priority, FULL/LIMITED, startup gate и temporary direct-only.
+   - **Выходы в интернет:** Ethernet/HiLink uplinks, priority, DHCP/static IPv4, direct/VPN summary, replacement и причина выбора.
+   - **Модемы:** HiLink discovery/adoption, operator/telemetry, hot-plug, recovery и статусы методов.
+   - **Подписки:** refresh/LKG, masked URL, candidate counts, server policies и статусы через каждый uplink.
+   - **VPN-серверы:** `AUTO/INCLUDE/EXCLUDE`, preferred rank и per-uplink/target results.
+   - **Матрица путей:** canonical `uplink × access method` с quality/freshness/reason/manual probe.
+   - **Серверы проверки доступа** и **Правила отбора серверов:** target classes, CRUD/priority и matcher preview остаются разными вкладками, потому что решают разные задачи.
+
+3. **Сеть**
+   - **Топология и интерфейсы:** physical inventory, ingress/management/uplink roles, topology profile, replacement и safe apply.
+   - **Локальная сеть Gateway:** transit LAN, DHCP/DNS, Keenetic WAN reservation и read-only advanced routes/marks.
+   - **Входящие WireGuard-клиенты:** отдельный `wg-ingress`, peers, keys/config/QR, policies, handshake/RX/TX; эта страница не смешивается со служебным `wg-mgmt`.
+
+4. **Удалённый доступ**
+   - **VPS и каналы:** `1..N` links, pairing/rotation, selected uplink, endpoint/handshake/RTT и independent health.
+   - **Администраторы:** отдельные peers/configs, `ROUTED_HUB`/`END_TO_END_RELAY`, revoke и разрешённые sites/resources.
+   - **Локальные ресурсы:** Gateway/Keenetic/hosts/subnets, access profile, local destination, published alias, ports, health и external prerequisites.
+   - **Матрица доступа:** `administrator × VPS × Gateway × resource`, effective ACL/generation и объяснение `почему доступно/недоступно`.
+
+5. **Наблюдение**
+   - **Журнал:** один canonical stream с тематическими вкладками и object deep links.
+   - **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
+   - **Самоконтроль 24/7:** девятнадцать fixed components successor, effective recovery policy, history и suppression reasons.
+
+6. **Система**
+   - **Обновление и обслуживание:** version, update, backup/restore, diagnostic bundle и uninstall.
+   - **Безопасность:** users/sessions, TLS, SSH/SFTP, audit и key rotations.
+   - **Питание:** manual reboot/shutdown и capability-gated RTC power-cycle.
+
+Overview показывает только сводку и ссылки **«Открыть подробности»**; CRUD/advanced forms в него не копируются. Страница объекта использует один compact status header и локальные секции, а длинные tables получают server-side pagination/virtualization. Advanced network/CIDR/AllowedIPs/NAT details скрыты за **«Дополнительными сведениями»**, но ошибки всегда формулируются понятным языком и указывают точную вкладку исправления.
 
 Каждая настройка имеет видимое понятное название, короткое inline-объяснение и help trigger. На desktop подсказка появляется после bounded hover delay, при keyboard focus — немедленно, на touch — по нажатию `?`; hover не является единственным способом получить описание. Help сообщает назначение, рекомендуемое значение и причину, prerequisites, точные последствия, возможность потери управления/Internet, restart/requalification, rollback и пример. Обычный режим скрывает CIDR/fwmark/table/AllowedIPs за **«Дополнительными сведениями»**, advanced mode всё равно принимает только typed validated values, а не arbitrary commands.
 
@@ -1880,11 +2030,12 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 
 ### 15.2 TLS и bind
 
-- API слушает только LAN и WireGuard addresses;
+- API слушает только owned LAN/management bridge addresses и local addresses всех enabled `wg_management_<link_id>`; dedicated Ethernet/HiLink uplinks и public VPS interface никогда не являются bind targets;
 - порт по умолчанию `8443`;
 - TLS обязателен;
-- при первом запуске генерируется self-signed certificate с отображением fingerprint;
+- при первом запуске генерируется локальная Gateway CA и leaf certificate со stable site hostname/current management SAN; пользователю показывается CA fingerprint, а добавление management link выполняет leaf rotation без молчаливой смены доверенной CA;
 - позднее допускается пользовательский certificate;
+- пользовательский certificate перед apply проверяется на key match, expiry и покрытие stable hostname; отсутствие нового IP SAN не блокирует hostname access, но показывается как понятное предупреждение;
 - Mihomo controller слушает только loopback.
 
 ### 15.3 Секреты
@@ -1924,6 +2075,11 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - пересечение management subnets и route injection через DHCP модема;
 - lockout при ошибке сетевых настроек;
 - компрометация VPS management peer.
+- подмена admin source полностью скомпрометированным routed-hub VPS и abuse публичного UDP relay;
+- повторное использование pairing token или подмена VPS fingerprint;
+- route/AllowedIPs injection, пересечение alias pool и доступ не к тому Gateway при одинаковых Home LAN;
+- lateral movement Gateway↔Gateway либо admin↔admin через общий VPS;
+- рассинхронизация ACL generations между Gateway и несколькими VPS;
 
 ---
 
@@ -1932,7 +2088,7 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 ### 16.1 Логирование
 
 - приложение пишет structured logs в journald;
-- типы: `system`, `uplink`, `modem`, `path/access`, `subscription/node`, `mihomo`, `network/firewall/dns/dhcp`, `wireguard-management`, `wireguard-ingress`, `watchdog/recovery`, `update/backup`, `auth/audit`;
+- типы: `system`, `uplink`, `modem`, `path/access`, `subscription/node`, `mihomo`, `network/firewall/dns/dhcp`, `wireguard-management`, `management-fabric/resource-acl`, `wireguard-ingress`, `watchdog/recovery`, `update/backup`, `auth/audit`;
 - повторяющиеся health failures агрегируются;
 - ни одно поле не содержит credentials или полный URL подписки;
 - log level изменяется без рестарта;
@@ -1950,7 +2106,7 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - изменение logging settings создаёт audit event с old/new metadata без секретов и применяется без restart;
 - Web UI предоставляет фильтры по времени, severity, category, modem/subscription/path и correlation ID, но читает journald через ограниченный server-side API с pagination/rate limit, а не произвольный journal query.
 
-Web UI показывает один canonical stream в тематических вкладках **Все**, **Модемы**, **Подписки и VPN-серверы**, **Доступ и переключения**, **VPN/Mihomo**, **Сеть**, **WireGuard/VPS**, **Watchdog**, **Обновления/backup** и **Безопасность/audit**. Фильтр конкретного uplink/modem/subscription/node/peer/operation доступен как deep link из соответствующей карточки. Очистка UI-селекции не удаляет audit; удаление eligible operational history подчиняется retention и отдельному подтверждению.
+Web UI показывает один canonical stream в тематических вкладках **Все**, **Модемы**, **Подписки и VPN-серверы**, **Доступ и переключения**, **VPN/Mihomo**, **Сеть**, **Удалённый доступ/VPS/ресурсы**, **WireGuard-клиенты**, **Watchdog**, **Обновления/backup** и **Безопасность/audit**. Фильтр конкретного uplink/modem/subscription/node/VPS/link/admin/resource/peer/operation доступен как deep link из соответствующей карточки. Очистка UI-селекции не удаляет audit; удаление eligible operational history подчиняется retention и отдельному подтверждению.
 
 Journald остаётся единственным authoritative журналом. Bounded exporter создаёт redacted human-readable snapshots/rotated archives только по фиксированному owned пути:
 
@@ -2012,6 +2168,7 @@ Files создаются atomic rename, имеют bounded size/age/disk budget 
 - Mihomo config без proxy credentials;
 - последние события и ограниченный journal;
 - WireGuard handshake metadata без keys;
+- redacted Management Fabric links, published aliases, effective ACL generations и resource health без private/pairing material;
 - SQLite integrity check result.
 
 ---
@@ -2167,6 +2324,10 @@ Down-migration новой БД старым binary не используется
 2. одна сгенерированная release-команда на чистом VPS с ролью `vps`;
 3. одна команда `gateway-vpn-deploy` с административного компьютера, которая по SSH выполняет preflight обеих машин, устанавливает обе роли, обменивает только WireGuard public keys и запускает end-to-end verification.
 
+Первый deploy создаёт один management link, но не закрепляет односерверную топологию навсегда. После установки Gateway WebUI может pair дополнительный VPS, а VPS Hub — дополнительный Gateway без переустановки любой роли. Installer VPS предлагает conflict-free management/admin/resource pools, проверяет их против host routes и существующих peers и никогда не перенумеровывает уже выданные site/link/admin prefixes автоматически. Повторный deploy существующей роли использует authenticated pairing/update transaction и не запускает clean-host wizard.
+
+VPS Hub после first install слушает только localhost и admin WireGuard address; публичный HTTPS bind является запрещённым default и не включается pairing bundle. Итоговая readiness проверка для management fabric отдельно подтверждает Gateway→каждый VPS handshake, admin→Gateway HTTPS, ACL deny между sites и отсутствие management prefixes в user Internet/NAT path.
+
 Команда содержит явную release version и ожидаемый hash bootstrap artifact. `curl | sudo bash`, непроверенный `latest` и исполнение загруженного файла до проверки hash/signature запрещены. Удобный канал `stable` допустим только как подписанный manifest, разрешающийся в конкретную immutable version; в installation report всегда записываются resolved version, hashes и signer identity.
 
 До первой host mutation выполняется полный read-only preflight и формируется машинно-читаемый отчёт. Проверяются:
@@ -2244,7 +2405,7 @@ Linux network namespaces моделируют:
 - Gateway LAN;
 - не менее двух fake HiLink routers с разными management subnets и операторами;
 - несколько proxy candidates;
-- VPS WireGuard peer;
+- минимум два независимых VPS WireGuard peers и два Gateway site peers, включая одинаковые local subnets за разными sites;
 - DNS и probe endpoints.
 - чистая Ubuntu 24.04 Gateway и отдельные чистые VPS fixtures Ubuntu 20.04/22.04/24.04/26.04 LTS для GitHub zero-to-ready deployment; 20.04 fixture проверяет ESM/security gate.
 
@@ -2300,6 +2461,16 @@ Linux network namespaces моделируют:
 - исчерпание soft probe budget откладывает standby probes, но не помечает nodes как failed;
 - management WireGuard переносит endpoint route на следующий modem и восстанавливает handshake независимо от subscription matrix;
 - первый по priority modem не пропускает VPS UDP: selector помечает его management path `BLOCKED` и устанавливает handshake через следующий modem;
+- один VPS одновременно маршрутизирует нескольких Gateway peers с уникальными `/32`/site prefixes и запрещает Gateway↔Gateway forwarding;
+- один Gateway одновременно удерживает handshakes с двумя VPS через независимые interfaces/keys/subnets; остановка одного VPS не меняет второй link и data plane;
+- pairing token одноразов, fingerprint/subnet проверяются, а make-before-break key rotation сохраняет хотя бы один проверенный management path;
+- `END_TO_END_RELAY` доставляет реальный nested WireGuard handshake admin→Gateway через VPS UDP relay; packet capture на VPS не содержит inner plaintext, а пакет, сгенерированный только VPS без admin private key, не проходит `wg-admin`/resource ACL;
+- restore-as-same-site требует key replacement и не допускает одновременно active cloned identity; restore-as-new-site получает новые `site_id`/keys/prefixes;
+- одинаковые `192.168.50.0/24` за двумя Gateway доступны только через разные published alias prefixes; попытка overlapping alias/AllowedIPs отклоняется до mutation;
+- ACL разрешает конкретному admin только назначенные site/resource ports и одинаково блокирует нарушение на VPS и Gateway; Gateway↔Gateway, admin↔admin и management→Internet запрещены;
+- `GATEWAY_ONLY`, `KEENETIC_WAN`, `VIA_KEENETIC_WAN_ROUTED`, `VIA_WG_ROUTER` и `VIA_DEDICATED_LAN` имеют отдельные fixtures; отсутствие внешнего Keenetic firewall/return path оставляет resource `WAITING_EXTERNAL_CONFIGURATION`, не создавая широкого fallback;
+- topology profiles переключаются после установки одной durable safe-apply transaction; подтверждение только со старого management address не фиксирует candidate, timeout/process kill/reboot возвращают LKG topology;
+- grouped WebUI navigation сохраняет единственного владельца каждой настройки, breadcrumbs/deep links и доступность keyboard/touch при desktop/mobile layouts;
 - reboot with PATH_BLOCKED;
 - truncated/invalid-checksum WAL после power cut: SQLite отбрасывает неподтверждённый tail, `quick_check` проходит, Gateway начинает с verification;
 - page corruption/partial write в основном DB-файле: `integrity_check` падает, запись прекращается, выполняется restore verified backup либо остаётся `PATH_BLOCKED`;
@@ -2356,6 +2527,13 @@ Linux network namespaces моделируют:
 | WireGuard management modem unplug | endpoint route переходит на следующий ready modem | нет |
 | Priority modem не достигает VPS endpoint | следующий management-reachable modem без влияния на data path | нет |
 | VPS/WireGuard недоступен | data plane продолжает работать | нет |
+| Один из нескольких VPS недоступен | остальные management links продолжают работать; только этот link получает external outage | нет |
+| VPS relay скомпрометирован/пытается spoof admin | `END_TO_END_RELAY` не принимает пакет без inner admin key; WebUI/SSH auth сохраняется | нет |
+| Один VPS обслуживает несколько Gateway с одинаковой Home LAN | unique alias prefixes выбирают правильный site; межсайтовый forwarding закрыт | нет |
+| ACL generation применена только на части VPS | рабочая предыдущая generation сохраняется; status PARTIAL/PENDING_RETRY либо полный rollback | нет |
+| Keenetic продолжает Internet через WAN без management WireGuard | Gateway остаётся доступен; непроверенная Home LAN не публикуется | нет |
+| Keenetic WAN→LAN firewall/return path отсутствует | resource WAITING_EXTERNAL_CONFIGURATION; другие resources/links продолжают работу | нет |
+| Reboot/kill во время topology profile switch | отдельный helper восстанавливает LKG network/firewall/API bind | нет |
 | SQLite недоступна | blocked или последний подтверждённый runtime без изменений | нет |
 | SQLite WAL оборван/имеет неверную checksum | отбросить неподтверждённый tail, quick check, затем verification | нет |
 | SQLite main DB page повреждена/частично записана | не открывать БД на запись; integrity event; restore backup либо PATH_BLOCKED | нет |
@@ -2530,15 +2708,20 @@ Fixtures не содержат production credentials, настоящие subscr
 ### Этап 5. WireGuard management
 
 - [ ] VPS installer;
-- [ ] Gateway peer generation;
-- [ ] admin peer management;
-- [ ] modem-independent management-uplink selector;
-- [ ] modem-specific endpoint host routes и atomic failover;
-- [ ] VPS forwarding/firewall;
-- [ ] status/handshake UI;
-- [ ] management survival tests.
+- [ ] durable entities для `site`, `vps_node`, `management_link`, `admin_peer`, `management_resource`, ACL/route generations и operation receipts;
+- [ ] несколько Gateway peers на одном VPS и несколько одновременно active VPS links на одном Gateway;
+- [ ] per-link keypair, one-time pairing, fingerprint verification и make-before-break rotation;
+- [ ] optional Gateway-terminated `wg-admin` и per-site VPS UDP relay для end-to-end administrator mode;
+- [ ] admin peer management и отдельные portable configs для каждого VPS без overlapping `AllowedIPs`;
+- [ ] uplink-independent endpoint selector каждого link, host routes и bounded recovery;
+- [ ] VPS forwarding/firewall с двойной Gateway-side ACL и default deny между sites/admins;
+- [ ] local-resource profiles через Gateway-only, Keenetic WAN/routed, router WireGuard и dedicated LAN;
+- [ ] unique published alias pool и typed translation для overlapping Home LAN;
+- [ ] Gateway **«Удалённый доступ»** tabs и restricted VPS Hub;
+- [ ] topology profile switching после установки через durable safe apply;
+- [ ] management/resource watchdog, logs, diagnostics и survival tests.
 
-**Критерий готовности:** Web UI доступен через VPS при неработающем Mihomo и отсутствии рабочих подписок; unplug текущего management-модема переносит endpoint route на следующий ready modem и восстанавливает handshake без ручной настройки.
+**Критерий готовности:** Web UI доступен через любой enabled reachable VPS при неработающем Mihomo и отсутствии рабочих подписок; один VPS безопасно обслуживает минимум два Gateway, один Gateway одновременно удерживает минимум два VPS links, а отказ VPS/uplink не разрушает остальные links. Администратор получает только разрешённые Gateway/Keenetic/local resources, одинаковые Home LAN различаются alias prefixes, отсутствие Keenetic return path не расширяет firewall, и post-install topology switch либо подтверждается через новый management path, либо автоматически возвращает LKG.
 
 ### Этап 6. Traffic, backup и эксплуатация
 
@@ -2597,6 +2780,13 @@ Fixtures не содержат production credentials, настоящие subscr
 33. Web UI имеет понятные роли, help для mouse/keyboard/touch, impact preview и safe rollback; технические термины не являются единственным объяснением mutable setting.
 34. canonical journald stream имеет тематические Web UI tabs и bounded redacted `/var/log/gateway-vpn` exports, доступные штатным SFTP только через management paths.
 35. ручные reboot/shutdown требуют re-authentication и typed confirmation; RTC power-cycle доступен только при доказанной поддержке железом, а любая power action блокируется во время критической durable transaction и полностью отражается в audit/operation status.
+36. все поддерживаемые topology profiles и interface roles можно изменить после установки через WebUI; risky apply имеет preview, alternative management prerequisite, out-of-process timeout/reboot rollback и подтверждается только через новый path.
+37. Management Fabric поддерживает `1..N Gateway ↔ 1..N VPS`: links имеют отдельные keys/subnets/interfaces/generations, остаются одновременно active и восстанавливаются независимо от user data plane.
+38. VPS/Gateway применяют одинаковую versioned ACL; Gateway↔Gateway, admin↔admin, management→Internet и непубликованные local networks закрыты, а key pairing/rotation/revoke не оставляют промежуточного широкого доступа.
+39. Gateway, Keenetic и local host/subnet resources публикуются только явно через один из проверенных profiles; обычный WAN Internet Keenetic не зависит от наличия management WireGuard, а отсутствующий firewall/return path отображается как внешний prerequisite.
+40. одинаковые private Home LAN нескольких Gateway доступны через уникальные conflict-checked aliases для каждой `site × resource × VPS link` publication без изменения адресов локальных устройств и без route ambiguity на VPS/admin.
+41. WebUI использует сгруппированную предметную навигацию, отдельные вкладки VPS/администраторов/локальных ресурсов/матрицы доступа, единственного владельца каждой настройки и canonical backend state без дублирующих форм/вычислений.
+42. Для local-resource access доступен Gateway-terminated `END_TO_END_RELAY`: VPS пересылает только зашифрованные inner WireGuard datagrams, не может подделать admin peer, а `ROUTED_HUB` остаётся явно обозначенным более доверительным opt-in.
 
 ---
 

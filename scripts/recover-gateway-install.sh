@@ -124,6 +124,18 @@ restore_systemd_unit_state() {
   return 0
 }
 
+# Recovery removes only Gateway-owned .network files. Do not implicitly start
+# a stopped or unavailable network manager while restoring the pre-install
+# host. When networkd is already active, failure to reload its live policy is a
+# real recovery error and is retained in the durable transaction marker.
+reload_networkd_policy_if_active() {
+  if systemctl is-active --quiet systemd-networkd.service; then
+    networkctl reload || record_failure "reload active networkd after policy cleanup"
+  else
+    echo "systemd-networkd is not active; skipped live policy reload after Gateway install recovery"
+  fi
+}
+
 UNITS=(
   gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer
@@ -236,7 +248,7 @@ fi
 if [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]]; then
   rm -rf /var/lib/gateway-vpn-host-upgrade || record_failure "remove unused host-upgrade transaction root"
 fi
-networkctl reload || record_failure "reload networkd after policy cleanup"
+reload_networkd_policy_if_active
 systemctl daemon-reload || record_failure "reload systemd after owned-state cleanup"
 for unit in "${UNITS[@]}"; do
   systemctl is-enabled --quiet "$unit" && record_failure "$unit remained enabled"

@@ -21,6 +21,7 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 - HiLink является USB-Ethernet uplink с собственной management subnet/NAT, stable device identity, telemetry и bounded recovery. Huawei/USB NIC никогда не включается в LAN bridge.
 - `SHARED_ONE_ARM` допускает один физический Ethernet к существующему роутеру: входящий пользовательский трафик приходит по `wg-ingress`, а отмеченный uplink возвращает обработанный трафик через тот же L2 interface. Обычный незашифрованный LAN transit на shared interface не принимается.
 - Replacement привязывает логическую роль к новой stable NIC identity через safe apply. Текущее Linux ifname не считается постоянным идентификатором.
+- Все topology profiles и роли изменяются после установки через WebUI. Candidate одновременно покрывает networkd, DHCP/DNS, firewall, policy routing, `wg-ingress` и API bind; LKG/old management path сохраняются до подтверждения через новый path, а timeout/process crash/reboot выполняют out-of-process rollback.
 - Loopback, non-Ethernet, current default-route/active SSH path, интерфейс с чужим IPv4 и HiLink risk не могут молча стать LAN member. Любая неоднозначность требует явного выбора пользователя.
 
 ## Uplink isolation
@@ -51,12 +52,17 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 - `wg-ingress` UDP принимается только на server-configured listener interfaces из `wireguard_ingress_listeners`. Disabled/failed server не оставляет интерфейс или wildcard listener.
 - Firewall guard проверяет base drop chains, generation 4, четыре traffic counters и ingress listener set. При flush/corruption он сначала quarantines transit LAN, восстанавливает только owned blocked ruleset и возвращает link после повторной проверки.
 
-## Два WireGuard-контура
+## WireGuard и Management Fabric
 
-- `wg-mgmt` (`10.80.0.0/24`) обслуживает независимое управление через VPS. Gateway address `10.80.0.2/32` дополняется owned route `10.80.0.0/24 dev wg-mgmt protocol 186`; VPS address `10.80.0.1/24` создаёт обратный connected route.
+- Совместимый первый `wg-mgmt` (`10.80.0.0/24`) обслуживает независимое управление через VPS. Gateway address `10.80.0.2/32` дополняется owned route `10.80.0.0/24 dev wg-mgmt protocol 186`; VPS address `10.80.0.1/24` создаёт обратный connected route.
+- Successor допускает `1..N Gateway ↔ 1..N VPS`. Дополнительные links используют отдельные `gvm<N>`, keypair, непересекающуюся management subnet/address и route/ACL generation; все enabled links остаются active одновременно и независимо выбирают physical uplink. Один VPS назначает уникальные Gateway `/32`, запрещает Gateway↔Gateway/admin↔admin forwarding и не создаёт общий private wildcard route.
 - Endpoint `wg-mgmt` получает uplink-specific host route и failover независимо от Mihomo/user path. Старый handshake при совпавшем локальном contour является внешней ошибкой, а не поводом restart/reboot.
+- Optional `wg-admin` завершает administrator tunnel непосредственно на Gateway. В рекомендуемом `END_TO_END_RELAY` VPS пересылает allowlisted public UDP port через outer management link, но не имеет inner key и не расшифровывает admin payload; `ROUTED_HUB` остаётся явным более доверительным режимом.
 - `wg-ingress` (по умолчанию `10.90.0.0/24`, UDP/51820) принимает трафик клиентов/роутеров. Его keys, peers, AllowedIPs, behind routes и access policies независимы от management tunnel.
 - Для managed ingress peer private key/PSK остаются root-only; revoke удаляет peer из kernel. Peer traffic проходит ту же FULL/LIMITED/direct/VPN policy, а не получает собственный неконтролируемый NAT.
-- Forwarding обычного LAN в `wg-mgmt` запрещён. Пересечения LAN/uplink/management/ingress/peer prefixes и duplicate peer routes отклоняются до apply.
+- Forwarding обычного LAN в outer `wg-mgmt` запрещён. Локальные ресурсы публикуются default-off как typed Gateway/Keenetic/host/subnet services через `GATEWAY_ONLY`, Keenetic WAN/routed, router WireGuard либо dedicated LAN profile и explicit administrator ACL.
+- Для каждой публикации `site × resource × VPS link` выделяется уникальный alias prefix. Это позволяет безопасно различать одинаковые `192.168.1.0/24`/`192.168.50.0/24` разных Gateway и одновременно держать admin tunnels к нескольким VPS без duplicate `AllowedIPs`.
+- Обычный Internet Keenetic продолжает идти через WAN. Management WireGuard на Keenetic не обязателен; без него Home LAN требует явного WAN→LAN firewall/return path либо dedicated LAN link и остаётся `WAITING_EXTERNAL_CONFIGURATION`, пока fresh probe не подтвердит доступ.
+- Пересечения LAN/uplink/management/admin/ingress/peer/resource prefixes и duplicate peer routes отклоняются до apply. Management→Internet, непубликованная LAN и inter-site traffic всегда default deny.
 
 Конкретные addresses, interfaces, USB IDs и routing values стенда записываются после hardware discovery, а не предполагаются из порядка PCI/USB-портов.

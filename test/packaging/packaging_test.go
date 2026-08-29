@@ -930,6 +930,39 @@ func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
 	}
 }
 
+func TestGatewayCleanupReloadsNetworkdOnlyWhenAlreadyActive(t *testing.T) {
+	root := repositoryRoot(t)
+	scripts := map[string]string{
+		"first-install recovery": read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh")),
+		"uninstall":              read(t, filepath.Join(root, "scripts", "uninstall.sh")),
+	}
+
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			functionStart := strings.Index(script, "reload_networkd_policy_if_active() {")
+			if functionStart < 0 {
+				t.Fatal("networkd cleanup helper is missing")
+			}
+			functionEnd := strings.Index(script[functionStart:], "\n}")
+			if functionEnd < 0 {
+				t.Fatal("networkd cleanup helper is incomplete")
+			}
+			function := script[functionStart : functionStart+functionEnd]
+			activeCheck := strings.Index(function, "systemctl is-active --quiet systemd-networkd.service")
+			reload := strings.Index(function, "networkctl reload")
+			if activeCheck < 0 || reload <= activeCheck {
+				t.Fatal("networkd reload is not gated on the daemon already being active")
+			}
+			if strings.Count(script, "networkctl reload") != 1 {
+				t.Fatal("cleanup contains an unconditional or duplicate networkd reload")
+			}
+			if strings.Count(script, "reload_networkd_policy_if_active") != 2 {
+				t.Fatal("networkd cleanup helper must have exactly one definition and one call")
+			}
+		})
+	}
+}
+
 func TestGatewayInstallerAcceptsOnlyAuthenticatedTerminalUninstallRemnants(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))

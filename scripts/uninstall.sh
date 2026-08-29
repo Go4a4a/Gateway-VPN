@@ -171,6 +171,19 @@ restore_systemd_unit_state() {
     ! systemctl is-active --quiet "$unit"
   fi
 }
+
+# Removing Gateway-owned .network files does not require starting a network
+# manager that is currently stopped (or not installed). Starting it here could
+# take ownership of unrelated interfaces while an uninstall is restoring the
+# pre-install host. If networkd is already active, however, the live policy must
+# be reloaded and any failure remains fatal under set -e.
+reload_networkd_policy_if_active() {
+  if systemctl is-active --quiet systemd-networkd.service; then
+    networkctl reload
+  else
+    echo "systemd-networkd is not active; skipped live policy reload after removing Gateway-owned files"
+  fi
+}
 systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 2>/dev/null || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
@@ -255,7 +268,7 @@ if ((PURGE_DATA)); then
   rm -rf /var/lib/gateway-vpn-host-upgrade
   rm -rf /var/log/gateway-vpn
 fi
-networkctl reload
+reload_networkd_policy_if_active
 systemctl daemon-reload
 if ((GRUB_POLICY_REMOVED)); then
   command -v update-grub >/dev/null && command -v grub-script-check >/dev/null || { echo "Cannot regenerate GRUB after uninstall" >&2; exit 1; }
