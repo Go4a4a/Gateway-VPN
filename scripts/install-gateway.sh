@@ -45,7 +45,10 @@ watchdog_runtime_ready() {
   ((status_age >= -5 && status_age <= 660 && control_age >= -5 && control_age <= 30)) || return 1
   grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/status.json || return 1
   grep -Fq '"policy_source":' /run/gateway-vpn-watchdog/status.json || return 1
-  grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/control.json || return 1
+  # The supervisor status and control-plane heartbeat deliberately have
+  # independent schemas.  The status payload is v1; worker-level control
+  # liveness was introduced in control heartbeat v2.
+  grep -Fq '"schema_version":2' /run/gateway-vpn-watchdog/control.json || return 1
   grep -Fq '"database_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
   grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
 }

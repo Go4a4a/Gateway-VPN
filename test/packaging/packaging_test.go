@@ -90,7 +90,7 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 		t.Fatal("tmpfiles does not create the root-only durable watchdog history root")
 	}
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
-	for _, required := range []string{"systemctl restart gateway-vpn-watchdog.service", "systemctl is-active --quiet gateway-vpn-watchdog.service", "watchdog_runtime_ready", "/run/gateway-vpn-watchdog/status.json", "/run/gateway-vpn-watchdog/control.json", `"database_ok":true`, `"workers_ok":true`, "status_age <= 660", "control_age <= 30"} {
+	for _, required := range []string{"systemctl restart gateway-vpn-watchdog.service", "systemctl is-active --quiet gateway-vpn-watchdog.service", "watchdog_runtime_ready", "/run/gateway-vpn-watchdog/status.json", "/run/gateway-vpn-watchdog/control.json", `grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/status.json`, `grep -Fq '"schema_version":2' /run/gateway-vpn-watchdog/control.json`, `"database_ok":true`, `"workers_ok":true`, "status_age <= 660", "control_age <= 30"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer watchdog acceptance missing %q", required)
 		}
@@ -674,6 +674,9 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 	}
 	if strings.Contains(recovery, "flush ruleset") || strings.Index(recovery, "if ((FAILED))") > strings.Index(recovery, "mv -f \"$MARKER\"") {
 		t.Fatal("Gateway recovery can discard its marker before verified owned-state cleanup")
+	}
+	if !strings.Contains(recovery, "restore_systemd_unit_state()") || !strings.Contains(recovery, "only record_failure controls recovery failure") || !strings.Contains(recovery, "  return 0\n}") {
+		t.Fatal("Gateway recovery systemd-state helper can leak an expected negative probe through set -e")
 	}
 	installRecovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-install-recovery.service"))
 	for _, required := range []string{"gateway-vpn-update-recovery.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-recovery.service", "gateway-vpn-network-broker.socket", "gateway-vpn-network-broker.service"} {

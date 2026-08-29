@@ -114,6 +114,10 @@ restore_systemd_unit_state() {
     systemctl stop "$unit" >/dev/null 2>&1 || record_failure "stop $label"
     systemctl is-active --quiet "$unit" && record_failure "$label remained active"
   fi
+  # A successfully restored disabled/inactive unit makes the negative probes
+  # above return 1.  Do not leak that expected probe result through the
+  # function under `set -e`; only record_failure controls recovery failure.
+  return 0
 }
 
 UNITS=(
