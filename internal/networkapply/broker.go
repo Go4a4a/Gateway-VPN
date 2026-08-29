@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -40,6 +41,7 @@ type BrokerServer struct {
 	Traffic     TrafficAdmin
 	Recovery    ModemRecoveryAdmin
 	Power       PowerAdmin
+	Logger      *slog.Logger
 	handler     http.Handler
 }
 
@@ -687,6 +689,7 @@ func (server *BrokerServer) syncWireGuardIngress(writer http.ResponseWriter, req
 		return
 	}
 	if err := server.Ingress.Sync(request.Context()); err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_sync", err)
 		writeBrokerError(writer, http.StatusServiceUnavailable, "WIREGUARD_INGRESS_SYNC_FAILED")
 		return
 	}
@@ -705,6 +708,7 @@ func (server *BrokerServer) updateWireGuardIngressServer(writer http.ResponseWri
 	}
 	item, err := server.Ingress.UpdateServer(request.Context(), input)
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_server_update", err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_SERVER_REJECTED")
 		return
 	}
@@ -723,6 +727,7 @@ func (server *BrokerServer) rotateWireGuardIngressServer(writer http.ResponseWri
 	}
 	item, err := server.Ingress.RotateServer(request.Context())
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_server_rotate", err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_ROTATION_FAILED")
 		return
 	}
@@ -741,6 +746,7 @@ func (server *BrokerServer) createWireGuardIngressPeer(writer http.ResponseWrite
 	}
 	item, err := server.Ingress.CreatePeer(request.Context(), input)
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_peer_create", err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_REJECTED")
 		return
 	}
@@ -764,6 +770,7 @@ func (server *BrokerServer) updateWireGuardIngressPeer(writer http.ResponseWrite
 	}
 	item, err := server.Ingress.UpdatePeer(request.Context(), input.PeerID, *input.Update)
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_peer_update", err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_REJECTED")
 		return
 	}
@@ -798,6 +805,7 @@ func (server *BrokerServer) exportWireGuardIngressPeer(writer http.ResponseWrite
 	}
 	item, err := server.Ingress.ExportPeerConfig(request.Context(), input.PeerID)
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_peer_export", err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_CONFIG_UNAVAILABLE")
 		return
 	}
@@ -829,6 +837,7 @@ func (server *BrokerServer) wireGuardIngressPeerAction(writer http.ResponseWrite
 		err = errors.New("unsupported WireGuard ingress action")
 	}
 	if err != nil {
+		server.logPrivilegedFailure("wireguard_ingress_peer_"+strings.ToLower(action), err)
 		writeBrokerError(writer, http.StatusConflict, "WIREGUARD_INGRESS_PEER_ACTION_FAILED")
 		return
 	}
@@ -837,6 +846,17 @@ func (server *BrokerServer) wireGuardIngressPeerAction(writer http.ResponseWrite
 		return
 	}
 	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+// logPrivilegedFailure keeps the actionable root cause in the root broker's
+// bounded journal while the Unix-socket client receives only a stable public
+// error code. Typed inputs and secret material are deliberately never logged.
+func (server *BrokerServer) logPrivilegedFailure(operation string, err error) {
+	logger := server.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("Gateway VPN privileged broker operation failed", "operation", operation, "error", err)
 }
 
 type BrokerClient struct {

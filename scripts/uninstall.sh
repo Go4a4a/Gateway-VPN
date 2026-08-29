@@ -59,11 +59,17 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     MARKER_BYTES=$(stat -c '%s' "$LATEST_TRANSACTION")
     [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Completed Gateway install marker size is unsafe" >&2; exit 1; }
     MARKER_FIELD_COUNT=$(wc -l <"$LATEST_TRANSACTION")
-    [[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
-    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|boot_network_policy|grub_policy)=' "$LATEST_TRANSACTION") == "$MARKER_FIELD_COUNT" ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
+    [[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
+    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$LATEST_TRANSACTION") == "$MARKER_FIELD_COUNT" ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
     MARKER_KEYS=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
-    if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
       MARKER_KEYS+=(boot_network_policy grub_policy)
+    fi
+    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+      MARKER_KEYS+=(log_reader_user log_reader_was_member)
+    fi
+    if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
+      MARKER_KEYS+=(ssh_socket_was_enabled ssh_socket_was_active)
     fi
     for marker_key in "${MARKER_KEYS[@]}"; do
       [[ $(grep -c "^${marker_key}=" "$LATEST_TRANSACTION") == 1 ]] || { echo "Completed Gateway install marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
@@ -84,13 +90,29 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     SSH_WAS_ACTIVE=$(sed -n 's/^ssh_was_active=//p' "$LATEST_TRANSACTION")
     BOOT_NETWORK_POLICY=keep
     GRUB_POLICY=keep
-    if [[ "$MARKER_FIELD_COUNT" == 16 ]]; then
+    LOG_READER_USER=""
+    LOG_READER_WAS_MEMBER=1
+    SSH_SOCKET_STATE_KNOWN=0
+    SSH_SOCKET_WAS_ENABLED=0
+    SSH_SOCKET_WAS_ACTIVE=0
+    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
       BOOT_NETWORK_POLICY=$(sed -n 's/^boot_network_policy=//p' "$LATEST_TRANSACTION")
       GRUB_POLICY=$(sed -n 's/^grub_policy=//p' "$LATEST_TRANSACTION")
+    fi
+    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+      LOG_READER_USER=$(sed -n 's/^log_reader_user=//p' "$LATEST_TRANSACTION")
+      LOG_READER_WAS_MEMBER=$(sed -n 's/^log_reader_was_member=//p' "$LATEST_TRANSACTION")
+    fi
+    if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
+      SSH_SOCKET_STATE_KNOWN=1
+      SSH_SOCKET_WAS_ENABLED=$(sed -n 's/^ssh_socket_was_enabled=//p' "$LATEST_TRANSACTION")
+      SSH_SOCKET_WAS_ACTIVE=$(sed -n 's/^ssh_socket_was_active=//p' "$LATEST_TRANSACTION")
     fi
     [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ && "$SSH_WAS_ENABLED" =~ ^[01]$ && "$SSH_WAS_ACTIVE" =~ ^[01]$ ]] && validate_marker_lan "$LAN_ADDRESS" || { echo "Completed Gateway install marker values are invalid" >&2; exit 1; }
     [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Completed Gateway boot-network policy is invalid" >&2; exit 1; }
     [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Completed Gateway GRUB policy is invalid" >&2; exit 1; }
+    [[ -z "$LOG_READER_USER" || "$LOG_READER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$LOG_READER_USER" != root && "$LOG_READER_WAS_MEMBER" =~ ^[01]$ ]] || { echo "Completed Gateway log-reader values are invalid" >&2; exit 1; }
+    ((SSH_SOCKET_STATE_KNOWN == 0)) || [[ "$SSH_SOCKET_WAS_ENABLED" =~ ^[01]$ && "$SSH_SOCKET_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "Completed Gateway OpenSSH socket values are invalid" >&2; exit 1; }
     if [[ -n "$LAN_MEMBERS" ]]; then
       [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ && "$LAN_MEMBER_WAS_UP" =~ ^[01](,[01]){0,15}$ ]] || { echo "Completed Gateway LAN bridge marker values are invalid" >&2; exit 1; }
       IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
@@ -104,6 +126,30 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     HAVE_COMPLETED_TRANSACTION=1
   fi
 fi
+
+restore_systemd_unit_state() {
+  local unit=$1 desired_enabled=$2 desired_active=$3 label=$4 load_state
+  load_state=$(systemctl show "$unit" -p LoadState --value 2>/dev/null || true)
+  if [[ "$load_state" == not-found ]]; then
+    ((desired_enabled == 0 && desired_active == 0)) && return 0
+    echo "$label unit is unavailable during uninstall" >&2
+    return 1
+  fi
+  if ((desired_enabled)); then
+    systemctl enable "$unit" >/dev/null
+    systemctl is-enabled --quiet "$unit"
+  else
+    systemctl disable "$unit" >/dev/null
+    ! systemctl is-enabled --quiet "$unit"
+  fi
+  if ((desired_active)); then
+    systemctl start "$unit" >/dev/null
+    systemctl is-active --quiet "$unit"
+  else
+    systemctl stop "$unit" >/dev/null
+    ! systemctl is-active --quiet "$unit"
+  fi
+}
 systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 2>/dev/null || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
@@ -129,6 +175,9 @@ fi
 if ip link show dev wg-mgmt >/dev/null 2>&1; then
   ip link delete dev wg-mgmt
 fi
+if ip link show dev wg-ingress >/dev/null 2>&1; then
+  ip link delete dev wg-ingress
+fi
 
 if ((HAVE_COMPLETED_TRANSACTION)); then
   sysctl -q -w "net.ipv4.ip_forward=$OLD_IPV4_FORWARD"
@@ -151,8 +200,15 @@ if ((HAVE_COMPLETED_TRANSACTION)); then
   if ((${#LAN_MEMBER_NAMES[@]})) && ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
     ip link delete dev "$LAN_INTERFACE" type bridge
   fi
-  ((SSH_WAS_ACTIVE)) || systemctl stop ssh.service >/dev/null 2>&1 || true
-  ((SSH_WAS_ENABLED)) || systemctl disable ssh.service >/dev/null 2>&1 || true
+  if ((SSH_SOCKET_STATE_KNOWN)); then
+    restore_systemd_unit_state ssh.socket "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "OpenSSH socket"
+  fi
+  restore_systemd_unit_state ssh.service "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "OpenSSH service"
+  if [[ -n "$LOG_READER_USER" && "$LOG_READER_WAS_MEMBER" == 0 ]] &&
+     getent group gateway-vpn-log-readers >/dev/null 2>&1 &&
+     id -nG "$LOG_READER_USER" 2>/dev/null | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers; then
+    gpasswd -d "$LOG_READER_USER" gateway-vpn-log-readers >/dev/null
+  fi
 fi
 rm -rf /etc/gateway-vpn /opt/gateway-vpn
 rm -f /var/lib/gateway-vpn/install-report.json

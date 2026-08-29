@@ -285,7 +285,11 @@ SSH_UNIT_ENABLED=0
 systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_UNIT_ENABLED=1
 SSH_UNIT_ACTIVE=0
 systemctl is-active --quiet ssh.service 2>/dev/null && SSH_UNIT_ACTIVE=1
-echo "SSH/SFTP requested: $([[ $ENABLE_SSH == 1 ]] && echo yes || echo no); openssh-server installed: $SSH_PACKAGE_INSTALLED; ssh.service enabled: $SSH_UNIT_ENABLED; active: $SSH_UNIT_ACTIVE"
+SSH_SOCKET_UNIT_ENABLED=0
+systemctl is-enabled --quiet ssh.socket 2>/dev/null && SSH_SOCKET_UNIT_ENABLED=1
+SSH_SOCKET_UNIT_ACTIVE=0
+systemctl is-active --quiet ssh.socket 2>/dev/null && SSH_SOCKET_UNIT_ACTIVE=1
+echo "SSH/SFTP requested: $([[ $ENABLE_SSH == 1 ]] && echo yes || echo no); openssh-server installed: $SSH_PACKAGE_INSTALLED; ssh.service enabled: $SSH_UNIT_ENABLED; active: $SSH_UNIT_ACTIVE; ssh.socket enabled: $SSH_SOCKET_UNIT_ENABLED; active: $SSH_SOCKET_UNIT_ACTIVE"
 MISSING_PACKAGES=()
 MISSING_EARLY_PACKAGES=()
 MISSING_LATE_PACKAGES=()
@@ -385,6 +389,8 @@ if ((ENABLE_SSH && SSH_PACKAGE_INSTALLED)); then
   validate_openssh_configuration 1 || { echo "Existing OpenSSH configuration is invalid; fix it before Gateway installation" >&2; exit 1; }
   if ((SSH_UNIT_ACTIVE)); then
     ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Active OpenSSH must listen on IPv4 wildcard TCP/22 so every selected management LAN port remains usable" >&2; exit 1; }
+  elif ((SSH_SOCKET_UNIT_ACTIVE)); then
+    ss -H -ltn "sport = :22" | awk '{print $4}' | grep -Eq '^(0\.0\.0\.0|\*):22$' || { echo "Active OpenSSH socket must listen on IPv4 wildcard TCP/22 so every selected management LAN port remains usable" >&2; exit 1; }
   elif ss -H -ltn "sport = :22" | grep -q .; then
     echo "TCP/22 is already occupied while ssh.service is inactive" >&2
     exit 1
@@ -612,6 +618,10 @@ SSH_WAS_ENABLED=0
 systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_WAS_ENABLED=1
 SSH_WAS_ACTIVE=0
 systemctl is-active --quiet ssh.service 2>/dev/null && SSH_WAS_ACTIVE=1
+SSH_SOCKET_WAS_ENABLED=0
+systemctl is-enabled --quiet ssh.socket 2>/dev/null && SSH_SOCKET_WAS_ENABLED=1
+SSH_SOCKET_WAS_ACTIVE=0
+systemctl is-active --quiet ssh.socket 2>/dev/null && SSH_SOCKET_WAS_ACTIVE=1
 LOG_READER_WAS_MEMBER=0
 if getent group gateway-vpn-log-readers >/dev/null 2>&1 && id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers; then
   LOG_READER_WAS_MEMBER=1
@@ -623,7 +633,7 @@ systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -667,6 +677,7 @@ install -D -m 0644 "$ROOT_DIR/packaging/sysusers.d/gateway-vpn.conf" /usr/lib/sy
 systemd-sysusers /usr/lib/sysusers.d/gateway-vpn.conf
 install -D -m 0644 "$ROOT_DIR/packaging/tmpfiles.d/gateway-vpn.conf" /usr/lib/tmpfiles.d/gateway-vpn.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/gateway-vpn.conf
+[[ -d /var/lib/gateway-vpn/secrets/wireguard-ingress && ! -L /var/lib/gateway-vpn/secrets/wireguard-ingress && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn/secrets/wireguard-ingress) == "root:root:700" ]] || { echo "WireGuard ingress secret root is unsafe" >&2; exit 1; }
 usermod -a -G gateway-vpn-log-readers "$LOG_READER_USER"
 id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers || { echo "Selected Ubuntu account did not receive read-only Gateway log access" >&2; exit 1; }
 install -d -m 0750 -o root -g gateway-vpn /etc/gateway-vpn/nftables

@@ -667,7 +667,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16`, "boot_network_policy", "grub_policy", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`, "boot_network_policy", "grub_policy", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "restore_systemd_unit_state ssh.service", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("Gateway recovery missing %q", required)
 		}
@@ -682,10 +682,74 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16`, "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "90-gateway-vpn.cfg", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "systemctl stop ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`, "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "90-gateway-vpn.cfg", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "restore_systemd_unit_state ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress"} {
 		if !strings.Contains(uninstaller, required) {
 			t.Errorf("Gateway uninstall missing %q", required)
 		}
+	}
+}
+
+func TestGatewayOpenSSHSocketAndLogAccessAreTransactionallyRestored(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
+	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
+
+	for _, required := range []string{
+		"SSH_SOCKET_UNIT_ENABLED=0",
+		"SSH_SOCKET_UNIT_ACTIVE=0",
+		"elif ((SSH_SOCKET_UNIT_ACTIVE)); then",
+		"SSH_SOCKET_WAS_ENABLED=0",
+		"SSH_SOCKET_WAS_ACTIVE=0",
+		"ssh_socket_was_enabled=%s",
+		"ssh_socket_was_active=%s",
+		"log_reader_was_member=%s",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer does not snapshot OpenSSH/log access transaction state: missing %q", required)
+		}
+	}
+	for name, script := range map[string]string{"recovery": recovery, "uninstaller": uninstaller} {
+		for _, required := range []string{
+			`"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`,
+			"SSH_SOCKET_STATE_KNOWN=0",
+			`if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then`,
+			`if [[ "$load_state" == not-found ]]; then`,
+			`((desired_enabled == 0 && desired_active == 0)) && return 0`,
+			`restore_systemd_unit_state ssh.socket "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "OpenSSH socket"`,
+			`restore_systemd_unit_state ssh.service "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "OpenSSH service"`,
+			`id -nG "$LOG_READER_USER" 2>/dev/null | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers`,
+			`gpasswd -d "$LOG_READER_USER" gateway-vpn-log-readers`,
+		} {
+			if !strings.Contains(script, required) {
+				t.Errorf("Gateway %s does not restore compatible OpenSSH/log access state: missing %q", name, required)
+			}
+		}
+	}
+}
+
+func TestWireGuardIngressSecretsHaveNarrowRootWriteBoundary(t *testing.T) {
+	root := repositoryRoot(t)
+	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
+	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+
+	if !strings.Contains(tmpfiles, "d /var/lib/gateway-vpn/secrets/wireguard-ingress 0700 root root") {
+		t.Fatal("WireGuard ingress secret root is not created as a root-only directory")
+	}
+	for _, required := range []string{
+		"ReadOnlyPaths=/opt/gateway-vpn /var/lib/gateway-vpn/secrets",
+		"ReadWritePaths=/etc/gateway-vpn /etc/systemd/journald@gateway-vpn.conf.d /var/lib/gateway-vpn /var/lib/gateway-vpn/secrets/wireguard-ingress",
+	} {
+		if !strings.Contains(broker, required) {
+			t.Errorf("network broker lacks the narrow WireGuard ingress secret override: missing %q", required)
+		}
+	}
+	if strings.Count(broker, "/var/lib/gateway-vpn/secrets/wireguard-ingress") != 1 {
+		t.Fatal("WireGuard ingress secret write override must appear exactly once")
+	}
+	if !strings.Contains(installer, `$(stat -c '%U:%G:%a' /var/lib/gateway-vpn/secrets/wireguard-ingress) == "root:root:700"`) {
+		t.Fatal("installer does not verify the root-only WireGuard ingress secret directory")
 	}
 }
 

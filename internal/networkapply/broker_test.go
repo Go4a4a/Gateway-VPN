@@ -1,8 +1,10 @@
 package networkapply
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,13 @@ import (
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/traffic"
 )
+
+type failingWireGuardIngressAdmin struct {
+	WireGuardIngressAdmin
+	err error
+}
+
+func (admin failingWireGuardIngressAdmin) Sync(context.Context) error { return admin.err }
 
 type fakeDataPlaneAdmin struct {
 	restarts int
@@ -795,6 +804,29 @@ func TestPeerAuthorizingListenerDropsWrongUIDBeforeAcceptingAllowedPeer(t *testi
 	buffer := make([]byte, 1)
 	if _, err := unauthorizedClient.Read(buffer); err == nil {
 		t.Fatal("unauthorized connection remained open")
+	}
+}
+
+func TestWireGuardIngressBrokerLogsPrivateCauseButReturnsOnlyStableCode(t *testing.T) {
+	var journal bytes.Buffer
+	privateCause := "read-only secret sandbox path /private/operator/detail"
+	server := &BrokerServer{
+		Ingress: failingWireGuardIngressAdmin{err: errors.New(privateCause)},
+		Logger:  slog.New(slog.NewJSONHandler(&journal, nil)),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/wireguard/ingress/sync", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.syncWireGuardIngress(response, request)
+
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "WIREGUARD_INGRESS_SYNC_FAILED") {
+		t.Fatalf("public broker response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), privateCause) || strings.Contains(response.Body.String(), "/private/operator/detail") {
+		t.Fatalf("public broker response leaked private root cause: %s", response.Body.String())
+	}
+	if content := journal.String(); !strings.Contains(content, `"operation":"wireguard_ingress_sync"`) || !strings.Contains(content, privateCause) {
+		t.Fatalf("privileged journal does not contain actionable root cause: %s", content)
 	}
 }
 
