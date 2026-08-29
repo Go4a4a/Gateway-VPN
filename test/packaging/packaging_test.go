@@ -209,11 +209,14 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"ConditionPathExists=/var/lib/gateway-vpn-host-upgrade/active",
 		"Before=gateway-vpn-install-recovery.service gateway-vpn-firewall.service",
 		"GATEWAY_VPN_HOST_UPGRADE_RECOVERY_BOOT=1",
-		"ReadWritePaths=/etc /boot/grub",
+		"ReadWritePaths=/etc -/boot/grub",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Errorf("host-upgrade boot recovery unit missing %q", required)
 		}
+	}
+	if strings.Contains(unit, "ReadWritePaths=/etc /boot/grub") {
+		t.Fatal("host-upgrade boot recovery incorrectly requires optional /boot/grub to exist")
 	}
 	if strings.Contains(unit, "ProtectKernelTunables=yes") {
 		t.Fatal("host-upgrade recovery cannot restore snapshotted sysctls while ProtectKernelTunables is enabled")
