@@ -19,6 +19,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/power"
+	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/traffic"
 	"gateway-vpn/internal/wgingress"
 )
@@ -41,6 +42,7 @@ type BrokerServer struct {
 	Traffic     TrafficAdmin
 	Recovery    ModemRecoveryAdmin
 	Power       PowerAdmin
+	Removal     RemovalAdmin
 	Logger      *slog.Logger
 	handler     http.Handler
 }
@@ -148,6 +150,14 @@ type ModemRecoveryAdmin interface {
 type PowerAdmin interface {
 	Capabilities(context.Context) (power.Capabilities, error)
 	Execute(context.Context, power.Command) error
+}
+
+// RemovalAdmin exposes only an impact snapshot and one typed dispatch. The
+// root implementation creates a durable marker and starts one fixed guardian;
+// paths, unit names, commands and package-removal choices never cross HTTP.
+type RemovalAdmin interface {
+	Impact(context.Context) (removal.Impact, error)
+	Dispatch(context.Context, removal.Request) error
 }
 
 // UpdateTransactionStatus is the only update-journal information exposed to
@@ -285,12 +295,61 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	}
 	mux.HandleFunc("POST /v1/power/capabilities", server.powerCapabilities)
 	mux.HandleFunc("POST /v1/power/execute", server.executePower)
+	mux.HandleFunc("POST /v1/uninstall/impact", server.uninstallImpact)
+	mux.HandleFunc("POST /v1/uninstall/dispatch", server.dispatchUninstall)
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) uninstallImpact(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.Removal == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "UNINSTALL_CONTROLLER_UNAVAILABLE")
+		return
+	}
+	impact, err := server.Removal.Impact(request.Context())
+	if err != nil {
+		server.logPrivilegedFailure("uninstall-impact", err)
+		writeBrokerError(writer, http.StatusServiceUnavailable, "UNINSTALL_IMPACT_UNAVAILABLE")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, impact)
+}
+
+func (server *BrokerServer) dispatchUninstall(writer http.ResponseWriter, request *http.Request) {
+	var input removal.Request
+	if err := decodeBrokerJSON(request, &input); err != nil || input.Validate() != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_UNINSTALL_REQUEST")
+		return
+	}
+	if server.Removal == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "UNINSTALL_CONTROLLER_UNAVAILABLE")
+		return
+	}
+	err := server.Removal.Dispatch(request.Context(), input)
+	switch {
+	case err == nil:
+		writer.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, removal.ErrMaintenanceActive):
+		writeBrokerError(writer, http.StatusConflict, "UNINSTALL_BLOCKED_BY_MAINTENANCE")
+	case errors.Is(err, removal.ErrOperationInProgress):
+		writeBrokerError(writer, http.StatusConflict, "UNINSTALL_OPERATION_IN_PROGRESS")
+	case errors.Is(err, removal.ErrUnavailable):
+		writeBrokerError(writer, http.StatusConflict, "UNINSTALL_UNAVAILABLE")
+	case errors.Is(err, removal.ErrInvalidRequest):
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_UNINSTALL_REQUEST")
+	default:
+		server.logPrivilegedFailure("uninstall-dispatch", err)
+		writeBrokerError(writer, http.StatusServiceUnavailable, "UNINSTALL_DISPATCH_FAILED")
+	}
 }
 
 func (server *BrokerServer) powerCapabilities(writer http.ResponseWriter, request *http.Request) {
@@ -1086,6 +1145,32 @@ func (client *BrokerClient) ExecutePower(ctx context.Context, command power.Comm
 		return power.ErrUnavailable
 	case strings.Contains(message, "INVALID_POWER_COMMAND"):
 		return power.ErrInvalidCommand
+	default:
+		return err
+	}
+}
+
+func (client *BrokerClient) UninstallImpact(ctx context.Context) (removal.Impact, error) {
+	var impact removal.Impact
+	err := client.call(ctx, "/v1/uninstall/impact", struct{}{}, http.StatusOK, &impact)
+	return impact, err
+}
+
+func (client *BrokerClient) DispatchUninstall(ctx context.Context, request removal.Request) error {
+	err := client.call(ctx, "/v1/uninstall/dispatch", request, http.StatusNoContent, nil)
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "UNINSTALL_BLOCKED_BY_MAINTENANCE"):
+		return removal.ErrMaintenanceActive
+	case strings.Contains(message, "UNINSTALL_OPERATION_IN_PROGRESS"):
+		return removal.ErrOperationInProgress
+	case strings.Contains(message, "UNINSTALL_UNAVAILABLE"):
+		return removal.ErrUnavailable
+	case strings.Contains(message, "INVALID_UNINSTALL_REQUEST"):
+		return removal.ErrInvalidRequest
 	default:
 		return err
 	}

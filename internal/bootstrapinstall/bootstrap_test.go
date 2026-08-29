@@ -478,6 +478,7 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 	writeFixtureFile(t, releaseRoot, "scripts/recover-gateway-install.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
 	writeFixtureFile(t, releaseRoot, "scripts/upgrade-gateway-host.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
 	writeFixtureFile(t, releaseRoot, "scripts/recover-gateway-host-upgrade.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
+	writeFixtureFile(t, releaseRoot, "scripts/run-gateway-uninstall-job.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
 	writeFixtureFile(t, releaseRoot, "scripts/uninstall.sh", []byte("#!/usr/bin/env bash\nexit 0\n"))
 	writeFixtureFile(t, releaseRoot, "manifest.sha256", []byte(strings.Repeat("0", 64)+"  placeholder\n"))
 	writeFixtureFile(t, releaseRoot, "share/supply-chain/sbom.spdx.json", []byte("{}\n"))
@@ -486,6 +487,7 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 		"gateway-vpn.service", "gateway-vpn-watchdog.service", "gateway-vpn-firewall.service",
 		"gateway-vpn-firewall-guard.service", "gateway-vpn-network-broker.socket",
 		"gateway-vpn-power-cycle@.service", "gateway-vpn-host-upgrade-recovery.service",
+		"gateway-vpn-uninstall.service",
 		"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service",
 		"gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer",
 	} {

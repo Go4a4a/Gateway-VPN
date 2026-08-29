@@ -17,6 +17,7 @@ import (
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/power"
+	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/traffic"
 )
 
@@ -98,6 +99,21 @@ type fakePowerAdmin struct {
 	capabilities power.Capabilities
 	commands     []power.Command
 	err          error
+}
+
+type fakeRemovalAdmin struct {
+	impact   removal.Impact
+	requests []removal.Request
+	err      error
+}
+
+func (admin *fakeRemovalAdmin) Impact(context.Context) (removal.Impact, error) {
+	return admin.impact, admin.err
+}
+
+func (admin *fakeRemovalAdmin) Dispatch(_ context.Context, request removal.Request) error {
+	admin.requests = append(admin.requests, request)
+	return admin.err
 }
 
 func (admin *fakePowerAdmin) Capabilities(context.Context) (power.Capabilities, error) {
@@ -207,6 +223,45 @@ func TestBrokerPowerSurfaceAcceptsOnlyTypedBoundedCommands(t *testing.T) {
 	}
 	admin.err = power.ErrMaintenanceActive
 	if err := client.ExecutePower(context.Background(), power.Command{Action: power.ActionReboot}); !errors.Is(err, power.ErrMaintenanceActive) {
+		t.Fatalf("maintenance mapping = %v", err)
+	}
+}
+
+func TestBrokerUninstallSurfaceAcceptsOnlyTypedModeAndOperationID(t *testing.T) {
+	_, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeRemovalAdmin{impact: removal.Impact{Available: true, RequiredConfirmationPhrase: removal.ExactConfirmation}}
+	server.Removal = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	if impact, err := client.UninstallImpact(context.Background()); err != nil || !impact.Available {
+		t.Fatalf("UninstallImpact() = %+v, %v", impact, err)
+	}
+	request := removal.Request{OperationID: "uninstall-0123456789abcdef0123456789abcdef", Mode: removal.ModePreserveData}
+	if err := client.DispatchUninstall(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(admin.requests) != 1 || admin.requests[0] != request {
+		t.Fatalf("uninstall requests = %+v", admin.requests)
+	}
+	raw, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/uninstall/dispatch", strings.NewReader(`{"operation_id":"uninstall-0123456789abcdef0123456789abcdef","mode":"PRESERVE_DATA","command":"rm -rf /"}`))
+	raw.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || len(admin.requests) != 1 {
+		t.Fatalf("arbitrary uninstall command status=%d requests=%+v", response.StatusCode, admin.requests)
+	}
+	admin.err = removal.ErrMaintenanceActive
+	if err := client.DispatchUninstall(context.Background(), request); !errors.Is(err, removal.ErrMaintenanceActive) {
 		t.Fatalf("maintenance mapping = %v", err)
 	}
 }

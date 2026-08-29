@@ -76,7 +76,7 @@ func TestLinuxBackendRequiresVerifiedRTCAndUsesFixedSystemdActions(t *testing.T)
 	executor := &powerExecutor{active: map[string]string{}}
 	backend := DefaultLinuxBackend(database, executor)
 	backend.Stat = func(path string) (os.FileInfo, error) {
-		if path == DefaultRTCVerificationPath || path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker {
+		if path == DefaultRTCVerificationPath || path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultUninstallMarkerPath {
 			return nil, os.ErrNotExist
 		}
 		mode := os.FileMode(0o644)
@@ -94,7 +94,7 @@ func TestLinuxBackendRequiresVerifiedRTCAndUsesFixedSystemdActions(t *testing.T)
 		t.Fatalf("unverified RTC execute = %v", err)
 	}
 	backend.Stat = func(path string) (os.FileInfo, error) {
-		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker {
+		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultUninstallMarkerPath {
 			return nil, os.ErrNotExist
 		}
 		mode := os.FileMode(0o644)
@@ -188,7 +188,7 @@ func TestLinuxBackendDoesNotExposeExecutorFailureDetails(t *testing.T) {
 	executor := &powerExecutor{active: map[string]string{}}
 	backend := DefaultLinuxBackend(database, executor)
 	backend.Stat = func(path string) (os.FileInfo, error) {
-		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultRTCVerificationPath {
+		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultUninstallMarkerPath || path == DefaultRTCVerificationPath {
 			return nil, os.ErrNotExist
 		}
 		return powerFileInfo{name: filepath.Base(path), mode: 0o755}, nil
@@ -213,7 +213,7 @@ func TestLinuxBackendFailsClosedWhenMaintenanceStateIsUnknown(t *testing.T) {
 	executor := &powerExecutor{active: map[string]string{}, failShow: true}
 	backend := DefaultLinuxBackend(database, executor)
 	backend.Stat = func(path string) (os.FileInfo, error) {
-		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultRTCVerificationPath || path == DefaultRTCAlarmPath {
+		if path == DefaultInstallMarkerPath || path == DefaultInstallRunMarker || path == DefaultUninstallMarkerPath || path == DefaultRTCVerificationPath || path == DefaultRTCAlarmPath {
 			return nil, os.ErrNotExist
 		}
 		return powerFileInfo{name: filepath.Base(path), mode: 0o755}, nil

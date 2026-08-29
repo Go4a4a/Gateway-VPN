@@ -52,6 +52,8 @@ var maintenanceUnits = []struct {
 	code string
 }{
 	{"gateway-vpn-install-recovery.service", "INSTALL_RECOVERY_ACTIVE"},
+	{"gateway-vpn-host-upgrade-recovery.service", "HOST_UPGRADE_RECOVERY_ACTIVE"},
+	{"gateway-vpn-uninstall.service", "UNINSTALL_ACTIVE"},
 	{"gateway-vpn-update.service", "UPDATE_ACTIVE"},
 	{"gateway-vpn-update-recovery.service", "UPDATE_RECOVERY_ACTIVE"},
 	{"gateway-vpn-update-finalize.service", "UPDATE_FINALIZE_ACTIVE"},

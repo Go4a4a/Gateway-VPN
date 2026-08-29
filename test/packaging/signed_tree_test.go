@@ -29,6 +29,7 @@ func TestActualGatewayAndVPSSourceTreesFitStrictSignedReleaseContracts(t *testin
 		copyFile(t, filepath.Join(repository, "scripts", "recover-gateway-install.sh"), filepath.Join(root, "scripts", "recover-gateway-install.sh"), 0o755)
 		copyFile(t, filepath.Join(repository, "scripts", "recover-gateway-host-upgrade.sh"), filepath.Join(root, "scripts", "recover-gateway-host-upgrade.sh"), 0o755)
 		copyFile(t, filepath.Join(repository, "scripts", "upgrade-gateway-host.sh"), filepath.Join(root, "scripts", "upgrade-gateway-host.sh"), 0o755)
+		copyFile(t, filepath.Join(repository, "scripts", "run-gateway-uninstall-job.sh"), filepath.Join(root, "scripts", "run-gateway-uninstall-job.sh"), 0o755)
 		copyFile(t, filepath.Join(repository, "scripts", "uninstall.sh"), filepath.Join(root, "scripts", "uninstall.sh"), 0o755)
 		copyFile(t, filepath.Join(repository, "config.example.yaml"), filepath.Join(root, "config.example.yaml"), 0o644)
 		writeSignedTreeFile(t, root, "bin/gateway-vpn", "gateway binary\n", 0o755)

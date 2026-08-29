@@ -241,6 +241,20 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/RTCPowerAction'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/uninstall/impact:
+    get:
+      tags: [System]
+      operationId: getUninstallImpact
+      summary: Получить bounded impact report до остановки WebUI, SSH/SFTP и восстановления recorded host state
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/uninstall:
+    post:
+      tags: [System]
+      operationId: uninstallGateway
+      summary: После password re-authentication, impact acknowledgements и точной фразы передать удаление durable root guardian
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/UninstallAction'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/gateway/reconcile:
     post:
       tags: [Gateway]
@@ -1153,6 +1167,22 @@ components:
               password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
               confirmation: {type: string, const: 'ВЫКЛЮЧИТЬ И ВКЛЮЧИТЬ'}
               delay_seconds: {type: integer, minimum: 30, maximum: 3600, default: 30}
+    UninstallAction:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [mode, password, confirmation, acknowledge_session_loss, acknowledge_not_factory_reset, acknowledge_purge_data_loss, acknowledge_export_handled]
+            properties:
+              mode: {type: string, enum: [PRESERVE_DATA, PURGE_DATA]}
+              password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+              confirmation: {type: string, const: 'УДАЛИТЬ GATEWAY VPN'}
+              acknowledge_session_loss: {type: boolean}
+              acknowledge_not_factory_reset: {type: boolean}
+              acknowledge_purge_data_loss: {type: boolean, description: Must be true for PURGE_DATA.}
+              acknowledge_export_handled: {type: boolean, description: Must be true for PURGE_DATA after export or an explicit decision to continue without it.}
     UserCreate:
       required: true
       content:

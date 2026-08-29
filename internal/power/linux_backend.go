@@ -22,6 +22,7 @@ const (
 	DefaultRTCVerificationPath = "/var/lib/gateway-vpn-privileged/rtc-wake-from-s5.verified"
 	DefaultInstallMarkerPath   = "/var/lib/gateway-vpn-privileged/install-transactions/active"
 	DefaultInstallRunMarker    = "/run/gateway-vpn-install-authorized"
+	DefaultUninstallMarkerPath = "/var/lib/gateway-vpn-uninstall/active"
 	RTCPowerCycleUnitPrefix    = "gateway-vpn-power-cycle@"
 	rtcVerificationContent     = "RTC_WAKE_FROM_S5_VERIFIED_V1\n"
 )
@@ -35,6 +36,7 @@ type LinuxBackend struct {
 	RTCVerification  string
 	InstallMarker    string
 	InstallRunMarker string
+	UninstallMarker  string
 	Stat             func(string) (os.FileInfo, error)
 	ReadFile         func(string) ([]byte, error)
 
@@ -48,6 +50,7 @@ func DefaultLinuxBackend(database *sql.DB, executor platformexec.Executor) *Linu
 		RTCWake: DefaultRTCWakePath, RTCAlarm: DefaultRTCAlarmPath,
 		RTCVerification: DefaultRTCVerificationPath,
 		InstallMarker:   DefaultInstallMarkerPath, InstallRunMarker: DefaultInstallRunMarker,
+		UninstallMarker: DefaultUninstallMarkerPath,
 	}
 }
 
@@ -121,7 +124,7 @@ func (backend *LinuxBackend) Execute(ctx context.Context, command Command) error
 }
 
 func (backend *LinuxBackend) maintenance(ctx context.Context) (bool, string) {
-	if backend.pathExists(backend.InstallMarker) || backend.pathExists(backend.InstallRunMarker) {
+	if backend.pathExists(backend.InstallMarker) || backend.pathExists(backend.InstallRunMarker) || backend.pathExists(backend.UninstallMarker) {
 		return true, "INSTALL_ACTIVE"
 	}
 	var count int
@@ -202,7 +205,8 @@ func (backend *LinuxBackend) validate() error {
 	if backend == nil || backend.Database == nil || backend.Executor == nil ||
 		backend.Systemctl != DefaultSystemctlPath || backend.RTCWake != DefaultRTCWakePath ||
 		backend.RTCAlarm != DefaultRTCAlarmPath || backend.RTCVerification != DefaultRTCVerificationPath ||
-		backend.InstallMarker != DefaultInstallMarkerPath || backend.InstallRunMarker != DefaultInstallRunMarker {
+		backend.InstallMarker != DefaultInstallMarkerPath || backend.InstallRunMarker != DefaultInstallRunMarker ||
+		backend.UninstallMarker != DefaultUninstallMarkerPath {
 		return errors.New("complete fixed Linux power backend configuration is required")
 	}
 	return nil

@@ -29,6 +29,7 @@ import (
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/power"
+	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
@@ -174,6 +175,7 @@ func runNetworkBroker(args []string) int {
 		Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg", NFT: "/usr/sbin/nft", Mutate: *apply,
 	}
 	server.Power = power.DefaultLinuxBackend(database, executor)
+	server.Removal = removal.DefaultLinuxBackend(database, executor)
 	if err := networkapply.ServeBroker(ctx, listener, server); err != nil {
 		fmt.Fprintf(os.Stderr, "network broker stopped: %v\n", err)
 		return 1

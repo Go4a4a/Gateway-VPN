@@ -360,7 +360,7 @@ func TestReleaseBuilderPinsMihomoVersionHashAndAPIContract(t *testing.T) {
 			t.Errorf("release builder missing %q", required)
 		}
 	}
-	for _, required := range []string{"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64", "./cmd/gateway-vpn-bootstrap", "scripts/install-gateway.sh", "scripts/recover-gateway-install.sh", "scripts/uninstall.sh", "config.example.yaml", "$ROOT/packaging", "Gateway archive SHA-256", "Bootstrap SHA-256"} {
+	for _, required := range []string{"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64", "./cmd/gateway-vpn-bootstrap", "scripts/install-gateway.sh", "scripts/recover-gateway-install.sh", "scripts/run-gateway-uninstall-job.sh", "scripts/uninstall.sh", "config.example.yaml", "$ROOT/packaging", "Gateway archive SHA-256", "Bootstrap SHA-256"} {
 		if !strings.Contains(builder, required) {
 			t.Errorf("installable release builder missing %q", required)
 		}
@@ -805,6 +805,24 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 	if !strings.Contains(recovery, "restore_systemd_unit_state()") || !strings.Contains(recovery, "only record_failure controls recovery failure") || !strings.Contains(recovery, "  return 0\n}") {
 		t.Fatal("Gateway recovery systemd-state helper can leak an expected negative probe through set -e")
 	}
+	grubRollbackStart := strings.Index(recovery, `if [[ "$GRUB_POLICY" != keep ]]; then`)
+	grubRollbackEnd := strings.Index(recovery, "rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf")
+	if grubRollbackStart < 0 || grubRollbackEnd <= grubRollbackStart {
+		t.Fatal("Gateway recovery GRUB rollback block is unavailable")
+	}
+	grubRollback := recovery[grubRollbackStart:grubRollbackEnd]
+	for _, required := range []string{
+		"rm -f /etc/default/grub.d/90-gateway-vpn.cfg",
+		"update-grub >/dev/null",
+		"grub-script-check /boot/grub/grub.cfg",
+	} {
+		if !strings.Contains(grubRollback, required) {
+			t.Errorf("Gateway recovery cannot durably finish GRUB rollback after an interrupted retry: missing %q", required)
+		}
+	}
+	if strings.Contains(grubRollback, "[[ -e /etc/default/grub.d/90-gateway-vpn.cfg") || strings.Contains(grubRollback, "[[ -f /etc/default/grub.d/90-gateway-vpn.cfg") {
+		t.Fatal("Gateway recovery incorrectly skips GRUB regeneration after an earlier retry already removed the owned drop-in")
+	}
 	installRecovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-install-recovery.service"))
 	for _, required := range []string{"gateway-vpn-update-recovery.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-recovery.service", "gateway-vpn-network-broker.socket", "gateway-vpn-network-broker.service"} {
 		if !strings.Contains(installRecovery, required) {
@@ -855,6 +873,97 @@ func TestGatewayOpenSSHSocketAndLogAccessAreTransactionallyRestored(t *testing.T
 				t.Errorf("Gateway %s does not restore compatible OpenSSH/log access state: missing %q", name, required)
 			}
 		}
+	}
+}
+
+func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
+	root := repositoryRoot(t)
+	helper := read(t, filepath.Join(root, "scripts", "run-gateway-uninstall-job.sh"))
+	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-uninstall.service"))
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
+	tmpfiles := read(t, filepath.Join(root, "packaging", "tmpfiles.d", "gateway-vpn.conf"))
+	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
+	web := read(t, filepath.Join(root, "internal", "webapi", "static", "uninstall.js"))
+
+	for _, required := range []string{
+		"GATEWAY_VPN_UNINSTALL_UNIT", "ROOT=/var/lib/gateway-vpn-uninstall", "ACTIVE=$ROOT/active", "uninstall-[a-f0-9]{32}",
+		"release-verify", "tooling-ready", "sha256sum --binary", "gateway-vpn PATH_BLOCKED",
+		"GATEWAY_VPN_UNINSTALL_GUARDIAN=1", "completed-$OPERATION_ID", "sync -f \"$RECEIPT_TMP\"",
+	} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("uninstall guardian helper missing %q", required)
+		}
+	}
+	receipt := strings.Index(helper, `mv -T "$RECEIPT_TMP" "$RECEIPT"`)
+	removeActive := -1
+	if receipt >= 0 {
+		removeActive = strings.Index(helper[receipt:], `rm -f "$ACTIVE"`)
+	}
+	if receipt < 0 || removeActive < 0 {
+		t.Fatal("uninstall guardian can remove active marker before durable terminal receipt")
+	}
+	for _, required := range []string{
+		"DefaultDependencies=no", "ConditionPathExists=/var/lib/gateway-vpn-uninstall/active",
+		"ExecStart=/usr/libexec/gateway-vpn-uninstall-job", "Before=network-pre.target",
+		"ReadWritePaths=/etc -/boot/grub /usr/libexec", "WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Errorf("uninstall guardian unit missing %q", required)
+		}
+	}
+	for _, required := range []string{"run-gateway-uninstall-job.sh", "gateway-vpn-uninstall.service", "systemctl enable gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service gateway-vpn-uninstall.service"} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("installer does not install boot-recoverable uninstall asset %q", required)
+		}
+	}
+	if !strings.Contains(tmpfiles, "d /var/lib/gateway-vpn-uninstall 0700 root root") || !strings.Contains(broker, "/var/lib/gateway-vpn-uninstall") {
+		t.Fatal("uninstall marker root is not provisioned for the fixed root broker")
+	}
+	for _, required := range []string{"УДАЛИТЬ GATEWAY VPN", "PRESERVE_DATA", "PURGE_DATA", "acknowledge_session_loss", "acknowledge_not_factory_reset"} {
+		if !strings.Contains(web, required) {
+			t.Errorf("WebUI uninstall confirmation flow missing %q", required)
+		}
+	}
+	if !strings.Contains(uninstaller, "Gateway did not enter PATH_BLOCKED before uninstall") || !strings.Contains(uninstaller, "rm -rf /var/log/gateway-vpn") || strings.Contains(uninstaller, "gateway-vpn-state-$(date") {
+		t.Fatal("CLI uninstall does not match fail-closed preserve/purge contract")
+	}
+}
+
+func TestGatewayInstallerAcceptsOnlyAuthenticatedTerminalUninstallRemnants(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+
+	for _, required := range []string{
+		"UNINSTALL_TERMINAL_REMNANTS=0",
+		"Previous Gateway uninstall receipt root is unsafe",
+		"completed-uninstall-*",
+		"Previous Gateway uninstall terminal receipt is unavailable or unsafe",
+		`$(wc -l <"$LATEST_UNINSTALL_RECEIPT") == 6`,
+		`grep -Ec '^(format|operation_id|mode|result|completed_at|packages_removed)='`,
+		`grep -c "^${receipt_key}="`,
+		`grep -Fxq 'format=1'`,
+		`$RECEIPT_OPERATION_ID =~ ^uninstall-[a-f0-9]{32}$`,
+		`$(basename "$LATEST_UNINSTALL_RECEIPT") == completed-$RECEIPT_OPERATION_ID`,
+		`grep -Eq '^mode=(PRESERVE_DATA|PURGE_DATA)$'`,
+		`grep -Fxq 'result=SUCCEEDED'`,
+		`grep -Eq '^completed_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'`,
+		`grep -Fxq 'packages_removed=0'`,
+		"Previous Gateway uninstall terminal receipt values are invalid",
+		"Previous Gateway uninstall guardian remnant is unsafe",
+		"UNINSTALL_TERMINAL_REMNANTS=1",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer terminal uninstall receipt validation is incomplete: missing %q", required)
+		}
+	}
+
+	remnantException := `if ((UNINSTALL_TERMINAL_REMNANTS)) && [[ "$conflict" == /etc/systemd/system/gateway-vpn-uninstall.service || "$conflict" == /usr/libexec/gateway-vpn-uninstall-job ]]; then`
+	if !strings.Contains(installer, remnantException) {
+		t.Fatal("Gateway installer cannot safely replace the two authenticated terminal guardian remnants")
+	}
+	if strings.Contains(installer, "if ((UNINSTALL_TERMINAL_REMNANTS)); then\n      continue") {
+		t.Fatal("Gateway installer terminal receipt exception is broad enough to bypass unrelated managed-path conflicts")
 	}
 }
 

@@ -19,14 +19,34 @@ fi
 [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
 [[ -d /run/lock && ! -L /run/lock && $(stat -c '%u' /run/lock) == 0 ]] || { echo "Gateway runtime lock directory is unavailable" >&2; exit 1; }
 LOCK_FILE=/run/lock/gateway-vpn-install.lock
-if [[ ! -e "$LOCK_FILE" && ! -L "$LOCK_FILE" ]]; then
-  (set -o noclobber; : >"$LOCK_FILE") || { echo "Cannot create Gateway transaction lock safely" >&2; exit 1; }
+if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]]; then
+  [[ -e /proc/$$/fd/9 && $(readlink -f /proc/$$/fd/9) == "$LOCK_FILE" ]] || { echo "Inherited Gateway uninstall transaction lock is invalid" >&2; exit 1; }
+else
+  if [[ ! -e "$LOCK_FILE" && ! -L "$LOCK_FILE" ]]; then
+    (set -o noclobber; : >"$LOCK_FILE") || { echo "Cannot create Gateway transaction lock safely" >&2; exit 1; }
+  fi
+  [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
+  exec 9<>"$LOCK_FILE"
+  flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
 fi
-[[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
-exec 9<>"$LOCK_FILE"
-flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-privileged/install-transactions/active && ! -L /var/lib/gateway-vpn-privileged/install-transactions/active ]] || { echo "Recover the interrupted Gateway install before uninstall" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted Gateway host upgrade before uninstall" >&2; exit 1; }
+if [[ -e /var/lib/gateway-vpn-uninstall/active || -L /var/lib/gateway-vpn-uninstall/active ]]; then
+  [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]] || { echo "A durable WebUI uninstall is active; let its guardian finish" >&2; exit 1; }
+  [[ -f /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active && $(stat -c '%u:%g:%a' /var/lib/gateway-vpn-uninstall/active) == 0:0:600 ]] || { echo "Durable uninstall marker is unsafe" >&2; exit 1; }
+elif [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]]; then
+  echo "Durable uninstall guardian has no active marker" >&2
+  exit 1
+fi
+
+# Quarantine forwarding before the first service is stopped. This is the
+# signed, installed boot ruleset and preserves only scoped management access.
+if [[ -f /etc/gateway-vpn/nftables/boot.nft && ! -L /etc/gateway-vpn/nftables/boot.nft ]]; then
+  [[ $(stat -c '%u:%a' /etc/gateway-vpn/nftables/boot.nft) == 0:640 ]] || { echo "Gateway boot firewall ownership or mode is unsafe" >&2; exit 1; }
+  /usr/sbin/nft --check --file /etc/gateway-vpn/nftables/boot.nft
+  /usr/sbin/nft --file /etc/gateway-vpn/nftables/boot.nft
+  /usr/sbin/nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED' || { echo "Gateway did not enter PATH_BLOCKED before uninstall" >&2; exit 1; }
+fi
 
 validate_marker_lan() {
   local cidr=$1 ip prefix a b c d octet ip_value host_mask network_value broadcast_value wg_start wg_end
@@ -154,11 +174,17 @@ restore_systemd_unit_state() {
 systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 2>/dev/null || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
+if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} != 1 ]]; then
+  systemctl disable --now gateway-vpn-uninstall.service 2>/dev/null || true
+fi
 rm -f /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-mihomo.service /etc/systemd/system/gateway-vpn-dnsmasq.service /etc/systemd/system/gateway-vpn-firewall.service
 rm -f /etc/systemd/system/gateway-vpn-network-broker.socket /etc/systemd/system/gateway-vpn-network-broker.service /etc/systemd/system/gateway-vpn-network-recovery.service /etc/systemd/system/gateway-vpn-network-rollback@.timer /etc/systemd/system/gateway-vpn-network-rollback@.service /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service /etc/systemd/system/gateway-vpn-database-restore.service /etc/systemd/system/gateway-vpn-database-restore-resume.service /etc/systemd/system/gateway-vpn-firewall-guard.service
 rm -f /etc/systemd/system/gateway-vpn-update.service /etc/systemd/system/gateway-vpn-update-recovery.service /etc/systemd/system/gateway-vpn-update-resume.service /etc/systemd/system/gateway-vpn-update-finalize.service /etc/systemd/system/gateway-vpn-update-finalize.timer
 rm -f /etc/systemd/system/gateway-vpn-power-cycle@.service
 rm -f /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
+if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} != 1 ]]; then
+  rm -f /etc/systemd/system/gateway-vpn-uninstall.service /usr/libexec/gateway-vpn-uninstall-job
+fi
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
@@ -170,6 +196,12 @@ if [[ -f /etc/default/grub.d/90-gateway-vpn.cfg && ! -L /etc/default/grub.d/90-g
 elif [[ -e /etc/default/grub.d/90-gateway-vpn.cfg || -L /etc/default/grub.d/90-gateway-vpn.cfg ]]; then
   echo "Unsafe Gateway GRUB policy path requires manual inspection" >&2
   exit 1
+fi
+# A guardian retry may begin after the owned drop-in was removed but before
+# update-grub completed. The durable install marker, not current file presence,
+# is the authoritative reason to regenerate the boot projection.
+if ((HAVE_COMPLETED_TRANSACTION)) && [[ "$GRUB_POLICY" != keep ]]; then
+  GRUB_POLICY_REMOVED=1
 fi
 if /usr/sbin/nft list table inet gateway_vpn >/dev/null 2>&1; then
   /usr/sbin/nft delete table inet gateway_vpn
@@ -218,10 +250,10 @@ rm -rf /var/lib/gateway-vpn-dnsmasq
 rm -f /run/gateway-vpn-install-authorized
 rm -f /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-host-upgrade-recovery
 if ((PURGE_DATA)); then
-  [[ -f /var/lib/gateway-vpn/state.db ]] && cp --reflink=auto --sparse=always /var/lib/gateway-vpn/state.db "/root/gateway-vpn-state-$(date -u +%Y%m%dT%H%M%SZ).db"
   rm -rf /var/lib/gateway-vpn
   rm -rf /var/lib/gateway-vpn-privileged
   rm -rf /var/lib/gateway-vpn-host-upgrade
+  rm -rf /var/log/gateway-vpn
 fi
 networkctl reload
 systemctl daemon-reload

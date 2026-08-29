@@ -212,7 +212,7 @@ fi
 RELEASE_DIR=$(realpath -- "$RELEASE_DIR")
 TRUSTED_UPDATE_KEY=$(realpath -- "$TRUSTED_UPDATE_KEY")
 [[ -f "$TRUSTED_UPDATE_KEY" && ! -L "$TRUSTED_UPDATE_KEY" ]] || { echo "Trusted update public key must be a regular non-symlink file" >&2; exit 1; }
-[[ -x "$RELEASE_DIR/bin/gateway-vpn" && -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/libexec/mihomo" && -x "$RELEASE_DIR/scripts/recover-gateway-install.sh" && -x "$RELEASE_DIR/scripts/upgrade-gateway-host.sh" && -x "$RELEASE_DIR/scripts/recover-gateway-host-upgrade.sh" ]] || { echo "Release binaries or recovery helpers are incomplete" >&2; exit 1; }
+[[ -x "$RELEASE_DIR/bin/gateway-vpn" && -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/libexec/mihomo" && -x "$RELEASE_DIR/scripts/recover-gateway-install.sh" && -x "$RELEASE_DIR/scripts/upgrade-gateway-host.sh" && -x "$RELEASE_DIR/scripts/recover-gateway-host-upgrade.sh" && -x "$RELEASE_DIR/scripts/run-gateway-uninstall-job.sh" ]] || { echo "Release binaries or recovery helpers are incomplete" >&2; exit 1; }
 [[ -f "$RELEASE_DIR/manifest.sha256" && -f "$RELEASE_DIR/manifest.json" && -f "$RELEASE_DIR/release.sig" && -f "$RELEASE_DIR/release.json" ]] || { echo "Signed release requires release metadata, file manifest and detached signature" >&2; exit 1; }
 (cd -- "$RELEASE_DIR" && sha256sum --check --strict manifest.sha256)
 "$RELEASE_DIR/bin/gateway-vpnctl" release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --current-version 0.0.0 --current-schema 1
@@ -232,6 +232,23 @@ source /etc/os-release
 for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles base64 sha256sum realpath apt-get dpkg-query grep awk getent timedatectl df wc head install mktemp rm rmdir sync stat uname flock find sort sed mv date readlink chown chmod cat sleep cp cmp id usermod gpasswd groupdel od; do
   command -v "$command" >/dev/null || { echo "Missing base Gateway prerequisite command: $command" >&2; exit 1; }
 done
+[[ ! -e /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active ]] || { echo "Complete the durable Gateway uninstall before installing" >&2; exit 1; }
+UNINSTALL_TERMINAL_REMNANTS=0
+if [[ -e /etc/systemd/system/gateway-vpn-uninstall.service || -L /etc/systemd/system/gateway-vpn-uninstall.service || -e /usr/libexec/gateway-vpn-uninstall-job || -L /usr/libexec/gateway-vpn-uninstall-job ]]; then
+  [[ -d /var/lib/gateway-vpn-uninstall && ! -L /var/lib/gateway-vpn-uninstall && $(stat -c '%u:%g:%a' /var/lib/gateway-vpn-uninstall) == 0:0:700 ]] || { echo "Previous Gateway uninstall receipt root is unsafe" >&2; exit 1; }
+  LATEST_UNINSTALL_RECEIPT=$(find /var/lib/gateway-vpn-uninstall -maxdepth 1 -type f -name 'completed-uninstall-*' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {sub(/^[^ ]+ /, ""); print}')
+  [[ -n $LATEST_UNINSTALL_RECEIPT && -f $LATEST_UNINSTALL_RECEIPT && ! -L $LATEST_UNINSTALL_RECEIPT && $(stat -c '%u:%g:%a' "$LATEST_UNINSTALL_RECEIPT") == 0:0:600 && $(stat -c '%s' "$LATEST_UNINSTALL_RECEIPT") -le 512 ]] || { echo "Previous Gateway uninstall terminal receipt is unavailable or unsafe" >&2; exit 1; }
+  [[ $(wc -l <"$LATEST_UNINSTALL_RECEIPT") == 6 && $(grep -Ec '^(format|operation_id|mode|result|completed_at|packages_removed)=' "$LATEST_UNINSTALL_RECEIPT") == 6 ]] || { echo "Previous Gateway uninstall terminal receipt schema is invalid" >&2; exit 1; }
+  for receipt_key in format operation_id mode result completed_at packages_removed; do
+    [[ $(grep -c "^${receipt_key}=" "$LATEST_UNINSTALL_RECEIPT") == 1 ]] || { echo "Previous Gateway uninstall terminal receipt contains duplicate or missing fields" >&2; exit 1; }
+  done
+  RECEIPT_OPERATION_ID=$(sed -n 's/^operation_id=//p' "$LATEST_UNINSTALL_RECEIPT")
+  grep -Fxq 'format=1' "$LATEST_UNINSTALL_RECEIPT" && [[ $RECEIPT_OPERATION_ID =~ ^uninstall-[a-f0-9]{32}$ && $(basename "$LATEST_UNINSTALL_RECEIPT") == completed-$RECEIPT_OPERATION_ID ]] && grep -Eq '^mode=(PRESERVE_DATA|PURGE_DATA)$' "$LATEST_UNINSTALL_RECEIPT" && grep -Fxq 'result=SUCCEEDED' "$LATEST_UNINSTALL_RECEIPT" && grep -Eq '^completed_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$LATEST_UNINSTALL_RECEIPT" && grep -Fxq 'packages_removed=0' "$LATEST_UNINSTALL_RECEIPT" || { echo "Previous Gateway uninstall terminal receipt values are invalid" >&2; exit 1; }
+  for remnant in /etc/systemd/system/gateway-vpn-uninstall.service /usr/libexec/gateway-vpn-uninstall-job; do
+    [[ ! -e $remnant && ! -L $remnant ]] || [[ -f $remnant && ! -L $remnant && $(stat -c '%u:%g' "$remnant") == 0:0 ]] || { echo "Previous Gateway uninstall guardian remnant is unsafe" >&2; exit 1; }
+  done
+  UNINSTALL_TERMINAL_REMNANTS=1
+fi
 HOST_UPGRADE_REQUIRED=0
 if ((HOST_UPGRADE_INNER == 0)) && [[ -L /opt/gateway-vpn/current ]] && [[ $(readlink /opt/gateway-vpn/current) != "releases/v$RELEASE_VERSION" ]]; then
   HOST_UPGRADE_REQUIRED=1
@@ -520,12 +537,14 @@ elif ((HOST_UPGRADE_INNER == 0)) && [[ -e /etc/gateway-vpn || -L /etc/gateway-vp
 fi
 if ((EXISTING_PROJECTION)); then
   [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" && -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] || { echo "Partial or conflicting Gateway VPN installation exists" >&2; exit 1; }
-  for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/05-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /etc/systemd/system/gateway-vpn-power-cycle@.service /usr/libexec/gateway-vpn-install-recovery; do
+  for installed_asset in /etc/gateway-vpn/config.yaml /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/network/05-gateway-vpn-lan.network /var/lib/gateway-vpn/install-report.json /etc/systemd/system/gateway-vpn-install-recovery.service /etc/systemd/system/gateway-vpn-power-cycle@.service /etc/systemd/system/gateway-vpn-uninstall.service /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-uninstall-job; do
     [[ -f "$installed_asset" && ! -L "$installed_asset" ]] || { echo "Installed Gateway asset is missing or unsafe: $installed_asset" >&2; exit 1; }
   done
   cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf" || { echo "Installed Gateway IPv4 forwarding policy differs from the signed release" >&2; exit 1; }
   cmp -s -- /etc/sysctl.d/90-gateway-vpn-ipv6.conf "$ROOT_DIR/packaging/sysctl.d/90-gateway-vpn-ipv6.conf" || { echo "Installed Gateway IPv6 policy differs from the signed release" >&2; exit 1; }
   cmp -s -- /etc/systemd/system/gateway-vpn-power-cycle@.service "$ROOT_DIR/packaging/systemd/gateway-vpn-power-cycle@.service" || { echo "Installed Gateway RTC power helper differs from the signed release" >&2; exit 1; }
+  cmp -s -- /etc/systemd/system/gateway-vpn-uninstall.service "$ROOT_DIR/packaging/systemd/gateway-vpn-uninstall.service" || { echo "Installed Gateway uninstall guardian unit differs from the signed release" >&2; exit 1; }
+  cmp -s -- /usr/libexec/gateway-vpn-uninstall-job "$ROOT_DIR/scripts/run-gateway-uninstall-job.sh" || { echo "Installed Gateway uninstall guardian helper differs from the signed release" >&2; exit 1; }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] || { echo "Gateway IPv4 forwarding is not active" >&2; exit 1; }
   [[ -x /usr/libexec/gateway-vpn-install-recovery ]] || { echo "Installed Gateway recovery helper is not executable" >&2; exit 1; }
   EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
@@ -617,10 +636,13 @@ else
     /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /var/lib/gateway-vpn-dnsmasq \
     /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-firewall.service \
     /etc/systemd/system/gateway-vpn-firewall-guard.service /etc/systemd/system/gateway-vpn-network-broker.socket \
-    /etc/systemd/system/gateway-vpn-power-cycle@.service \
+    /etc/systemd/system/gateway-vpn-power-cycle@.service /etc/systemd/system/gateway-vpn-uninstall.service /usr/libexec/gateway-vpn-uninstall-job \
     /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service \
     /etc/systemd/system/gateway-vpn-install-recovery.service /usr/libexec/gateway-vpn-install-recovery; do
     if ((HOST_UPGRADE_INNER)) && [[ "$conflict" == /var/lib/gateway-vpn-dnsmasq ]]; then
+      continue
+    fi
+    if ((UNINSTALL_TERMINAL_REMNANTS)) && [[ "$conflict" == /etc/systemd/system/gateway-vpn-uninstall.service || "$conflict" == /usr/libexec/gateway-vpn-uninstall-job ]]; then
       continue
     fi
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict" >&2; exit 1; }
@@ -657,6 +679,7 @@ if ((EXISTING)); then
     echo "Completed Gateway install unexpectedly has first-install recovery enabled" >&2
     exit 1
   fi
+  systemctl is-enabled --quiet gateway-vpn-uninstall.service || { echo "Gateway uninstall boot guardian is not enabled" >&2; exit 1; }
   systemctl is-active --quiet gateway-vpn-firewall.service
   systemctl is-active --quiet gateway-vpn-firewall-guard.service
   systemctl is-active --quiet gateway-vpn-watchdog.service
@@ -690,6 +713,7 @@ if ((APPLY == 0)); then
   exit 0
 fi
 [[ ! -L /var/lib/gateway-vpn-privileged ]] || { echo "Privileged state root must not be a symlink" >&2; exit 1; }
+[[ ! -L /var/lib/gateway-vpn-uninstall ]] || { echo "Uninstall state root must not be a symlink" >&2; exit 1; }
 PRESERVE_STATE_ROOT=0
 [[ ! -e /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]] || PRESERVE_STATE_ROOT=1
 OLD_IPV6_ALL_DISABLE=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)
@@ -714,8 +738,11 @@ install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-install-recovery.ser
 install -d -m 0700 /var/lib/gateway-vpn-host-upgrade
 install -D -m 0700 "$ROOT_DIR/scripts/recover-gateway-host-upgrade.sh" /usr/libexec/gateway-vpn-host-upgrade-recovery
 install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-host-upgrade-recovery.service" /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
+install -d -m 0700 /var/lib/gateway-vpn-uninstall
+install -D -m 0700 "$ROOT_DIR/scripts/run-gateway-uninstall-job.sh" /usr/libexec/gateway-vpn-uninstall-job
+install -D -m 0644 "$ROOT_DIR/packaging/systemd/gateway-vpn-uninstall.service" /etc/systemd/system/gateway-vpn-uninstall.service
 systemctl daemon-reload
-systemctl enable gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service
+systemctl enable gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service gateway-vpn-uninstall.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
 printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
@@ -868,6 +895,7 @@ for unit in gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewal
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service \
   gateway-vpn-power-cycle@.service \
+  gateway-vpn-uninstall.service \
   gateway-vpn-host-upgrade-recovery.service \
   gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
@@ -882,7 +910,7 @@ chmod 0600 /run/gateway-vpn-install-authorized
 [[ -f /run/gateway-vpn-install-authorized && ! -L /run/gateway-vpn-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-install-authorized) == "0:0:600" ]] || { echo "Ephemeral Gateway service-start authorization is unsafe" >&2; exit 1; }
 systemctl daemon-reload
 systemctl try-restart systemd-journald@gateway-vpn.service
-systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service gateway-vpn-host-upgrade-recovery.service
+systemctl enable gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service gateway-vpn-host-upgrade-recovery.service gateway-vpn-uninstall.service
 systemctl enable --now gateway-vpn-update-finalize.timer
 systemctl restart gateway-vpn-firewall.service
 systemctl restart gateway-vpn-firewall-guard.service

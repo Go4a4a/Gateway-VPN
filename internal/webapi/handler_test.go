@@ -39,6 +39,7 @@ import (
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/reconcile"
+	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/scheduler"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/store"
@@ -2514,6 +2515,57 @@ func TestPowerAndMaintenanceMutationGateIsMutuallyExclusive(t *testing.T) {
 	server.endMaintenanceMutation()
 }
 
+func TestUninstallAPIRequiresImpactReauthenticationExactPhraseAndAcknowledgements(t *testing.T) {
+	server, ctx := testServer(t)
+	controller := &fakeRemovalController{impact: removal.Impact{
+		Available: true, InstalledStateRecorded: true, ApplicationDataPresent: true,
+		SessionWillDisconnect: true, OSPackagesRetained: true,
+		PreserveDataDescription: "preserve", PurgeDataDescription: "purge",
+		RequiredConfirmationPhrase: removal.ExactConfirmation,
+	}}
+	server.dependencies.Removal = controller
+	cookie, csrf := login(t, server)
+
+	impactRequest := httptest.NewRequest(http.MethodGet, "/api/v1/system/uninstall/impact", nil)
+	impactRequest.AddCookie(cookie)
+	impactResponse := httptest.NewRecorder()
+	server.ServeHTTP(impactResponse, impactRequest)
+	if impactResponse.Code != http.StatusOK || !strings.Contains(impactResponse.Body.String(), removal.ExactConfirmation) || !strings.Contains(impactResponse.Body.String(), "installed_state_recorded") {
+		t.Fatalf("uninstall impact = %d %s", impactResponse.Code, impactResponse.Body.String())
+	}
+
+	requestUninstall := func(body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/system/uninstall", strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	wrongPhrase := requestUninstall(`{"mode":"PRESERVE_DATA","password":"correct horse battery staple","confirmation":"УДАЛИТЬ","acknowledge_session_loss":true,"acknowledge_not_factory_reset":true,"acknowledge_purge_data_loss":false,"acknowledge_export_handled":false}`)
+	if wrongPhrase.Code != http.StatusBadRequest || len(controller.requests) != 0 {
+		t.Fatalf("wrong uninstall phrase = %d/%d", wrongPhrase.Code, len(controller.requests))
+	}
+	missingPurgeAcknowledgement := requestUninstall(`{"mode":"PURGE_DATA","password":"correct horse battery staple","confirmation":"УДАЛИТЬ GATEWAY VPN","acknowledge_session_loss":true,"acknowledge_not_factory_reset":true,"acknowledge_purge_data_loss":false,"acknowledge_export_handled":false}`)
+	if missingPurgeAcknowledgement.Code != http.StatusBadRequest || len(controller.requests) != 0 {
+		t.Fatalf("missing purge acknowledgement = %d/%d", missingPurgeAcknowledgement.Code, len(controller.requests))
+	}
+	wrongPassword := requestUninstall(`{"mode":"PRESERVE_DATA","password":"wrong","confirmation":"УДАЛИТЬ GATEWAY VPN","acknowledge_session_loss":true,"acknowledge_not_factory_reset":true,"acknowledge_purge_data_loss":false,"acknowledge_export_handled":false}`)
+	if wrongPassword.Code != http.StatusUnauthorized || len(controller.requests) != 0 {
+		t.Fatalf("wrong uninstall password = %d/%d", wrongPassword.Code, len(controller.requests))
+	}
+	success := requestUninstall(`{"mode":"PRESERVE_DATA","password":"correct horse battery staple","confirmation":"УДАЛИТЬ GATEWAY VPN","acknowledge_session_loss":true,"acknowledge_not_factory_reset":true,"acknowledge_purge_data_loss":false,"acknowledge_export_handled":false}`)
+	if success.Code != http.StatusAccepted || len(controller.requests) != 1 || controller.requests[0].Mode != removal.ModePreserveData || !strings.Contains(success.Body.String(), "UNINSTALL_DISPATCHED") {
+		t.Fatalf("uninstall success = %d calls=%+v body=%s", success.Code, controller.requests, success.Body.String())
+	}
+	var requested, dispatched int
+	_ = server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='SYSTEM_UNINSTALL_REQUESTED'").Scan(&requested)
+	_ = server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='SYSTEM_UNINSTALL_DISPATCHED'").Scan(&dispatched)
+	if requested != 1 || dispatched != 1 {
+		t.Fatalf("uninstall audit = %d/%d", requested, dispatched)
+	}
+}
+
 type fakeNetworkBroker struct {
 	prepared  networkapply.Prepared
 	staged    networkapply.Candidate
@@ -2525,6 +2577,21 @@ type fakePowerController struct {
 	capabilities power.Capabilities
 	commands     []power.Command
 	err          error
+}
+
+type fakeRemovalController struct {
+	impact   removal.Impact
+	requests []removal.Request
+	err      error
+}
+
+func (controller *fakeRemovalController) UninstallImpact(context.Context) (removal.Impact, error) {
+	return controller.impact, controller.err
+}
+
+func (controller *fakeRemovalController) DispatchUninstall(_ context.Context, request removal.Request) error {
+	controller.requests = append(controller.requests, request)
+	return controller.err
 }
 
 func (controller *fakePowerController) PowerCapabilities(context.Context) (power.Capabilities, error) {

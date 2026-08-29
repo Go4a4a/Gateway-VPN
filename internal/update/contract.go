@@ -522,6 +522,7 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd/gateway-vpn-network-broker.socket",
 	"packaging/systemd/gateway-vpn-power-cycle@.service",
 	"packaging/systemd/gateway-vpn-host-upgrade-recovery.service",
+	"packaging/systemd/gateway-vpn-uninstall.service",
 	"packaging/systemd/gateway-vpn-update.service",
 	"packaging/systemd/gateway-vpn-update-recovery.service",
 	"packaging/systemd/gateway-vpn-update-resume.service",
@@ -538,6 +539,7 @@ var requiredHostContractFiles = []string{
 	"scripts/recover-gateway-install.sh",
 	"scripts/upgrade-gateway-host.sh",
 	"scripts/recover-gateway-host-upgrade.sh",
+	"scripts/run-gateway-uninstall-job.sh",
 	"scripts/uninstall.sh",
 }
 
@@ -559,6 +561,7 @@ var hostContractStandaloneFiles = []string{
 	"scripts/recover-gateway-install.sh",
 	"scripts/upgrade-gateway-host.sh",
 	"scripts/recover-gateway-host-upgrade.sh",
+	"scripts/run-gateway-uninstall-job.sh",
 	"scripts/uninstall.sh",
 }
 

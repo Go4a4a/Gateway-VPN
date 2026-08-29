@@ -122,6 +122,8 @@ func TestSystemProbeRestartMatrixIsFixedAndComplete(t *testing.T) {
 func TestMaintenanceUnitAllowlistCoversDestructiveLifecycle(t *testing.T) {
 	want := map[string]bool{
 		"gateway-vpn-install-recovery.service":          false,
+		"gateway-vpn-host-upgrade-recovery.service":     false,
+		"gateway-vpn-uninstall.service":                 false,
 		"gateway-vpn-update.service":                    false,
 		"gateway-vpn-update-recovery.service":           false,
 		"gateway-vpn-update-finalize.service":           false,

@@ -860,8 +860,18 @@ Guard никогда не выполняет `nft flush ruleset` и не вос�
 
 ## Удаление
 
-`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` закрывает data path, удаляет units/program/config и owned nftables/networkd/sysctl/journald/GRUB projection, восстанавливает сохранённые перед первой установкой forwarding/IPv6, LAN link/bridge members, SSH service/socket и log-reader membership, но сохраняет `/var/lib/gateway-vpn` для повторной установки. `--purge-data --apply` дополнительно удаляет application DB/secrets/keys/backups; текущая CLI перед purge сохраняет root-only копию SQLite в `/root`.
+`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` сначала атомарно загружает signed boot ruleset и проверяет `PATH_BLOCKED`, затем удаляет units/program/config и owned nftables/networkd/sysctl/journald/GRUB projection, восстанавливает сохранённые перед первой установкой forwarding/IPv6, LAN link/bridge members, SSH service/socket и log-reader membership, но сохраняет `/var/lib/gateway-vpn` для повторной установки. `--purge-data --apply` дополнительно и без скрытой копии удаляет application DB/secrets/keys/backups и `/var/log/gateway-vpn`; нужный portable backup/diagnostic export следует скачать до команды.
 
 Удаление не является factory reset Ubuntu. Установленные системные packages не удаляются автоматически, чужие firewall/network rules не изменяются, а изменения, сделанные оператором или другим ПО после установки, не угадываются и не откатываются. После удаления owned firewall table оператор обязан убедиться, что обычная host firewall policy соответствует его требованиям. Восстановление прежней сети либо отключение SSH, который до установки был выключен, может оборвать текущую сессию.
 
-WebUI contract для **Система и безопасность → Удаление Gateway VPN** требует password re-auth, точной фразы, выбора `Сохранить данные`/`Полностью удалить`, downloadable backup и точного impact preview. HTTP-процесс только ставит fixed root-owned uninstall job; после его принятия исчезновение WebUI ожидаемо. Реализация WebUI trigger и durable terminal receipt остаётся отдельным незавершённым increment и не считается готовой по наличию CLI script.
+WebUI в **Система и безопасность → Удаление Gateway VPN** сначала показывает фактический bounded impact report. Apply требует текущий пароль, точную фразу `УДАЛИТЬ GATEWAY VPN`, подтверждение разрыва management-сессии и границ восстановления ОС; `Полное удаление` дополнительно требует подтвердить потерю данных и то, что нужный экспорт уже сохранён либо осознанно не нужен. HTTP передаёт root только typed `operation_id + PRESERVE_DATA|PURGE_DATA`.
+
+Root broker создаёт `root:root 0600` `/var/lib/gateway-vpn-uninstall/active` и запускает только `gateway-vpn-uninstall.service`. Helper до mutation повторно проверяет signed current release, копирует проверенные verifier/uninstaller/key в root-only tooling вне `/opt/gateway-vpn`, применяет `PATH_BLOCKED` и использует общий lifecycle lock. Поэтому SIGKILL или reboot после удаления `/opt` не лишает следующий boot uninstaller: enabled guardian с `ConditionPathExists` повторяет idempotent operation. Успех сначала fsync-сохраняет `completed-uninstall-…` receipt в `/var/lib/gateway-vpn-uninstall/`, затем удаляет active marker и guardian. Receipt является authoritative terminal evidence, особенно если SQLite была удалена либо WebUI отключился до ответа.
+
+Проверка после удаления:
+
+```bash
+sudo ls -l /var/lib/gateway-vpn-uninstall/completed-uninstall-*
+sudo systemctl status gateway-vpn-uninstall.service
+sudo nft list table inet gateway_vpn   # ожидается отсутствие owned table после успешного завершения
+```

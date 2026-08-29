@@ -402,6 +402,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		Watchdog:             &watchdog.Repository{Database: database},
 		WatchdogStatus:       watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
 		Power:                networkBroker,
+		Removal:              networkBroker,
 		NetworkCandidate:     networkCandidateBuilder(configuration, database),
 		NetworkInterface:     configuration.Network.LANInterface,
 		NetworkLANAddress:    configuration.Network.LANAddress,

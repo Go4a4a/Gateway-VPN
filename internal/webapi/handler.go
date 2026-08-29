@@ -47,6 +47,7 @@ import (
 	"gateway-vpn/internal/pathmatrix"
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/reconcile"
+	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/scheduler"
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/store"
@@ -119,6 +120,7 @@ type Dependencies struct {
 	Watchdog                *watchdog.Repository
 	WatchdogStatus          WatchdogStatusReader
 	Power                   PowerController
+	Removal                 RemovalController
 	Now                     func() time.Time
 }
 
@@ -129,6 +131,11 @@ type WatchdogStatusReader interface {
 type PowerController interface {
 	PowerCapabilities(context.Context) (power.Capabilities, error)
 	ExecutePower(context.Context, power.Command) error
+}
+
+type RemovalController interface {
+	UninstallImpact(context.Context) (removal.Impact, error)
+	DispatchUninstall(context.Context, removal.Request) error
 }
 
 type ProbeBudgetReader interface {
@@ -407,6 +414,8 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/system/reboot", server.protected(http.HandlerFunc(server.rebootSystem)))
 	mux.Handle("POST /api/v1/system/shutdown", server.protected(http.HandlerFunc(server.shutdownSystem)))
 	mux.Handle("POST /api/v1/system/power-cycle", server.protected(http.HandlerFunc(server.powerCycleSystem)))
+	mux.Handle("GET /api/v1/system/uninstall/impact", server.protected(http.HandlerFunc(server.uninstallImpact)))
+	mux.Handle("POST /api/v1/system/uninstall", server.protected(http.HandlerFunc(server.uninstallSystem)))
 	mux.Handle("GET /api/v1/logs", server.protected(http.HandlerFunc(server.logs)))
 	mux.Handle("POST /api/v1/system/diagnostics", server.protected(http.HandlerFunc(server.downloadDiagnostics)))
 	mux.Handle("GET /api/v1/system/backups", server.protected(http.HandlerFunc(server.backupInventory)))
@@ -3400,6 +3409,157 @@ func (server *Server) executeSystemPower(writer http.ResponseWriter, request *ht
 		// systemd already accepted the action. Do not claim it failed merely
 		// because the host began shutting down before SQLite acknowledgement.
 		writeJSON(writer, http.StatusAccepted, map[string]any{"operation_id": operation.ID, "action": action, "status": "DISPATCHED_STATUS_PENDING"})
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, operationResponse(finished, true))
+}
+
+func (server *Server) uninstallImpact(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Removal == nil {
+		writeError(writer, http.StatusNotImplemented, "UNINSTALL_NOT_AVAILABLE", "Безопасное удаление не подключено")
+		return
+	}
+	impact, err := server.dependencies.Removal.UninstallImpact(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UNINSTALL_IMPACT_UNAVAILABLE", "Не удалось безопасно определить последствия удаления")
+		return
+	}
+	repository := removal.Repository{Database: server.dependencies.Database}
+	if !impact.Active {
+		if _, err := repository.RecoverInterrupted(request.Context()); err != nil {
+			writeInternalError(writer, err)
+			return
+		}
+	}
+	latest, exists, err := repository.Latest(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	response := map[string]any{"impact": impact, "latest_operation": nil}
+	if exists {
+		response["latest_operation"] = operationResponse(latest, true)
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) uninstallSystem(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Removal == nil {
+		writeError(writer, http.StatusNotImplemented, "UNINSTALL_NOT_AVAILABLE", "Безопасное удаление не подключено")
+		return
+	}
+	var input struct {
+		Mode                     removal.Mode `json:"mode"`
+		Password                 string       `json:"password"`
+		Confirmation             string       `json:"confirmation"`
+		AcknowledgeSessionLoss   bool         `json:"acknowledge_session_loss"`
+		AcknowledgeNotFactory    bool         `json:"acknowledge_not_factory_reset"`
+		AcknowledgePurgeDataLoss bool         `json:"acknowledge_purge_data_loss"`
+		AcknowledgeExportHandled bool         `json:"acknowledge_export_handled"`
+	}
+	if err := decodeJSON(request, &input); err != nil || len(input.Password) > 1024 || len(input.Confirmation) > 64 {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректный запрос удаления")
+		return
+	}
+	probe := removal.Request{OperationID: "uninstall-" + strings.Repeat("0", 32), Mode: input.Mode}
+	if err := probe.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_UNINSTALL_MODE", "Выберите сохранение данных или полное удаление")
+		return
+	}
+	if input.Confirmation != removal.ExactConfirmation {
+		writeError(writer, http.StatusBadRequest, "UNINSTALL_CONFIRMATION_MISMATCH", "Введите точную показанную фразу подтверждения")
+		return
+	}
+	if !input.AcknowledgeSessionLoss || !input.AcknowledgeNotFactory {
+		writeError(writer, http.StatusBadRequest, "UNINSTALL_WARNINGS_NOT_ACKNOWLEDGED", "Подтвердите разрыв доступа и границы восстановления ОС")
+		return
+	}
+	if input.Mode == removal.ModePurgeData && (!input.AcknowledgePurgeDataLoss || !input.AcknowledgeExportHandled) {
+		writeError(writer, http.StatusBadRequest, "UNINSTALL_PURGE_NOT_ACKNOWLEDGED", "Для полного удаления подтвердите потерю данных и завершите нужный экспорт")
+		return
+	}
+	principal, ok := request.Context().Value(principalKey).(auth.Principal)
+	if !ok {
+		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
+		return
+	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrRateLimited):
+			writer.Header().Set("Retry-After", "2")
+			writeError(writer, http.StatusTooManyRequests, "REAUTH_RATE_LIMITED", "Слишком много неверных попыток; повторите позже")
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(writer, http.StatusUnauthorized, "REAUTH_FAILED", "Текущий пароль указан неверно")
+		case errors.Is(err, auth.ErrInvalidSession):
+			writeError(writer, http.StatusUnauthorized, "SESSION_INVALID", "Сессия истекла или отозвана")
+		default:
+			writeInternalError(writer, err)
+		}
+		return
+	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UNINSTALL_BLOCKED_BY_MAINTENANCE", "Дождитесь завершения операции питания, установки, обновления, восстановления, сети или резервного копирования")
+		return
+	}
+	repository := removal.Repository{Database: server.dependencies.Database}
+	impact, err := server.dependencies.Removal.UninstallImpact(request.Context())
+	if err != nil {
+		server.endMaintenanceMutation()
+		writeError(writer, http.StatusServiceUnavailable, "UNINSTALL_IMPACT_UNAVAILABLE", "Не удалось повторно проверить root guardian перед удалением")
+		return
+	}
+	if impact.Active {
+		server.endMaintenanceMutation()
+		writeError(writer, http.StatusConflict, "UNINSTALL_OPERATION_IN_PROGRESS", "Root guardian уже выполняет удаление")
+		return
+	}
+	if !impact.Available {
+		server.endMaintenanceMutation()
+		writeError(writer, http.StatusConflict, "UNINSTALL_UNAVAILABLE", "Fixed root guardian недоступен или не прошёл проверку")
+		return
+	}
+	if _, err := repository.RecoverInterrupted(request.Context()); err != nil {
+		server.endMaintenanceMutation()
+		writeInternalError(writer, err)
+		return
+	}
+	operation, err := repository.Start(request.Context(), principal.UserID, input.Mode)
+	if err != nil {
+		server.endMaintenanceMutation()
+		if errors.Is(err, removal.ErrOperationInProgress) {
+			writeError(writer, http.StatusConflict, "UNINSTALL_OPERATION_IN_PROGRESS", "Удаление уже выполняется")
+			return
+		}
+		writeInternalError(writer, err)
+		return
+	}
+	dispatch := removal.Request{OperationID: operation.ID, Mode: input.Mode}
+	if err := server.dependencies.Removal.DispatchUninstall(request.Context(), dispatch); err != nil {
+		server.endMaintenanceMutation()
+		reason := "UNINSTALL_DISPATCH_FAILED"
+		status, code, message := http.StatusBadGateway, reason, "Удаление не удалось безопасно передать root guardian"
+		switch {
+		case errors.Is(err, removal.ErrMaintenanceActive):
+			reason, status, code, message = "UNINSTALL_BLOCKED_BY_MAINTENANCE", http.StatusConflict, "UNINSTALL_BLOCKED_BY_MAINTENANCE", "Сначала завершите установку, обновление, восстановление или безопасное применение сети"
+		case errors.Is(err, removal.ErrOperationInProgress):
+			reason, status, code, message = "UNINSTALL_OPERATION_IN_PROGRESS", http.StatusConflict, "UNINSTALL_OPERATION_IN_PROGRESS", "Root guardian уже выполняет удаление"
+		case errors.Is(err, removal.ErrUnavailable):
+			reason, status, code, message = "UNINSTALL_UNAVAILABLE", http.StatusConflict, "UNINSTALL_UNAVAILABLE", "Fixed root guardian недоступен или повреждён"
+		case errors.Is(err, removal.ErrInvalidRequest):
+			reason, status, code, message = "INVALID_UNINSTALL_REQUEST", http.StatusBadRequest, "INVALID_UNINSTALL_REQUEST", "Некорректный typed запрос удаления"
+		}
+		_, _ = repository.Finish(request.Context(), operation.ID, false, reason)
+		writeError(writer, status, code, message)
+		return
+	}
+	finished, err := repository.Finish(request.Context(), operation.ID, true, "")
+	if err != nil {
+		writeJSON(writer, http.StatusAccepted, map[string]any{
+			"operation_id": operation.ID,
+			"mode":         input.Mode,
+			"status":       "DISPATCHED_STATUS_PENDING",
+			"message":      "Root guardian принял удаление; WebUI и SSH сейчас станут недоступны",
+		})
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, operationResponse(finished, true))

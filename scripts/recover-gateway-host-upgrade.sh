@@ -102,7 +102,7 @@ rm -f /etc/default/grub.d/90-gateway-vpn.cfg
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf
 rm -f /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf
-rm -f /usr/libexec/gateway-vpn-install-recovery
+rm -f /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-uninstall-job
 shopt -u nullglob
 
 restore_snapshot_item() {
@@ -119,11 +119,12 @@ done
 shopt -s nullglob
 for source in \
   "$ROOTFS"/etc/systemd/system/gateway-vpn*.service "$ROOTFS"/etc/systemd/system/gateway-vpn*.socket "$ROOTFS"/etc/systemd/system/gateway-vpn*.timer \
+  "$ROOTFS"/etc/systemd/system/multi-user.target.wants/gateway-vpn-uninstall.service \
   "$ROOTFS"/etc/systemd/network/05-gateway-vpn-lan.network "$ROOTFS"/etc/systemd/network/05-gateway-vpn-lan.netdev "$ROOTFS"/etc/systemd/network/06-gateway-vpn-lan-*.network "$ROOTFS"/etc/systemd/network/80-gateway-vpn-hilink.network \
   "$ROOTFS"/etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf "$ROOTFS"/etc/default/grub.d/90-gateway-vpn.cfg \
   "$ROOTFS"/etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf "$ROOTFS"/etc/sysctl.d/90-gateway-vpn-ipv6.conf "$ROOTFS"/etc/systemd/journald@gateway-vpn.conf.d/retention.conf \
   "$ROOTFS"/usr/lib/sysusers.d/gateway-vpn.conf "$ROOTFS"/usr/lib/tmpfiles.d/gateway-vpn.conf \
-  "$ROOTFS"/usr/libexec/gateway-vpn-install-recovery "$ROOTFS"/usr/libexec/gateway-vpn-host-upgrade-recovery \
+  "$ROOTFS"/usr/libexec/gateway-vpn-install-recovery "$ROOTFS"/usr/libexec/gateway-vpn-host-upgrade-recovery "$ROOTFS"/usr/libexec/gateway-vpn-uninstall-job \
   "$ROOTFS"/boot/grub/grub.cfg "$ROOTFS"/boot/grub/grubenv; do
   [[ ${source#"$ROOTFS"} == "$RECOVERY_UNIT" || ${source#"$ROOTFS"} == "$RECOVERY_HELPER" ]] && continue
   restore_snapshot_item "${source#"$ROOTFS"}"
@@ -190,7 +191,7 @@ enable_if_present() {
   local unit=$1
   [[ $(systemctl show "$unit" -p LoadState --value 2>/dev/null || true) == not-found ]] || systemctl enable "$unit" >/dev/null
 }
-for unit in gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service gateway-vpn-update-finalize.timer; do
+for unit in gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-mihomo.service gateway-vpn.service gateway-vpn-update-finalize.timer gateway-vpn-uninstall.service; do
   enable_if_present "$unit"
 done
 [[ ! -f /etc/gateway-vpn/dnsmasq.conf ]] || enable_if_present gateway-vpn-dnsmasq.service

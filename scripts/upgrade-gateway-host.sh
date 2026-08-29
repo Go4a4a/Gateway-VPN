@@ -193,6 +193,7 @@ for pending in /var/lib/gateway-vpn-privileged/install-transactions/active /var/
   [[ ! -e $pending && ! -L $pending ]] || { echo "Finish the existing Gateway transaction before host upgrade" >&2; exit 1; }
 done
 [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted host upgrade before retrying" >&2; exit 1; }
+[[ ! -e /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active ]] || { echo "Complete the durable Gateway uninstall before host upgrade" >&2; exit 1; }
 
 if ((APPLY == 0)); then
   echo "Signed host-contract upgrade dry-run PASS: $OLD_VERSION (schema $OLD_SCHEMA, host ${OLD_HOST_CONTRACT:0:12}…) -> $RELEASE_VERSION (schema $NEW_SCHEMA, host ${NEW_HOST_CONTRACT:0:12}…)."
@@ -279,7 +280,7 @@ snapshot_item() {
 }
 for path in /opt/gateway-vpn /etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /var/lib/gateway-vpn-dnsmasq /var/log/gateway-vpn; do snapshot_item "$path"; done
 shopt -s nullglob
-for path in /etc/systemd/system/gateway-vpn*.service /etc/systemd/system/gateway-vpn*.socket /etc/systemd/system/gateway-vpn*.timer /etc/systemd/system/multi-user.target.wants/gateway-vpn-host-upgrade-recovery.service /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf /etc/default/grub.d/90-gateway-vpn.cfg /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/journald@gateway-vpn.conf.d/retention.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-host-upgrade-recovery /boot/grub/grub.cfg /boot/grub/grubenv; do snapshot_item "$path"; done
+for path in /etc/systemd/system/gateway-vpn*.service /etc/systemd/system/gateway-vpn*.socket /etc/systemd/system/gateway-vpn*.timer /etc/systemd/system/multi-user.target.wants/gateway-vpn-host-upgrade-recovery.service /etc/systemd/system/multi-user.target.wants/gateway-vpn-uninstall.service /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf /etc/default/grub.d/90-gateway-vpn.cfg /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/journald@gateway-vpn.conf.d/retention.conf /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-host-upgrade-recovery /usr/libexec/gateway-vpn-uninstall-job /boot/grub/grub.cfg /boot/grub/grubenv; do snapshot_item "$path"; done
 shopt -u nullglob
 sync
 [[ -L $ROOTFS/opt/gateway-vpn/current && $(readlink "$ROOTFS/opt/gateway-vpn/current") == releases/v$OLD_VERSION && -f $ROOTFS/var/lib/gateway-vpn/state.db ]] || { echo "Host-upgrade rollback snapshot is incomplete" >&2; exit 1; }
@@ -329,7 +330,7 @@ rm -f /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /et
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
 rm -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf /etc/default/grub.d/90-gateway-vpn.cfg
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
-rm -f /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /usr/libexec/gateway-vpn-install-recovery
+rm -f /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-uninstall-job
 shopt -s nullglob
 for path in /etc/systemd/system/gateway-vpn*.service /etc/systemd/system/gateway-vpn*.socket /etc/systemd/system/gateway-vpn*.timer; do
   [[ $path == /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service ]] || rm -f -- "$path"
