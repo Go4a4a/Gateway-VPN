@@ -339,6 +339,10 @@
 
 **Неуспешный промежуточный тест:** после выделения отдельной validated `TOOLING` directory packaging regression ещё искал прежние literal paths `$TRANSACTION/tooling/...` и дал два ожидаемых string-mismatch. Проверка обновлена на `$TOOLING/...`; повторный focused suite прошёл, runtime contract не ослаблялся.
 
+**Exact baseline discovery:** новый clean Ubuntu container установил неизменяемый public `0.1.0-successor.5723940` со schema 16 и показал marker format 14: исходное состояние `ssh.service` записано, `ssh.socket` ещё отсутствует. Первоначальный merge ошибочно подставлял socket state из post-install candidate marker. До запуска upgrade merge изменён: marker v20 сохраняет старые socket fields только при их реальном наличии; legacy 14/16/18 становится форматом 18, поэтому uninstaller не угадывает неизвестное pre-install состояние socket.
+
+**Superseded exact build:** commit `3a84a522568ece08d7d28dda91fa46a02d903c0d` дважды offline собрал 85 побайтно одинаковых files как `0.1.0-successor.g3a84a52` (Gateway SHA-256 `f1572d5507f6381b0ab080aaebce0a4893317bfb104efcc212b2c84655867088`). Artifact не запускался как upgrade и сразу признан superseded после обнаружения legacy socket-marker defect; tag/Release не создавались. Следующий exact candidate обязан включать исправленный merge.
+
 **Не проверено:** candidate ещё не собран как exact committed disposable-signed artifact; public baseline schema 16 не обновлялся до schema 24. Success, injected failure, process interruption и новый PID 1 с пустым `/run` пока не являются доказанными. Bare-metal power cut остаётся отдельным hardware gate.
 
 **Следующий шаг:** commit/push текущего increment, exact offline candidate build и privileged Ubuntu 24.04 public-baseline `16 → 24` success/rollback/new-PID1 recovery matrix. После стабилизации реализовать DEV-195 WebUI uninstall job и расширить CLI purge до полного bounded cleanup/receipt.

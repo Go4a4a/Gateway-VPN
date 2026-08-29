@@ -169,6 +169,8 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"write_marker CANDIDATE_READY",
 		`GATEWAY_VPN_HOST_UPGRADE_INNER=1 "$RELEASE_DIR/scripts/install-gateway.sh"`,
 		`--trusted-update-key "$TOOLING/update-signing.pub"`,
+		`if [[ $OLD_MARKER_FIELD_COUNT == 20 ]]; then`,
+		`$OLD_MARKER_FIELD_COUNT != 20 && $MERGED_FIELD_COUNT == 18`,
 		"Merged host-upgrade install marker does not preserve the original OS state",
 	} {
 		if !strings.Contains(upgrader, required) {
@@ -177,6 +179,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Contains(upgrader, "rm -rf /etc/gateway-vpn") {
 		t.Fatal("host upgrade destroys persistent Gateway configuration instead of preserving it")
+	}
+	if strings.Contains(upgrader, `old_or_default ssh_socket_was_enabled`) || strings.Contains(upgrader, `new_marker_value ssh_socket_was_enabled`) {
+		t.Fatal("host upgrade guesses unknown legacy pre-install ssh.socket state from the post-install marker")
 	}
 	for _, required := range []string{
 		"ConditionPathExists=/var/lib/gateway-vpn-host-upgrade/active",
