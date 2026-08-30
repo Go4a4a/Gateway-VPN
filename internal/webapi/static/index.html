@@ -24,7 +24,11 @@
     <aside>
       <div class="brand"><span class="brand-mark small">GV</span><span><strong>Gateway VPN</strong><small>Control plane</small></span></div>
       <nav id="navigation" aria-label="Разделы">
+        <div class="nav-group">Состояние</div>
         <button data-tab="overview" class="active">Обзор</button>
+        <button data-tab="health">Состояние и события</button>
+        <button data-tab="traffic">Трафик</button>
+        <div class="nav-group">Интернет и VPN</div>
         <button data-tab="uplinks">Физические выходы</button>
         <button data-tab="modems">Модемы</button>
         <button data-tab="access">Способы доступа</button>
@@ -33,10 +37,11 @@
         <button data-tab="targets">Серверы проверки</button>
         <button data-tab="matchers">Правила отбора</button>
         <button data-tab="nodes">VPN-серверы</button>
-        <button data-tab="health">Состояние и события</button>
-        <button data-tab="traffic">Трафик</button>
+        <div class="nav-group">Туннели и управление</div>
         <button data-tab="wireguard-ingress">WireGuard-клиенты</button>
-        <button data-tab="remote">Удалённый доступ</button>
+        <button data-tab="management-fabric">VPS и удалённое управление</button>
+        <button data-tab="remote">Legacy VPS-канал</button>
+        <div class="nav-group">Gateway</div>
         <button data-tab="network">Сеть</button>
         <button data-tab="system">Система и безопасность</button>
       </nav>
@@ -53,6 +58,7 @@
   <script src="/wireguard-ingress.js" defer></script>
   <script src="/contextual-help.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/management-fabric.js" defer></script>
   <script src="/logging-ui.js" defer></script>
   <script src="/watchdog.js" defer></script>
   <script src="/ethernet-network.js" defer></script>

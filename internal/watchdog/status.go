@@ -22,6 +22,8 @@ const (
 	ComponentSSH              = "openssh_sftp"
 	ComponentMihomo           = "mihomo"
 	ComponentWireGuardMgmt    = "wireguard_management"
+	ComponentManagementFabric = "management_fabric_routes"
+	ComponentWireGuardAdmin   = "wireguard_admin"
 	ComponentWireGuardIngress = "wireguard_ingress"
 	ComponentPolicyRouting    = "policy_routing"
 	ComponentWorkerRuntime    = "worker_runtime"
@@ -46,11 +48,12 @@ const (
 )
 
 type ComponentSpec struct {
-	ID             string
-	Label          string
-	Reconcileable  bool
-	Restartable    bool
-	RebootEligible bool
+	ID                      string
+	Label                   string
+	Reconcileable           bool
+	Restartable             bool
+	RebootEligible          bool
+	RestartWithoutPathBlock bool
 }
 
 var fixedComponentSpecs = []ComponentSpec{
@@ -64,6 +67,8 @@ var fixedComponentSpecs = []ComponentSpec{
 	{ID: ComponentSSH, Label: "SSH/SFTP", Reconcileable: true, Restartable: true},
 	{ID: ComponentMihomo, Label: "Mihomo/TUN", Reconcileable: true, Restartable: true, RebootEligible: true},
 	{ID: ComponentWireGuardMgmt, Label: "WireGuard удалённого управления", Reconcileable: true, Restartable: true},
+	{ID: ComponentManagementFabric, Label: "Маршруты и ACL Management Fabric", Reconcileable: true, Restartable: true, RestartWithoutPathBlock: true},
+	{ID: ComponentWireGuardAdmin, Label: "WireGuard-связи Gateway с VPS", Reconcileable: true, Restartable: true, RestartWithoutPathBlock: true},
 	{ID: ComponentWireGuardIngress, Label: "WireGuard входящего трафика", Reconcileable: true, Restartable: true},
 	{ID: ComponentPolicyRouting, Label: "Policy routing физических выходов", Reconcileable: true, Restartable: true, RebootEligible: true},
 	{ID: ComponentWorkerRuntime, Label: "Фоновые циклы и планировщики", Reconcileable: true, Restartable: true, RebootEligible: true},

@@ -325,29 +325,32 @@ FROM management_link_endpoints WHERE link_id=? ORDER BY priority, id`, linkID)
 }
 
 func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, transaction *sql.Tx, candidates []namedPrefix, excludedLinkID string) error {
-	all := make([]namedPrefix, 0, len(repository.ReservedPrefixes)+len(candidates)+16)
+	if err := rejectOverlaps(candidates); err != nil {
+		return err
+	}
+	existing := make([]namedPrefix, 0, len(repository.ReservedPrefixes)+16)
 	for _, reserved := range repository.ReservedPrefixes {
 		prefix, err := canonicalPrefix(reserved.CIDR)
 		if err != nil || prefix.Bits() == 0 {
 			return fmt.Errorf("configured reserved prefix %q is invalid", reserved.Owner)
 		}
-		all = append(all, namedPrefix{owner: "reserved:" + reserved.Owner, prefix: prefix})
+		existing = append(existing, namedPrefix{owner: "reserved:" + reserved.Owner, prefix: prefix})
 	}
-	all = append(all, candidates...)
 
 	queries := []struct {
-		statement string
-		owner     string
-		args      []any
+		statement   string
+		owner       string
+		args        []any
+		addressCIDR bool
 	}{
-		{"SELECT admin_address_pool FROM vps_nodes", "vps-admin-pool", nil},
-		{"SELECT resource_alias_pool FROM vps_nodes", "vps-alias-pool", nil},
-		{"SELECT management_subnet FROM management_links WHERE id<>?", "management-link", []any{excludedLinkID}},
-		{"SELECT published_alias FROM management_resource_publications", "published-alias", nil},
-		{"SELECT subnet_cidr FROM wireguard_ingress_servers", "wireguard-ingress", nil},
-		{"SELECT management_cidr FROM modems WHERE management_cidr IS NOT NULL AND management_cidr<>''", "modem", nil},
-		{"SELECT ipv4_cidr FROM uplinks WHERE ipv4_cidr IS NOT NULL AND ipv4_cidr<>''", "uplink-runtime", nil},
-		{"SELECT configured_ipv4_cidr FROM uplinks WHERE configured_ipv4_cidr IS NOT NULL AND configured_ipv4_cidr<>''", "uplink-config", nil},
+		{"SELECT admin_address_pool FROM vps_nodes", "vps-admin-pool", nil, false},
+		{"SELECT resource_alias_pool FROM vps_nodes", "vps-alias-pool", nil, false},
+		{"SELECT management_subnet FROM management_links WHERE id<>?", "management-link", []any{excludedLinkID}, false},
+		{"SELECT published_alias FROM management_resource_publications", "published-alias", nil, false},
+		{"SELECT subnet_cidr FROM wireguard_ingress_servers", "wireguard-ingress", nil, false},
+		{"SELECT management_cidr FROM modems WHERE management_cidr IS NOT NULL AND management_cidr<>'' AND NOT EXISTS (SELECT 1 FROM legacy_modem_uplink_map AS m WHERE m.modem_id=modems.id)", "unmigrated-modem", nil, true},
+		{"SELECT ipv4_cidr FROM uplinks WHERE ipv4_cidr IS NOT NULL AND ipv4_cidr<>''", "uplink-runtime", nil, true},
+		{"SELECT configured_ipv4_cidr FROM uplinks WHERE configured_ipv4_cidr IS NOT NULL AND configured_ipv4_cidr<>''", "uplink-config", nil, true},
 	}
 	for _, query := range queries {
 		rows, err := transaction.QueryContext(ctx, query.statement, query.args...)
@@ -362,12 +365,17 @@ func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, tran
 				return fmt.Errorf("scan %s prefix: %w", query.owner, err)
 			}
 			prefix, err := canonicalPrefix(raw)
+			if err != nil && query.addressCIDR {
+				if addressPrefix, parseErr := netip.ParsePrefix(strings.TrimSpace(raw)); parseErr == nil && addressPrefix.Addr().Is4() {
+					prefix, err = addressPrefix.Masked(), nil
+				}
+			}
 			if err != nil {
 				rows.Close()
 				return fmt.Errorf("stored %s prefix is invalid", query.owner)
 			}
 			index++
-			all = append(all, namedPrefix{owner: fmt.Sprintf("%s:%d", query.owner, index), prefix: prefix})
+			existing = append(existing, namedPrefix{owner: fmt.Sprintf("%s:%d", query.owner, index), prefix: prefix})
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -377,7 +385,14 @@ func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, tran
 			return fmt.Errorf("close %s prefixes: %w", query.owner, err)
 		}
 	}
-	return rejectOverlaps(all)
+	for _, candidate := range candidates {
+		for _, occupied := range existing {
+			if candidate.prefix.Overlaps(occupied.prefix) {
+				return fmt.Errorf("network prefixes %s (%s) and %s (%s) overlap", candidate.owner, candidate.prefix, occupied.owner, occupied.prefix)
+			}
+		}
+	}
+	return nil
 }
 
 func allocateVPSNumber(ctx context.Context, transaction *sql.Tx) (int64, error) {

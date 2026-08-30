@@ -16,7 +16,7 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 4
+	SchemaGeneration = 5
 )
 
 type BootConfig struct {
@@ -66,6 +66,18 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	}
 
 	set wireguard_endpoint_generation {
+		type mark
+	}
+
+	set management_fabric_interfaces {
+		type ifname
+	}
+
+	set management_fabric_endpoints {
+		type ifname . mark . ipv4_addr . inet_service
+	}
+
+	set management_fabric_generation {
 		type mark
 	}
 
@@ -154,12 +166,13 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         meta nfproto ipv4 iifname @user_ingress_interfaces meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct uplink mark"
 	}
 
-    chain input {
+	chain input {
         type filter hook input priority filter; policy drop;
         iifname "lo" accept comment "gateway-vpn loopback"
         ct state invalid drop
         iifname @hilink_interfaces ct state { established, related } counter name service_download accept comment "gateway-vpn direct service download"
-        ct state { established, related } accept
+		ct state { established, related } accept
+		jump management_fabric_input
         iifname %s udp sport 68 udp dport 67 accept comment "gateway-vpn LAN DHCP request"
         iifname %s udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
@@ -171,9 +184,10 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
 
-    chain forward {
+	chain forward {
         type filter hook forward priority filter; policy drop;
-        ct state invalid drop
+		ct state invalid drop
+		jump management_fabric_forward
         meta nfproto ipv4 iifname %s oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
 		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified TUN"
         meta nfproto ipv4 iifname @active_tun_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
@@ -187,11 +201,12 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 
 	chain postrouting {
 		type nat hook postrouting priority srcnat;
+		jump management_fabric_postrouting
 		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct LAN NAT"
 		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct WireGuard NAT"
 	}
 
-    chain output {
+	chain output {
         type filter hook output priority filter; policy drop;
         oifname "lo" accept comment "gateway-vpn loopback"
         ct state invalid drop
@@ -201,6 +216,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         oifname @hilink_interfaces udp sport 68 udp dport 67 counter name service_upload accept comment "gateway-vpn modem DHCP request"
 		oifname . ip daddr @hilink_management_v4 tcp dport { 80, 443 } counter name service_upload accept comment "gateway-vpn modem management"
 		oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport %d counter name service_upload accept comment "gateway-vpn WireGuard endpoint"
+		oifname . meta mark . ip daddr . udp dport @management_fabric_endpoints counter name service_upload accept comment "gateway-vpn Management Fabric endpoint"
 		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS UDP"
 		meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS TCP"
 		meta skuid "gateway-vpn" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4 counter name service_upload accept comment "gateway-vpn subscription HTTPS"
@@ -210,7 +226,20 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS TCP"
 		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy TCP"
 		meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . udp dport @mihomo_endpoint_udp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy UDP"
-    }
+	}
+
+	chain management_fabric_input {
+	}
+
+	chain management_fabric_forward {
+	}
+
+	chain management_fabric_postrouting {
+	}
+
+	chain management_fabric_prerouting {
+		type nat hook prerouting priority dstnat;
+	}
 }
 `,
 		TableName,

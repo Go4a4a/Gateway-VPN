@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 26 {
+	if err != nil || version != 28 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 26 {
+	if err != nil || latest != 28 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -253,8 +253,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 26 {
-		t.Fatalf("SchemaVersion() = %d, want 26", version)
+	if version != 28 {
+		t.Fatalf("SchemaVersion() = %d, want 28", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -298,8 +298,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 26 {
-		t.Fatalf("migration count = %d, want 26", count)
+	if count != 28 {
+		t.Fatalf("migration count = %d, want 28", count)
 	}
 }
 
@@ -417,20 +417,22 @@ WHERE key='watchdog'`); err != nil {
 		t.Fatal(err)
 	}
 	var version, interval int
-	var loggingMode string
+	var loggingMode, managementFabricMode, wireGuardAdminMode string
 	if err := database.QueryRowContext(ctx, `
 SELECT (SELECT MAX(version) FROM schema_migrations),
        json_extract(value_json, '$.check_interval_seconds'),
-       json_extract(value_json, '$.component_recovery_modes.logging_pipeline')
-FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode); err != nil {
+	   json_extract(value_json, '$.component_recovery_modes.logging_pipeline'),
+	   json_extract(value_json, '$.component_recovery_modes.management_fabric_routes'),
+	   json_extract(value_json, '$.component_recovery_modes.wireguard_admin')
+FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode, &managementFabricMode, &wireGuardAdminMode); err != nil {
 		t.Fatal(err)
 	}
 	var modeCount int
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 || interval != 42 || loggingMode != "RESTART" || modeCount != 17 {
-		t.Fatalf("migration 24 = version:%d interval:%d mode:%s count:%d", version, interval, loggingMode, modeCount)
+	if version != 28 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
+		t.Fatalf("watchdog migrations = version:%d interval:%d modes:%s/%s/%s count:%d", version, interval, loggingMode, managementFabricMode, wireGuardAdminMode, modeCount)
 	}
 }
 

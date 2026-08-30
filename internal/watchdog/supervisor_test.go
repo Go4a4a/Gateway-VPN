@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -262,7 +263,7 @@ func TestHostRebootRequiresExplicitPolicyCriticalDelayGraceAndDurableBudget(t *t
 	}
 }
 
-func TestRestartableComponentMatrixAlwaysFailsClosedBeforeFixedRestart(t *testing.T) {
+func TestRestartableComponentMatrixUsesDeclaredPathBlockBoundary(t *testing.T) {
 	now := time.Date(2026, 8, 26, 11, 0, 0, 0, time.UTC)
 	policy := DefaultPolicy()
 	policy.FailureThreshold, policy.ReconcileEnabled = 1, false
@@ -277,7 +278,10 @@ func TestRestartableComponentMatrixAlwaysFailsClosedBeforeFixedRestart(t *testin
 				t.Fatal(err)
 			}
 			want := []string{"fail-closed", "restart:" + spec.ID}
-			if len(probe.actions) != len(want) || probe.actions[0] != want[0] || probe.actions[1] != want[1] {
+			if spec.RestartWithoutPathBlock {
+				want = []string{"restart:" + spec.ID}
+			}
+			if !reflect.DeepEqual(probe.actions, want) {
 				t.Fatalf("component recovery order = %v, want %v", probe.actions, want)
 			}
 		})

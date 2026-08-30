@@ -11,9 +11,11 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
@@ -27,24 +29,26 @@ import (
 const maxBrokerMessageBytes = 64 << 10
 
 type BrokerServer struct {
-	Engine      *Engine
-	DataPlane   DataPlaneAdmin
-	PathPlane   PathAdmin
-	Routing     RoutingAdmin
-	Bootstrap   BootstrapAdmin
-	WireGuard   WireGuardAdmin
-	Ingress     WireGuardIngressAdmin
-	Logging     LoggingAdmin
-	Journal     JournalAdmin
-	Diagnostics HostDiagnosticsAdmin
-	Restore     RestoreAdmin
-	Update      UpdateAdmin
-	Traffic     TrafficAdmin
-	Recovery    ModemRecoveryAdmin
-	Power       PowerAdmin
-	Removal     RemovalAdmin
-	Logger      *slog.Logger
-	handler     http.Handler
+	Engine           *Engine
+	DataPlane        DataPlaneAdmin
+	PathPlane        PathAdmin
+	Routing          RoutingAdmin
+	Bootstrap        BootstrapAdmin
+	WireGuard        WireGuardAdmin
+	Ingress          WireGuardIngressAdmin
+	Logging          LoggingAdmin
+	Journal          JournalAdmin
+	Diagnostics      HostDiagnosticsAdmin
+	Restore          RestoreAdmin
+	Update           UpdateAdmin
+	Traffic          TrafficAdmin
+	Recovery         ModemRecoveryAdmin
+	Power            PowerAdmin
+	Removal          RemovalAdmin
+	ManagementFabric ManagementFabricAdmin
+	PortableBackup   PortableBackupAdmin
+	Logger           *slog.Logger
+	handler          http.Handler
 }
 
 // DataPlaneAdmin is the deliberately small privileged surface needed by the
@@ -158,6 +162,28 @@ type PowerAdmin interface {
 type RemovalAdmin interface {
 	Impact(context.Context) (removal.Impact, error)
 	Dispatch(context.Context, removal.Request) error
+}
+
+// ManagementFabricAdmin exposes only parameter-free convergence and status.
+// Root re-reads SQLite, protected key files and kernel state; no interface,
+// route, key path, nft expression or generation is accepted from WebUI.
+type ManagementFabricAdmin interface {
+	Apply(context.Context) error
+	NeedsApply(context.Context) (bool, string, error)
+}
+
+// PortableBackupAdmin is implemented only by the root broker. It reads the
+// fixed Gateway state/config trees, including root-owned Management Fabric
+// keys, and exposes only the final encrypted .gvpn stream to the control plane.
+type PortableBackupAdmin interface {
+	Build(context.Context, string) (backup.PortableArtifact, error)
+	Open(backup.PortableArtifact) (io.ReadCloser, error)
+	Remove(backup.PortableArtifact) error
+}
+
+type ManagementFabricStatus struct {
+	NeedsApply bool   `json:"needs_apply"`
+	Reason     string `json:"reason"`
 }
 
 // UpdateTransactionStatus is the only update-journal information exposed to
@@ -297,12 +323,107 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	mux.HandleFunc("POST /v1/power/execute", server.executePower)
 	mux.HandleFunc("POST /v1/uninstall/impact", server.uninstallImpact)
 	mux.HandleFunc("POST /v1/uninstall/dispatch", server.dispatchUninstall)
+	mux.HandleFunc("POST /v1/management-fabric/sync", server.syncManagementFabric)
+	mux.HandleFunc("POST /v1/management-fabric/status", server.managementFabricStatus)
+	mux.HandleFunc("POST /v1/backup/export", server.exportPortableBackup)
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(writer, request)
 	})
 	return server, nil
+}
+
+func (server *BrokerServer) exportPortableBackup(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil || backup.ValidatePassphrase(input.Passphrase) != nil {
+		input.Passphrase = ""
+		writeBrokerError(writer, http.StatusBadRequest, "BACKUP_PASSPHRASE_INVALID")
+		return
+	}
+	if server.PortableBackup == nil {
+		input.Passphrase = ""
+		writeBrokerError(writer, http.StatusServiceUnavailable, "PORTABLE_BACKUP_UNAVAILABLE")
+		return
+	}
+	passphrase := input.Passphrase
+	input.Passphrase = ""
+	artifact, err := server.PortableBackup.Build(request.Context(), passphrase)
+	passphrase = ""
+	if err != nil {
+		server.logPrivilegedFailure("portable_backup_export", err)
+		writeBrokerError(writer, http.StatusConflict, "PORTABLE_BACKUP_BUILD_FAILED")
+		return
+	}
+	defer server.PortableBackup.Remove(artifact)
+	if artifact.Path == "" {
+		server.logPrivilegedFailure("portable_backup_export", errors.New("portable backup builder returned no managed path"))
+		writeBrokerError(writer, http.StatusInternalServerError, "PORTABLE_BACKUP_INVALID")
+		return
+	}
+	streamMetadata := artifact
+	streamMetadata.Path = ""
+	if err := backup.ValidatePortableArtifactMetadata(streamMetadata); err != nil {
+		server.logPrivilegedFailure("portable_backup_export", err)
+		writeBrokerError(writer, http.StatusInternalServerError, "PORTABLE_BACKUP_INVALID")
+		return
+	}
+	reader, err := server.PortableBackup.Open(artifact)
+	if err != nil {
+		server.logPrivilegedFailure("portable_backup_export", err)
+		writeBrokerError(writer, http.StatusInternalServerError, "PORTABLE_BACKUP_VERIFY_FAILED")
+		return
+	}
+	defer reader.Close()
+	writer.Header().Set("Content-Type", "application/vnd.gateway-vpn.backup.encrypted")
+	writer.Header().Set("Content-Length", fmt.Sprintf("%d", artifact.Bytes))
+	writer.Header().Set("X-Gateway-VPN-Backup-Filename", artifact.Filename)
+	writer.Header().Set("X-Gateway-VPN-Backup-SHA256", artifact.SHA256)
+	writer.Header().Set("X-Gateway-VPN-Backup-Snapshot", artifact.SnapshotID)
+	writer.WriteHeader(http.StatusOK)
+	written, copyErr := io.CopyN(writer, reader, artifact.Bytes)
+	if copyErr != nil || written != artifact.Bytes {
+		server.logPrivilegedFailure("portable_backup_stream", errors.New("encrypted portable backup stream was interrupted"))
+	}
+}
+
+func (server *BrokerServer) syncManagementFabric(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.ManagementFabric == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_UNAVAILABLE")
+		return
+	}
+	if err := server.ManagementFabric.Apply(request.Context()); err != nil {
+		server.logPrivilegedFailure("management_fabric_sync", err)
+		writeBrokerError(writer, http.StatusConflict, "MANAGEMENT_FABRIC_SYNC_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *BrokerServer) managementFabricStatus(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.ManagementFabric == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_UNAVAILABLE")
+		return
+	}
+	needed, reason, err := server.ManagementFabric.NeedsApply(request.Context())
+	if err != nil {
+		server.logPrivilegedFailure("management_fabric_status", err)
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_STATUS_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, ManagementFabricStatus{NeedsApply: needed, Reason: reason})
 }
 
 func (server *BrokerServer) uninstallImpact(writer http.ResponseWriter, request *http.Request) {
@@ -996,6 +1117,86 @@ func (client *BrokerClient) SyncRouting(ctx context.Context) error {
 
 func (client *BrokerClient) SyncWireGuard(ctx context.Context) error {
 	return client.call(ctx, "/v1/wireguard/sync", struct{}{}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) SyncManagementFabric(ctx context.Context) error {
+	return client.call(ctx, "/v1/management-fabric/sync", struct{}{}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) ManagementFabricStatus(ctx context.Context) (ManagementFabricStatus, error) {
+	var status ManagementFabricStatus
+	err := client.call(ctx, "/v1/management-fabric/status", struct{}{}, http.StatusOK, &status)
+	return status, err
+}
+
+// ExportPortableBackup requests a root-built encrypted backup. The passphrase
+// is carried only in the body of the UID-restricted Unix-socket request; it is
+// never placed in argv, environment, a trigger file, SQLite or a journal.
+func (client *BrokerClient) ExportPortableBackup(ctx context.Context, passphrase string) (backup.PortableArtifact, io.ReadCloser, error) {
+	if client == nil || client.client == nil {
+		return backup.PortableArtifact{}, nil, errors.New("network broker client is not configured")
+	}
+	if err := backup.ValidatePassphrase(passphrase); err != nil {
+		return backup.PortableArtifact{}, nil, err
+	}
+	payload, err := json.Marshal(struct {
+		Passphrase string `json:"passphrase"`
+	}{Passphrase: passphrase})
+	passphrase = ""
+	if err != nil {
+		return backup.PortableArtifact{}, nil, errors.New("encode portable backup request failed")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/v1/backup/export", bytes.NewReader(payload))
+	if err != nil {
+		for index := range payload {
+			payload[index] = 0
+		}
+		return backup.PortableArtifact{}, nil, errors.New("create portable backup request failed")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/vnd.gateway-vpn.backup.encrypted")
+	streamClient := *client.client
+	streamClient.Timeout = 10 * time.Minute
+	response, err := streamClient.Do(request)
+	for index := range payload {
+		payload[index] = 0
+	}
+	if err != nil {
+		return backup.PortableArtifact{}, nil, errors.New("network broker is unavailable")
+	}
+	fail := func(message string) (backup.PortableArtifact, io.ReadCloser, error) {
+		response.Body.Close()
+		return backup.PortableArtifact{}, nil, errors.New(message)
+	}
+	if response.StatusCode != http.StatusOK {
+		content, readErr := io.ReadAll(io.LimitReader(response.Body, maxBrokerMessageBytes+1))
+		if readErr != nil || len(content) > maxBrokerMessageBytes {
+			return fail("network broker backup response is invalid")
+		}
+		var envelope struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(content, &envelope) != nil || envelope.Error.Code == "" {
+			return fail(fmt.Sprintf("network broker returned HTTP %d", response.StatusCode))
+		}
+		return fail("network broker rejected backup request (" + envelope.Error.Code + ")")
+	}
+	if response.Header.Get("Content-Type") != "application/vnd.gateway-vpn.backup.encrypted" {
+		return fail("network broker backup media type is invalid")
+	}
+	bytesCount, parseErr := strconv.ParseInt(response.Header.Get("Content-Length"), 10, 64)
+	artifact := backup.PortableArtifact{
+		Filename:   response.Header.Get("X-Gateway-VPN-Backup-Filename"),
+		Bytes:      bytesCount,
+		SHA256:     response.Header.Get("X-Gateway-VPN-Backup-SHA256"),
+		SnapshotID: response.Header.Get("X-Gateway-VPN-Backup-Snapshot"),
+	}
+	if parseErr != nil || response.ContentLength != artifact.Bytes || backup.ValidatePortableArtifactMetadata(artifact) != nil {
+		return fail("network broker backup metadata is invalid")
+	}
+	return artifact, response.Body, nil
 }
 
 func (client *BrokerClient) SyncWireGuardIngress(ctx context.Context) error {

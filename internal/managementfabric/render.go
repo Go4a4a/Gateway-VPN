@@ -44,6 +44,8 @@ type RenderedAlias struct {
 	ResourceID       string `json:"resource_id"`
 	LinkID           string `json:"link_id"`
 	InterfaceName    string `json:"interface_name"`
+	ResourceKind     string `json:"resource_kind"`
+	AccessProfile    string `json:"access_profile"`
 	PublishedAlias   string `json:"published_alias"`
 	LocalDestination string `json:"local_destination"`
 }
@@ -55,6 +57,8 @@ type RenderedACLRule struct {
 	PublicationID    string `json:"publication_id"`
 	LinkID           string `json:"link_id"`
 	InputInterface   string `json:"input_interface"`
+	ResourceKind     string `json:"resource_kind"`
+	AccessProfile    string `json:"access_profile"`
 	Source           string `json:"source"`
 	PublishedAlias   string `json:"published_alias"`
 	LocalDestination string `json:"local_destination"`
@@ -68,13 +72,17 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 		return RenderedFabric{}, err
 	}
 	links := make(map[string]LinkSpec, len(spec.Links))
-	admins := make(map[string]AdminSpec, len(spec.Admins))
+	admins := make(map[string][]AdminSpec, len(spec.Admins))
+	resources := make(map[string]ResourceSpec, len(spec.Resources))
 	publicationsByResource := make(map[string][]PublicationSpec)
 	for _, link := range spec.Links {
 		links[link.ID] = link
 	}
 	for _, admin := range spec.Admins {
-		admins[admin.ID] = admin
+		admins[admin.ID] = append(admins[admin.ID], admin)
+	}
+	for _, resource := range spec.Resources {
+		resources[resource.ID] = resource
 	}
 	for _, publication := range spec.Publications {
 		publicationsByResource[publication.ResourceID] = append(publicationsByResource[publication.ResourceID], publication)
@@ -87,7 +95,12 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 		for _, admin := range spec.Admins {
 			if admin.VPSID == link.VPSID {
 				address, _ := netip.ParseAddr(admin.AssignedAddress)
-				allowed = append(allowed, netip.PrefixFrom(address, 32).String())
+				prefix := netip.PrefixFrom(address, 32).String()
+				allowed = append(allowed, prefix)
+				result.Routes = append(result.Routes, RenderedRoute{
+					Owner: "gateway-vpn", LinkID: link.ID, InterfaceName: link.InterfaceName,
+					Destination: prefix, Purpose: "ADMIN_PEER", Protocol: OwnedRouteProtocol,
+				})
 			}
 		}
 		sort.Strings(allowed)
@@ -103,9 +116,11 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 	}
 	for _, publication := range spec.Publications {
 		link := links[publication.LinkID]
+		resource := resources[publication.ResourceID]
 		result.Aliases = append(result.Aliases, RenderedAlias{
 			PublicationID: publication.ID, ResourceID: publication.ResourceID,
 			LinkID: publication.LinkID, InterfaceName: link.InterfaceName,
+			ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
 			PublishedAlias: publication.PublishedAlias, LocalDestination: publication.LocalDestination,
 		})
 		result.Routes = append(result.Routes, RenderedRoute{
@@ -114,19 +129,22 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 		})
 	}
 	for _, rule := range spec.ACL {
-		admin := admins[rule.AdminID]
+		resource := resources[rule.ResourceID]
 		for _, publication := range publicationsByResource[rule.ResourceID] {
 			link := links[publication.LinkID]
-			if link.VPSID != admin.VPSID {
-				continue
+			for _, admin := range admins[rule.AdminID] {
+				if link.VPSID != admin.VPSID {
+					continue
+				}
+				result.ACL = append(result.ACL, RenderedACLRule{
+					RuleID: rule.ID, AdminID: rule.AdminID, ResourceID: rule.ResourceID,
+					PublicationID: publication.ID, LinkID: link.ID, InputInterface: link.InterfaceName,
+					ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
+					Source: admin.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
+					LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
+					PortStart: rule.PortStart, PortEnd: rule.PortEnd,
+				})
 			}
-			result.ACL = append(result.ACL, RenderedACLRule{
-				RuleID: rule.ID, AdminID: rule.AdminID, ResourceID: rule.ResourceID,
-				PublicationID: publication.ID, LinkID: link.ID, InputInterface: link.InterfaceName,
-				Source: admin.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
-				LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
-				PortStart: rule.PortStart, PortEnd: rule.PortEnd,
-			})
 		}
 	}
 	sort.Slice(result.Peers, func(i, j int) bool { return result.Peers[i].LinkID < result.Peers[j].LinkID })
@@ -163,6 +181,19 @@ func validateRenderedFabric(plan RenderedFabric) error {
 			if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
 				return errors.New("rendered WireGuard peer contains a wildcard AllowedIPs source")
 			}
+		}
+	}
+	aliases := make(map[string]RenderedAlias, len(plan.Aliases))
+	for _, alias := range plan.Aliases {
+		if !validResourceKind(alias.ResourceKind) || !validAccessProfile(alias.AccessProfile) {
+			return errors.New("rendered management alias has an invalid resource projection")
+		}
+		aliases[alias.PublicationID] = alias
+	}
+	for _, rule := range plan.ACL {
+		alias, exists := aliases[rule.PublicationID]
+		if !exists || rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile {
+			return errors.New("rendered management ACL resource projection changed")
 		}
 	}
 	return nil

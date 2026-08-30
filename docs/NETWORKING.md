@@ -44,13 +44,13 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 
 ## Firewall и fail-closed
 
-- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `4`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
+- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `5`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
 - Direct и TUN gate взаимно исключаются. Direct открывается только для точного fresh `uplink + generation`; при active subscription прямой пользовательский выход закрыт.
 - Настройка startup blocking управляет только поведением до первого доказанного path. Она не отключает firewall integrity/quarantine: повреждённое или неизвестное состояние всегда закрывается.
 - IPv6 отключён sysctl и блокируется owned `inet` ruleset; IPv6 forwarding равен `0`.
 - SSH/SFTP TCP/22 разрешается только с `gateway-vpn-lan` (и отдельной management policy через `wg-mgmt`), никогда с HiLink/Ethernet uplink.
 - `wg-ingress` UDP принимается только на server-configured listener interfaces из `wireguard_ingress_listeners`. Disabled/failed server не оставляет интерфейс или wildcard listener.
-- Firewall guard проверяет base drop chains, generation 4, четыре traffic counters и ingress listener set. При flush/corruption он сначала quarantines transit LAN, восстанавливает только owned blocked ruleset и возвращает link после повторной проверки.
+- Firewall guard проверяет base drop chains, generation 5, четыре traffic counters, ingress listener set и пустой fail-closed Management Fabric contour. При flush/corruption он сначала quarantines transit LAN, восстанавливает только owned blocked ruleset и возвращает link после повторной проверки.
 
 ## WireGuard и Management Fabric
 

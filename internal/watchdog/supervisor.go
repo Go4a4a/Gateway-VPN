@@ -292,11 +292,13 @@ func (supervisor *Supervisor) evaluateComponent(ctx context.Context, spec Compon
 		status.RecoverySuppressed, status.SuppressionReason = true, reason
 		return supervisor.componentStatus(status, runtimeState, now), changed
 	}
-	if err := supervisor.Probe.FailClosed(ctx); err != nil {
-		status.RecoverySuppressed, status.SuppressionReason = true, "FAIL_CLOSED_FAILED"
-		status.ErrorCode = "FAIL_CLOSED_FAILED"
-		supervisor.logger().Error("watchdog refused unsafe restart because fail-closed failed", "component_id", spec.ID, "error", err)
-		return supervisor.componentStatus(status, runtimeState, now), changed
+	if !spec.RestartWithoutPathBlock {
+		if err := supervisor.Probe.FailClosed(ctx); err != nil {
+			status.RecoverySuppressed, status.SuppressionReason = true, "FAIL_CLOSED_FAILED"
+			status.ErrorCode = "FAIL_CLOSED_FAILED"
+			supervisor.logger().Error("watchdog refused unsafe restart because fail-closed failed", "component_id", spec.ID, "error", err)
+			return supervisor.componentStatus(status, runtimeState, now), changed
+		}
 	}
 	supervisor.durable.RecordRestart(spec.ID, now)
 	changed = true

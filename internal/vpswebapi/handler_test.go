@@ -311,6 +311,9 @@ func TestVPSHubFabricTriggerSchedulesAutomaticAndExplicitApply(t *testing.T) {
 func TestVPSHubWebUIExposesFabricApplyAndRootWatchdogStatus(t *testing.T) {
 	server, _ := newVPSAPIFixture(t, &fakeFabricTrigger{})
 	for path, required := range map[string][]string{
+		"/styles.css": {
+			"overflow-wrap:anywhere", "minmax(min(320px,100%),1fr)", ".actions button,form>button{width:100%}",
+		},
 		"/app.js": {
 			"/api/v1/hub/fabric/apply", "Применить изменения сейчас", "Запустить reconciliation",
 			"host_fabric", "Последняя root-проверка", "Привилегированный reconciler",

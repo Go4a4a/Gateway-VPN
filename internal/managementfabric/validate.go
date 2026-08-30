@@ -162,8 +162,9 @@ func ValidateFabric(spec FabricSpec) error {
 		prefixes = append(prefixes, namedPrefix{owner: "link:" + link.ID, prefix: prefix})
 	}
 
-	admins := make(map[string]AdminSpec, len(spec.Admins))
+	admins := make(map[string][]AdminSpec, len(spec.Admins))
 	adminAddresses := make(map[string]string, len(spec.Admins))
+	adminPeers := make(map[string]struct{}, len(spec.Admins))
 	linkAddresses := make(map[string]string, len(spec.Links)*2)
 	for _, link := range spec.Links {
 		linkAddresses[link.LocalAddress] = link.ID
@@ -177,8 +178,9 @@ func ValidateFabric(spec FabricSpec) error {
 		if err != nil || !address.Is4() || !address.IsPrivate() || address.IsUnspecified() || address.IsMulticast() || address.String() != admin.AssignedAddress {
 			return fmt.Errorf("administrator %s assigned address is invalid", admin.ID)
 		}
-		if _, exists := admins[admin.ID]; exists {
-			return fmt.Errorf("administrator %s is duplicated", admin.ID)
+		peerKey := admin.ID + "\x00" + admin.VPSID
+		if _, exists := adminPeers[peerKey]; exists {
+			return fmt.Errorf("administrator %s has duplicate peer on VPS %s", admin.ID, admin.VPSID)
 		}
 		addressKey := admin.VPSID + "\x00" + admin.AssignedAddress
 		if previous, exists := adminAddresses[addressKey]; exists {
@@ -187,7 +189,8 @@ func ValidateFabric(spec FabricSpec) error {
 		if linkID, exists := linkAddresses[admin.AssignedAddress]; exists {
 			return fmt.Errorf("administrator %s reuses an address from management link %s", admin.ID, linkID)
 		}
-		admins[admin.ID] = admin
+		admins[admin.ID] = append(admins[admin.ID], admin)
+		adminPeers[peerKey] = struct{}{}
 		adminAddresses[addressKey] = admin.ID
 	}
 
@@ -248,7 +251,7 @@ func ValidateFabric(spec FabricSpec) error {
 		if _, exists := aclIDs[rule.ID]; exists {
 			return fmt.Errorf("ACL rule %s is duplicated", rule.ID)
 		}
-		admin, adminExists := admins[rule.AdminID]
+		adminPeers, adminExists := admins[rule.AdminID]
 		resource, resourceExists := resources[rule.ResourceID]
 		if !adminExists || !resourceExists {
 			return fmt.Errorf("ACL rule %s references an unknown administrator or resource", rule.ID)
@@ -257,9 +260,14 @@ func ValidateFabric(spec FabricSpec) error {
 			return fmt.Errorf("ACL rule %s: %w", rule.ID, err)
 		}
 		matchedVPS := false
-		for _, binding := range resourceBindings[resource.ID] {
-			if binding.vpsID == admin.VPSID && binding.siteID == resource.SiteID {
-				matchedVPS = true
+		for _, admin := range adminPeers {
+			for _, binding := range resourceBindings[resource.ID] {
+				if binding.vpsID == admin.VPSID && binding.siteID == resource.SiteID {
+					matchedVPS = true
+					break
+				}
+			}
+			if matchedVPS {
 				break
 			}
 		}
@@ -285,9 +293,7 @@ func validateResource(resource ResourceSpec) (netip.Prefix, error) {
 	if !safeIdentifier.MatchString(resource.ID) || !safeIdentifier.MatchString(resource.SiteID) {
 		return netip.Prefix{}, errors.New("management resource id or site id is invalid")
 	}
-	validKind := resource.Kind == ResourceGatewayService || resource.Kind == ResourceKeeneticService || resource.Kind == ResourceLocalHost || resource.Kind == ResourceLocalSubnet || resource.Kind == ResourceCustomService
-	validProfile := resource.AccessProfile == ProfileGatewayOnly || resource.AccessProfile == ProfileKeeneticWAN || resource.AccessProfile == ProfileKeeneticWANRouted || resource.AccessProfile == ProfileWireGuardRouter || resource.AccessProfile == ProfileDedicatedLAN
-	if !validKind || !validProfile {
+	if !validResourceKind(resource.Kind) || !validAccessProfile(resource.AccessProfile) {
 		return netip.Prefix{}, fmt.Errorf("management resource %s kind or access profile is invalid", resource.ID)
 	}
 	if resource.Kind == ResourceLocalSubnet && !resource.AdvancedScopeAcknowledged {
@@ -298,6 +304,14 @@ func validateResource(resource ResourceSpec) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("management resource %s destination is invalid", resource.ID)
 	}
 	return prefix, nil
+}
+
+func validResourceKind(value string) bool {
+	return value == ResourceGatewayService || value == ResourceKeeneticService || value == ResourceLocalHost || value == ResourceLocalSubnet || value == ResourceCustomService
+}
+
+func validAccessProfile(value string) bool {
+	return value == ProfileGatewayOnly || value == ProfileKeeneticWAN || value == ProfileKeeneticWANRouted || value == ProfileWireGuardRouter || value == ProfileDedicatedLAN
 }
 
 func parseResourceDestination(kind, value string) (netip.Prefix, error) {

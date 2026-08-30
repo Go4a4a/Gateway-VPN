@@ -517,7 +517,7 @@ func observedJSON(pathState PathState) string {
 
 func healthyPathFirewallTable() string {
 	return `table inet gateway_vpn {
-set firewall_schema_generation { type mark; elements = { 4 }; }
+set firewall_schema_generation { type mark; elements = { 5 }; }
 set user_ingress_interfaces { type ifname; elements = { "enp2s0", "wg-ingress" }; }
 set wireguard_ingress_listeners { type ifname . inet_service; }
 set wireguard_ingress_allowed_v4 { type ipv4_addr; flags interval; }

@@ -33,6 +33,7 @@ import (
 	"gateway-vpn/internal/health"
 	"gateway-vpn/internal/hilink"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
@@ -93,6 +94,88 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 	var count int
 	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM bypass_probe_targets").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("target count = %d, %v", count, err)
+	}
+}
+
+type fakeManagementFabricAdmin struct {
+	status networkapply.ManagementFabricStatus
+	syncs  int
+}
+
+func (admin *fakeManagementFabricAdmin) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
+	return admin.status, nil
+}
+
+func (admin *fakeManagementFabricAdmin) SyncManagementFabric(context.Context) error {
+	admin.syncs++
+	return nil
+}
+
+func TestManagementFabricAPIIsAuthenticatedRedactedAndParameterFree(t *testing.T) {
+	server, ctx := testServer(t)
+	repository := managementfabric.NewRepository(server.dependencies.Database, nil)
+	if _, err := repository.EnsureLocalSite(ctx, "site:home", "Home"); err != nil {
+		t.Fatal(err)
+	}
+	remoteKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	localKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))
+	vps, err := repository.CreateVPS(ctx, managementfabric.CreateVPSInput{
+		ID: "vps:a", Name: "VPS A", VerifiedFingerprint: strings.Repeat("a", 64), PublicKey: remoteKey,
+		AdminAddressPool: "10.81.0.0/24", ResourceAliasPool: "10.96.0.0/16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := repository.CreateLink(ctx, managementfabric.CreateLinkInput{
+		ID: "link:a", SiteID: "site:home", VPSID: vps.ID, Enabled: true,
+		ManagementSubnet: "10.82.0.0/24", LocalAddress: "10.82.0.2", RemoteAddress: "10.82.0.1",
+		LocalPrivateKeySecretRef: "/var/lib/gateway-vpn/secrets/management/link:a.key",
+		LocalPublicKey:           localKey, RemotePublicKey: remoteKey, UplinkPolicy: managementfabric.UplinkAuto,
+		PersistentKeepalive: 25, Endpoints: []managementfabric.EndpointSpec{{Host: "203.0.113.10", Port: 51821}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeManagementFabricAdmin{}
+	server.dependencies.ManagementFabric, server.dependencies.ManagementFabricAdmin = repository, admin
+
+	unauthenticated := httptest.NewRecorder()
+	server.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/v1/management-fabric", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated Management Fabric = %d", unauthenticated.Code)
+	}
+	cookie, csrf := login(t, server)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/management-fabric", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"interface_name":"gvm1"`) || strings.Contains(body, remoteKey) || strings.Contains(body, localKey) || strings.Contains(body, "local_private_key_secret_ref") || strings.Contains(body, "/var/lib/gateway-vpn/secrets") {
+		t.Fatalf("Management Fabric dashboard = %d %s", response.Code, body)
+	}
+
+	withoutCSRF := httptest.NewRequest(http.MethodPatch, "/api/v1/management-fabric/links/"+link.ID, strings.NewReader(`{"enabled":false,"uplink_policy":"AUTO","pinned_uplink_id":"","persistent_keepalive":25}`))
+	withoutCSRF.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, withoutCSRF)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("Management Fabric mutation without CSRF = %d", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodPatch, "/api/v1/management-fabric/links/"+link.ID, strings.NewReader(`{"enabled":false,"uplink_policy":"AUTO","pinned_uplink_id":"","persistent_keepalive":25}`))
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || admin.syncs != 1 || strings.Contains(response.Body.String(), remoteKey) || strings.Contains(response.Body.String(), localKey) {
+		t.Fatalf("Management Fabric link update = %d syncs:%d %s", response.Code, admin.syncs, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/sync", strings.NewReader(`{}`))
+	request.AddCookie(cookie)
+	request.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || admin.syncs != 2 {
+		t.Fatalf("parameter-free Management Fabric sync = %d syncs:%d %s", response.Code, admin.syncs, response.Body.String())
 	}
 }
 
@@ -916,14 +999,14 @@ func TestPortableEncryptedBackupRequiresPassphraseCSRFStreamsAuditsAndCleansUp(t
 	server.dependencies.PortableBackups = portable
 	cookie, csrf := login(t, server)
 
-	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
+	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"password":"correct horse battery staple","passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
 	withoutCSRF.AddCookie(cookie)
 	withoutCSRFResponse := httptest.NewRecorder()
 	server.ServeHTTP(withoutCSRFResponse, withoutCSRF)
 	if withoutCSRFResponse.Code != http.StatusForbidden || portable.builds != 0 {
 		t.Fatalf("portable backup without CSRF = %d builds=%d", withoutCSRFResponse.Code, portable.builds)
 	}
-	mismatch := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"passphrase":"correct horse battery staple","passphrase_confirmation":"different passphrase value"}`))
+	mismatch := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"password":"correct horse battery staple","passphrase":"correct horse battery staple","passphrase_confirmation":"different passphrase value"}`))
 	mismatch.AddCookie(cookie)
 	mismatch.Header.Set("X-CSRF-Token", csrf)
 	mismatchResponse := httptest.NewRecorder()
@@ -931,9 +1014,17 @@ func TestPortableEncryptedBackupRequiresPassphraseCSRFStreamsAuditsAndCleansUp(t
 	if mismatchResponse.Code != http.StatusBadRequest || portable.builds != 0 || strings.Contains(mismatchResponse.Body.String(), "correct horse") {
 		t.Fatalf("mismatched passphrase = %d %s", mismatchResponse.Code, mismatchResponse.Body.String())
 	}
+	wrongPassword := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"password":"wrong administrator password","passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
+	wrongPassword.AddCookie(cookie)
+	wrongPassword.Header.Set("X-CSRF-Token", csrf)
+	wrongPasswordResponse := httptest.NewRecorder()
+	server.ServeHTTP(wrongPasswordResponse, wrongPassword)
+	if wrongPasswordResponse.Code != http.StatusUnauthorized || portable.builds != 0 || strings.Contains(wrongPasswordResponse.Body.String(), "administrator password") {
+		t.Fatalf("portable backup wrong reauthentication = %d %s", wrongPasswordResponse.Code, wrongPasswordResponse.Body.String())
+	}
 
 	for index := 0; index < diagnosticBundleLimit; index++ {
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"password":"correct horse battery staple","passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
 		request.AddCookie(cookie)
 		request.Header.Set("X-CSRF-Token", csrf)
 		response := httptest.NewRecorder()
@@ -942,7 +1033,7 @@ func TestPortableEncryptedBackupRequiresPassphraseCSRFStreamsAuditsAndCleansUp(t
 			t.Fatalf("portable download %d = %d headers=%v body=%q", index, response.Code, response.Header(), response.Body.String())
 		}
 	}
-	rateLimited := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
+	rateLimited := httptest.NewRequest(http.MethodPost, "/api/v1/system/backup", strings.NewReader(`{"password":"correct horse battery staple","passphrase":"correct horse battery staple","passphrase_confirmation":"correct horse battery staple"}`))
 	rateLimited.AddCookie(cookie)
 	rateLimited.Header.Set("X-CSRF-Token", csrf)
 	rateLimitedResponse := httptest.NewRecorder()
@@ -1461,7 +1552,7 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	}
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") {
 		t.Fatalf("static stylesheet does not preserve hidden layout semantics: %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()

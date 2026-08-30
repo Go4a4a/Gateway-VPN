@@ -39,6 +39,8 @@ var restartUnits = map[string][]string{
 	ComponentSSH:              {unitSSH},
 	ComponentMihomo:           {unitMihomo},
 	ComponentWireGuardMgmt:    {unitBroker, unitControl},
+	ComponentManagementFabric: {unitBroker},
+	ComponentWireGuardAdmin:   {unitBroker},
 	ComponentWireGuardIngress: {unitBroker, unitControl},
 	ComponentPolicyRouting:    {unitBroker, unitControl},
 	ComponentWorkerRuntime:    {unitControl},
@@ -103,11 +105,25 @@ type SystemProbe struct {
 	RoutingTableStart   uint32
 	FwmarkStart         uint32
 	InstallMarkerPath   string
+	ManagementFabric    ManagementFabricRuntime
 	Now                 func() time.Time
 
 	quickCheckMutex sync.Mutex
 	lastQuickCheck  time.Time
 	quickCheckError error
+}
+
+// ManagementFabricRuntime is deliberately parameter-free. The privileged
+// broker re-reads the desired database state and root-only secrets; watchdog
+// cannot supply an interface, route, key path, nft expression or generation.
+type ManagementFabricRuntime interface {
+	ManagementFabricStatus(context.Context) (ManagementFabricStatus, error)
+	SyncManagementFabric(context.Context) error
+}
+
+type ManagementFabricStatus struct {
+	NeedsApply bool
+	Reason     string
 }
 
 func (probe *SystemProbe) Snapshot(ctx context.Context, policy Policy) (ProbeSnapshot, error) {
@@ -149,6 +165,8 @@ func (probe *SystemProbe) Snapshot(ctx context.Context, policy Policy) (ProbeSna
 	mihomoHealthy := !mihomoApplicable || probe.unitActive(ctx, unitMihomo) && probe.tunHealthy(ctx)
 	items = append(items, Observation{ComponentID: ComponentMihomo, Applicable: mihomoApplicable, Healthy: mihomoHealthy, ErrorCode: "MIHOMO_OR_TUN_UNAVAILABLE"})
 	items = append(items, probe.wireGuardManagementHealth(ctx, now, policy))
+	items = append(items, probe.managementFabricRouteHealth(ctx))
+	items = append(items, probe.wireGuardAdminHealth(ctx, now, policy))
 	items = append(items, probe.wireGuardIngressHealth(ctx))
 	routingHealthy, routingCode, routingDetails := probe.policyRoutingHealth(ctx)
 	items = append(items, Observation{ComponentID: ComponentPolicyRouting, Applicable: true, Healthy: routingHealthy, ErrorCode: routingCode, Details: routingDetails})
@@ -179,6 +197,12 @@ func (probe *SystemProbe) Reconcile(ctx context.Context, componentID string) err
 	if !validComponentID(componentID) {
 		return errors.New("unknown watchdog component")
 	}
+	if componentID == ComponentManagementFabric || componentID == ComponentWireGuardAdmin {
+		if probe.ManagementFabric == nil {
+			return errors.New("management fabric broker client is unavailable")
+		}
+		return probe.ManagementFabric.SyncManagementFabric(ctx)
+	}
 	// SIGHUP is a fixed, non-privilege-expanding request for the control plane
 	// to run its existing idempotent routing/WireGuard/data-plane reconcile.
 	return probe.run(ctx, probe.Systemctl, "kill", "--kill-who=main", "--signal=SIGHUP", unitControl)
@@ -202,6 +226,14 @@ func (probe *SystemProbe) Restart(ctx context.Context, componentID string) error
 	for _, unit := range units {
 		if err := probe.run(ctx, probe.Systemctl, "restart", unit); err != nil {
 			return fmt.Errorf("restart fixed component %s failed: %w", componentID, err)
+		}
+	}
+	if componentID == ComponentManagementFabric || componentID == ComponentWireGuardAdmin {
+		if probe.ManagementFabric == nil {
+			return errors.New("management fabric broker client is unavailable after broker restart")
+		}
+		if err := probe.ManagementFabric.SyncManagementFabric(ctx); err != nil {
+			return fmt.Errorf("reconcile management fabric after broker restart: %w", err)
 		}
 	}
 	return nil

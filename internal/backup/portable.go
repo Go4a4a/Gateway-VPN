@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -80,7 +81,9 @@ type PortableManager struct {
 	ConfigurationPath string
 	GatewayVersion    string
 	ExportRoot        string
+	TransientSnapshot bool
 	Now               func() time.Time
+	mutex             sync.Mutex
 }
 
 type portableSource struct {
@@ -113,6 +116,11 @@ func NewPortableManager(snapshots *Manager, stateDirectory, configurationPath, g
 }
 
 func (manager *PortableManager) Build(ctx context.Context, passphrase string) (PortableArtifact, error) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	if err := ctx.Err(); err != nil {
+		return PortableArtifact{}, err
+	}
 	if err := ValidatePassphrase(passphrase); err != nil {
 		return PortableArtifact{}, err
 	}
@@ -122,6 +130,14 @@ func (manager *PortableManager) Build(ctx context.Context, passphrase string) (P
 	snapshot, err := manager.Snapshots.Create(ctx, KindManual)
 	if err != nil {
 		return PortableArtifact{}, fmt.Errorf("create portable backup database snapshot: %w", err)
+	}
+	removeTransientSnapshot := manager.TransientSnapshot
+	if removeTransientSnapshot {
+		defer func() {
+			if removeTransientSnapshot {
+				_ = manager.Snapshots.Remove(context.Background(), snapshot)
+			}
+		}()
 	}
 	sources, total, err := manager.collectSources(ctx, snapshot)
 	if err != nil {
@@ -235,7 +251,28 @@ func (manager *PortableManager) Build(ctx context.Context, passphrase string) (P
 	if err := syncDirectory(manager.ExportRoot); err != nil {
 		return PortableArtifact{}, err
 	}
+	if manager.TransientSnapshot {
+		if err := manager.Snapshots.Remove(ctx, snapshot); err != nil {
+			_ = os.Remove(finalPath)
+			_ = syncDirectory(manager.ExportRoot)
+			return PortableArtifact{}, errors.New("remove privileged portable backup staging snapshot failed")
+		}
+		removeTransientSnapshot = false
+	}
 	return PortableArtifact{Filename: filename, Path: finalPath, Bytes: verification.Bytes, SHA256: verification.SHA256, SnapshotID: snapshot.Manifest.SnapshotID, Manifest: manifest}, nil
+}
+
+// ValidatePortableArtifactMetadata validates the path-free metadata carried
+// across the privileged backup stream. It deliberately accepts no filesystem
+// location from the caller.
+func ValidatePortableArtifactMetadata(artifact PortableArtifact) error {
+	if !portableNamePattern.MatchString(artifact.Filename) || artifact.Bytes <= 0 || artifact.Bytes > MaximumPortableBackupBytes || !validDigest(artifact.SHA256) || !snapshotIDPattern.MatchString(artifact.SnapshotID) {
+		return errors.New("portable backup metadata is invalid")
+	}
+	if artifact.Path != "" {
+		return errors.New("portable backup stream metadata must not contain a path")
+	}
+	return nil
 }
 
 func (manager *PortableManager) Remove(artifact PortableArtifact) error {

@@ -40,6 +40,7 @@ import (
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/networkapply"
@@ -78,6 +79,8 @@ type Dependencies struct {
 	WireGuardSync           WireGuardSynchronizer
 	WireGuardIngress        *wgingress.Repository
 	WireGuardIngressAdmin   WireGuardIngressController
+	ManagementFabric        *managementfabric.Repository
+	ManagementFabricAdmin   ManagementFabricController
 	ModemRuntime            ModemRuntime
 	ModemRecovery           ModemRecoveryController
 	ModemReconcile          func(context.Context) (hilink.CycleResult, error)
@@ -221,6 +224,11 @@ type WireGuardIngressController interface {
 	ExportWireGuardIngressPeer(context.Context, string) (wgingress.ExportedConfig, error)
 }
 
+type ManagementFabricController interface {
+	SyncManagementFabric(context.Context) error
+	ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error)
+}
+
 type ModemRuntime interface {
 	BlockPath(context.Context) error
 	SyncRouting(context.Context) error
@@ -323,6 +331,11 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/gateway/diagnostics", server.protected(http.HandlerFunc(server.diagnosticDescription)))
 	mux.Handle("GET /api/v1/system/runtime-metrics", server.protected(http.HandlerFunc(server.runtimeMetrics)))
 	mux.Handle("GET /api/v1/wireguard/status", server.protected(http.HandlerFunc(server.wireGuardStatus)))
+	mux.Handle("GET /api/v1/management-fabric", server.protected(http.HandlerFunc(server.managementFabricDashboard)))
+	mux.Handle("PUT /api/v1/management-fabric/vps/priorities", server.protected(http.HandlerFunc(server.reorderManagementVPS)))
+	mux.Handle("PATCH /api/v1/management-fabric/vps/{id}", server.protected(http.HandlerFunc(server.updateManagementVPS)))
+	mux.Handle("PATCH /api/v1/management-fabric/links/{id}", server.protected(http.HandlerFunc(server.updateManagementLink)))
+	mux.Handle("POST /api/v1/management-fabric/sync", server.protected(http.HandlerFunc(server.syncManagementFabric)))
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
 	mux.Handle("GET /api/v1/wireguard-ingress", server.protected(http.HandlerFunc(server.wireGuardIngressServer)))
@@ -783,6 +796,121 @@ func (server *Server) wireGuardStatus(writer http.ResponseWriter, request *http.
 		"handshake_age_seconds": handshakeAgeSeconds, "handshake_stale": handshakeStale,
 		"modems": modemStates,
 	})
+}
+
+func (server *Server) managementFabricDashboard(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Управление несколькими VPS не подключено")
+		return
+	}
+	dashboard, err := server.dependencies.ManagementFabric.Dashboard(request.Context())
+	if err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	hostStatus := networkapply.ManagementFabricStatus{}
+	hostQueryState := "NOT_AVAILABLE"
+	if server.dependencies.ManagementFabricAdmin != nil {
+		hostQueryState = "AVAILABLE"
+		if status, err := server.dependencies.ManagementFabricAdmin.ManagementFabricStatus(request.Context()); err == nil {
+			hostStatus = status
+		} else {
+			hostQueryState = "TEMPORARILY_UNAVAILABLE"
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"fabric": dashboard, "host_status": hostStatus, "host_status_query_state": hostQueryState,
+		"apply_available": server.dependencies.ManagementFabricAdmin != nil,
+		"model":           "many_to_many_all_enabled_links_simultaneous",
+	})
+}
+
+func (server *Server) reorderManagementVPS(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Управление несколькими VPS не подключено")
+		return
+	}
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if err := server.dependencies.ManagementFabric.ReorderVPS(request.Context(), input.IDs); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) updateManagementVPS(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Управление несколькими VPS не подключено")
+		return
+	}
+	var input struct {
+		Name    string `json:"name"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.UpdateVPS(request.Context(), request.PathValue("id"), managementfabric.UpdateVPSInput{Name: input.Name, Enabled: input.Enabled})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"id": item.ID, "updated": true, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) updateManagementLink(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Управление несколькими VPS не подключено")
+		return
+	}
+	var input struct {
+		Enabled             bool   `json:"enabled"`
+		UplinkPolicy        string `json:"uplink_policy"`
+		PinnedUplinkID      string `json:"pinned_uplink_id"`
+		PersistentKeepalive int    `json:"persistent_keepalive"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.UpdateLink(request.Context(), request.PathValue("id"), managementfabric.UpdateLinkInput{
+		Enabled: input.Enabled, UplinkPolicy: input.UplinkPolicy,
+		PinnedUplinkID: input.PinnedUplinkID, PersistentKeepalive: input.PersistentKeepalive,
+	})
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"id": item.ID, "updated": true, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) syncManagementFabric(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabricAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_APPLY_NOT_AVAILABLE", "Применение Management Fabric не подключено")
+		return
+	}
+	if err := server.dependencies.ManagementFabricAdmin.SyncManagementFabric(request.Context()); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_SYNC_FAILED", "Применение не завершено; watchdog повторит безопасную попытку")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) requestManagementFabricSync(ctx context.Context) string {
+	if server.dependencies.ManagementFabricAdmin == nil {
+		return "NOT_AVAILABLE"
+	}
+	if err := server.dependencies.ManagementFabricAdmin.SyncManagementFabric(ctx); err != nil {
+		return "RETRY_PENDING"
+	}
+	return "SYNCED"
 }
 
 func (server *Server) wireGuardSettings(writer http.ResponseWriter, request *http.Request) {
@@ -3712,23 +3840,35 @@ func (server *Server) downloadEncryptedBackup(writer http.ResponseWriter, reques
 		return
 	}
 	var input struct {
+		Password               string `json:"password"`
 		Passphrase             string `json:"passphrase"`
 		PassphraseConfirmation string `json:"passphrase_confirmation"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
+		input.Password, input.Passphrase, input.PassphraseConfirmation = "", "", ""
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректные параметры резервной копии")
 		return
 	}
 	if input.Passphrase != input.PassphraseConfirmation || backup.ValidatePassphrase(input.Passphrase) != nil {
+		input.Password, input.Passphrase, input.PassphraseConfirmation = "", "", ""
 		writeError(writer, http.StatusBadRequest, "BACKUP_PASSPHRASE_INVALID", "Passphrase должна совпадать и содержать 12–256 UTF-8 байт")
 		return
 	}
 	principal, ok := request.Context().Value(principalKey).(auth.Principal)
 	if !ok || principal.SessionHash == "" || principal.UserID == "" {
+		input.Password, input.Passphrase, input.PassphraseConfirmation = "", "", ""
 		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
 		return
 	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		input.Password, input.Passphrase, input.PassphraseConfirmation = "", "", ""
+		writeError(writer, http.StatusUnauthorized, "REAUTHENTICATION_FAILED", "Текущий пароль не подтверждён")
+		return
+	}
+	passphrase := input.Passphrase
+	input.Password, input.Passphrase, input.PassphraseConfirmation = "", "", ""
 	if allowed, retry := server.portableBackupLimiter.allow(principal.SessionHash, server.now()); !allowed {
+		passphrase = ""
 		seconds := int64((retry + time.Second - 1) / time.Second)
 		if seconds < 1 {
 			seconds = 1
@@ -3738,12 +3878,11 @@ func (server *Server) downloadEncryptedBackup(writer http.ResponseWriter, reques
 		return
 	}
 	if !server.beginMaintenanceMutation() {
+		passphrase = ""
 		writeError(writer, http.StatusConflict, "BACKUP_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
 		return
 	}
 	defer server.endMaintenanceMutation()
-	passphrase := input.Passphrase
-	input.Passphrase, input.PassphraseConfirmation = "", ""
 	artifact, err := server.dependencies.PortableBackups.Build(request.Context(), passphrase)
 	passphrase = ""
 	if err != nil {

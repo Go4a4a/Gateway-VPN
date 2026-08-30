@@ -1,7 +1,7 @@
 table inet gateway_vpn {
     set firewall_schema_generation {
         type mark
-        elements = { 4 }
+        elements = { 5 }
     }
 
     set hilink_interfaces {
@@ -18,6 +18,18 @@ table inet gateway_vpn {
     }
 
     set wireguard_endpoint_generation {
+        type mark
+    }
+
+    set management_fabric_interfaces {
+        type ifname
+    }
+
+    set management_fabric_endpoints {
+        type ifname . mark . ipv4_addr . inet_service
+    }
+
+    set management_fabric_generation {
         type mark
     }
 
@@ -112,6 +124,7 @@ table inet gateway_vpn {
         ct state invalid drop
         iifname @hilink_interfaces ct state { established, related } counter name service_download accept comment "gateway-vpn direct service download"
         ct state { established, related } accept
+        jump management_fabric_input
         iifname "__LAN_INTERFACE__" udp sport 68 udp dport 67 accept comment "gateway-vpn LAN DHCP request"
         iifname "__LAN_INTERFACE__" udp dport 53 accept comment "gateway-vpn LAN DNS UDP"
         iifname "__LAN_INTERFACE__" tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
@@ -127,6 +140,7 @@ __SSH_RULE__
     chain forward {
         type filter hook forward priority filter; policy drop;
         ct state invalid drop
+        jump management_fabric_forward
         meta nfproto ipv4 iifname "@LAN_INTERFACE@" oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
         meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified TUN"
         meta nfproto ipv4 iifname @active_tun_interfaces oifname "@LAN_INTERFACE@" ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
@@ -140,6 +154,7 @@ __SSH_RULE__
 
     chain postrouting {
         type nat hook postrouting priority srcnat;
+        jump management_fabric_postrouting
         meta nfproto ipv4 iifname "@LAN_INTERFACE@" oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct LAN NAT"
         meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct WireGuard NAT"
     }
@@ -154,6 +169,7 @@ __SSH_RULE__
         oifname @hilink_interfaces udp sport 68 udp dport 67 counter name service_upload accept comment "gateway-vpn modem DHCP request"
         oifname . ip daddr @hilink_management_v4 tcp dport { 80, 443 } counter name service_upload accept comment "gateway-vpn modem management"
         oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 counter name service_upload accept comment "gateway-vpn WireGuard endpoint"
+        oifname . meta mark . ip daddr . udp dport @management_fabric_endpoints counter name service_upload accept comment "gateway-vpn Management Fabric endpoint"
         meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS UDP"
         meta skuid "gateway-vpn" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn control bootstrap DNS TCP"
         meta skuid "gateway-vpn" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4 counter name service_upload accept comment "gateway-vpn subscription HTTPS"
@@ -163,5 +179,18 @@ __SSH_RULE__
         meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr @bootstrap_dns_v4 tcp dport 53 counter name service_upload accept comment "gateway-vpn Mihomo bootstrap DNS TCP"
         meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy TCP"
         meta skuid "gateway-vpn-mihomo" oifname . meta mark . ip daddr . udp dport @mihomo_endpoint_udp_v4 counter name service_upload accept comment "gateway-vpn Mihomo proxy UDP"
+    }
+
+    chain management_fabric_input {
+    }
+
+    chain management_fabric_forward {
+    }
+
+    chain management_fabric_postrouting {
+    }
+
+    chain management_fabric_prerouting {
+        type nat hook prerouting priority dstnat;
     }
 }

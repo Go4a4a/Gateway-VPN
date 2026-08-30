@@ -36,6 +36,7 @@ import (
 	"gateway-vpn/internal/directprobe"
 	"gateway-vpn/internal/health"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/operations"
@@ -95,9 +96,13 @@ func (dispatcher *previewDispatcher) Enqueue(ctx context.Context, subscriptionID
 
 type previewRuntime struct{}
 
-func (previewRuntime) BlockPath(context.Context) error     { return nil }
-func (previewRuntime) SyncRouting(context.Context) error   { return nil }
-func (previewRuntime) SyncWireGuard(context.Context) error { return nil }
+func (previewRuntime) BlockPath(context.Context) error            { return nil }
+func (previewRuntime) SyncRouting(context.Context) error          { return nil }
+func (previewRuntime) SyncWireGuard(context.Context) error        { return nil }
+func (previewRuntime) SyncManagementFabric(context.Context) error { return nil }
+func (previewRuntime) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
+	return networkapply.ManagementFabricStatus{}, nil
+}
 
 type previewIngressController struct{ backend *wgingress.Backend }
 
@@ -473,6 +478,9 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	if _, err := uplinks.EnsureManagedLANInterface(ctx, "gateway-vpn-lan", "192.168.200.1/24"); err != nil {
 		return err
 	}
+	if err := seedManagementFabric(ctx, database); err != nil {
+		return err
+	}
 	ingressSecretRoot := filepath.Join(root, "secrets", "wireguard-ingress")
 	ingressRepository := &wgingress.Repository{Database: database, SecretRoot: ingressSecretRoot, ReservedPrefixes: []netip.Prefix{netip.MustParsePrefix("192.168.200.0/24")}}
 	ingressBackend := &wgingress.Backend{
@@ -595,6 +603,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
 		WireGuardIngress: ingressRepository, WireGuardIngressAdmin: previewIngressController{backend: ingressBackend},
+		ManagementFabric: managementfabric.NewRepository(database, nil), ManagementFabricAdmin: previewRuntime{},
 		DirectPaths:         directPaths,
 		DirectPathProbe:     previewDirectProbe{},
 		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,
@@ -754,6 +763,71 @@ UPDATE subscriptions SET status='DEGRADED', last_refresh_at=?, last_success_at=?
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano), now.Add(-time.Hour).Format(time.RFC3339Nano)); err != nil {
 		return err
+	}
+	return nil
+}
+
+func seedManagementFabric(ctx context.Context, database *sql.DB) error {
+	repository := managementfabric.NewRepository(database, nil)
+	if _, err := repository.EnsureLocalSite(ctx, "site:preview", "Домашний Gateway"); err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, item := range []struct {
+		vpsID, name, fingerprint, adminPool, aliasPool, subnet, local, remote, endpoint string
+	}{
+		{"vps:primary", "Основной VPS", strings.Repeat("a", 64), "10.81.0.0/24", "10.96.0.0/16", "10.82.0.0/24", "10.82.0.2", "10.82.0.1", "203.0.113.10"},
+		{"vps:reserve", "Резервный VPS", strings.Repeat("b", 64), "10.83.0.0/24", "10.97.0.0/16", "10.84.0.0/24", "10.84.0.2", "10.84.0.1", "203.0.113.11"},
+	} {
+		vpsKeys, err := wgingress.GenerateKeyPair()
+		if err != nil {
+			return err
+		}
+		localKeys, err := wgingress.GenerateKeyPair()
+		if err != nil {
+			return err
+		}
+		vps, err := repository.CreateVPS(ctx, managementfabric.CreateVPSInput{
+			ID: item.vpsID, Name: item.name, VerifiedFingerprint: item.fingerprint, PublicKey: vpsKeys.Public,
+			AdminAddressPool: item.adminPool, ResourceAliasPool: item.aliasPool,
+		})
+		if err != nil {
+			return err
+		}
+		link, err := repository.CreateLink(ctx, managementfabric.CreateLinkInput{
+			ID: fmt.Sprintf("link:preview:%d", index+1), SiteID: "site:preview", VPSID: vps.ID, Enabled: true,
+			ManagementSubnet: item.subnet, LocalAddress: item.local, RemoteAddress: item.remote,
+			LocalPrivateKeySecretRef: fmt.Sprintf("/var/lib/gateway-vpn/secrets/management/preview-%d.key", index+1),
+			LocalPublicKey:           localKeys.Public, RemotePublicKey: vpsKeys.Public,
+			UplinkPolicy: managementfabric.UplinkAuto, PersistentKeepalive: 25,
+			Endpoints: []managementfabric.EndpointSpec{{Host: item.endpoint, Port: 51821 + index}},
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := database.ExecContext(ctx, `UPDATE management_links SET selected_uplink_id='modem-a',state=? WHERE id=?`, map[bool]string{true: "REACHABLE", false: "DEGRADED"}[index == 0], link.ID); err != nil {
+			return err
+		}
+	}
+	adminKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		return err
+	}
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at) VALUES('admin:igor','Игорь','ADMIN',1,'ACTIVE',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at) VALUES('admin-peer:preview','admin:igor','vps:primary',?,'10.81.0.10','ACTIVE',1,1,?,?)`, []any{adminKeys.Public, stamp, stamp}},
+		{`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,created_at,updated_at) VALUES('resource:webui','site:preview','WebUI Gateway','GATEWAY_SERVICE','GATEWAY_ONLY','192.168.200.1',1,0,1,0,'HEALTHY',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_resource_ports(resource_id,protocol,port_start,port_end) VALUES('resource:webui','TCP',8443,8443)`, nil},
+		{`INSERT INTO management_resource_publications(id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES('publication:webui','resource:webui','link:preview:1','10.96.1.10/32',1,0,1,0,'PENDING',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_resource_acl(id,admin_id,resource_id,protocol,port_start,port_end,enabled,generation,created_at,updated_at) VALUES('acl:webui','admin:igor','resource:webui','TCP',8443,8443,1,1,?,?)`, []any{stamp, stamp}},
+	}
+	for _, statement := range statements {
+		if _, err := database.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }

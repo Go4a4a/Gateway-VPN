@@ -33,7 +33,7 @@ RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 ReadOnlyPaths=/opt/gateway-vpn /var/lib/gateway-vpn/secrets /var/lib/gateway-vpn/tls /var/lib/gateway-vpn/subscriptions /var/lib/gateway-vpn/mihomo /var/lib/gateway-vpn/transactions /var/lib/gateway-vpn/update-staging
-ReadWritePaths=/etc/gateway-vpn /etc/systemd/journald@gateway-vpn.conf.d /var/lib/gateway-vpn /var/lib/gateway-vpn/secrets/wireguard-ingress /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn-uninstall /var/log/gateway-vpn /run
+ReadWritePaths=/etc/gateway-vpn /etc/systemd/journald@gateway-vpn.conf.d /var/lib/gateway-vpn /var/lib/gateway-vpn/secrets/wireguard-ingress /var/lib/gateway-vpn-privileged/network-transactions /var/lib/gateway-vpn-privileged/backup-exports /var/lib/gateway-vpn-privileged/management-fabric /var/lib/gateway-vpn-uninstall /var/log/gateway-vpn /run
 
 [Install]
 WantedBy=multi-user.target

@@ -29,6 +29,7 @@ tags:
   - name: Traffic
   - name: Network
   - name: WireGuard
+  - name: ManagementFabric
 paths:
   /api/v1/auth/login:
     post:
@@ -269,6 +270,45 @@ paths:
       operationId: getWireGuardStatus
       summary: Состояние management WireGuard и modem reachability
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric:
+    get:
+      tags: [ManagementFabric]
+      operationId: getGatewayManagementFabric
+      summary: Получить redacted many-to-many VPS/link/admin/resource/ACL read model и desired/applied host status
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/vps/priorities:
+    put:
+      tags: [ManagementFabric]
+      operationId: reorderGatewayManagementVPS
+      summary: Атомарно изменить приоритет всех включённых управляющих VPS
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/vps/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [ManagementFabric]
+      operationId: updateGatewayManagementVPS
+      summary: Переименовать, включить или отключить VPS с автоматическим bounded apply/retry
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/links/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    patch:
+      tags: [ManagementFabric]
+      operationId: updateGatewayManagementLink
+      summary: Изменить enabled/uplink policy/keepalive отдельной связи без передачи root-команд из WebUI
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/sync:
+    post:
+      tags: [ManagementFabric]
+      operationId: syncGatewayManagementFabric
+      summary: Попросить root broker перечитать SQLite/secrets и безопасно согласовать все VPS links/routes/ACL
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/settings/wireguard:
     get:
       tags: [WireGuard]

@@ -368,6 +368,28 @@ func (manager *Manager) Verify(ctx context.Context, snapshot Snapshot) error {
 	return err
 }
 
+// Remove deletes exactly one verified, manager-owned snapshot. It exists for
+// privileged portable-backup staging, whose SQLite snapshot is only an
+// intermediate input and must not remain in the ordinary backup inventory.
+func (manager *Manager) Remove(ctx context.Context, snapshot Snapshot) error {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	if !snapshotIDPattern.MatchString(snapshot.Manifest.SnapshotID) {
+		return errors.New("invalid snapshot id")
+	}
+	directory := filepath.Join(manager.Root, snapshot.Manifest.SnapshotID)
+	if filepath.Clean(snapshot.Path) != directory {
+		return errors.New("snapshot is outside the managed root")
+	}
+	if _, err := manager.readSnapshot(ctx, directory, true); err != nil {
+		return fmt.Errorf("refuse to remove unverified snapshot: %w", err)
+	}
+	if err := removeSnapshotDirectory(directory); err != nil {
+		return err
+	}
+	return syncDirectory(manager.Root)
+}
+
 func (manager *Manager) readSnapshot(ctx context.Context, directory string, verify bool) (Snapshot, error) {
 	name := filepath.Base(directory)
 	if !snapshotIDPattern.MatchString(name) || filepath.Dir(directory) != filepath.Clean(manager.Root) {

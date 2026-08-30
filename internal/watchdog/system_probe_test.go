@@ -17,6 +17,21 @@ type recordingExecutor struct {
 	err      error
 }
 
+type fakeManagementFabricRuntime struct {
+	status ManagementFabricStatus
+	err    error
+	syncs  int
+}
+
+func (runtime *fakeManagementFabricRuntime) ManagementFabricStatus(context.Context) (ManagementFabricStatus, error) {
+	return runtime.status, runtime.err
+}
+
+func (runtime *fakeManagementFabricRuntime) SyncManagementFabric(context.Context) error {
+	runtime.syncs++
+	return runtime.err
+}
+
 func (executor *recordingExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
 	executor.requests = append(executor.requests, request)
 	return executor.result, executor.err
@@ -59,6 +74,24 @@ func TestSystemProbePrivilegedActionsUseOnlyFixedCommands(t *testing.T) {
 	}
 }
 
+func TestSystemProbeManagementFabricRecoveryIsParameterFreeAndDoesNotBlockUserPath(t *testing.T) {
+	executor := &recordingExecutor{}
+	probe := fixedTestSystemProbe(executor)
+	runtime := probe.ManagementFabric.(*fakeManagementFabricRuntime)
+	if err := probe.Reconcile(context.Background(), ComponentManagementFabric); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.syncs != 1 || len(executor.requests) != 0 {
+		t.Fatalf("parameter-free reconcile = syncs:%d requests:%+v", runtime.syncs, executor.requests)
+	}
+	if err := probe.Restart(context.Background(), ComponentWireGuardAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.syncs != 2 || len(executor.requests) != 1 || executor.requests[0].Executable != "/usr/bin/systemctl" || !reflect.DeepEqual(executor.requests[0].Arguments, []string{"restart", "gateway-vpn-network-broker.service"}) {
+		t.Fatalf("bounded broker restart = syncs:%d requests:%+v", runtime.syncs, executor.requests)
+	}
+}
+
 func TestSystemProbeRejectsUnknownComponentAndMutablePrivilegedPath(t *testing.T) {
 	executor := &recordingExecutor{}
 	probe := fixedTestSystemProbe(executor)
@@ -89,6 +122,8 @@ func TestSystemProbeRestartMatrixIsFixedAndComplete(t *testing.T) {
 		ComponentSSH:              {"ssh.service"},
 		ComponentMihomo:           {"gateway-vpn-mihomo.service"},
 		ComponentWireGuardMgmt:    {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
+		ComponentManagementFabric: {"gateway-vpn-network-broker.service"},
+		ComponentWireGuardAdmin:   {"gateway-vpn-network-broker.service"},
 		ComponentWireGuardIngress: {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
 		ComponentPolicyRouting:    {"gateway-vpn-network-broker.service", "gateway-vpn.service"},
 		ComponentWorkerRuntime:    {"gateway-vpn.service"},
@@ -204,5 +239,6 @@ func fixedTestSystemProbe(executor platformexec.Executor) *SystemProbe {
 		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml", LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
+		ManagementFabric:  &fakeManagementFabricRuntime{},
 	}
 }

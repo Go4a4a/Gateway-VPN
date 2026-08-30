@@ -24,7 +24,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"table inet gateway_vpn",
 		"set firewall_schema_generation",
 		"type mark",
-		"elements = { 4 }",
+		"elements = { 5 }",
 		"set user_ingress_interfaces",
 		"elements = { \"enp2s0\", \"wg-ingress\" }",
 		"set wireguard_ingress_listeners",
@@ -37,6 +37,9 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"set active_route_generation",
 		"set bootstrap_dns_v4",
 		"set wireguard_endpoint_generation",
+		"set management_fabric_interfaces",
+		"set management_fabric_endpoints",
+		"set management_fabric_generation",
 		"set bootstrap_http_v4",
 		"set mihomo_endpoint_tcp_v4",
 		"set mihomo_endpoint_udp_v4",
@@ -51,6 +54,14 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"hook input priority filter; policy drop",
 		"hook forward priority filter; policy drop",
 		"hook output priority filter; policy drop",
+		"jump management_fabric_input",
+		"jump management_fabric_forward",
+		"jump management_fabric_postrouting",
+		"chain management_fabric_input",
+		"chain management_fabric_forward",
+		"chain management_fabric_postrouting",
+		"chain management_fabric_prerouting",
+		"hook prerouting priority dstnat",
 		"gateway-vpn PATH_BLOCKED",
 		"iifname \"enp2s0\" tcp dport 8443 accept",
 		"iifname \"enp2s0\" tcp dport 22 accept",
@@ -70,6 +81,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"meta skuid \"gateway-vpn-mihomo\" oifname . meta mark . ip daddr . tcp dport @mihomo_endpoint_tcp_v4",
 		"meta skuid 0 oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53",
 		"@wireguard_endpoint_v4 udp dport 51821 counter name service_upload",
+		"@management_fabric_endpoints counter name service_upload",
 	} {
 		if !strings.Contains(ruleset.Text, expected) {
 			t.Errorf("ruleset missing %q:\n%s", expected, ruleset.Text)
@@ -90,16 +102,17 @@ func TestBootRulesetAccountsEveryAllowedDirectServiceDirection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	text := strings.ReplaceAll(ruleset.Text, "\t", "    ")
 	inputScoped := `iifname @hilink_interfaces ct state { established, related } counter name service_download accept`
 	outputScoped := `oifname @hilink_interfaces ct state { established, related } counter name service_upload accept`
-	if strings.Index(ruleset.Text, inputScoped) < 0 || strings.Index(ruleset.Text, inputScoped) > strings.Index(ruleset.Text, "        ct state { established, related } accept") {
+	if strings.Index(text, inputScoped) < 0 || strings.Index(text, inputScoped) > strings.Index(text, "        ct state { established, related } accept") {
 		t.Fatal("modem download accounting does not precede generic established input")
 	}
-	outputStart := strings.Index(ruleset.Text, "    chain output {")
+	outputStart := strings.Index(text, "chain output {")
 	if outputStart < 0 {
 		t.Fatal("output chain is missing")
 	}
-	output := ruleset.Text[outputStart:]
+	output := text[outputStart:]
 	if strings.Index(output, outputScoped) < 0 || strings.Index(output, outputScoped) > strings.Index(output, "        ct state { established, related } accept") {
 		t.Fatal("modem upload accounting does not precede generic established output")
 	}
@@ -120,7 +133,7 @@ func TestBootRulesetAccountsEveryAllowedDirectServiceDirection(t *testing.T) {
 			t.Errorf("direct service rule %q is not upload-accounted: %q", directRule, line)
 		}
 	}
-	if !strings.Contains(ruleset.Text, `modem DHCP reply"`) || !strings.Contains(ruleset.Text, `udp sport 67 udp dport 68 counter name service_download accept`) {
+	if !strings.Contains(text, `modem DHCP reply"`) || !strings.Contains(text, `udp sport 67 udp dport 68 counter name service_download accept`) {
 		t.Fatal("modem DHCP download is not separately accounted")
 	}
 }

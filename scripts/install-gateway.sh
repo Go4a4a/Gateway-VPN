@@ -792,6 +792,9 @@ systemd-sysusers /usr/lib/sysusers.d/gateway-vpn.conf
 install -D -m 0644 "$ROOT_DIR/packaging/tmpfiles.d/gateway-vpn.conf" /usr/lib/tmpfiles.d/gateway-vpn.conf
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/gateway-vpn.conf
 [[ -d /var/lib/gateway-vpn/secrets/wireguard-ingress && ! -L /var/lib/gateway-vpn/secrets/wireguard-ingress && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn/secrets/wireguard-ingress) == "root:root:700" ]] || { echo "WireGuard ingress secret root is unsafe" >&2; exit 1; }
+[[ -d /var/lib/gateway-vpn/secrets/management && ! -L /var/lib/gateway-vpn/secrets/management && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn/secrets/management) == "root:root:700" ]] || { echo "Management Fabric secret root is unsafe" >&2; exit 1; }
+[[ -d /var/lib/gateway-vpn-privileged/management-fabric && ! -L /var/lib/gateway-vpn-privileged/management-fabric && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-privileged/management-fabric) == "root:root:700" ]] || { echo "Management Fabric transaction root is unsafe" >&2; exit 1; }
+[[ -d /var/lib/gateway-vpn-privileged/backup-exports && ! -L /var/lib/gateway-vpn-privileged/backup-exports && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-privileged/backup-exports) == "root:root:700" ]] || { echo "Privileged portable backup staging root is unsafe" >&2; exit 1; }
 usermod -a -G gateway-vpn-log-readers "$LOG_READER_USER"
 id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers || { echo "Selected Ubuntu account did not receive read-only Gateway log access" >&2; exit 1; }
 install -d -m 0750 -o root -g gateway-vpn /etc/gateway-vpn/nftables

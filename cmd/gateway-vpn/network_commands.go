@@ -18,11 +18,14 @@ import (
 
 	"gateway-vpn/internal/accesspolicy"
 	"gateway-vpn/internal/backup"
+	"gateway-vpn/internal/buildinfo"
 	"gateway-vpn/internal/bypass"
 	"gateway-vpn/internal/config"
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
+	"gateway-vpn/internal/gatewayfabric"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/mihomoruntime"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/modemrecovery"
@@ -73,6 +76,22 @@ func runNetworkBroker(args []string) int {
 	if err := engine.Recover(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "recover unfinished network apply: %v\n", err)
 		return 1
+	}
+	lanPrefix, err := netip.ParsePrefix(configuration.Network.LANAddress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parse LAN prefix for Management Fabric: %v\n", err)
+		return 1
+	}
+	fabricRepository := managementfabric.NewRepository(database, []managementfabric.ReservedPrefix{{Owner: "gateway-lan", CIDR: lanPrefix.Masked().String()}})
+	fabricPaths := gatewayfabric.DefaultPaths()
+	fabricPaths.TransactionRoot = filepath.Join(filepath.Dir(*transactionRoot), "management-fabric")
+	fabricPaths.SecretRoot = filepath.Join(configuration.System.StateDir, "secrets", "management")
+	fabricApplier := &gatewayfabric.Applier{Repository: fabricRepository, Executor: platformexec.OSExecutor{}, Paths: fabricPaths}
+	if recovered, err := fabricApplier.Recover(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "recover unfinished Gateway Management Fabric transaction: %v\n", err)
+		return 1
+	} else if recovered {
+		fmt.Fprintln(os.Stdout, "Recovered unfinished Gateway Management Fabric transaction")
 	}
 	uid, _, err := gatewayVPNIdentity()
 	if err != nil {
@@ -160,11 +179,6 @@ func runNetworkBroker(args []string) int {
 		fmt.Fprintf(os.Stderr, "create network broker: %v\n", err)
 		return 1
 	}
-	lanPrefix, err := netip.ParsePrefix(configuration.Network.LANAddress)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "parse LAN prefix for WireGuard ingress: %v\n", err)
-		return 1
-	}
 	ingressSecretRoot := filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress")
 	server.Ingress = &wgingress.Backend{
 		Repository: wgingress.Repository{
@@ -176,6 +190,22 @@ func runNetworkBroker(args []string) int {
 	}
 	server.Power = power.DefaultLinuxBackend(database, executor)
 	server.Removal = removal.DefaultLinuxBackend(database, executor)
+	server.ManagementFabric = fabricApplier
+	privilegedBackupRoot := filepath.Join(defaultPrivilegedRoot, "backup-exports")
+	privilegedSnapshots, err := backup.NewManager(database, configuration.System.StateDir, configuration.System.Database)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize privileged portable backup snapshots: %v\n", err)
+		return 1
+	}
+	privilegedSnapshots.Root = filepath.Join(privilegedBackupRoot, "snapshots")
+	privilegedPortableBackups, err := backup.NewPortableManager(privilegedSnapshots, configuration.System.StateDir, *configPath, buildinfo.String("gateway-vpn"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize privileged portable backup exporter: %v\n", err)
+		return 1
+	}
+	privilegedPortableBackups.ExportRoot = filepath.Join(privilegedBackupRoot, "artifacts")
+	privilegedPortableBackups.TransientSnapshot = true
+	server.PortableBackup = privilegedPortableBackups
 	if err := networkapply.ServeBroker(ctx, listener, server); err != nil {
 		fmt.Fprintf(os.Stderr, "network broker stopped: %v\n", err)
 		return 1

@@ -3,7 +3,10 @@ package networkapply
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
@@ -105,6 +109,134 @@ type fakeRemovalAdmin struct {
 	impact   removal.Impact
 	requests []removal.Request
 	err      error
+}
+
+type fakeManagementFabricAdmin struct {
+	applyCalls  int
+	statusCalls int
+	needed      bool
+	reason      string
+	err         error
+}
+
+type fakePortableBackupAdmin struct {
+	artifact   backup.PortableArtifact
+	content    []byte
+	passphrase string
+	builds     int
+	opens      int
+	removes    int
+	err        error
+}
+
+func (admin *fakePortableBackupAdmin) Build(_ context.Context, passphrase string) (backup.PortableArtifact, error) {
+	admin.builds++
+	admin.passphrase = passphrase
+	return admin.artifact, admin.err
+}
+
+func (admin *fakePortableBackupAdmin) Open(backup.PortableArtifact) (io.ReadCloser, error) {
+	admin.opens++
+	return io.NopCloser(bytes.NewReader(admin.content)), admin.err
+}
+
+func (admin *fakePortableBackupAdmin) Remove(backup.PortableArtifact) error {
+	admin.removes++
+	return nil
+}
+
+func TestBrokerPortableBackupStreamsOnlyEncryptedPathFreeArtifact(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	content := []byte("encrypted-gvpn-root-broker-stream")
+	digest := sha256.Sum256(content)
+	admin := &fakePortableBackupAdmin{content: content, artifact: backup.PortableArtifact{
+		Filename: "gateway-vpn-backup-20260830T150000Z-0123456789abcdef01234567.gvpn",
+		Path:     "/var/lib/gateway-vpn-privileged/backup-exports/artifacts/private.gvpn",
+		Bytes:    int64(len(content)), SHA256: hex.EncodeToString(digest[:]),
+		SnapshotID: "20260830T150000.000000000Z-0123456789abcdef01234567",
+	}}
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.PortableBackup = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	metadata, reader, err := client.ExportPortableBackup(ctx, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(stream, content) || metadata.Path != "" || metadata.Filename != admin.artifact.Filename || admin.builds != 1 || admin.opens != 1 || admin.removes != 1 || admin.passphrase != "correct horse battery staple" {
+		t.Fatalf("broker backup metadata=%+v stream=%q calls=%d/%d/%d pass=%q errors=%v/%v", metadata, stream, admin.builds, admin.opens, admin.removes, admin.passphrase, readErr, closeErr)
+	}
+	if bytes.Contains(stream, []byte(admin.artifact.Path)) || strings.Contains(metadata.Filename, "/var/lib/") {
+		t.Fatal("privileged backup path crossed the broker boundary")
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/backup/export", strings.NewReader(`{"passphrase":"correct horse battery staple","path":"/etc/shadow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || admin.builds != 1 {
+		t.Fatalf("parameterized root backup request = %d builds=%d", response.StatusCode, admin.builds)
+	}
+	admin.err = errors.New("root secret path /var/lib/gateway-vpn/secrets/management/link.key")
+	if _, body, err := client.ExportPortableBackup(ctx, "correct horse battery staple"); err == nil || body != nil || strings.Contains(err.Error(), "management/link.key") {
+		t.Fatalf("privileged backup root error was not redacted: %v", err)
+	}
+}
+
+func (admin *fakeManagementFabricAdmin) Apply(context.Context) error {
+	admin.applyCalls++
+	return admin.err
+}
+
+func (admin *fakeManagementFabricAdmin) NeedsApply(context.Context) (bool, string, error) {
+	admin.statusCalls++
+	return admin.needed, admin.reason, admin.err
+}
+
+func TestBrokerManagementFabricIsParameterFreeAndRedactsRootErrors(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	admin := &fakeManagementFabricAdmin{needed: true, reason: "DESIRED_GENERATION_PENDING"}
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.ManagementFabric = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	status, err := client.ManagementFabricStatus(ctx)
+	if err != nil || !status.NeedsApply || status.Reason != admin.reason || admin.statusCalls != 1 {
+		t.Fatalf("ManagementFabricStatus() = %+v calls=%d error=%v", status, admin.statusCalls, err)
+	}
+	if err := client.SyncManagementFabric(ctx); err != nil || admin.applyCalls != 1 {
+		t.Fatalf("SyncManagementFabric() calls=%d error=%v", admin.applyCalls, err)
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/management-fabric/sync", strings.NewReader(`{"interface":"eth0","command":"nft flush ruleset"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || admin.applyCalls != 1 {
+		t.Fatalf("parameterized Management Fabric status/calls = %d/%d", response.StatusCode, admin.applyCalls)
+	}
+	admin.err = errors.New("private key path and nft command detail")
+	if err := client.SyncManagementFabric(ctx); err == nil || strings.Contains(err.Error(), "key path") || strings.Contains(err.Error(), "nft command") {
+		t.Fatalf("redacted Management Fabric error = %v", err)
+	}
 }
 
 func (admin *fakeRemovalAdmin) Impact(context.Context) (removal.Impact, error) {

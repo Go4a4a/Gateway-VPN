@@ -48,6 +48,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	}
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "restored.secret"),
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-restored.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"),
@@ -61,6 +62,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 		}
 	}
 	for filename, expected := range map[string]string{
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-restored.key"):                 "restored-management-fabric-private-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"):     "restored-wireguard-ingress-server-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"): "restored-wireguard-ingress-peer-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"): "restored-wireguard-ingress-peer-psk",
@@ -71,6 +73,9 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	}
 	if _, err := os.Stat(filepath.Join(fixture.stateDirectory, "secrets", "old.secret")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("old secret survived exact restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.stateDirectory, "secrets", "management", "link-old.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old management private key survived exact restore: %v", err)
 	}
 	configuration := mustReadFile(t, fixture.configurationPath)
 	if !strings.Contains(string(configuration), "lan_interface: enp2s0") || strings.Contains(string(configuration), "oldlan0") {
@@ -93,6 +98,11 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	if err := database.QueryRow("SELECT COUNT(*) FROM events WHERE type='RESTORE_APPLIED'").Scan(&appliedAudits); err != nil || appliedAudits != 1 {
 		t.Fatalf("restore applied audits = %d, %v", appliedAudits, err)
 	}
+	assertManagementFabricBackupFixture(t, fixture.ctx, database, "restored", "/var/lib/gateway-vpn/secrets/management/link-restored.key", 7, 6)
+	var oldManagementLinks int
+	if err := database.QueryRowContext(fixture.ctx, "SELECT COUNT(*) FROM management_links WHERE id='link:old'").Scan(&oldManagementLinks); err != nil || oldManagementLinks != 0 {
+		t.Fatalf("old management fabric row survived restore = %d, %v", oldManagementLinks, err)
+	}
 	runtimeState, err := state.NewRepository(database).Get(fixture.ctx)
 	if err != nil || runtimeState.GatewayState != state.GatewayBlocked || runtimeState.PathState != state.PathBlocked || runtimeState.ActivePathID != "" {
 		t.Fatalf("restored runtime state = %+v, %v", runtimeState, err)
@@ -108,6 +118,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	if err := preRestore.QueryRow("SELECT value_json FROM settings WHERE key='fixture-marker'").Scan(&oldMarker); err != nil || oldMarker != `"old"` {
 		t.Fatalf("pre-restore snapshot marker = %q, %v", oldMarker, err)
 	}
+	assertManagementFabricBackupFixture(t, fixture.ctx, preRestore, "old", "/var/lib/gateway-vpn/secrets/management/link-old.key", 3, 2)
 	if _, err := os.Stat(fixture.applier.journalPath(result.RestoreID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("completed restore journal remains: %v", err)
 	}
@@ -366,6 +377,7 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	}
 	sourceState := filepath.Dir(snapshots.DatabasePath)
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "restored.secret"), "restored-secret")
+	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "management", "link-restored.key"), "restored-management-fabric-private-key")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "mihomo-api-secret"), "restored-mihomo-api-secret")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "servers", "default.key"), "restored-wireguard-ingress-server-key")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "peers", "peer-restored.key"), "restored-wireguard-ingress-peer-key")
@@ -375,6 +387,7 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	writeFixtureFile(t, filepath.Join(sourceState, "tls", "key.pem"), "restored-key")
 	writeFixtureFile(t, filepath.Join(sourceState, "mihomo", "generations", "gen-restored", "config.yaml"), "mixed-port: 7890")
 	writeFixtureFile(t, filepath.Join(sourceState, "mihomo", "state", "active.json"), `{"generation":"gen-restored"}`)
+	seedManagementFabricBackupFixture(t, ctx, sourceDatabase, "restored", "/var/lib/gateway-vpn/secrets/management/link-restored.key", 7, 6)
 	sourceConfiguration := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(sourceConfiguration, []byte(validRestoreConfig()), 0o600); err != nil {
 		t.Fatal(err)
@@ -407,10 +420,12 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	if _, err := liveDatabase.ExecContext(ctx, "INSERT INTO settings(key, value_json, updated_at) VALUES ('fixture-marker', ?, ?)", `"old"`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
+	seedManagementFabricBackupFixture(t, ctx, liveDatabase, "old", "/var/lib/gateway-vpn/secrets/management/link-old.key", 3, 2)
 	if err := liveDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "old.secret"), "old-secret")
+	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "management", "link-old.key"), "old-management-fabric-private-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"), "old-wireguard-ingress-server-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"), "old-wireguard-ingress-peer-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "subscriptions", "old.yaml"), "old")
@@ -463,6 +478,7 @@ func assertOldRestoreFixtureLive(t *testing.T, fixture restoreApplyFixture) {
 	}
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "old.secret"),
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-old.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"),
 		filepath.Join(fixture.stateDirectory, "subscriptions", "old.yaml"),
@@ -484,6 +500,7 @@ func assertOldRestoreFixtureLive(t *testing.T, fixture restoreApplyFixture) {
 	if err := database.QueryRow("SELECT value_json FROM settings WHERE key='fixture-marker'").Scan(&marker); err != nil || marker != `"old"` {
 		t.Fatalf("rolled-back database marker = %q, %v", marker, err)
 	}
+	assertManagementFabricBackupFixture(t, fixture.ctx, database, "old", "/var/lib/gateway-vpn/secrets/management/link-old.key", 3, 2)
 	runtimeState, err := state.NewRepository(database).Get(fixture.ctx)
 	if err != nil || runtimeState.GatewayState != state.GatewayBlocked || runtimeState.PathState != state.PathBlocked {
 		t.Fatalf("rolled-back runtime is not safely blocked = %+v, %v", runtimeState, err)

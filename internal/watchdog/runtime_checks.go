@@ -245,6 +245,200 @@ func (probe *SystemProbe) wireGuardManagementHealth(ctx context.Context, now tim
 	return observation
 }
 
+func (probe *SystemProbe) managementFabricRouteHealth(ctx context.Context) Observation {
+	observation := Observation{ComponentID: ComponentManagementFabric, Details: map[string]any{}}
+	database, err := databasepkg.OpenReadOnly(ctx, probe.DatabasePath)
+	if err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "MANAGEMENT_FABRIC_DATABASE_UNAVAILABLE"
+		return observation
+	}
+	defer database.Close()
+	var enabled int
+	var desired, applied int64
+	var state, lastError string
+	if err := database.QueryRowContext(ctx, `
+SELECT
+  (SELECT COUNT(*)
+     FROM management_links AS l
+     JOIN management_sites AS s ON s.id=l.site_id
+     JOIN vps_nodes AS v ON v.id=l.vps_id
+    WHERE l.enabled=1 AND l.state NOT IN ('DISABLED','REVOKED')
+      AND s.is_local=1 AND s.identity_state='ACTIVE'
+      AND v.enabled=1 AND v.state!='REVOKED'),
+  desired_generation,applied_generation,state,last_error_code
+FROM management_fabric_generations WHERE singleton_id=1`).Scan(&enabled, &desired, &applied, &state, &lastError); err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "MANAGEMENT_FABRIC_STATE_UNAVAILABLE"
+		return observation
+	}
+	observation.Details["enabled_links"] = enabled
+	observation.Details["desired_generation"] = desired
+	observation.Details["applied_generation"] = applied
+	observation.Details["apply_state"] = state
+	if lastError != "" {
+		observation.Details["last_error_code"] = safeCode(lastError)
+	}
+	// A generation mismatch remains applicable even after the final link is
+	// disabled: root must remove its old interface/routes/ACL projection.
+	observation.Applicable = enabled > 0 || desired != applied
+	if !observation.Applicable {
+		observation.Healthy = true
+		return observation
+	}
+	if probe.ManagementFabric == nil {
+		observation.ErrorCode = "MANAGEMENT_FABRIC_BROKER_CLIENT_UNAVAILABLE"
+		return observation
+	}
+	status, err := probe.ManagementFabric.ManagementFabricStatus(ctx)
+	if err != nil {
+		observation.ErrorCode = "MANAGEMENT_FABRIC_STATUS_UNAVAILABLE"
+		return observation
+	}
+	if status.Reason != "" {
+		observation.Details["runtime_reason"] = safeCode(status.Reason)
+	}
+	if status.NeedsApply || desired != applied {
+		observation.ErrorCode = "MANAGEMENT_FABRIC_DIVERGED"
+		return observation
+	}
+	observation.Healthy = true
+	return observation
+}
+
+type wireGuardAdminLink struct {
+	ID, InterfaceName, LocalAddress, LocalPublicKey, RemotePublicKey string
+	SelectedUplinkID, UplinkState                                    string
+}
+
+func (probe *SystemProbe) wireGuardAdminHealth(ctx context.Context, now time.Time, policy Policy) Observation {
+	observation := Observation{ComponentID: ComponentWireGuardAdmin, Details: map[string]any{}}
+	database, err := databasepkg.OpenReadOnly(ctx, probe.DatabasePath)
+	if err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "WG_ADMIN_DATABASE_UNAVAILABLE"
+		return observation
+	}
+	defer database.Close()
+	var desired, applied int64
+	if err := database.QueryRowContext(ctx, `SELECT desired_generation,applied_generation FROM management_fabric_generations WHERE singleton_id=1`).Scan(&desired, &applied); err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "WG_ADMIN_GENERATION_UNAVAILABLE"
+		return observation
+	}
+	rows, err := database.QueryContext(ctx, `
+SELECT l.id,l.interface_name,l.local_address,l.local_public_key,l.remote_public_key,
+       COALESCE(l.selected_uplink_id,''),COALESCE(u.state,'')
+FROM management_links AS l
+JOIN management_sites AS s ON s.id=l.site_id
+JOIN vps_nodes AS v ON v.id=l.vps_id
+LEFT JOIN uplinks AS u ON u.id=l.selected_uplink_id
+WHERE l.enabled=1 AND l.state NOT IN ('DISABLED','REVOKED')
+  AND s.is_local=1 AND s.identity_state='ACTIVE'
+  AND v.enabled=1 AND v.state!='REVOKED'
+ORDER BY l.slot,l.id`)
+	if err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "WG_ADMIN_LINKS_UNAVAILABLE"
+		return observation
+	}
+	links := make([]wireGuardAdminLink, 0)
+	for rows.Next() {
+		var link wireGuardAdminLink
+		if err := rows.Scan(&link.ID, &link.InterfaceName, &link.LocalAddress, &link.LocalPublicKey, &link.RemotePublicKey, &link.SelectedUplinkID, &link.UplinkState); err != nil {
+			rows.Close()
+			observation.Applicable = true
+			observation.ErrorCode = "WG_ADMIN_LINK_STATE_INVALID"
+			return observation
+		}
+		links = append(links, link)
+	}
+	if err := rows.Close(); err != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "WG_ADMIN_LINKS_UNAVAILABLE"
+		return observation
+	}
+	observation.Applicable = len(links) > 0
+	observation.Details["enabled_links"] = len(links)
+	if !observation.Applicable {
+		observation.Healthy = true
+		return observation
+	}
+	// The route/ACL component owns convergence. Avoid racing it or issuing two
+	// root syncs while a newly edited generation is still being applied.
+	if desired != applied {
+		observation.Details["awaiting_management_fabric_generation"] = desired
+		observation.Healthy = true
+		return observation
+	}
+	localFailures := make([]string, 0)
+	externalFailures := make([]string, 0)
+	handshakeAges := make(map[string]int64, len(links))
+	for _, link := range links {
+		if link.SelectedUplinkID == "" {
+			localFailures = append(localFailures, link.ID+":UPLINK_SELECTION_MISSING")
+			continue
+		}
+		if !probe.wireGuardAdminLocalStateHealthy(ctx, link) {
+			localFailures = append(localFailures, link.ID+":LOCAL_RUNTIME_DRIFT")
+			continue
+		}
+		if link.UplinkState != "UPLINK_READY" {
+			externalFailures = append(externalFailures, link.ID+":UPLINK_NOT_READY")
+			continue
+		}
+		handshakes, err := probe.fixedOutput(ctx, probe.WG, "show", link.InterfaceName, "latest-handshakes")
+		if err != nil {
+			localFailures = append(localFailures, link.ID+":HANDSHAKE_READ_FAILED")
+			continue
+		}
+		latest := peerHandshake(handshakes, link.RemotePublicKey)
+		if latest.IsZero() {
+			externalFailures = append(externalFailures, link.ID+":NEVER_CONNECTED")
+			continue
+		}
+		age := now.Sub(latest)
+		if age < 0 {
+			age = 0
+		}
+		handshakeAges[link.ID] = int64(age / time.Second)
+		if age > time.Duration(policy.WireGuardHandshakeStaleSeconds)*time.Second {
+			externalFailures = append(externalFailures, link.ID+":HANDSHAKE_STALE")
+		}
+	}
+	observation.Details["handshake_age_seconds"] = handshakeAges
+	if len(localFailures) != 0 {
+		observation.Details["local_failures"] = localFailures
+		observation.ErrorCode = "WG_ADMIN_LOCAL_DRIFT"
+		return observation
+	}
+	if len(externalFailures) != 0 {
+		observation.Details["external_failures"] = externalFailures
+		observation.Classification = ClassificationExternal
+		observation.ErrorCode = "WG_ADMIN_EXTERNAL_OUTAGE"
+		return observation
+	}
+	observation.Healthy = true
+	return observation
+}
+
+func (probe *SystemProbe) wireGuardAdminLocalStateHealthy(ctx context.Context, link wireGuardAdminLink) bool {
+	links, err := probe.fixedOutput(ctx, probe.IP, "-json", "link", "show", "dev", link.InterfaceName)
+	if err != nil || !jsonFlagsContain(links, "UP") {
+		return false
+	}
+	addresses, err := probe.fixedOutput(ctx, probe.IP, "-json", "-4", "address", "show", "dev", link.InterfaceName)
+	if err != nil || !jsonAddressContains(addresses, link.LocalAddress+"/32") {
+		return false
+	}
+	publicKey, err := probe.fixedOutput(ctx, probe.WG, "show", link.InterfaceName, "public-key")
+	if err != nil || strings.TrimSpace(publicKey) != link.LocalPublicKey {
+		return false
+	}
+	peers, err := probe.fixedOutput(ctx, probe.WG, "show", link.InterfaceName, "peers")
+	return err == nil && exactLineSet(peers, []string{link.RemotePublicKey})
+}
+
 func (probe *SystemProbe) wireGuardIngressHealth(ctx context.Context) Observation {
 	observation := Observation{ComponentID: ComponentWireGuardIngress, Details: map[string]any{}}
 	database, err := databasepkg.OpenReadOnly(ctx, probe.DatabasePath)

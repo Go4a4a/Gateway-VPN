@@ -10,6 +10,7 @@ import (
 	"time"
 
 	databasepkg "gateway-vpn/internal/db"
+	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -138,6 +139,34 @@ func TestRepositoryRejectsIdentityAndNetworkCollisionsAtomically(t *testing.T) {
 		UplinkPolicy: UplinkAuto, PersistentKeepalive: 25, Endpoints: []EndpointSpec{{Host: "vps-a.example.net", Port: 51821}},
 	}); err == nil {
 		t.Fatal("raw key material was accepted as a SQLite secret reference")
+	}
+}
+
+func TestPrefixCollisionInventoryAcceptsHostAddressCIDRAndStillRejectsOverlap(t *testing.T) {
+	ctx, database, repository := managementFixture(t)
+	modems := modem.NewRepository(database, 1101, 0x1101)
+	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem:a", Name: "A", IdentityKind: "hilink_serial_hash", IdentityHash: strings.Repeat("e", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modems.ApplyLease(ctx, "modem:a", modem.LeaseInput{InterfaceName: "enx-a", ManagementCIDR: "172.20.1.0/24", Gateway: "172.20.1.1", DNS: []string{"1.1.1.1"}, MTU: 1500, State: modem.StateReady}); err != nil {
+		t.Fatal(err)
+	}
+	// Ethernet runtime stores the host address together with its prefix. The
+	// Management Fabric collision inventory must compare its masked network.
+	if _, err := database.ExecContext(ctx, "UPDATE uplinks SET ipv4_cidr='172.20.1.2/24' WHERE id='modem:a'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateVPS(ctx, CreateVPSInput{
+		ID: "vps:overlap", Name: "Bad", VerifiedFingerprint: strings.Repeat("a", 64), PublicKey: testPublicKey(t),
+		AdminAddressPool: "172.20.1.0/24", ResourceAliasPool: "10.96.0.0/16",
+	}); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("uplink host-address CIDR overlap = %v", err)
+	}
+	if _, err := repository.CreateVPS(ctx, CreateVPSInput{
+		ID: "vps:safe", Name: "Safe", VerifiedFingerprint: strings.Repeat("b", 64), PublicKey: testPublicKey(t),
+		AdminAddressPool: "10.81.0.0/24", ResourceAliasPool: "10.96.0.0/16",
+	}); err != nil {
+		t.Fatalf("non-overlapping VPS rejected after host-address CIDR inventory: %v", err)
 	}
 }
 

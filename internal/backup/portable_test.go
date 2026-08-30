@@ -3,6 +3,8 @@ package backup
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,6 +24,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	configurationPath := filepath.Join(configurationDirectory, "config.yaml")
 	files := map[string]string{
 		configurationPath: "version: 1\nsystem:\n  state_dir: /var/lib/gateway-vpn\n",
+		filepath.Join(stateDirectory, "secrets", "management", "link-a.key"):                    "management-fabric-private-secret",
 		filepath.Join(stateDirectory, "secrets", "subscriptions", "sub-a.url"):                  "https://subscription.example/private?token=subscription-secret",
 		filepath.Join(stateDirectory, "secrets", "wireguard.yaml"):                              "private_key: wireguard-private-secret",
 		filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"): "wireguard-ingress-server-private-secret",
@@ -45,11 +48,13 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	if _, err := database.ExecContext(ctx, `INSERT INTO events(occurred_at,severity,type,details_json) VALUES('2026-08-24T14:00:00Z','INFO','PORTABLE_SOURCE','{}')`); err != nil {
 		t.Fatal(err)
 	}
+	seedManagementFabricBackupFixture(t, ctx, database, "restored", "/var/lib/gateway-vpn/secrets/management/link-a.key", 7, 6)
 	manager, err := NewPortableManager(snapshots, stateDirectory, configurationPath, "gateway-vpn test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	manager.Now = func() time.Time { return time.Date(2026, 8, 24, 14, 30, 0, 0, time.UTC) }
+	manager.TransientSnapshot = true
 	passphrase := "correct horse battery staple"
 	artifact, err := manager.Build(ctx, passphrase)
 	if err != nil {
@@ -58,12 +63,15 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	if !portableNamePattern.MatchString(artifact.Filename) || artifact.Bytes <= 0 || artifact.Bytes > MaximumPortableBackupBytes || len(artifact.SHA256) != 64 || artifact.SnapshotID == "" || !artifact.Manifest.SecretsIncluded {
 		t.Fatalf("portable artifact = %+v", artifact)
 	}
+	if _, err := os.Stat(filepath.Join(snapshots.Root, artifact.SnapshotID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("privileged transient snapshot remains after encryption: %v", err)
+	}
 	encrypted, err := os.ReadFile(artifact.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, secret := range []string{
-		"subscription-secret", "wireguard-private-secret", "wireguard-ingress-server-private-secret",
+		"management-fabric-private-secret", "subscription-secret", "wireguard-private-secret", "wireguard-ingress-server-private-secret",
 		"wireguard-ingress-peer-private-secret", "wireguard-ingress-peer-preshared-secret",
 		"proxy-private-secret", "tls-private-secret", "mihomo-private-secret",
 	} {
@@ -100,6 +108,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	}
 	for _, name := range []string{
 		"manifest.json", "database/state.db", "config/config.yaml",
+		"state/secrets/management/link-a.key",
 		"state/secrets/subscriptions/sub-a.url", "state/secrets/wireguard.yaml",
 		"state/secrets/wireguard-ingress/servers/default.key",
 		"state/secrets/wireguard-ingress/peers/peer-a.key",
@@ -112,7 +121,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 		}
 	}
 	var manifest PortableManifest
-	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 26 || len(manifest.Files) != len(contents)-1 {
+	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 28 || len(manifest.Files) != len(contents)-1 {
 		t.Fatalf("portable manifest = %+v, %v", manifest, err)
 	}
 	extractedDatabase := filepath.Join(t.TempDir(), "state.db")
@@ -127,6 +136,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 		verifiedDatabase.Close()
 		t.Fatal(err)
 	}
+	assertManagementFabricBackupFixture(t, ctx, verifiedDatabase, "restored", "/var/lib/gateway-vpn/secrets/management/link-a.key", 7, 6)
 	verifiedDatabase.Close()
 
 	wrongDestination := filepath.Join(t.TempDir(), "wrong.zip")
@@ -157,6 +167,39 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 	}
 	if _, err := os.Stat(artifact.Path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("served portable artifact remains: %v", err)
+	}
+}
+
+func seedManagementFabricBackupFixture(t *testing.T, ctx context.Context, database *sql.DB, suffix, privateKeyReference string, desiredGeneration, appliedGeneration int64) {
+	t.Helper()
+	stamp := "2026-08-30T12:00:00Z"
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO management_sites(id,display_name,is_local,identity_state,created_at,updated_at) VALUES(?,?,1,'ACTIVE',?,?)`, []any{"site:" + suffix, "Site " + suffix, stamp, stamp}},
+		{`INSERT INTO vps_nodes(id,display_number,name,enabled,priority,verified_fingerprint,public_key,admin_address_pool,resource_alias_pool,state,created_at,updated_at) VALUES(?,1,?,1,1,?,?,? ,?,'REACHABLE',?,?)`, []any{"vps:" + suffix, "VPS " + suffix, strings.Repeat("a", 64), "remote-public-" + suffix, "10.90.0.0/24", "10.91.0.0/24", stamp, stamp}},
+		{`INSERT INTO management_links(id,site_id,vps_id,slot,interface_name,enabled,management_subnet,local_address,remote_address,local_private_key_secret_ref,local_public_key,remote_public_key,uplink_policy,persistent_keepalive,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES(?,?,?,1,'gvm1',1,'10.81.0.0/30','10.81.0.2/32','10.81.0.1/32',?,?,?,'AUTO',25,7,6,7,6,'REACHABLE',?,?)`, []any{"link:" + suffix, "site:" + suffix, "vps:" + suffix, privateKeyReference, "local-public-" + suffix, "remote-public-" + suffix, stamp, stamp}},
+		{`UPDATE management_fabric_generations SET desired_generation=?,applied_generation=?,state='PENDING',last_error_code='RESTORE_FIXTURE',updated_at=? WHERE singleton_id=1`, []any{desiredGeneration, appliedGeneration, stamp}},
+	}
+	for _, statement := range statements {
+		if _, err := database.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatalf("seed management fabric backup fixture: %v", err)
+		}
+	}
+}
+
+func assertManagementFabricBackupFixture(t *testing.T, ctx context.Context, database *sql.DB, suffix, privateKeyReference string, desiredGeneration, appliedGeneration int64) {
+	t.Helper()
+	var reference, interfaceName, state, errorCode string
+	var desired, applied int64
+	err := database.QueryRowContext(ctx, `
+SELECT l.local_private_key_secret_ref,l.interface_name,g.desired_generation,g.applied_generation,g.state,g.last_error_code
+FROM management_links AS l
+CROSS JOIN management_fabric_generations AS g
+WHERE l.id=? AND g.singleton_id=1`, "link:"+suffix).Scan(&reference, &interfaceName, &desired, &applied, &state, &errorCode)
+	if err != nil || reference != privateKeyReference || interfaceName != "gvm1" || desired != desiredGeneration || applied != appliedGeneration || state != "PENDING" || errorCode != "RESTORE_FIXTURE" {
+		t.Fatalf("management fabric backup fixture = ref=%q interface=%q generation=%d/%d state=%q error=%q, %v", reference, interfaceName, desired, applied, state, errorCode, err)
 	}
 }
 

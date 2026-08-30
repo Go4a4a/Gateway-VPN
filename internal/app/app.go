@@ -31,6 +31,7 @@ import (
 	"gateway-vpn/internal/hilink"
 	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/mihomo"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/modemrecovery"
@@ -321,7 +322,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		TLSFingerprint: tlsResult.Fingerprint, MihomoRoot: filepath.Join(configuration.System.StateDir, "mihomo"),
 		WatchdogStatus: watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
 	}
-	portableBackups, err := backup.NewPortableManager(managedDatabase.Backups, configuration.System.StateDir, configurationPath, buildinfo.String("gateway-vpn"))
+	portableBackups, err := backup.NewRemotePortableManager(networkBroker, filepath.Join(configuration.System.StateDir, "backups", "exports"))
 	if err != nil {
 		return fail(err)
 	}
@@ -365,6 +366,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 			SecretRoot: filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress"),
 		},
 		WireGuardIngressAdmin: networkBroker,
+		ManagementFabric:      managementfabric.NewRepository(database, nil),
+		ManagementFabricAdmin: networkBroker,
 		ModemRuntime:          networkBroker,
 		ModemRecovery:         recoveryController,
 		ModemReconcile: func(ctx context.Context) (hilink.CycleResult, error) {

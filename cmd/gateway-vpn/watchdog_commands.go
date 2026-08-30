@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"gateway-vpn/internal/config"
+	"gateway-vpn/internal/networkapply"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/watchdog"
 )
@@ -21,6 +22,17 @@ const (
 )
 
 type notifyingWatchdogStatus struct{ file watchdog.StatusFile }
+
+type watchdogManagementFabricClient struct{ client *networkapply.BrokerClient }
+
+func (client watchdogManagementFabricClient) ManagementFabricStatus(ctx context.Context) (watchdog.ManagementFabricStatus, error) {
+	status, err := client.client.ManagementFabricStatus(ctx)
+	return watchdog.ManagementFabricStatus{NeedsApply: status.NeedsApply, Reason: status.Reason}, err
+}
+
+func (client watchdogManagementFabricClient) SyncManagementFabric(ctx context.Context) error {
+	return client.client.SyncManagementFabric(ctx)
+}
 
 func (writer notifyingWatchdogStatus) Write(status watchdog.Status) error {
 	if err := writer.file.Write(status); err != nil {
@@ -53,6 +65,11 @@ func runWatchdog(args []string) int {
 		return 1
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With("component", "watchdog")
+	managementFabric, err := networkapply.NewBrokerClient("/run/gateway-vpn/network-broker.sock")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create fixed management fabric broker client: %v\n", err)
+		return 1
+	}
 	probe := &watchdog.SystemProbe{
 		Executor: platformexec.OSExecutor{}, Systemctl: "/usr/bin/systemctl", NFT: "/usr/sbin/nft", IP: "/usr/sbin/ip", WG: "/usr/bin/wg",
 		SSHD: "/usr/sbin/sshd", SS: "/usr/bin/ss",
@@ -65,6 +82,7 @@ func runWatchdog(args []string) int {
 		BootstrapDNS:      configuration.Mihomo.BootstrapDNS,
 		RoutingTableStart: configuration.Modems.RoutingTableStart, FwmarkStart: configuration.Modems.FwmarkStart,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
+		ManagementFabric:  watchdogManagementFabricClient{client: managementFabric},
 	}
 	supervisor := &watchdog.Supervisor{
 		Policies: watchdog.LivePolicySource{DatabasePath: configuration.System.Database},

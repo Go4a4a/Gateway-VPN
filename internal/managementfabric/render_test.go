@@ -11,7 +11,7 @@ func TestRenderFabricProducesOwnedTypedRoutesAliasesAndACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.RouteProtocol != OwnedRouteProtocol || len(plan.Peers) != 1 || len(plan.Routes) != 2 || len(plan.Aliases) != 1 || len(plan.ACL) != 1 {
+	if plan.RouteProtocol != OwnedRouteProtocol || len(plan.Peers) != 1 || len(plan.Routes) != 3 || len(plan.Aliases) != 1 || len(plan.ACL) != 1 {
 		t.Fatalf("rendered fabric = %+v", plan)
 	}
 	peer := plan.Peers[0]
@@ -24,11 +24,11 @@ func TestRenderFabricProducesOwnedTypedRoutesAliasesAndACL(t *testing.T) {
 		}
 	}
 	alias := plan.Aliases[0]
-	if alias.PublishedAlias != "10.96.1.10/32" || alias.LocalDestination != "192.168.50.10" || alias.InterfaceName != "gvm1" {
+	if alias.PublishedAlias != "10.96.1.10/32" || alias.LocalDestination != "192.168.50.10" || alias.InterfaceName != "gvm1" || alias.ResourceKind != ResourceLocalHost || alias.AccessProfile != ProfileDedicatedLAN {
 		t.Fatalf("rendered alias = %+v", alias)
 	}
 	rule := plan.ACL[0]
-	if rule.InputInterface != "gvm1" || rule.Source != "10.81.0.10/32" || rule.Protocol != ProtocolTCP || rule.PortStart != 443 || rule.PortEnd != 443 {
+	if rule.InputInterface != "gvm1" || rule.Source != "10.81.0.10/32" || rule.ResourceKind != ResourceLocalHost || rule.AccessProfile != ProfileDedicatedLAN || rule.Protocol != ProtocolTCP || rule.PortStart != 443 || rule.PortEnd != 443 {
 		t.Fatalf("rendered ACL = %+v", rule)
 	}
 }

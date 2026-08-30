@@ -16,6 +16,8 @@ import (
 	configpkg "gateway-vpn/internal/config"
 	databasepkg "gateway-vpn/internal/db"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
+	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
@@ -150,6 +152,102 @@ id, display_number, type, name, enabled, priority, address_mode, routing_table_i
 	observation = probe.wireGuardManagementHealth(ctx, now, policy)
 	if observation.Healthy || observation.Classification == ClassificationExternal || observation.ErrorCode != "WG_MANAGEMENT_ROUTE_MISSING" {
 		t.Fatalf("local WireGuard route mismatch observation = %+v", observation)
+	}
+}
+
+func TestManagementFabricWatchdogSeparatesConvergenceFromExternalAdminHandshake(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 30, 15, 0, 0, 0, time.UTC)
+	databasePath := filepath.Join(t.TempDir(), "state.db")
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	repository := &managementfabric.Repository{Database: database, Now: func() time.Time { return now }}
+	if _, err := repository.EnsureLocalSite(ctx, "site:home", "Home"); err != nil {
+		t.Fatal(err)
+	}
+	vpsKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	localKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vps, err := repository.CreateVPS(ctx, managementfabric.CreateVPSInput{
+		ID: "vps:a", Name: "VPS A", VerifiedFingerprint: strings.Repeat("a", 64), PublicKey: vpsKeys.Public,
+		AdminAddressPool: "10.81.0.0/24", ResourceAliasPool: "10.96.0.0/16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modems := modem.NewRepository(database, 1101, 0x1101)
+	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem:a", Name: "Operator", IdentityKind: "hilink_serial_hash", IdentityHash: strings.Repeat("b", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modems.ApplyLease(ctx, "modem:a", modem.LeaseInput{
+		InterfaceName: "enx0001", ManagementCIDR: "192.168.8.0/24", Gateway: "192.168.8.1",
+		DNS: []string{"1.1.1.1"}, MTU: 1500, State: modem.StateReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateLink(ctx, managementfabric.CreateLinkInput{
+		ID: "link:a", SiteID: "site:home", VPSID: vps.ID, Enabled: true,
+		ManagementSubnet: "10.82.0.0/24", LocalAddress: "10.82.0.2", RemoteAddress: "10.82.0.1",
+		LocalPrivateKeySecretRef: "/var/lib/gateway-vpn/secrets/management/link:a.key",
+		LocalPublicKey:           localKeys.Public, RemotePublicKey: vpsKeys.Public,
+		UplinkPolicy: managementfabric.UplinkAuto, PersistentKeepalive: 25,
+		Endpoints: []managementfabric.EndpointSpec{{Host: "203.0.113.10", Port: 51821}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := repository.BuildGatewayHostPlan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.MarkGatewayHostPlanApplied(ctx, plan, now); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeManagementFabricRuntime{}
+	executor := &exactOutputExecutor{outputs: map[string]string{
+		"/usr/sbin/ip -json link show dev gvm1":       `[{"flags":["UP"]}]`,
+		"/usr/sbin/ip -json -4 address show dev gvm1": `[{"addr_info":[{"local":"10.82.0.2","prefixlen":32}]}]`,
+		"/usr/bin/wg show gvm1 public-key":            localKeys.Public + "\n",
+		"/usr/bin/wg show gvm1 peers":                 vpsKeys.Public + "\n",
+		"/usr/bin/wg show gvm1 latest-handshakes":     vpsKeys.Public + "\t" + strconv.FormatInt(now.Add(-30*time.Second).Unix(), 10) + "\n",
+	}}
+	probe := &SystemProbe{Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg", DatabasePath: databasePath, ManagementFabric: runtime}
+
+	routes := probe.managementFabricRouteHealth(ctx)
+	if !routes.Applicable || !routes.Healthy || routes.ErrorCode != "" {
+		t.Fatalf("healthy management fabric routes = %+v", routes)
+	}
+	admin := probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
+	if !admin.Applicable || !admin.Healthy || admin.Classification != "" {
+		t.Fatalf("healthy admin WireGuard = %+v", admin)
+	}
+
+	runtime.status = ManagementFabricStatus{NeedsApply: true, Reason: "KERNEL_STATE_DIVERGED"}
+	routes = probe.managementFabricRouteHealth(ctx)
+	if routes.Healthy || routes.ErrorCode != "MANAGEMENT_FABRIC_DIVERGED" {
+		t.Fatalf("diverged management fabric routes = %+v", routes)
+	}
+	runtime.status = ManagementFabricStatus{}
+	executor.outputs["/usr/bin/wg show gvm1 latest-handshakes"] = vpsKeys.Public + "\t" + strconv.FormatInt(now.Add(-time.Hour).Unix(), 10) + "\n"
+	admin = probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
+	if admin.Healthy || admin.Classification != ClassificationExternal || admin.ErrorCode != "WG_ADMIN_EXTERNAL_OUTAGE" {
+		t.Fatalf("stale admin handshake = %+v", admin)
+	}
+	executor.outputs["/usr/bin/wg show gvm1 latest-handshakes"] = vpsKeys.Public + "\t" + strconv.FormatInt(now.Add(-30*time.Second).Unix(), 10) + "\n"
+	executor.outputs["/usr/bin/wg show gvm1 peers"] = "unexpected-peer\n"
+	admin = probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
+	if admin.Healthy || admin.Classification == ClassificationExternal || admin.ErrorCode != "WG_ADMIN_LOCAL_DRIFT" {
+		t.Fatalf("local admin WireGuard drift = %+v", admin)
 	}
 }
 

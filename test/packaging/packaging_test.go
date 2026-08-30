@@ -20,7 +20,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 4 }", "user_ingress_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 5 }", "user_ingress_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
@@ -56,6 +56,16 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 			t.Errorf("watchdog unit missing %q", required)
 		}
 	}
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	for _, required := range []string{
+		`$(stat -c '%U:%G:%a' /var/lib/gateway-vpn/secrets/management) == "root:root:700"`,
+		`$(stat -c '%U:%G:%a' /var/lib/gateway-vpn-privileged/backup-exports) == "root:root:700"`,
+		`$(stat -c '%U:%G:%a' /var/lib/gateway-vpn-privileged/management-fabric) == "root:root:700"`,
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway Management Fabric installer audit missing %q", required)
+		}
+	}
 	for _, forbidden := range []string{"/bin/sh", "bash -c", "%i", "EnvironmentFile=", "User=gateway-vpn\n"} {
 		if strings.Contains(unit, forbidden) {
 			t.Errorf("watchdog unit contains unsafe dynamic surface %q", forbidden)
@@ -89,7 +99,7 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 	if !strings.Contains(tmpfiles, "d /var/lib/gateway-vpn-privileged/watchdog 0700 root root") {
 		t.Fatal("tmpfiles does not create the root-only durable watchdog history root")
 	}
-	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	installer = read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	for _, required := range []string{"systemctl restart gateway-vpn-watchdog.service", "systemctl is-active --quiet gateway-vpn-watchdog.service", "watchdog_runtime_ready", "/run/gateway-vpn-watchdog/status.json", "/run/gateway-vpn-watchdog/control.json", `grep -Fq '"schema_version":1' /run/gateway-vpn-watchdog/status.json`, `grep -Fq '"schema_version":2' /run/gateway-vpn-watchdog/control.json`, `"database_ok":true`, `"workers_ok":true`, "status_age <= 660", "control_age <= 30"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer watchdog acceptance missing %q", required)
@@ -710,6 +720,17 @@ func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testin
 	if !strings.Contains(tmpfiles, "d /var/lib/gateway-vpn-privileged/network-transactions 0700 root root") {
 		t.Fatal("network transaction root is not root-owned")
 	}
+	for _, required := range []string{
+		"d /var/lib/gateway-vpn/secrets/management 0700 root root",
+		"d /var/lib/gateway-vpn-privileged/backup-exports 0700 root root",
+		"d /var/lib/gateway-vpn-privileged/management-fabric 0700 root root",
+		"/var/lib/gateway-vpn-privileged/backup-exports",
+		"/var/lib/gateway-vpn-privileged/management-fabric",
+	} {
+		if !strings.Contains(tmpfiles+broker, required) {
+			t.Errorf("Gateway Management Fabric packaging missing %q", required)
+		}
+	}
 	control := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn.service"))
 	if strings.Contains(control, "CAP_NET_ADMIN") || !strings.Contains(control, "gateway-vpn-network-recovery.service") {
 		t.Fatal("control plane gained privileges or lost boot recovery ordering")
@@ -1094,7 +1115,7 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft delete table inet gateway_vpn",
 		"nft flush ruleset",
 		"firewall_schema_generation",
-		`\[[[:space:]]*4[[:space:]]*\]`,
+		`\[[[:space:]]*5[[:space:]]*\]`,
 		"active_tun_interfaces",
 		"useradd --system --no-create-home --shell /usr/sbin/nologin",
 		"gateway-vpn-mihomo",
