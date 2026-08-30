@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gateway VPN — VPS Hub</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <section id="login" class="card narrow">
+      <h1>Gateway VPN — VPS Hub</h1>
+      <p class="muted">Локальное управление VPS-компонентами Gateway VPN. Это не панель управления всей ОС.</p>
+      <form id="login-form">
+        <label>Пользователь<input name="username" autocomplete="username" required value="admin"></label>
+        <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+        <button>Войти</button><p id="login-error" class="error"></p>
+      </form>
+    </section>
+    <section id="app" hidden>
+      <header><div><h1>Gateway VPN — VPS Hub</h1><p class="muted">Restricted Agent WebUI</p></div><button id="logout" class="secondary">Выйти</button></header>
+      <section id="password-card" class="card narrow" hidden>
+        <h2>Замените временный пароль</h2>
+        <p class="warning">Перед работой с ключами и резервными копиями задайте собственный пароль VPS Hub.</p>
+        <form id="password-form">
+          <label>Текущий пароль<input name="current_password" type="password" autocomplete="current-password" required></label>
+          <label>Новый пароль, минимум 12 символов<input name="new_password" type="password" minlength="12" autocomplete="new-password" required></label>
+          <label>Повторите новый пароль<input name="password_confirmation" type="password" minlength="12" autocomplete="new-password" required></label>
+          <button>Сохранить новый пароль</button>
+        </form>
+      </section>
+      <nav id="navigation" aria-label="Разделы VPS Hub">
+        <button disabled title="Будет подключено к VPS Agent API">Обзор</button><button disabled>Gateway</button><button disabled>Каналы</button><button disabled>Администраторы</button><button disabled>Локальные ресурсы</button><button disabled>Матрица доступа</button><button disabled>Watchdog</button><button disabled>Журналы</button><button class="active">Backup / восстановление</button><button disabled>Диагностика</button>
+      </nav>
+      <p id="notice" role="status"></p>
+      <section id="backup-grid" class="grid">
+        <article class="card">
+          <h2>Скачать настройки VPS</h2>
+          <p>Создаётся отдельный зашифрованный файл <code>.gvpn-vps</code>. Он содержит настройки и ключи только этого VPS Hub и не подходит для восстановления Gateway.</p>
+          <form id="backup-form">
+            <label title="Повторная проверка защищает экспорт приватных ключей.">Текущий пароль VPS Hub<input name="password" type="password" autocomplete="current-password" required></label>
+            <label title="Этим паролем шифруется файл. Он нигде не сохраняется; без него восстановление невозможно.">Пароль файла, минимум 12 байт<input name="passphrase" type="password" autocomplete="new-password" minlength="12" required></label>
+            <label>Повторите пароль файла<input name="passphrase_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
+            <button>Создать и скачать .gvpn-vps</button>
+          </form>
+        </article>
+        <article class="card">
+          <h2>Восстановить настройки VPS</h2>
+          <p class="warning">Сначала файл полностью проверяется. Текущие настройки не меняются до отдельного подтверждения.</p>
+          <form id="restore-form">
+            <label title="Можно выбрать только резервную копию VPS Hub.">Файл .gvpn-vps<input name="backup" type="file" accept=".gvpn-vps" required></label>
+            <label>Пароль файла<input name="passphrase" type="password" required></label>
+            <button>Проверить файл</button>
+          </form>
+          <div id="restore-preview"></div>
+        </article>
+      </section>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -406,6 +406,7 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 	releaseRoot := t.TempDir()
 	for relative, content := range map[string][]byte{
 		"bin/gateway-vpnctl":                                                []byte("synthetic VPS controller"),
+		"bin/gateway-vpn-vps-agent":                                         []byte("synthetic VPS Agent"),
 		"scripts/install-vps.sh":                                            []byte("#!/usr/bin/env bash\nexit 0\n"),
 		"scripts/uninstall-vps.sh":                                          []byte("#!/usr/bin/env bash\nexit 0\n"),
 		"scripts/recover-vps-install.sh":                                    []byte("#!/usr/bin/env bash\nexit 0\n"),
@@ -413,6 +414,11 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 		"packaging/vps/sysctl.d/90-gateway-vpn-vps.conf":                    []byte("net.ipv4.ip_forward=1\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-firewall.service":            []byte("[Service]\nType=oneshot\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-install-recovery.service":    []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-agent.service":               []byte("[Service]\nType=simple\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-restore.service":             []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-restore.path":                []byte("[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/restore.trigger\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service":    []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/config/config.yaml":                                  []byte("version: 1\n"),
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": []byte("[Unit]\nAfter=gateway-vpn-vps-firewall.service\n"),
 		"manifest.sha256":                                                   []byte(strings.Repeat("0", 64) + "  placeholder\n"),
 		"share/supply-chain/sbom.spdx.json":                                 []byte("{}\n"),

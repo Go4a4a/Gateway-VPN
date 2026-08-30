@@ -14,7 +14,7 @@ while (($#)); do
   esac
 done
 if ((APPLY == 0)); then
-  echo "Would stop Gateway VPN VPS services and remove only owned nftables/program/sysctl/unit files. WireGuard keys are preserved unless --purge-keys is supplied."
+  echo "Would stop Gateway VPN VPS services and remove only owned nftables/program/sysctl/unit files. VPS Hub settings, backups, administrator, TLS identity, and WireGuard keys are preserved unless --purge-keys is supplied."
   exit 0
 fi
 [[ $EUID -eq 0 ]] || { echo "VPS uninstall requires root" >&2; exit 1; }
@@ -27,8 +27,13 @@ fi
 exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN VPS install/recovery/uninstall transaction is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-vps/install-transactions/active && ! -L /var/lib/gateway-vpn-vps/install-transactions/active ]] || { echo "Recover the interrupted VPS install before uninstall" >&2; exit 1; }
+[[ ! -e /var/lib/gateway-vpn-vps/agent/restore.trigger && ! -L /var/lib/gateway-vpn-vps/agent/restore.trigger ]] || { echo "Finish or discard the pending VPS restore before uninstall" >&2; exit 1; }
+if [[ -d /var/lib/gateway-vpn-vps-privileged/restore-transactions ]] && find /var/lib/gateway-vpn-vps-privileged/restore-transactions -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
+  echo "Recover the interrupted VPS restore before uninstall" >&2
+  exit 1
+fi
 
-systemctl disable --now wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-restore-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
 if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
   /usr/sbin/nft delete table inet gateway_vpn_vps
 fi
@@ -47,17 +52,28 @@ fi
 
 rm -f /etc/sysctl.d/90-gateway-vpn-vps.conf
 rm -f /etc/systemd/system/gateway-vpn-vps-firewall.service
+rm -f /etc/systemd/system/gateway-vpn-vps-agent.service
+rm -f /etc/systemd/system/gateway-vpn-vps-restore.service
+rm -f /etc/systemd/system/gateway-vpn-vps-restore.path
+rm -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service
 rm -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d
 rm -rf /etc/gateway-vpn-vps
 rm -rf /opt/gateway-vpn-vps
 rm -f /usr/libexec/gateway-vpn-vps-install-recovery
 rm -f /run/gateway-vpn-vps-install-authorized
+rm -rf /var/lib/gateway-vpn-vps-privileged
 if ((PURGE_KEYS)); then
   rm -f /etc/wireguard/wg-mgmt.conf
   rm -rf /var/lib/gateway-vpn-vps
-  echo "Gateway VPN VPS uninstalled; WireGuard private key and installation report were purged."
+  if getent passwd gateway-vpn-vps >/dev/null; then
+    userdel gateway-vpn-vps
+  fi
+  if getent group gateway-vpn-vps >/dev/null; then
+    groupdel gateway-vpn-vps
+  fi
+  echo "Gateway VPN VPS uninstalled; VPS Hub settings, backups, administrator, TLS identity, and WireGuard keys were purged."
 else
-  echo "Gateway VPN VPS uninstalled; /etc/wireguard/wg-mgmt.conf and /var/lib/gateway-vpn-vps are preserved."
+  echo "Gateway VPN VPS uninstalled; VPS Hub settings/backups/account and /etc/wireguard/wg-mgmt.conf are preserved for reinstall."
 fi
 systemctl daemon-reload

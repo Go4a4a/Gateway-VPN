@@ -43,6 +43,7 @@ const (
 
 var (
 	portableMagic       = [16]byte{'G', 'A', 'T', 'E', 'W', 'A', 'Y', '-', 'V', 'P', 'N', '-', 'B', 'K', 'P', '1'}
+	portableVPSMagic    = [16]byte{'G', 'A', 'T', 'E', 'W', 'A', 'Y', '-', 'V', 'P', 'N', '-', 'V', 'P', 'S', '1'}
 	portableNamePattern = regexp.MustCompile(`^gateway-vpn-backup-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{24}\.gvpn$`)
 )
 
@@ -89,6 +90,7 @@ type portableSource struct {
 
 type encryptionHeader struct {
 	FormatVersion  int    `json:"format_version"`
+	Role           string `json:"role,omitempty"`
 	PayloadFormat  string `json:"payload_format"`
 	Cipher         string `json:"cipher"`
 	ChunkBytes     int    `json:"chunk_bytes"`
@@ -379,8 +381,22 @@ type chunkEncryptWriter struct {
 }
 
 func newChunkEncryptWriter(destination io.Writer, passphrase string) (*chunkEncryptWriter, error) {
+	return newRoleChunkEncryptWriter(destination, passphrase, portableMagic, "gateway")
+}
+
+// NewVPSArchiveEncryptWriter creates the same bounded authenticated stream as
+// Gateway backups, but with a distinct magic and authenticated VPS role. The
+// returned writer must be closed to emit the mandatory final record.
+func NewVPSArchiveEncryptWriter(destination io.Writer, passphrase string) (io.WriteCloser, error) {
+	return newRoleChunkEncryptWriter(destination, passphrase, portableVPSMagic, "vps")
+}
+
+func newRoleChunkEncryptWriter(destination io.Writer, passphrase string, magic [16]byte, role string) (*chunkEncryptWriter, error) {
 	if err := ValidatePassphrase(passphrase); err != nil {
 		return nil, err
+	}
+	if destination == nil || role != "gateway" && role != "vps" {
+		return nil, errors.New("valid role backup destination is required")
 	}
 	salt, noncePrefix := make([]byte, 16), make([]byte, 8)
 	if _, err := rand.Read(salt); err != nil {
@@ -400,7 +416,7 @@ func newChunkEncryptWriter(destination io.Writer, passphrase string) (*chunkEncr
 		return nil, errors.New("initialize backup authentication failed")
 	}
 	header := encryptionHeader{
-		FormatVersion: PortableFormatVersion, PayloadFormat: "zip", Cipher: "AES-256-GCM-CHUNKED", ChunkBytes: portableChunkBytes,
+		FormatVersion: PortableFormatVersion, Role: role, PayloadFormat: "zip", Cipher: "AES-256-GCM-CHUNKED", ChunkBytes: portableChunkBytes,
 		KDF: "argon2id", KDFMemoryKiB: portableKDFMemoryKiB, KDFIterations: portableKDFIterations, KDFParallelism: portableKDFParallelism,
 		Salt: base64.RawStdEncoding.EncodeToString(salt), NoncePrefix: base64.RawStdEncoding.EncodeToString(noncePrefix),
 	}
@@ -408,8 +424,8 @@ func newChunkEncryptWriter(destination io.Writer, passphrase string) (*chunkEncr
 	if err != nil || len(headerContent) > portableHeaderMaximum {
 		return nil, errors.New("encode backup encryption header failed")
 	}
-	prefix := make([]byte, 0, len(portableMagic)+4+len(headerContent))
-	prefix = append(prefix, portableMagic[:]...)
+	prefix := make([]byte, 0, len(magic)+4+len(headerContent))
+	prefix = append(prefix, magic[:]...)
 	length := make([]byte, 4)
 	binary.BigEndian.PutUint32(length, uint32(len(headerContent)))
 	prefix = append(prefix, length...)
@@ -427,11 +443,24 @@ func newChunkEncryptWriter(destination io.Writer, passphrase string) (*chunkEncr
 // It intentionally reports one generic error for a wrong passphrase or a
 // modified/truncated artifact.
 func DecryptToZIP(ctx context.Context, encryptedPath, destinationPath, passphrase string) (int64, error) {
+	return decryptRoleToZIP(ctx, encryptedPath, destinationPath, passphrase, portableMagic, "gateway")
+}
+
+// DecryptVPSBackupToZIP accepts only the separately authenticated VPS role.
+// A Gateway .gvpn file fails before any plaintext archive is committed.
+func DecryptVPSBackupToZIP(ctx context.Context, encryptedPath, destinationPath, passphrase string) (int64, error) {
+	return decryptRoleToZIP(ctx, encryptedPath, destinationPath, passphrase, portableVPSMagic, "vps")
+}
+
+func decryptRoleToZIP(ctx context.Context, encryptedPath, destinationPath, passphrase string, magic [16]byte, expectedRole string) (int64, error) {
 	if err := ValidatePassphrase(passphrase); err != nil {
 		return 0, err
 	}
+	if expectedRole != "gateway" && expectedRole != "vps" {
+		return 0, errors.New("backup role is invalid")
+	}
 	info, err := os.Lstat(encryptedPath)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= int64(len(portableMagic)+4) || info.Size() > MaximumPortableBackupBytes {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= int64(len(magic)+4) || info.Size() > MaximumPortableBackupBytes {
 		return 0, errors.New("encrypted backup artifact is invalid")
 	}
 	source, err := os.Open(encryptedPath)
@@ -439,11 +468,11 @@ func DecryptToZIP(ctx context.Context, encryptedPath, destinationPath, passphras
 		return 0, errors.New("open encrypted backup artifact failed")
 	}
 	defer source.Close()
-	prefix := make([]byte, len(portableMagic)+4)
-	if _, err := io.ReadFull(source, prefix); err != nil || string(prefix[:len(portableMagic)]) != string(portableMagic[:]) {
+	prefix := make([]byte, len(magic)+4)
+	if _, err := io.ReadFull(source, prefix); err != nil || string(prefix[:len(magic)]) != string(magic[:]) {
 		return 0, errors.New("backup passphrase or artifact is invalid")
 	}
-	headerLength := binary.BigEndian.Uint32(prefix[len(portableMagic):])
+	headerLength := binary.BigEndian.Uint32(prefix[len(magic):])
 	if headerLength == 0 || headerLength > portableHeaderMaximum {
 		return 0, errors.New("backup passphrase or artifact is invalid")
 	}
@@ -452,7 +481,11 @@ func DecryptToZIP(ctx context.Context, encryptedPath, destinationPath, passphras
 		return 0, errors.New("backup passphrase or artifact is invalid")
 	}
 	var header encryptionHeader
-	if err := decodeStrictJSON(headerContent, &header); err != nil || header.FormatVersion != PortableFormatVersion || header.PayloadFormat != "zip" || header.Cipher != "AES-256-GCM-CHUNKED" || header.ChunkBytes != portableChunkBytes || header.KDF != "argon2id" || header.KDFMemoryKiB != portableKDFMemoryKiB || header.KDFIterations != portableKDFIterations || header.KDFParallelism != portableKDFParallelism {
+	if err := decodeStrictJSON(headerContent, &header); err != nil {
+		return 0, errors.New("backup passphrase or artifact is invalid")
+	}
+	legacyGateway := expectedRole == "gateway" && header.Role == ""
+	if header.FormatVersion != PortableFormatVersion || !legacyGateway && header.Role != expectedRole || header.PayloadFormat != "zip" || header.Cipher != "AES-256-GCM-CHUNKED" || header.ChunkBytes != portableChunkBytes || header.KDF != "argon2id" || header.KDFMemoryKiB != portableKDFMemoryKiB || header.KDFIterations != portableKDFIterations || header.KDFParallelism != portableKDFParallelism {
 		return 0, errors.New("backup passphrase or artifact is invalid")
 	}
 	salt, saltErr := base64.RawStdEncoding.DecodeString(header.Salt)

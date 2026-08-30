@@ -85,6 +85,7 @@ func writeValidVPSRelease(t *testing.T) string {
 	root := t.TempDir()
 	files := map[string]string{
 		"bin/gateway-vpnctl":                                                "controller\n",
+		"bin/gateway-vpn-vps-agent":                                         "agent\n",
 		"scripts/install-vps.sh":                                            "#!/usr/bin/env bash\nexit 0\n",
 		"scripts/uninstall-vps.sh":                                          "#!/usr/bin/env bash\nexit 0\n",
 		"scripts/recover-vps-install.sh":                                    "#!/usr/bin/env bash\nexit 0\n",
@@ -92,6 +93,11 @@ func writeValidVPSRelease(t *testing.T) string {
 		"packaging/vps/sysctl.d/90-gateway-vpn-vps.conf":                    "net.ipv4.ip_forward=1\n",
 		"packaging/vps/systemd/gateway-vpn-vps-firewall.service":            "[Service]\nType=oneshot\n",
 		"packaging/vps/systemd/gateway-vpn-vps-install-recovery.service":    "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-agent.service":               "[Service]\nType=simple\n",
+		"packaging/vps/systemd/gateway-vpn-vps-restore.service":             "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-restore.path":                "[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/restore.trigger\n",
+		"packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service":    "[Service]\nType=oneshot\n",
+		"packaging/vps/config/config.yaml":                                  "version: 1\n",
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": "[Unit]\nAfter=gateway-vpn-vps-firewall.service\n",
 		LegacyHashFilename:                                                  strings.Repeat("0", 64) + "  placeholder\n",
 		"share/supply-chain/sbom.spdx.json":                                 "{}\n",

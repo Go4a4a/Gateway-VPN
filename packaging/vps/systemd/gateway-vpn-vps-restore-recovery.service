@@ -1,0 +1,41 @@
+[Unit]
+Description=Recover interrupted Gateway VPN VPS restore before Agent startup
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target
+Before=network.target gateway-vpn-vps-agent.service
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent restore-recover --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+ReadOnlyPaths=/etc/gateway-vpn-vps/config.yaml /opt/gateway-vpn-vps/current
+ReadWritePaths=/etc/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+[Unit]
+Description=Apply one explicitly authorized Gateway VPN VPS restore
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+After=gateway-vpn-vps-agent.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/usr/bin/systemctl stop gateway-vpn-vps-agent.service
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent restore-apply --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+ExecStartPost=/usr/bin/systemctl restart wg-quick@wg-mgmt.service
+ExecStopPost=/usr/bin/rm -f /var/lib/gateway-vpn-vps/agent/restore.trigger
+ExecStopPost=/usr/bin/systemctl start --no-block gateway-vpn-vps-agent.service
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+ReadOnlyPaths=/etc/gateway-vpn-vps/config.yaml /opt/gateway-vpn-vps/current
+ReadWritePaths=/etc/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd
+SystemCallArchitectures=native

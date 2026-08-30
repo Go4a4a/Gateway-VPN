@@ -1,0 +1,13 @@
+version: 1
+system:
+  state_directory: /var/lib/gateway-vpn-vps/agent
+  database: /var/lib/gateway-vpn-vps/agent/vps-agent.db
+  transaction_root: /var/lib/gateway-vpn-vps-privileged/restore-transactions
+listen:
+  - 127.0.0.1:9443
+  - 10.80.0.1:9443
+admin_prefixes:
+  - 10.80.0.0/24
+tls:
+  certificate: /var/lib/gateway-vpn-vps/agent/tls/cert.pem
+  private_key: /var/lib/gateway-vpn-vps/agent/tls/key.pem

@@ -1,0 +1,46 @@
+[Unit]
+Description=Gateway VPN restricted VPS Hub Agent
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+After=network-online.target gateway-vpn-vps-install-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-restore-recovery.service
+Wants=network-online.target
+Requires=wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-restore-recovery.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=simple
+User=gateway-vpn-vps
+Group=gateway-vpn-vps
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent serve --config /etc/gateway-vpn-vps/config.yaml
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/gateway-vpn-vps/config.yaml
+ReadWritePaths=/var/lib/gateway-vpn-vps/agent
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

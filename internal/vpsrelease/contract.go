@@ -203,6 +203,7 @@ func validateRequiredFiles(files []FileRecord) error {
 		executable bool
 	}{
 		{"bin/gateway-vpnctl", true},
+		{"bin/gateway-vpn-vps-agent", true},
 		{"scripts/install-vps.sh", true},
 		{"scripts/uninstall-vps.sh", true},
 		{"scripts/recover-vps-install.sh", true},
@@ -210,6 +211,11 @@ func validateRequiredFiles(files []FileRecord) error {
 		{"packaging/vps/sysctl.d/90-gateway-vpn-vps.conf", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-firewall.service", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-install-recovery.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-agent.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-restore.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-restore.path", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service", false},
+		{"packaging/vps/config/config.yaml", false},
 		{"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf", false},
 		{ReleaseFilename, false},
 		{LegacyHashFilename, false},

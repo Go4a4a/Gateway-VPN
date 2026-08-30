@@ -613,6 +613,9 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		"validate_preserved_wg_config", "PRESERVED_WG_CONFIG", "preserve_wg_config=%s", ".gateway-vpn-wg-mgmt.conf.tmp",
 		"/run/lock/gateway-vpn-vps-install.lock", "set -o noclobber", "0:0:600", "flock -n 9", "flock -u 9",
 		"ip -4 route get 10.80.0.2", "ip -4 route get 10.80.0.10", "INSTALLED_NOT_READY",
+		"--hub-admin-password-file", "--check-password-file", "preserve_agent_user=%s", "$AGENT_STATE/vps-agent.db",
+		"gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-restore-recovery.service",
+		"identity-init", "init-admin", "systemctl is-active --quiet gateway-vpn-vps-agent.service", "127.0.0.1:9443", "10.80.0.1:9443",
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("VPS installer missing %q", required)
@@ -633,7 +636,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		}
 	}
 	firewall := read(t, filepath.Join(root, "packaging", "vps", "nftables", "gateway-vpn-vps.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn_vps", "iifname \"wg-mgmt\"", "ip saddr 10.80.0.10", "ip daddr 10.80.0.2", "reject with icmpx type admin-prohibited"} {
+	for _, required := range []string{"table inet gateway_vpn_vps", "iifname \"wg-mgmt\"", "ip saddr 10.80.0.10", "ip daddr 10.80.0.2", "ip daddr 10.80.0.1", "tcp dport 9443", "VPS Hub administrator access", "deny VPS Hub to non-admin peers", "reject with icmpx type admin-prohibited"} {
 		if !strings.Contains(firewall, required) {
 			t.Errorf("VPS firewall missing %q", required)
 		}
@@ -643,6 +646,9 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 	}
 	for _, unitPath := range []string{
 		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-firewall.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-agent.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-restore-recovery.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-restore.path"),
 		filepath.Join(root, "packaging", "vps", "systemd", "wg-quick@wg-mgmt.service.d", "gateway-vpn.conf"),
 	} {
 		unit := read(t, unitPath)
@@ -651,7 +657,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-vps-install.sh"))
-	for _, required := range []string{"nft delete table inet gateway_vpn_vps", "old_ipv4_forward", "preserve_wg_config", "PRESERVE_WG_CONFIG", "active marker retained for retry", ".gateway-vpn-wg-mgmt.conf.tmp", "install-report.json", "/run/lock/gateway-vpn-vps-install.lock", "flock -n 9", "marker field count is invalid", "duplicate or missing field", "wg-mgmt remained enabled", "if ((FAILED))"} {
+	for _, required := range []string{"nft delete table inet gateway_vpn_vps", "old_ipv4_forward", "preserve_wg_config", "PRESERVE_WG_CONFIG", "preserve_agent_user", "PRESERVE_AGENT_USER", "gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.path", "remove newly created VPS Agent state", "active marker retained for retry", ".gateway-vpn-wg-mgmt.conf.tmp", "install-report.json", "/run/lock/gateway-vpn-vps-install.lock", "flock -n 9", "marker field count is invalid", "duplicate or missing field", "wg-mgmt remained enabled", "if ((FAILED))"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("VPS recovery missing %q", required)
 		}
@@ -660,7 +666,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		t.Fatal("VPS first-install recovery does not restore only owned state")
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall-vps.sh"))
-	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || strings.Contains(uninstaller, "flush ruleset") {
+	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || !strings.Contains(uninstaller, "VPS Hub settings/backups/account") || !strings.Contains(uninstaller, "gateway-vpn-vps-restore.path") || strings.Contains(uninstaller, "flush ruleset") {
 		t.Fatal("VPS uninstall key-preservation or firewall ownership contract is incomplete")
 	}
 	commandGenerator := read(t, filepath.Join(root, "scripts", "generate-vps-install-command.sh"))

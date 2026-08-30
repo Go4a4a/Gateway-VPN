@@ -72,6 +72,7 @@ func TestActualGatewayAndVPSSourceTreesFitStrictSignedReleaseContracts(t *testin
 			copyFile(t, filepath.Join(repository, "scripts", script), filepath.Join(root, "scripts", script), 0o755)
 		}
 		writeSignedTreeFile(t, root, "bin/gateway-vpnctl", "controller binary\n", 0o755)
+		writeSignedTreeFile(t, root, "bin/gateway-vpn-vps-agent", "VPS Agent binary\n", 0o755)
 		writeSignedTreeFile(t, root, "manifest.sha256", strings.Repeat("0", 64)+"  placeholder\n", 0o644)
 		writeSignedTreeFile(t, root, "share/supply-chain/sbom.spdx.json", "{}\n", 0o644)
 		writeSignedTreeFile(t, root, "share/supply-chain/provenance.intoto.json", "{}\n", 0o644)

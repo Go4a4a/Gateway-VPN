@@ -1,4 +1,11 @@
 table inet gateway_vpn_vps {
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        iifname "wg-mgmt" ip saddr 10.80.0.10 ip daddr 10.80.0.1 ct state new tcp dport 9443 counter accept comment "gateway-vpn VPS Hub administrator access"
+        iifname "wg-mgmt" ip daddr 10.80.0.1 tcp dport 9443 counter reject with icmpx type admin-prohibited comment "gateway-vpn deny VPS Hub to non-admin peers"
+    }
+
     chain forward {
         type filter hook forward priority filter; policy accept;
 

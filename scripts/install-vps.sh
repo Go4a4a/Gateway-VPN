@@ -15,9 +15,10 @@ RELEASE_VERSION=""
 PUBLIC_ENDPOINT=""
 GATEWAY_PUBLIC_KEY=""
 ADMIN_PUBLIC_KEY=""
+HUB_ADMIN_PASSWORD_FILE=""
 
 usage() {
-  echo "Usage: install-vps.sh --release-dir DIR --trusted-update-key FILE --version VERSION --public-endpoint HOST:51821 --gateway-public-key KEY --admin-public-key KEY [--install-dependencies] [--allow-gateway-ssh] [--apply]"
+  echo "Usage: install-vps.sh --release-dir DIR --trusted-update-key FILE --version VERSION --public-endpoint HOST:51821 --gateway-public-key KEY --admin-public-key KEY [--hub-admin-password-file FILE] [--install-dependencies] [--allow-gateway-ssh] [--apply]"
   echo "Without --apply the installer performs a read-only signed-release, host, and dependency-plan preflight."
 }
 
@@ -29,6 +30,7 @@ while (($#)); do
     --public-endpoint) PUBLIC_ENDPOINT=${2:?}; shift 2 ;;
     --gateway-public-key) GATEWAY_PUBLIC_KEY=${2:?}; shift 2 ;;
     --admin-public-key) ADMIN_PUBLIC_KEY=${2:?}; shift 2 ;;
+    --hub-admin-password-file) HUB_ADMIN_PASSWORD_FILE=${2:?}; shift 2 ;;
     --install-dependencies) INSTALL_DEPENDENCIES=1; shift ;;
     --dependency-preflight-only) DEPENDENCY_PREFLIGHT_ONLY=1; shift ;;
     --allow-gateway-ssh) ALLOW_GATEWAY_SSH=1; shift ;;
@@ -58,7 +60,7 @@ validate_wg_public_key "$ADMIN_PUBLIC_KEY" || { echo "Admin WireGuard public key
 RELEASE_DIR=$(realpath -- "$RELEASE_DIR")
 TRUSTED_UPDATE_KEY=$(realpath -- "$TRUSTED_UPDATE_KEY")
 [[ -f "$TRUSTED_UPDATE_KEY" && ! -L "$TRUSTED_UPDATE_KEY" ]] || { echo "Trusted VPS update public key must be a regular non-symlink file" >&2; exit 1; }
-[[ -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/scripts/install-vps.sh" && -x "$RELEASE_DIR/scripts/uninstall-vps.sh" && -x "$RELEASE_DIR/scripts/recover-vps-install.sh" ]] || { echo "VPS release executables are incomplete" >&2; exit 1; }
+[[ -x "$RELEASE_DIR/bin/gateway-vpnctl" && -x "$RELEASE_DIR/bin/gateway-vpn-vps-agent" && -x "$RELEASE_DIR/scripts/install-vps.sh" && -x "$RELEASE_DIR/scripts/uninstall-vps.sh" && -x "$RELEASE_DIR/scripts/recover-vps-install.sh" ]] || { echo "VPS release executables are incomplete" >&2; exit 1; }
 [[ -f "$RELEASE_DIR/manifest.sha256" && -f "$RELEASE_DIR/manifest.json" && -f "$RELEASE_DIR/release.sig" && -f "$RELEASE_DIR/release.json" ]] || { echo "Signed VPS release metadata is incomplete" >&2; exit 1; }
 (cd -- "$RELEASE_DIR" && sha256sum --check --strict manifest.sha256)
 
@@ -69,8 +71,13 @@ case "${ID:-}:${VERSION_ID:-}" in
 esac
 [[ $(uname -m) == x86_64 ]] || { echo "Gateway VPN VPS release requires x86_64" >&2; exit 1; }
 "$RELEASE_DIR/bin/gateway-vpnctl" vps-release-verify --release-dir "$RELEASE_DIR" --public-key "$TRUSTED_UPDATE_KEY" --release-version "$RELEASE_VERSION" --profile "$PROFILE"
+if [[ -n "$HUB_ADMIN_PASSWORD_FILE" ]]; then
+  [[ -f "$HUB_ADMIN_PASSWORD_FILE" && ! -L "$HUB_ADMIN_PASSWORD_FILE" ]] || { echo "VPS Hub password file must be a regular non-symlink file" >&2; exit 1; }
+  HUB_ADMIN_PASSWORD_FILE=$(realpath -- "$HUB_ADMIN_PASSWORD_FILE")
+  "$RELEASE_DIR/bin/gateway-vpn-vps-agent" --check-password-file "$HUB_ADMIN_PASSWORD_FILE"
+fi
 
-for command in systemctl base64 sha256sum realpath sed awk grep getent timedatectl apt-get dpkg-query find sort sync date df wc cat readlink install mktemp mv rm stat uname flock; do
+for command in systemctl base64 sha256sum realpath sed awk grep getent timedatectl apt-get dpkg-query find sort sync date df wc cat readlink install mktemp mv rm stat uname flock groupadd groupdel useradd userdel chown chmod openssl ss hostname id; do
   command -v "$command" >/dev/null || { echo "Missing base VPS prerequisite command: $command" >&2; exit 1; }
 done
 [[ -d /run/lock && ! -L /run/lock && $(stat -c '%u' /run/lock) == 0 ]] || { echo "VPS runtime lock directory is unavailable" >&2; exit 1; }
@@ -144,7 +151,7 @@ if [[ "$PROFILE" == ubuntu-20.04 ]]; then
   validate_ubuntu_20_maintenance
 fi
 
-REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps python3-minimal)
+REQUIRED_PACKAGES=(iproute2 nftables wireguard-tools kmod procps python3-minimal openssl passwd)
 MISSING_PACKAGES=()
 for package in "${REQUIRED_PACKAGES[@]}"; do
   status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)
@@ -153,9 +160,10 @@ done
 
 APT_PLAN_FILE=""
 PREFLIGHT_RULESET=""
+HUB_ADMIN_PASSWORD_TEMP=""
 cleanup_temp_files() {
   local filename
-  for filename in "${APT_PLAN_FILE:-}" "${PREFLIGHT_RULESET:-}"; do
+  for filename in "${APT_PLAN_FILE:-}" "${PREFLIGHT_RULESET:-}" "${HUB_ADMIN_PASSWORD_TEMP:-}"; do
     [[ -z "$filename" ]] || rm -f -- "$filename"
   done
 }
@@ -311,13 +319,39 @@ if len(private_key) != 32 or base64.b64encode(private_key).decode("ascii") != to
 PY
 }
 
+AGENT_USER=gateway-vpn-vps
+AGENT_STATE=/var/lib/gateway-vpn-vps/agent
+PRESERVE_AGENT_USER=0
+if getent passwd "$AGENT_USER" >/dev/null; then
+  AGENT_PASSWD=$(getent passwd "$AGENT_USER")
+  [[ $(printf '%s\n' "$AGENT_PASSWD" | awk -F: '{print NF ":" $1 ":" $6 ":" $7}') == "7:gateway-vpn-vps:/nonexistent:/usr/sbin/nologin" ]] || { echo "Existing VPS Agent account has an incompatible login contract" >&2; exit 1; }
+  getent group "$AGENT_USER" >/dev/null || { echo "Existing VPS Agent account has no matching group" >&2; exit 1; }
+  AGENT_USER_GID=$(printf '%s\n' "$AGENT_PASSWD" | awk -F: '{print $4}')
+  AGENT_GROUP_GID=$(getent group "$AGENT_USER" | awk -F: '{print $3}')
+  [[ "$AGENT_USER_GID" == "$AGENT_GROUP_GID" && $(id -gn "$AGENT_USER") == "$AGENT_USER" ]] || { echo "Existing VPS Agent account does not use its dedicated primary group" >&2; exit 1; }
+  [[ -d "$AGENT_STATE" && ! -L "$AGENT_STATE" ]] || { echo "Existing VPS Agent account without preserved Agent state is a conflict" >&2; exit 1; }
+  [[ -d /var/lib/gateway-vpn-vps && ! -L /var/lib/gateway-vpn-vps && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-vps) == "root:gateway-vpn-vps:710" ]] || { echo "Preserved VPS state-root ownership or mode is unsafe" >&2; exit 1; }
+  [[ $(stat -c '%U:%G:%a' "$AGENT_STATE") == "gateway-vpn-vps:gateway-vpn-vps:700" ]] || { echo "Preserved VPS Agent state ownership or mode is unsafe" >&2; exit 1; }
+  for preserved_agent_file in "$AGENT_STATE/vps-agent.db" "$AGENT_STATE/secrets/wireguard/server.key" "$AGENT_STATE/secrets/update/identity.key" "$AGENT_STATE/tls/cert.pem" "$AGENT_STATE/tls/key.pem"; do
+    [[ -f "$preserved_agent_file" && ! -L "$preserved_agent_file" && $(stat -c '%U:%G:%a' "$preserved_agent_file") == "gateway-vpn-vps:gateway-vpn-vps:600" ]] || { echo "Preserved VPS Agent file is missing or unsafe: $preserved_agent_file" >&2; exit 1; }
+  done
+  PRESERVE_AGENT_USER=1
+elif getent group "$AGENT_USER" >/dev/null; then
+  echo "Existing gateway-vpn-vps group without its service user is a conflict" >&2
+  exit 1
+elif [[ -e "$AGENT_STATE" || -L "$AGENT_STATE" ]]; then
+  echo "Preserved VPS Agent state without its dedicated service account is a conflict" >&2
+  exit 1
+fi
+
 DEST="/opt/gateway-vpn-vps/releases/v$RELEASE_VERSION"
 EXISTING=0
 PRESERVED_WG_CONFIG=0
-if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
-  [[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
+if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/gateway-vpn-vps-agent.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
+  [[ $PRESERVE_AGENT_USER == 1 && -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/gateway-vpn-vps/config.yaml && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/gateway-vpn-vps-agent.service && -f /etc/systemd/system/gateway-vpn-vps-restore.service && -f /etc/systemd/system/gateway-vpn-vps-restore.path && -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f "$AGENT_STATE/vps-agent.db" && -f "$AGENT_STATE/tls/cert.pem" && -f "$AGENT_STATE/tls/key.pem" && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
   "$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$RELEASE_VERSION" --profile "$PROFILE"
   validate_preserved_wg_config /etc/wireguard/wg-mgmt.conf
+  "$DEST/bin/gateway-vpn-vps-agent" --check-config /etc/gateway-vpn-vps/config.yaml
   EXISTING=1
 elif [[ -e /etc/wireguard/wg-mgmt.conf || -L /etc/wireguard/wg-mgmt.conf ]]; then
   validate_preserved_wg_config /etc/wireguard/wg-mgmt.conf
@@ -326,7 +360,7 @@ elif [[ -e /etc/wireguard/wg-mgmt.conf || -L /etc/wireguard/wg-mgmt.conf ]]; the
 fi
 
 if ((EXISTING == 0)); then
-  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new; do
+  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-agent.service /etc/systemd/system/gateway-vpn-vps-restore.service /etc/systemd/system/gateway-vpn-vps-restore.path /etc/systemd/system/gateway-vpn-vps-restore-recovery.service /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting VPS managed path exists: $conflict" >&2; exit 1; }
   done
   if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
@@ -345,6 +379,10 @@ if ((EXISTING == 0)); then
     echo "UDP port 51821 is already in use" >&2
     exit 1
   fi
+  if ss -H -ltn 'sport = :9443' | grep -q .; then
+    echo "TCP port 9443 is already in use" >&2
+    exit 1
+  fi
 fi
 
 PORTS=8443
@@ -352,14 +390,20 @@ PORTS=8443
 if ((EXISTING)); then
   grep -Fq "\"public_endpoint\": \"$PUBLIC_ENDPOINT\"" /var/lib/gateway-vpn-vps/install-report.json || { echo "Existing VPS public endpoint differs; explicit reconfiguration is required" >&2; exit 1; }
   grep -Fq "tcp dport { $PORTS }" /etc/gateway-vpn-vps/firewall.nft || { echo "Existing VPS management-port policy differs; explicit reconfiguration is required" >&2; exit 1; }
+  grep -Fq 'ip saddr 10.80.0.10 ip daddr 10.80.0.1 ct state new tcp dport 9443' /etc/gateway-vpn-vps/firewall.nft || { echo "Existing VPS Hub firewall policy differs; explicit reconfiguration is required" >&2; exit 1; }
 fi
 PREFLIGHT_RULESET=$(mktemp)
 sed "s|__GATEWAY_TCP_PORTS__|$PORTS|g" "$ROOT_DIR/packaging/vps/nftables/gateway-vpn-vps.nft.in" >"$PREFLIGHT_RULESET"
 nft --check --file "$PREFLIGHT_RULESET"
-if ((EXISTING)); then
+if ((EXISTING || PRESERVED_WG_CONFIG)); then
   VPS_PRIVATE_KEY=$(awk '/^PrivateKey = / {print $3}' /etc/wireguard/wg-mgmt.conf)
   VPS_PUBLIC_KEY=$(printf '%s' "$VPS_PRIVATE_KEY" | wg pubkey)
   unset VPS_PRIVATE_KEY
+fi
+if ((PRESERVE_AGENT_USER)); then
+  AGENT_CHECK_CONFIG="$RELEASE_DIR/packaging/vps/config/config.yaml"
+  ((EXISTING == 0)) || AGENT_CHECK_CONFIG=/etc/gateway-vpn-vps/config.yaml
+  "$RELEASE_DIR/bin/gateway-vpn-vps-agent" state-check --config "$AGENT_CHECK_CONFIG" --expected-public-key "$VPS_PUBLIC_KEY"
 fi
 
 echo "Validated VPS profile $PROFILE release $RELEASE_VERSION"
@@ -367,6 +411,7 @@ echo "Public endpoint: $PUBLIC_ENDPOINT"
 echo "WireGuard: wg-mgmt / 10.80.0.1/24 / UDP 51821"
 echo "Gateway peer: 10.80.0.2/32; admin peer: 10.80.0.10/32"
 echo "Gateway TCP forwarding ports: $PORTS"
+echo "VPS Hub WebUI: https://10.80.0.1:9443 through administrator WireGuard, plus localhost:9443"
 if ((EXISTING)); then
   if systemctl is-enabled --quiet gateway-vpn-vps-install-recovery.service; then
     echo "Completed VPS install unexpectedly has first-install recovery enabled" >&2
@@ -374,6 +419,11 @@ if ((EXISTING)); then
   fi
   systemctl is-active --quiet gateway-vpn-vps-firewall.service
   systemctl is-active --quiet wg-quick@wg-mgmt.service
+  systemctl is-active --quiet gateway-vpn-vps-agent.service
+  systemctl is-active --quiet gateway-vpn-vps-restore.path
+  systemctl is-enabled --quiet gateway-vpn-vps-agent.service
+  systemctl is-enabled --quiet gateway-vpn-vps-restore.path
+  systemctl is-enabled --quiet gateway-vpn-vps-restore-recovery.service
   [[ $(wg show wg-mgmt listen-port) == 51821 ]]
   [[ $(wg show wg-mgmt public-key) == "$VPS_PUBLIC_KEY" ]]
   [[ $(wg show wg-mgmt peers | wc -l) == 2 ]]
@@ -389,12 +439,39 @@ END { exit !(rows == 2 && gateway_ok == 1 && admin_ok == 1) }
   ip -4 route get 10.80.0.2 | grep -Eq 'dev wg-mgmt'
   ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
   nft list table inet gateway_vpn_vps >/dev/null
+  ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
+  ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
   echo "Gateway VPN VPS $RELEASE_VERSION is already installed with the requested immutable release and peers."
   exit 0
 fi
 if ((APPLY == 0)); then
   echo "VPS dry-run complete. Re-run with --apply to install."
   exit 0
+fi
+
+if ((PRESERVE_AGENT_USER)); then
+  [[ -z "$HUB_ADMIN_PASSWORD_FILE" ]] || { echo "A preserved VPS Hub already has an administrator; do not provide a bootstrap password" >&2; exit 1; }
+  echo "Validated preserved VPS Hub identity, settings, and administrator state"
+elif [[ -n "$HUB_ADMIN_PASSWORD_FILE" ]]; then
+  HUB_ADMIN_PASSWORD_FILE=$(realpath -- "$HUB_ADMIN_PASSWORD_FILE")
+  [[ -f "$HUB_ADMIN_PASSWORD_FILE" && ! -L "$HUB_ADMIN_PASSWORD_FILE" ]] || { echo "VPS Hub password file must be a regular non-symlink file" >&2; exit 1; }
+  PASSWORD_MODE=$(stat -c '%a' "$HUB_ADMIN_PASSWORD_FILE")
+  (( (8#$PASSWORD_MODE & 077) == 0 )) || { echo "VPS Hub password file must not be accessible to group or others" >&2; exit 1; }
+else
+  [[ -t 0 ]] || { echo "Non-interactive VPS install requires --hub-admin-password-file" >&2; exit 1; }
+  read -r -s -p "New VPS Hub administrator password (minimum 12 characters): " HUB_ADMIN_PASSWORD
+  echo
+  read -r -s -p "Repeat VPS Hub administrator password: " HUB_ADMIN_PASSWORD_CONFIRMATION
+  echo
+  [[ "$HUB_ADMIN_PASSWORD" == "$HUB_ADMIN_PASSWORD_CONFIRMATION" && ${#HUB_ADMIN_PASSWORD} -ge 12 ]] || { unset HUB_ADMIN_PASSWORD HUB_ADMIN_PASSWORD_CONFIRMATION; echo "VPS Hub administrator passwords do not match or are too short" >&2; exit 1; }
+  HUB_ADMIN_PASSWORD_TEMP=$(mktemp)
+  printf '%s\n' "$HUB_ADMIN_PASSWORD" >"$HUB_ADMIN_PASSWORD_TEMP"
+  chmod 0600 "$HUB_ADMIN_PASSWORD_TEMP"
+  unset HUB_ADMIN_PASSWORD HUB_ADMIN_PASSWORD_CONFIRMATION
+  HUB_ADMIN_PASSWORD_FILE=$HUB_ADMIN_PASSWORD_TEMP
+fi
+if ((PRESERVE_AGENT_USER == 0)); then
+  "$RELEASE_DIR/bin/gateway-vpn-vps-agent" --check-password-file "$HUB_ADMIN_PASSWORD_FILE"
 fi
 
 rollback_install() {
@@ -409,7 +486,10 @@ rollback_install() {
   exit "$code"
 }
 
-install -d -m 0700 /var/lib/gateway-vpn-vps /var/lib/gateway-vpn-vps/install-transactions
+if ((PRESERVE_AGENT_USER == 0)); then
+  install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps
+fi
+install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps/install-transactions
 OLD_FORWARD=$(cat /proc/sys/net/ipv4/ip_forward)
 OLD_IPV6_ALL=$(cat /proc/sys/net/ipv6/conf/all/forwarding)
 OLD_IPV6_DEFAULT=$(cat /proc/sys/net/ipv6/conf/default/forwarding)
@@ -418,7 +498,7 @@ install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-install-reco
 systemctl daemon-reload
 systemctl enable gateway-vpn-vps-install-recovery.service
 MARKER_TMP=/var/lib/gateway-vpn-vps/install-transactions/.active.tmp
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_forwarding=%s\nold_ipv6_default_forwarding=%s\npreserve_wg_config=%s\n' "$RELEASE_VERSION" "$OLD_FORWARD" "$OLD_IPV6_ALL" "$OLD_IPV6_DEFAULT" "$PRESERVED_WG_CONFIG" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_forwarding=%s\nold_ipv6_default_forwarding=%s\npreserve_wg_config=%s\npreserve_agent_user=%s\n' "$RELEASE_VERSION" "$OLD_FORWARD" "$OLD_IPV6_ALL" "$OLD_IPV6_DEFAULT" "$PRESERVED_WG_CONFIG" "$PRESERVE_AGENT_USER" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-vps/install-transactions/active
@@ -426,6 +506,18 @@ sync
 trap 'rollback_install $?' ERR EXIT
 trap 'rollback_install 130' INT
 trap 'rollback_install 143' TERM
+
+if ((PRESERVE_AGENT_USER == 0)); then
+  groupadd --system "$AGENT_USER"
+  useradd --system --gid "$AGENT_USER" --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$AGENT_USER"
+fi
+getent passwd "$AGENT_USER" >/dev/null && getent group "$AGENT_USER" >/dev/null || { echo "VPS Agent service account creation failed" >&2; false; }
+chown root:"$AGENT_USER" /var/lib/gateway-vpn-vps
+chmod 0710 /var/lib/gateway-vpn-vps
+chown root:root /var/lib/gateway-vpn-vps/install-transactions
+chmod 0700 /var/lib/gateway-vpn-vps/install-transactions
+install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$AGENT_STATE" "$AGENT_STATE/backups" "$AGENT_STATE/secrets" "$AGENT_STATE/secrets/wireguard" "$AGENT_STATE/secrets/update" "$AGENT_STATE/tls"
+install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps-privileged /var/lib/gateway-vpn-vps-privileged/restore-transactions
 
 install -d -m 0755 "$DEST"
 while IFS= read -r -d '' source; do
@@ -452,32 +544,71 @@ else
   mv -T "$WG_TEMP" /etc/wireguard/wg-mgmt.conf
   sync -f /etc/wireguard
 fi
+if ((PRESERVE_AGENT_USER == 0)); then
+  VPS_ID="vps-$(openssl rand -hex 16)"
+  (set -o noclobber; printf '%s\n' "$VPS_PRIVATE_KEY" >"$AGENT_STATE/secrets/wireguard/server.key")
+  (set -o noclobber; openssl rand -hex 32 >"$AGENT_STATE/secrets/update/identity.key")
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -days 365 -nodes \
+    -subj "/CN=Gateway VPN VPS $VPS_ID" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:10.80.0.1" \
+    -keyout "$AGENT_STATE/tls/key.pem" -out "$AGENT_STATE/tls/cert.pem" >/dev/null 2>&1
+  chown -R "$AGENT_USER":"$AGENT_USER" "$AGENT_STATE"
+  find "$AGENT_STATE" -type d -exec chmod 0700 {} +
+  find "$AGENT_STATE" -type f -exec chmod 0600 {} +
+  sync
+fi
 unset VPS_PRIVATE_KEY
 
 install -D -m 0644 "$ROOT_DIR/packaging/vps/sysctl.d/90-gateway-vpn-vps.conf" /etc/sysctl.d/90-gateway-vpn-vps.conf
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-firewall.service" /etc/systemd/system/gateway-vpn-vps-firewall.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-agent.service" /etc/systemd/system/gateway-vpn-vps-agent.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore.service" /etc/systemd/system/gateway-vpn-vps-restore.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore.path" /etc/systemd/system/gateway-vpn-vps-restore.path
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service" /etc/systemd/system/gateway-vpn-vps-restore-recovery.service
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf" /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf
-install -d -m 0750 /etc/gateway-vpn-vps
+install -d -o root -g "$AGENT_USER" -m 0750 /etc/gateway-vpn-vps
+install -o root -g "$AGENT_USER" -m 0640 "$ROOT_DIR/packaging/vps/config/config.yaml" /etc/gateway-vpn-vps/config.yaml
 sed "s|__GATEWAY_TCP_PORTS__|$PORTS|g" "$ROOT_DIR/packaging/vps/nftables/gateway-vpn-vps.nft.in" >/etc/gateway-vpn-vps/firewall.nft
+chown root:"$AGENT_USER" /etc/gateway-vpn-vps/firewall.nft
 chmod 0640 /etc/gateway-vpn-vps/firewall.nft
 nft --check --file /etc/gateway-vpn-vps/firewall.nft
+"$DEST/bin/gateway-vpn-vps-agent" --check-config /etc/gateway-vpn-vps/config.yaml
 sysctl -q -p /etc/sysctl.d/90-gateway-vpn-vps.conf
 
 install -d -m 0755 /opt/gateway-vpn-vps
 ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn-vps/.current.new
 mv -Tf /opt/gateway-vpn-vps/.current.new /opt/gateway-vpn-vps/current
 sync
+if ((PRESERVE_AGENT_USER == 0)); then
+  HOST_LABEL=$(hostname -s)
+  HOST_LABEL=${HOST_LABEL:0:96}
+  "$DEST/bin/gateway-vpn-vps-agent" identity-init --config /etc/gateway-vpn-vps/config.yaml --vps-id "$VPS_ID" --display-name "VPS $HOST_LABEL" --public-key "$VPS_PUBLIC_KEY" >/dev/null
+  "$DEST/bin/gateway-vpn-vps-agent" init-admin --config /etc/gateway-vpn-vps/config.yaml --password-file "$HUB_ADMIN_PASSWORD_FILE"
+  chown -R "$AGENT_USER":"$AGENT_USER" "$AGENT_STATE"
+  find "$AGENT_STATE" -type d -exec chmod 0700 {} +
+  find "$AGENT_STATE" -type f -exec chmod 0600 {} +
+  sync
+else
+  [[ ! -e "$AGENT_STATE/restore.trigger" && ! -L "$AGENT_STATE/restore.trigger" ]] || { echo "A pending preserved VPS restore must finish before reinstall" >&2; false; }
+fi
 systemctl daemon-reload
 (set -o noclobber; : >/run/gateway-vpn-vps-install-authorized) || { echo "Cannot create ephemeral VPS service-start authorization safely" >&2; exit 1; }
 chmod 0600 /run/gateway-vpn-vps-install-authorized
 [[ -f /run/gateway-vpn-vps-install-authorized && ! -L /run/gateway-vpn-vps-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-vps-install-authorized) == "0:0:600" ]] || { echo "Ephemeral VPS service-start authorization is unsafe" >&2; exit 1; }
-systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service
+systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-agent.service
 systemctl restart gateway-vpn-vps-firewall.service
 systemctl restart wg-quick@wg-mgmt.service
+systemctl restart gateway-vpn-vps-restore-recovery.service
+systemctl restart gateway-vpn-vps-restore.path
+systemctl restart gateway-vpn-vps-agent.service
 [[ $(wg show wg-mgmt listen-port) == 51821 ]]
 ip -4 route get 10.80.0.2 | grep -Eq 'dev wg-mgmt'
 ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
 nft list table inet gateway_vpn_vps >/dev/null
+systemctl is-active --quiet gateway-vpn-vps-agent.service
+systemctl is-active --quiet gateway-vpn-vps-restore.path
+ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
+ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
 
 install -d -m 0700 /var/lib/gateway-vpn-vps
 printf '{\n  "version": "%s",\n  "profile": "%s",\n  "public_endpoint": "%s",\n  "interface": "wg-mgmt",\n  "vps_address": "10.80.0.1/24",\n  "gateway_address": "10.80.0.2/32",\n  "admin_address": "10.80.0.10/32",\n  "vps_public_key": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$PROFILE" "$PUBLIC_ENDPOINT" "$VPS_PUBLIC_KEY" >/var/lib/gateway-vpn-vps/install-report.json
