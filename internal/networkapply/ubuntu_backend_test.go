@@ -97,6 +97,7 @@ func ubuntuBackendFixture(t *testing.T) (UbuntuBackend, *statefulBackendExecutor
 		ConfigFile:     filepath.Join(root, "etc", "config.yaml"),
 		DNSMasqFile:    filepath.Join(root, "etc", "dnsmasq.conf"),
 		BootNFTFile:    filepath.Join(root, "etc", "boot.nft"),
+		LANNetDevFile:  filepath.Join(root, "etc", "lan.netdev"),
 		LANNetworkFile: filepath.Join(root, "etc", "lan.network"),
 		IP:             filepath.Join(root, "bin", "ip"), NFT: filepath.Join(root, "bin", "nft"),
 		DNSMasq: filepath.Join(root, "bin", "dnsmasq"), Systemctl: filepath.Join(root, "bin", "systemctl"), Networkctl: filepath.Join(root, "bin", "networkctl"),

@@ -29,6 +29,7 @@ type UbuntuPaths struct {
 	ConfigFile         string
 	DNSMasqFile        string
 	BootNFTFile        string
+	LANNetDevFile      string
 	LANNetworkFile     string
 	EthernetNetworkDir string
 	IP                 string
@@ -44,6 +45,7 @@ func DefaultUbuntuPaths() UbuntuPaths {
 		ConfigFile:         "/etc/gateway-vpn/config.yaml",
 		DNSMasqFile:        "/etc/gateway-vpn/dnsmasq.conf",
 		BootNFTFile:        "/etc/gateway-vpn/nftables/boot.nft",
+		LANNetDevFile:      "/etc/systemd/network/05-gateway-vpn-lan.netdev",
 		LANNetworkFile:     "/etc/systemd/network/05-gateway-vpn-lan.network",
 		EthernetNetworkDir: "/etc/systemd/network",
 		IP:                 "/usr/sbin/ip", NFT: "/usr/sbin/nft", DNSMasq: "/usr/sbin/dnsmasq",
@@ -57,9 +59,16 @@ type UbuntuBackend struct {
 	Database          *sql.DB
 	RoutingTableStart uint32
 	FwmarkStart       uint32
+	TopologyGate      TopologyPathGate
+	TopologyRouting   TopologyRoutingSynchronizer
+	TopologyIngress   TopologyIngressController
+	TopologyContext   TopologyRuntimeContext
 }
 
 func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		return backend.snapshotTopology(ctx, manifest, transactionDirectory)
+	}
 	if manifest.SchemaVersion == ManifestSchema {
 		return backend.snapshotEthernet(ctx, manifest, transactionDirectory)
 	}
@@ -137,7 +146,8 @@ func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, tr
 	}
 	ruleset, err := firewall.RenderBootBlocked(firewall.BootConfig{
 		LANInterface: manifest.InterfaceName, TUNInterface: configuration.Mihomo.TunName,
-		WireGuardInterface: "wg-mgmt", APIPort: apiPort, WireGuardListenPort: 51821,
+		ManagementInterfaces: configuration.Network.ManagementInterfaces,
+		WireGuardInterface:   "wg-mgmt", APIPort: apiPort, WireGuardListenPort: 51821,
 		DisableSSHManagement: configuration.Network.DisableSSHManagement,
 	})
 	if err != nil {
@@ -166,6 +176,9 @@ func (backend UbuntuBackend) Snapshot(ctx context.Context, manifest Manifest, tr
 }
 
 func (backend UbuntuBackend) Apply(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		return backend.applyTopology(ctx, manifest, transactionDirectory)
+	}
 	if manifest.SchemaVersion == ManifestSchema {
 		return backend.applyEthernet(ctx, manifest, transactionDirectory)
 	}
@@ -231,6 +244,9 @@ func (backend UbuntuBackend) Apply(ctx context.Context, manifest Manifest, trans
 }
 
 func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		return backend.commitTopology(ctx, manifest, transactionDirectory)
+	}
 	if manifest.SchemaVersion == ManifestSchema {
 		return backend.commitEthernet(ctx, manifest, transactionDirectory)
 	}
@@ -253,6 +269,9 @@ func (backend UbuntuBackend) Commit(ctx context.Context, manifest Manifest, tran
 }
 
 func (backend UbuntuBackend) Rollback(ctx context.Context, manifest Manifest, transactionDirectory string) error {
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		return backend.rollbackTopology(ctx, manifest, transactionDirectory)
+	}
 	if manifest.SchemaVersion == ManifestSchema {
 		return backend.rollbackEthernet(ctx, manifest, transactionDirectory)
 	}
@@ -319,7 +338,7 @@ func (backend UbuntuBackend) validate() error {
 	if backend.Executor == nil {
 		return errors.New("Ubuntu network backend executor is required")
 	}
-	for _, path := range []string{backend.Paths.ConfigFile, backend.Paths.DNSMasqFile, backend.Paths.BootNFTFile, backend.Paths.LANNetworkFile, backend.Paths.IP, backend.Paths.NFT, backend.Paths.DNSMasq, backend.Paths.Systemctl, backend.Paths.Networkctl} {
+	for _, path := range []string{backend.Paths.ConfigFile, backend.Paths.DNSMasqFile, backend.Paths.BootNFTFile, backend.Paths.LANNetDevFile, backend.Paths.LANNetworkFile, backend.Paths.IP, backend.Paths.NFT, backend.Paths.DNSMasq, backend.Paths.Systemctl, backend.Paths.Networkctl} {
 		if !filepath.IsAbs(path) {
 			return errors.New("Ubuntu network backend paths must be absolute")
 		}

@@ -18,14 +18,16 @@ import (
 )
 
 type Candidate struct {
-	InterfaceName           string
-	OldLANCIDR              string
-	NewLANCIDR              string
-	OldURL                  string
-	NewURL                  string
-	Ethernet                *EthernetMutation
-	ManagementURL           string
-	ManagementDestinationIP string
+	InterfaceName                string
+	OldLANCIDR                   string
+	NewLANCIDR                   string
+	OldURL                       string
+	NewURL                       string
+	Ethernet                     *EthernetMutation
+	Topology                     *TopologyMutation
+	ManagementURL                string
+	ManagementDestinationIP      string
+	RequireWireGuardConfirmation bool
 }
 
 type SnapshotBackend interface {
@@ -64,6 +66,24 @@ type ConfirmEvidence struct {
 	ViaWireGuard       bool
 }
 
+type TopologyPreview struct {
+	CurrentProfile               string   `json:"current_profile"`
+	CandidateProfile             string   `json:"candidate_profile"`
+	CurrentDesiredGeneration     int64    `json:"current_desired_generation"`
+	CandidateDesiredGeneration   int64    `json:"candidate_desired_generation"`
+	OldURL                       string   `json:"old_url"`
+	NewURL                       string   `json:"new_url"`
+	RequiredPrerequisites        []string `json:"required_prerequisites"`
+	MissingPrerequisites         []string `json:"missing_prerequisites"`
+	RequireWireGuardConfirmation bool     `json:"require_wireguard_confirmation"`
+	ManagementInterfaces         []string `json:"management_interfaces"`
+	AffectedInterfaces           []string `json:"affected_interfaces"`
+}
+
+type topologyPreviewBackend interface {
+	PreviewTopology(context.Context, Manifest) (TopologyPreview, error)
+}
+
 func NewEngine(repository *Repository, store DiskStore, backend SnapshotBackend, timer RollbackTimer) *Engine {
 	return &Engine{
 		Repository:    repository,
@@ -78,6 +98,34 @@ func NewEngine(repository *Repository, store DiskStore, backend SnapshotBackend,
 			return value, err
 		},
 	}
+}
+
+// PreviewTopology performs the same protected generation, role, subnet and
+// management-safety checks as Stage without creating a transaction, writing a
+// snapshot or arming a rollback timer.
+func (engine *Engine) PreviewTopology(ctx context.Context, candidate Candidate) (TopologyPreview, error) {
+	if err := engine.validate(); err != nil {
+		return TopologyPreview{}, err
+	}
+	backend, ok := engine.Backend.(topologyPreviewBackend)
+	if !ok {
+		return TopologyPreview{}, errors.New("topology preview backend is unavailable")
+	}
+	manifest, err := buildManifest(candidate)
+	if err != nil {
+		return TopologyPreview{}, err
+	}
+	if manifest.SchemaVersion != TopologyManifestSchema {
+		return TopologyPreview{}, errors.New("topology preview requires a topology candidate")
+	}
+	now := engine.Now().UTC()
+	manifest.ID = "preview-topology"
+	manifest.CreatedAt = now.Format(time.RFC3339Nano)
+	manifest.RollbackDeadline = now.Add(engine.RollbackAfter).Format(time.RFC3339Nano)
+	if err := validateManifest(manifest); err != nil {
+		return TopologyPreview{}, err
+	}
+	return backend.PreviewTopology(ctx, manifest)
 }
 
 // Prepare is the synchronous convenience operation used by local callers. The
@@ -254,16 +302,19 @@ func (engine *Engine) Confirm(ctx context.Context, applyID string, evidence Conf
 	if err != nil || len(expected) != len(provided) || subtle.ConstantTimeCompare(expected, provided[:]) != 1 {
 		return ErrConfirmToken
 	}
+	manifest, status, err := engine.Store.Load(applyID)
+	directory, directoryErr := engine.Store.Directory(applyID)
+	if err != nil || directoryErr != nil || status.Phase != PhaseApplied || !manifestMatchesTransaction(manifest, transaction, directory) {
+		return errors.New("network apply durable state is unavailable")
+	}
+	if manifest.RequireWireGuardConfirmation && !evidence.ViaWireGuard {
+		return ErrConfirmSource
+	}
 	if !evidence.ViaWireGuard {
 		local, parseErr := netip.ParseAddr(evidence.LocalDestinationIP)
 		if parseErr != nil || local.Unmap().String() != transaction.NewDestinationIP {
 			return ErrConfirmSource
 		}
-	}
-	manifest, status, err := engine.Store.Load(applyID)
-	directory, directoryErr := engine.Store.Directory(applyID)
-	if err != nil || directoryErr != nil || status.Phase != PhaseApplied || !manifestMatchesTransaction(manifest, transaction, directory) {
-		return errors.New("network apply durable state is unavailable")
 	}
 	if err := engine.Store.SetPhase(applyID, PhaseConfirming); err != nil {
 		return fmt.Errorf("record network apply confirmation intent: %w", err)
@@ -431,6 +482,43 @@ func validateCandidate(candidate Candidate) (netip.Prefix, netip.Prefix, error) 
 }
 
 func buildManifest(candidate Candidate) (Manifest, error) {
+	if candidate.Topology != nil {
+		if candidate.Ethernet != nil || candidate.InterfaceName != "" || candidate.OldLANCIDR != "" || candidate.NewLANCIDR != "" {
+			return Manifest{}, errors.New("topology candidate cannot contain LAN or Ethernet mutation fields")
+		}
+		mutation := cloneTopologyMutation(*candidate.Topology)
+		if err := validateTopologyMutation(mutation); err != nil {
+			return Manifest{}, fmt.Errorf("invalid topology profile candidate: %w", err)
+		}
+		oldURL, newURL := candidate.OldURL, candidate.NewURL
+		if oldURL == "" {
+			oldURL = candidate.ManagementURL
+		}
+		if newURL == "" {
+			newURL = candidate.ManagementURL
+		}
+		destination, err := netip.ParseAddr(candidate.ManagementDestinationIP)
+		if err != nil || !destination.Is4() {
+			return Manifest{}, errors.New("topology confirmation destination must be an IPv4 address")
+		}
+		if err := validateManagementURL(newURL, destination); err != nil {
+			return Manifest{}, fmt.Errorf("topology management URL: %w", err)
+		}
+		parsedOld, err := url.Parse(oldURL)
+		if err != nil {
+			return Manifest{}, errors.New("topology old management URL is invalid")
+		}
+		oldDestination, err := netip.ParseAddr(strings.Trim(parsedOld.Hostname(), "[]"))
+		if err != nil || validateManagementURL(oldURL, oldDestination) != nil {
+			return Manifest{}, errors.New("topology old management URL is invalid")
+		}
+		return Manifest{
+			SchemaVersion: TopologyManifestSchema, OperationKind: OperationTopologyProfile,
+			OldURL: oldURL, NewURL: newURL,
+			NewDestinationIP: destination.String(), Topology: &mutation,
+			RequireWireGuardConfirmation: candidate.RequireWireGuardConfirmation,
+		}, nil
+	}
 	if candidate.Ethernet == nil {
 		oldPrefix, newPrefix, err := validateCandidate(candidate)
 		if err != nil {
@@ -481,7 +569,11 @@ func manifestCandidateJSON(manifest Manifest) (string, error) {
 	if manifest.SchemaVersion == LegacyManifestSchema {
 		return "{}", nil
 	}
-	payload, err := json.Marshal(manifest.Ethernet)
+	var candidate any = manifest.Ethernet
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		candidate = manifest.Topology
+	}
+	payload, err := json.Marshal(candidate)
 	if err != nil {
 		return "", errors.New("encode network apply candidate failed")
 	}

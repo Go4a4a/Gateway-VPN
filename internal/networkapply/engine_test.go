@@ -171,6 +171,65 @@ func TestEngineRejectsEthernetCandidateContainingBrokerSuppliedIfname(t *testing
 	}
 }
 
+func TestEnginePersistsTopologyManifestAndRequiresWireGuardConfirmation(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, backend, _ := testEngine(t, database)
+	candidate := validTopologyCandidate()
+	prepared, err := engine.Stage(ctx, candidate)
+	if err != nil {
+		t.Fatalf("Stage(topology) error = %v", err)
+	}
+	candidate.Topology.LANInterfaceIDs[0] = "netif:tampered"
+	transaction, err := engine.Repository.Get(ctx, prepared.ApplyID)
+	if err != nil || transaction.ManifestSchema != TopologyManifestSchema || transaction.OperationKind != OperationTopologyProfile || transaction.InterfaceName != "" {
+		t.Fatalf("topology transaction = %+v, %v", transaction, err)
+	}
+	manifest, _, err := engine.Store.Load(prepared.ApplyID)
+	if err != nil || manifest.Topology == nil || manifest.Topology.LANInterfaceIDs[0] != "netif:lan" || !manifest.RequireWireGuardConfirmation {
+		t.Fatalf("durable topology manifest = %+v, %v", manifest, err)
+	}
+	if err := engine.Apply(ctx, prepared.ApplyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, LocalDestinationIP: "192.168.210.1"}); !errors.Is(err, ErrConfirmSource) {
+		t.Fatalf("local topology confirmation error = %v", err)
+	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, LocalDestinationIP: "10.80.0.2", ViaWireGuard: true}); err != nil {
+		t.Fatalf("WireGuard topology confirmation error = %v", err)
+	}
+	if got := strings.Join(*backend.calls, ","); got != "snapshot,arm,apply,disarm,commit" {
+		t.Fatalf("topology operation order = %s", got)
+	}
+}
+
+func TestTopologyManifestRejectsAmbiguousAndUnscopedInterfaceRoles(t *testing.T) {
+	base := validTopologyCandidate()
+	invalid := []TopologyMutation{
+		func() TopologyMutation {
+			value := cloneTopologyMutation(*base.Topology)
+			value.ManagementInterfaceIDs = []string{"netif:other"}
+			return value
+		}(),
+		func() TopologyMutation {
+			value := cloneTopologyMutation(*base.Topology)
+			value.SharedOneArmInterfaceID = "netif:lan"
+			return value
+		}(),
+		func() TopologyMutation {
+			value := cloneTopologyMutation(*base.Topology)
+			value.IngressListenInterfaces = []TopologyListenInterface{{NetworkInterfaceID: "netif:other", ExposureMode: "PUBLIC", Priority: 1}}
+			return value
+		}(),
+	}
+	for _, mutation := range invalid {
+		candidate := base
+		candidate.Topology = &mutation
+		if _, err := buildManifest(candidate); err == nil {
+			t.Fatalf("invalid topology accepted: %+v", mutation)
+		}
+	}
+}
+
 func TestEngineAcceptsConfirmationThroughWireGuard(t *testing.T) {
 	ctx, database := networkApplyDatabase(t)
 	engine, _, _ := testEngine(t, database)
@@ -325,6 +384,26 @@ func validCandidate() Candidate {
 		NewLANCIDR:    "192.168.210.1/24",
 		OldURL:        "https://192.168.200.1:8443",
 		NewURL:        "https://192.168.210.1:8443",
+	}
+}
+
+func validTopologyCandidate() Candidate {
+	return Candidate{
+		Topology: &TopologyMutation{
+			ExpectedDesiredGeneration: 1,
+			Profile:                   TopologyEthernetHiLink,
+			LANInterfaceIDs:           []string{"netif:lan"},
+			ManagementInterfaceIDs:    []string{"netif:lan"},
+			LANInterfaceName:          "gateway-vpn-lan",
+			LANAddress:                "192.168.210.1/24",
+			DHCPDNSEnabled:            true,
+			IngressTopologyMode:       "ROUTED",
+			AcknowledgedPrerequisites: []string{"ACCEPT_TEMPORARY_DISCONNECT", "CONFIGURE_KEENETIC_WAN_DHCP"},
+		},
+		OldURL:                       "https://192.168.200.1:8443",
+		NewURL:                       "https://192.168.210.1:8443",
+		ManagementDestinationIP:      "192.168.210.1",
+		RequireWireGuardConfirmation: true,
 	}
 }
 

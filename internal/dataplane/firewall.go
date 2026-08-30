@@ -299,7 +299,9 @@ func renderPathTransaction(state PathState, tunName, lanName string, wireGuardSo
 			fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, activeDirectInterfaceSet, strconv.Quote(state.DirectInterface))
 			fmt.Fprintf(&builder, "add element inet %s %s { %s . %s }\n", firewall.TableName, activeDirectContextSet, strconv.Quote(state.DirectInterface), mark)
 			fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(lanName), mark)
-			fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(wireGuardIngressName), mark)
+			if lanName != wireGuardIngressName {
+				fmt.Fprintf(&builder, "add element inet %s %s { %s : %s }\n", firewall.TableName, activeDirectMarkMap, strconv.Quote(wireGuardIngressName), mark)
+			}
 		}
 	}
 	return []byte(builder.String()), nil

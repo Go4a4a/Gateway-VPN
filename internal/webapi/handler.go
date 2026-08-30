@@ -198,6 +198,10 @@ type NetworkBroker interface {
 	Confirm(context.Context, string, networkapply.ConfirmEvidence) error
 }
 
+type TopologyNetworkBroker interface {
+	PreviewTopology(context.Context, networkapply.Candidate) (networkapply.TopologyPreview, error)
+}
+
 type SubscriptionRefresher interface {
 	RefreshOne(context.Context, string, bool) (subscription.RefreshResult, error)
 	ReclassifyOne(context.Context, string) (subscription.RefreshResult, error)
@@ -380,6 +384,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("PUT /api/v1/uplinks/{id}/network", server.protected(http.HandlerFunc(server.updateEthernetNetwork)))
 	mux.Handle("DELETE /api/v1/uplinks/{id}", server.protected(http.HandlerFunc(server.deleteEthernetUplink)))
 	mux.Handle("GET /api/v1/network/interfaces", server.protected(http.HandlerFunc(server.networkInterfaces)))
+	mux.Handle("GET /api/v1/network/topology", server.protected(http.HandlerFunc(server.networkTopology)))
+	mux.Handle("POST /api/v1/network/topology/preview", server.protected(http.HandlerFunc(server.previewNetworkTopology)))
+	mux.Handle("POST /api/v1/network/topology/apply", server.protected(http.HandlerFunc(server.applyNetworkTopology)))
 	mux.Handle("GET /api/v1/modems", server.protected(http.HandlerFunc(server.modems)))
 	mux.Handle("PUT /api/v1/modems/priorities", server.protected(http.HandlerFunc(server.reorderModems)))
 	mux.Handle("PATCH /api/v1/modems/{id}", server.protected(http.HandlerFunc(server.updateModem)))
@@ -5033,6 +5040,127 @@ func (server *Server) stagePreparedNetworkCandidate(writer http.ResponseWriter, 
 	}(prepared.ApplyID)
 }
 
+type networkTopologyInput struct {
+	ExpectedDesiredGeneration int64                                  `json:"expected_desired_generation"`
+	Profile                   string                                 `json:"profile"`
+	LANInterfaceIDs           []string                               `json:"lan_interface_ids"`
+	ManagementInterfaceIDs    []string                               `json:"management_interface_ids"`
+	WGEndpointInterfaceIDs    []string                               `json:"wg_endpoint_interface_ids"`
+	SharedOneArmInterfaceID   string                                 `json:"shared_one_arm_interface_id"`
+	LANInterfaceName          string                                 `json:"lan_interface_name"`
+	LANAddress                string                                 `json:"lan_address"`
+	DHCPDNSEnabled            bool                                   `json:"dhcp_dns_enabled"`
+	IngressEnabled            bool                                   `json:"ingress_enabled"`
+	IngressTopologyMode       string                                 `json:"ingress_topology_mode"`
+	IngressListenInterfaces   []networkapply.TopologyListenInterface `json:"ingress_listen_interfaces"`
+	AcknowledgedPrerequisites []string                               `json:"acknowledged_prerequisites"`
+	RequireWireGuardConfirm   bool                                   `json:"require_wireguard_confirmation"`
+}
+
+func (input networkTopologyInput) mutation() networkapply.TopologyMutation {
+	return networkapply.TopologyMutation{
+		ExpectedDesiredGeneration: input.ExpectedDesiredGeneration,
+		Profile:                   input.Profile,
+		LANInterfaceIDs:           append([]string(nil), input.LANInterfaceIDs...),
+		ManagementInterfaceIDs:    append([]string(nil), input.ManagementInterfaceIDs...),
+		WGEndpointInterfaceIDs:    append([]string(nil), input.WGEndpointInterfaceIDs...),
+		SharedOneArmInterfaceID:   input.SharedOneArmInterfaceID,
+		LANInterfaceName:          input.LANInterfaceName,
+		LANAddress:                input.LANAddress,
+		DHCPDNSEnabled:            input.DHCPDNSEnabled,
+		IngressEnabled:            input.IngressEnabled,
+		IngressTopologyMode:       input.IngressTopologyMode,
+		IngressListenInterfaces:   append([]networkapply.TopologyListenInterface(nil), input.IngressListenInterfaces...),
+		AcknowledgedPrerequisites: append([]string(nil), input.AcknowledgedPrerequisites...),
+	}
+}
+
+func (server *Server) networkTopology(writer http.ResponseWriter, request *http.Request) {
+	var profile, state, lastError, updatedAt string
+	var desired, applied int64
+	if err := server.dependencies.Database.QueryRowContext(request.Context(), `
+SELECT active_profile,desired_generation,applied_generation,state,last_error_code,updated_at
+FROM topology_profile_state WHERE singleton_id=1`).Scan(&profile, &desired, &applied, &state, &lastError, &updatedAt); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"active_profile": profile, "desired_generation": desired, "applied_generation": applied,
+		"state": state, "last_error_code": lastError, "updated_at": updatedAt,
+		"lan_interface_name": server.dependencies.NetworkInterface,
+		"lan_address":        server.dependencies.NetworkLANAddress,
+		"profiles": []string{
+			networkapply.TopologyEthernetHiLink, networkapply.TopologyEthernetEthernet,
+			networkapply.TopologyOneArmWireGuard, networkapply.TopologyMixed,
+		},
+	})
+}
+
+func (server *Server) previewNetworkTopology(writer http.ResponseWriter, request *http.Request) {
+	previewer, ok := server.dependencies.NetworkBroker.(TopologyNetworkBroker)
+	if !ok {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Проверка topology profile не подключена")
+		return
+	}
+	var input networkTopologyInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	candidate, err := server.topologyCandidate(request, input)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "TOPOLOGY_CANDIDATE_INVALID", err.Error())
+		return
+	}
+	preview, err := previewer.PreviewTopology(request.Context(), candidate)
+	if err != nil {
+		writeError(writer, http.StatusConflict, "TOPOLOGY_PREVIEW_REJECTED", "Профиль нельзя безопасно применить в текущем состоянии")
+		return
+	}
+	writeJSON(writer, http.StatusOK, preview)
+}
+
+func (server *Server) applyNetworkTopology(writer http.ResponseWriter, request *http.Request) {
+	var input networkTopologyInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	candidate, err := server.topologyCandidate(request, input)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "TOPOLOGY_CANDIDATE_INVALID", err.Error())
+		return
+	}
+	server.stagePreparedNetworkCandidate(writer, request, candidate, networkapply.OperationTopologyProfile, "")
+}
+
+func (server *Server) topologyCandidate(request *http.Request, input networkTopologyInput) (networkapply.Candidate, error) {
+	oldPrefix, err := netip.ParsePrefix(server.dependencies.NetworkLANAddress)
+	if err != nil || !oldPrefix.Addr().Is4() {
+		return networkapply.Candidate{}, errors.New("текущий LAN-адрес Gateway недоступен")
+	}
+	newPrefix, err := netip.ParsePrefix(input.LANAddress)
+	if err != nil || !newPrefix.Addr().Is4() {
+		return networkapply.Candidate{}, errors.New("новый LAN-адрес должен быть IPv4 CIDR")
+	}
+	local, ok := request.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || local == nil {
+		return networkapply.Candidate{}, errors.New("локальный адрес API недоступен")
+	}
+	_, port, err := net.SplitHostPort(local.String())
+	if err != nil || port == "" {
+		return networkapply.Candidate{}, errors.New("порт API недоступен")
+	}
+	mutation := input.mutation()
+	return networkapply.Candidate{
+		Topology:                     &mutation,
+		OldURL:                       "https://" + net.JoinHostPort(oldPrefix.Addr().String(), port),
+		NewURL:                       "https://" + net.JoinHostPort(newPrefix.Addr().String(), port),
+		ManagementDestinationIP:      newPrefix.Addr().String(),
+		RequireWireGuardConfirmation: input.RequireWireGuardConfirm,
+	}, nil
+}
+
 func (server *Server) networkSettings(writer http.ResponseWriter, request *http.Request) {
 	if server.dependencies.NetworkInterface == "" || server.dependencies.NetworkLANAddress == "" {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Сетевые настройки runtime не подключены")
@@ -5076,16 +5204,23 @@ FROM network_apply_transactions WHERE id=?`, request.PathValue("id")).Scan(
 		return
 	}
 	item.ErrorCode, item.ConfirmedAt, item.RolledBackAt = errorCode.String, confirmedAt.String, rolledBackAt.String
-	var ethernetOperation, uplinkID string
+	var ethernetOperation, uplinkID, topologyProfile string
+	var topologyGeneration int64
 	if item.OperationKind == networkapply.OperationEthernetUplink {
 		var candidate networkapply.EthernetMutation
 		if err := json.Unmarshal([]byte(item.CandidateJSON), &candidate); err == nil {
 			ethernetOperation, uplinkID = candidate.Operation, candidate.UplinkID
 		}
+	} else if item.OperationKind == networkapply.OperationTopologyProfile {
+		var candidate networkapply.TopologyMutation
+		if err := json.Unmarshal([]byte(item.CandidateJSON), &candidate); err == nil {
+			topologyProfile, topologyGeneration = candidate.Profile, candidate.ExpectedDesiredGeneration
+		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"apply_id": item.ID, "state": item.State, "operation_kind": item.OperationKind,
 		"ethernet_operation": ethernetOperation, "uplink_id": uplinkID,
+		"topology_profile": topologyProfile, "topology_expected_generation": topologyGeneration,
 		"old_url": item.OldURL, "new_url": item.NewURL,
 		"rollback_deadline": item.RollbackDeadline, "error_code": item.ErrorCode,
 		"created_at": item.CreatedAt, "updated_at": item.UpdatedAt,

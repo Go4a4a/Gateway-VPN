@@ -110,6 +110,85 @@ func (previewRuntime) RotateAdminContourIdentity(context.Context) (managementfab
 	return managementfabric.AdminContour{}, errors.New("preview administrator contour rotation is disabled")
 }
 
+// previewNetworkBroker exposes the complete safe-apply WebUI without ever
+// touching the developer workstation. It deliberately returns synthetic
+// transactions and previews only; production uses the privileged broker.
+type previewNetworkBroker struct{}
+
+func (previewNetworkBroker) Stage(_ context.Context, candidate networkapply.Candidate) (networkapply.Prepared, error) {
+	if candidate.Topology == nil && candidate.NewLANCIDR == "" {
+		return networkapply.Prepared{}, errors.New("preview network candidate is empty")
+	}
+	return networkapply.Prepared{
+		ApplyID:          "apply-0123456789abcdef0123456789abcdef",
+		ConfirmToken:     strings.Repeat("c", 64),
+		OldURL:           candidate.OldURL,
+		NewURL:           candidate.NewURL,
+		RollbackDeadline: time.Now().UTC().Add(time.Minute),
+	}, nil
+}
+
+func (previewNetworkBroker) Apply(context.Context, string) error { return nil }
+
+func (previewNetworkBroker) Confirm(context.Context, string, networkapply.ConfirmEvidence) error {
+	return nil
+}
+
+func (previewNetworkBroker) PreviewTopology(_ context.Context, candidate networkapply.Candidate) (networkapply.TopologyPreview, error) {
+	if candidate.Topology == nil {
+		return networkapply.TopologyPreview{}, errors.New("preview topology candidate is missing")
+	}
+	mutation := candidate.Topology
+	required := []string{"ACCEPT_TEMPORARY_DISCONNECT"}
+	switch mutation.Profile {
+	case networkapply.TopologyOneArmWireGuard:
+		required = append(required, "CONFIGURE_KEENETIC_WIREGUARD", "VERIFY_UPSTREAM_RETURN_PATH")
+	case networkapply.TopologyEthernetHiLink, networkapply.TopologyEthernetEthernet, networkapply.TopologyMixed:
+		required = append(required, "MOVE_LAN_CABLES", "CONFIGURE_KEENETIC_WAN_DHCP")
+	default:
+		return networkapply.TopologyPreview{}, errors.New("preview topology profile is invalid")
+	}
+	acknowledged := make(map[string]struct{}, len(mutation.AcknowledgedPrerequisites))
+	for _, item := range mutation.AcknowledgedPrerequisites {
+		acknowledged[item] = struct{}{}
+	}
+	missing := make([]string, 0, len(required))
+	for _, item := range required {
+		if _, ok := acknowledged[item]; !ok {
+			missing = append(missing, item)
+		}
+	}
+	affectedSet := make(map[string]struct{})
+	affected := make([]string, 0, len(mutation.LANInterfaceIDs)+len(mutation.ManagementInterfaceIDs)+len(mutation.WGEndpointInterfaceIDs)+1)
+	for _, values := range [][]string{mutation.LANInterfaceIDs, mutation.ManagementInterfaceIDs, mutation.WGEndpointInterfaceIDs} {
+		for _, item := range values {
+			if _, exists := affectedSet[item]; exists {
+				continue
+			}
+			affectedSet[item] = struct{}{}
+			affected = append(affected, item)
+		}
+	}
+	if mutation.SharedOneArmInterfaceID != "" {
+		if _, exists := affectedSet[mutation.SharedOneArmInterfaceID]; !exists {
+			affected = append(affected, mutation.SharedOneArmInterfaceID)
+		}
+	}
+	return networkapply.TopologyPreview{
+		CurrentProfile:               networkapply.TopologyEthernetHiLink,
+		CandidateProfile:             mutation.Profile,
+		CurrentDesiredGeneration:     mutation.ExpectedDesiredGeneration,
+		CandidateDesiredGeneration:   mutation.ExpectedDesiredGeneration + 1,
+		OldURL:                       candidate.OldURL,
+		NewURL:                       candidate.NewURL,
+		RequiredPrerequisites:        required,
+		MissingPrerequisites:         missing,
+		RequireWireGuardConfirmation: candidate.RequireWireGuardConfirmation,
+		ManagementInterfaces:         append([]string(nil), mutation.ManagementInterfaceIDs...),
+		AffectedInterfaces:           affected,
+	}, nil
+}
+
 type previewIngressController struct{ backend *wgingress.Backend }
 
 func (controller previewIngressController) SyncWireGuardIngress(ctx context.Context) error {
@@ -415,6 +494,10 @@ func main() {
 }
 
 func run(address string, restorePending, updatePending, mustChangePassword bool) error {
+	return runContext(context.Background(), address, restorePending, updatePending, mustChangePassword)
+}
+
+func runContext(parent context.Context, address string, restorePending, updatePending, mustChangePassword bool) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("parse preview address: %w", err)
@@ -436,7 +519,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	if err := os.MkdirAll(payloadRoot, 0o700); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	database, err := db.Open(ctx, db.OpenOptions{Path: filepath.Join(root, "state.db")})
 	if err != nil {
@@ -472,6 +555,29 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		StableIdentityHash: strings.Repeat("e", 64), PermanentMAC: "02:00:00:12:34:56",
 		TopologyPath: "pci-0000:03:00.0", CurrentIfname: "enp3s0", Driver: "igc",
 		Vendor: "Intel", Model: "I225-V", CarrierState: "DOWN", Addresses: []string{},
+	}); err != nil {
+		return err
+	}
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:preview:lan", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("a", 64), PermanentMAC: "02:00:00:65:43:21",
+		TopologyPath: "pci-0000:02:00.0", CurrentIfname: "enp2s0", Driver: "r8169",
+		Vendor: "Realtek", Model: "RTL8111/8168/8411", CarrierState: "UP", Addresses: []string{"192.168.200.1/24"},
+	}); err != nil {
+		return err
+	}
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:preview:spare", StableIdentityKind: "PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("b", 64), PermanentMAC: "02:00:00:aa:bb:cc",
+		TopologyPath: "usb-0:4:1.0", CurrentIfname: "enp4s0", Driver: "r8152",
+		Vendor: "Realtek", Model: "USB GbE", CarrierState: "DOWN", Addresses: []string{},
+	}); err != nil {
+		return err
+	}
+	if _, err := uplinks.SeedInitialLANRoles(ctx, "enp2s0", []uplink.InitialLANObservation{
+		{NetworkInterfaceID: "netif:preview:lan", CurrentIfname: "enp2s0"},
+		{NetworkInterfaceID: "netif:preview:ethernet", CurrentIfname: "enp3s0"},
+		{NetworkInterfaceID: "netif:preview:spare", CurrentIfname: "enp4s0"},
 	}); err != nil {
 		return err
 	}
@@ -605,6 +711,7 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 	}
 	operationRepository := operations.NewRepository(database)
 	watchdogRepository := &watchdog.Repository{Database: database}
+	networkBroker := previewNetworkBroker{}
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
@@ -615,6 +722,19 @@ func run(address string, restorePending, updatePending, mustChangePassword bool)
 		SubscriptionRefresh: previewRefresher{}, SubscriptionDispatch: &previewDispatcher{operations: operationRepository}, Operations: operationRepository,
 		BootIDReader: func() (string, error) { return "11111111-2222-3333-4444-555555555555", nil }, SubscriptionSecretRoot: secretRoot,
 		SubscriptionPayloadRoot: payloadRoot, ModemRuntime: previewRuntime{},
+		NetworkBroker: networkBroker,
+		NetworkCandidate: func(_ context.Context, value string) (networkapply.Candidate, error) {
+			prefix, parseErr := netip.ParsePrefix(value)
+			if parseErr != nil || !prefix.Addr().Is4() {
+				return networkapply.Candidate{}, errors.New("preview LAN address must be an IPv4 CIDR")
+			}
+			return networkapply.Candidate{
+				InterfaceName: "gateway-vpn-lan", OldLANCIDR: "192.168.200.1/24", NewLANCIDR: prefix.String(),
+				OldURL: "https://192.168.200.1:8443", NewURL: "https://" + net.JoinHostPort(prefix.Addr().String(), "8443"),
+				ManagementDestinationIP: prefix.Addr().String(),
+			}, nil
+		},
+		NetworkInterface: "gateway-vpn-lan", NetworkLANAddress: "192.168.200.1/24",
 		PathOperations: previewPathOperations{}, PathActivator: previewPathActivator{},
 		PeriodicHealth: periodicHealth, PeriodicHealthConfig: candidateruntime.DefaultPeriodicConfig(), ProbeBudget: probeScheduler,
 		Logging:  loggingController,

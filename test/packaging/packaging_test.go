@@ -20,12 +20,12 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 5 }", "user_ingress_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 6 }", "user_ingress_interfaces", "local_management_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "oifname @hilink_interfaces accept"} {
+	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "oifname @hilink_interfaces accept", "@LAN_INTERFACE@"} {
 		if strings.Contains(boot, forbidden) {
 			t.Errorf("boot ruleset contains forbidden %q", forbidden)
 		}
@@ -1115,7 +1115,7 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft delete table inet gateway_vpn",
 		"nft flush ruleset",
 		"firewall_schema_generation",
-		`\[[[:space:]]*5[[:space:]]*\]`,
+		`\[[[:space:]]*6[[:space:]]*\]`,
 		"active_tun_interfaces",
 		"useradd --system --no-create-home --shell /usr/sbin/nologin",
 		"gateway-vpn-mihomo",
@@ -1158,7 +1158,8 @@ func TestLANBridgeSSHHarnessCoversTwoMembersAndUplinkIsolation(t *testing.T) {
 		"link set lanp1 master gateway-vpn-lan",
 		"link set lanp2 master gateway-vpn-lan",
 		"address add 192.168.200.1/24 dev gateway-vpn-lan",
-		`iifname "gateway-vpn-lan" tcp dport 22 accept`,
+		"nft list set inet gateway_vpn local_management_interfaces",
+		`iifname @local_management_interfaces tcp dport 22 accept`,
 		"/dev/tcp/192.168.200.1/22",
 		"/dev/tcp/192.168.8.2/22",
 		"TCP/22 was exposed through the non-LAN uplink",

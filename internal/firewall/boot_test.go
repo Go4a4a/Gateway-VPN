@@ -24,7 +24,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"table inet gateway_vpn",
 		"set firewall_schema_generation",
 		"type mark",
-		"elements = { 5 }",
+		"elements = { 6 }",
 		"set user_ingress_interfaces",
 		"elements = { \"enp2s0\", \"wg-ingress\" }",
 		"set wireguard_ingress_listeners",
@@ -63,18 +63,18 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"chain management_fabric_prerouting",
 		"hook prerouting priority dstnat",
 		"gateway-vpn PATH_BLOCKED",
-		"iifname \"enp2s0\" tcp dport 8443 accept",
-		"iifname \"enp2s0\" tcp dport 22 accept",
+		"iifname @local_management_interfaces tcp dport 8443 accept",
+		"iifname @local_management_interfaces tcp dport 22 accept",
 		"iifname \"wg-mgmt\" tcp dport 8443 accept",
-		"meta nfproto ipv4 iifname \"enp2s0\" oifname @active_tun_interfaces",
+		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname @active_tun_interfaces",
 		"meta nfproto ipv4 iifname \"wg-ingress\" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces",
 		"meta nfproto ipv4 iifname @active_tun_interfaces oifname \"enp2s0\"",
 		"meta nfproto ipv4 iifname @active_tun_interfaces oifname \"wg-ingress\" ip daddr @wireguard_ingress_allowed_v4",
 		"meta nfproto ipv4 iifname @user_ingress_interfaces meta mark set iifname map @active_direct_marks",
-		"meta nfproto ipv4 iifname \"enp2s0\" oifname . meta mark @active_direct_context",
+		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname . meta mark @active_direct_context",
 		"meta nfproto ipv4 iifname \"wg-ingress\" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context",
-		"meta nfproto ipv4 iifname @active_direct_interfaces oifname \"enp2s0\" ct state { established, related }",
-		"meta nfproto ipv4 iifname \"enp2s0\" oifname . meta mark @active_direct_context masquerade",
+		"meta nfproto ipv4 iifname @active_direct_interfaces oifname \"enp2s0\" oifname != \"wg-ingress\" ct state { established, related }",
+		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname . meta mark @active_direct_context masquerade",
 		"iifname . udp dport @wireguard_ingress_listeners accept",
 		"meta skuid \"gateway-vpn\" oifname . meta mark . ip daddr @bootstrap_dns_v4 udp dport 53",
 		"meta skuid \"gateway-vpn\" oifname . meta mark . ip daddr . tcp dport @bootstrap_http_v4",
@@ -94,6 +94,35 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 	}
 	if len(ruleset.SHA256) != 64 {
 		t.Fatalf("ruleset SHA256 length = %d", len(ruleset.SHA256))
+	}
+}
+
+func TestBootRulesetOneArmUsesOnlyPeerScopedWireGuardTransit(t *testing.T) {
+	ruleset, err := RenderBootBlocked(BootConfig{
+		LANInterface: "wg-ingress", ManagementInterfaces: []string{"enp2s0"},
+		TUNInterface: "gateway-vpn-tun", WireGuardInterface: "wg-mgmt",
+		APIPort: 8443, WireGuardListenPort: 51821,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`elements = { "wg-ingress" }`,
+		`elements = { "wg-ingress", "enp2s0" }`,
+		`iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces`,
+		`iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context`,
+	} {
+		if !strings.Contains(ruleset.Text, required) {
+			t.Errorf("one-arm ruleset missing %q:\n%s", required, ruleset.Text)
+		}
+	}
+	for _, forbidden := range []string{
+		`iifname "wg-ingress" oifname @active_tun_interfaces`,
+		`iifname "wg-ingress" oifname . meta mark @active_direct_context`,
+	} {
+		if strings.Contains(ruleset.Text, forbidden) {
+			t.Errorf("one-arm ruleset contains unrestricted transit %q", forbidden)
+		}
 	}
 }
 
@@ -149,10 +178,40 @@ func TestBootRulesetCanDisableOnlyTheLANSSHExposure(t *testing.T) {
 	if strings.Contains(ruleset.Text, "tcp dport 22") || strings.Contains(ruleset.Text, "LAN SSH") {
 		t.Fatalf("disabled SSH is still exposed:\n%s", ruleset.Text)
 	}
-	for _, required := range []string{`iifname "gateway-vpn-lan" tcp dport 8443 accept`, `iifname "wg-mgmt" tcp dport 8443 accept`, `gateway-vpn PATH_BLOCKED`} {
+	for _, required := range []string{`iifname @local_management_interfaces tcp dport 8443 accept`, `iifname "wg-mgmt" tcp dport 8443 accept`, `gateway-vpn PATH_BLOCKED`} {
 		if !strings.Contains(ruleset.Text, required) {
 			t.Errorf("disabled SSH changed unrelated firewall contract: missing %q", required)
 		}
+	}
+}
+
+func TestBootRulesetScopesManagementToExplicitInterfaces(t *testing.T) {
+	ruleset, err := RenderBootBlocked(BootConfig{
+		LANInterface:         "gateway-vpn-lan",
+		ManagementInterfaces: []string{"enp1s0", "enp2s0", "enp1s0"},
+		TUNInterface:         "gateway-vpn-tun",
+		WireGuardInterface:   "wg-mgmt",
+		APIPort:              8443,
+		WireGuardListenPort:  51821,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`set local_management_interfaces`,
+		`elements = { "gateway-vpn-lan", "enp1s0", "enp2s0" }`,
+		`iifname @local_management_interfaces tcp dport 8443 accept`,
+		`iifname @local_management_interfaces tcp dport 22 accept`,
+	} {
+		if !strings.Contains(ruleset.Text, required) {
+			t.Errorf("management contract missing %q:\n%s", required, ruleset.Text)
+		}
+	}
+	if strings.Contains(ruleset.Text, `elements = { "gateway-vpn-lan", "enp1s0", "enp2s0", "enp1s0" }`) {
+		t.Fatal("duplicate management interface was not normalized")
+	}
+	if strings.Contains(ruleset.Text, `iifname "enp3s0" tcp dport 8443 accept`) || strings.Contains(ruleset.Text, `iifname "enp3s0" tcp dport 22 accept`) {
+		t.Fatal("dedicated uplink received management exposure")
 	}
 }
 

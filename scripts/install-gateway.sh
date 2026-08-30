@@ -800,7 +800,7 @@ id -nG "$LOG_READER_USER" | tr ' ' '\n' | grep -Fxq gateway-vpn-log-readers || {
 install -d -m 0750 -o root -g gateway-vpn /etc/gateway-vpn/nftables
 SSH_NFT_RULE=""
 if ((ENABLE_SSH)); then
-  SSH_NFT_RULE="        iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\""
+  SSH_NFT_RULE="        iifname @local_management_interfaces tcp dport 22 accept comment \"gateway-vpn management SSH\""
 fi
 for log_dir in /var/log/gateway-vpn /var/log/gateway-vpn/current /var/log/gateway-vpn/archive /var/log/gateway-vpn/diagnostics; do
   [[ -d "$log_dir" && ! -L "$log_dir" && $(stat -c '%U:%G:%a' "$log_dir") == "root:gateway-vpn-log-readers:2750" ]] || { echo "Installed Gateway log export directory is unsafe: $log_dir" >&2; exit 1; }
@@ -814,7 +814,7 @@ else
   nft --check --file /etc/gateway-vpn/nftables/boot.nft
 fi
 if ((ENABLE_SSH)); then
-  grep -Fq "iifname \"$LAN_INTERFACE\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"" /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway SSH firewall rule is not scoped to the selected management LAN" >&2; exit 1; }
+  grep -Fq "iifname @local_management_interfaces tcp dport 22 accept comment \"gateway-vpn management SSH\"" /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway SSH firewall rule is not scoped to the selected management interfaces" >&2; exit 1; }
   [[ $(grep -Ec 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft) == 1 ]] || { echo "Gateway firewall must contain exactly one LAN-scoped SSH rule" >&2; exit 1; }
 else
   ! grep -Eq 'tcp dport 22([[:space:]]|$)' /etc/gateway-vpn/nftables/boot.nft || { echo "Gateway firewall unexpectedly exposes SSH while SSH/SFTP management is disabled" >&2; exit 1; }

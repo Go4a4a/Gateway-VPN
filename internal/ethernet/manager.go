@@ -31,8 +31,9 @@ const (
 )
 
 type Device struct {
-	Observation uplink.InterfaceObservation
-	MTU         int64
+	Observation  uplink.InterfaceObservation
+	MasterIfname string
+	MTU          int64
 }
 
 type Probe interface {
@@ -53,12 +54,14 @@ type Manager struct {
 	LeaseReader     LeaseReader
 	Routes          RoutingSynchronizer
 	Uplinks         *uplink.Repository
+	LANInterface    string
 	LANPrefix       string
 	WireGuardPrefix string
 }
 
 type CycleResult struct {
 	ObservedInterfaces []string
+	ImportedLANMembers []string
 	ReadyUplinks       []string
 	OfflineUplinks     []string
 	ConflictUplinks    map[string]string
@@ -131,6 +134,20 @@ func (manager *Manager) Reconcile(ctx context.Context) (CycleResult, error) {
 		seen[device.Observation.ID] = struct{}{}
 		byID[device.Observation.ID] = device
 		result.ObservedInterfaces = append(result.ObservedInterfaces, device.Observation.ID)
+	}
+	if manager.LANInterface != "" {
+		observations := make([]uplink.InitialLANObservation, 0, len(byID))
+		for _, device := range byID {
+			observations = append(observations, uplink.InitialLANObservation{
+				NetworkInterfaceID: device.Observation.ID,
+				CurrentIfname:      device.Observation.CurrentIfname,
+				MasterIfname:       device.MasterIfname,
+			})
+		}
+		result.ImportedLANMembers, err = manager.Uplinks.SeedInitialLANRoles(ctx, manager.LANInterface, observations)
+		if err != nil {
+			return result, fmt.Errorf("import installer LAN interface roles: %w", err)
+		}
 	}
 	if err := manager.Uplinks.MarkUnseenEthernetInterfacesAbsent(ctx, seen); err != nil {
 		return result, err
@@ -305,6 +322,7 @@ func (manager *Manager) Reconcile(ctx context.Context) (CycleResult, error) {
 		return result, fmt.Errorf("synchronize Ethernet policy routing: %w", err)
 	}
 	sort.Strings(result.ObservedInterfaces)
+	sort.Strings(result.ImportedLANMembers)
 	sort.Strings(result.ReadyUplinks)
 	sort.Strings(result.OfflineUplinks)
 	sort.Strings(result.RouteChanges)

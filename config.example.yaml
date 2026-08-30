@@ -9,6 +9,9 @@ system:
 network:
   lan_interface: enp2s0
   lan_address: 192.168.200.1/24
+  # Empty means the current LAN interface; safe topology apply writes an exact list.
+  management_interfaces: []
+  lan_service_mode: dhcp_dns
   ipv6_mode: disabled
   # OpenSSH/SFTP is normally available only through the management LAN firewall rule.
   disable_ssh_management: false

@@ -113,7 +113,7 @@ add element inet gateway_vpn active_direct_marks { "wg-ingress" : 0x00001101 }
 		Required: []string{
 			"table inet gateway_vpn", "policy drop", "gateway-vpn PATH_BLOCKED",
 			"counter user_upload", "counter user_download", "counter service_upload", "counter service_download",
-			"wireguard_ingress_allowed_v4",
+			"wireguard_ingress_allowed_v4", "local_management_interfaces",
 		},
 		Forbidden: []string{"flush ruleset", "policy accept", "LAN to HiLink direct accept"},
 	}

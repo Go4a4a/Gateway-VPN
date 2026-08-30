@@ -54,6 +54,22 @@ func (c Config) Validate() error {
 	if !netutil.ValidGatewayLAN(c.Network.LANAddress) {
 		errors.add("network.lan_address", "must be a usable private IPv4 host CIDR with /16../30 and must not overlap WireGuard management")
 	}
+	if c.Network.LANServiceMode != "" && c.Network.LANServiceMode != "dhcp_dns" && c.Network.LANServiceMode != "disabled" {
+		errors.add("network.lan_service_mode", "must be dhcp_dns or disabled")
+	}
+	if len(c.Network.ManagementInterfaces) > 16 {
+		errors.add("network.management_interfaces", "must contain at most 16 interfaces")
+	}
+	seenManagement := make(map[string]struct{}, len(c.Network.ManagementInterfaces))
+	for index, interfaceName := range c.Network.ManagementInterfaces {
+		if !validInterfaceName(interfaceName) {
+			errors.add(fmt.Sprintf("network.management_interfaces[%d]", index), "must be a valid Linux interface name")
+		}
+		if _, exists := seenManagement[interfaceName]; exists {
+			errors.add(fmt.Sprintf("network.management_interfaces[%d]", index), "duplicates another management interface")
+		}
+		seenManagement[interfaceName] = struct{}{}
+	}
 	if c.Network.IPv6Mode != "disabled" {
 		errors.add("network.ipv6_mode", "must be disabled in MVP")
 	}

@@ -85,6 +85,24 @@ func TestManagerConvergesDHCPAndInvalidatesOnceOnCarrierLoss(t *testing.T) {
 	}
 }
 
+func TestManagerImportsInstallerBridgeMemberAfterPhysicalObservation(t *testing.T) {
+	ctx, database, repository := ethernetEmptyFixture(t)
+	device := observedDevice("netif:lan", "enp2s0", "UP", nil)
+	device.MasterIfname = "gateway-vpn-lan"
+	manager := &Manager{
+		Probe: probeFixture{devices: []Device{device}}, LeaseReader: leaseFixture{}, Routes: &routeFixture{},
+		Uplinks: repository, LANInterface: "gateway-vpn-lan", LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
+	}
+	result, err := manager.Reconcile(ctx)
+	if err != nil || strings.Join(result.ImportedLANMembers, ",") != "netif:lan" {
+		t.Fatalf("Reconcile(initial LAN) = %+v, %v", result, err)
+	}
+	var roles int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM interface_role_assignments WHERE network_interface_id='netif:lan' AND role IN ('LAN_MEMBER','MANAGEMENT')`).Scan(&roles); err != nil || roles != 2 {
+		t.Fatalf("initial LAN roles = %d, %v", roles, err)
+	}
+}
+
 func TestManagerUsesConfiguredDHCPDNSWithoutLosingLeaseAddress(t *testing.T) {
 	ctx, _, repository, created := ethernetFixture(t, uplink.AddressDHCP)
 	configured, err := repository.UpdateEthernetConfiguration(ctx, created.ID, uplink.UpdateEthernetInput{
@@ -154,16 +172,7 @@ func TestManagerFailsClosedWhenAuthoritativeRoutingCannotConverge(t *testing.T) 
 
 func ethernetFixture(t *testing.T, addressMode string) (context.Context, *sql.DB, *uplink.Repository, uplink.Uplink) {
 	t.Helper()
-	ctx := context.Background()
-	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	if err := databasepkg.Migrate(ctx, database); err != nil {
-		t.Fatal(err)
-	}
-	repository := uplink.NewRepository(database, 1101, 0x1101)
+	ctx, database, repository := ethernetEmptyFixture(t)
 	device := observedDevice("netif:wan", "enp3s0", "UP", nil)
 	if _, err := repository.ObserveInterface(ctx, device.Observation); err != nil {
 		t.Fatal(err)
@@ -177,6 +186,20 @@ func ethernetFixture(t *testing.T, addressMode string) (context.Context, *sql.DB
 		t.Fatal(err)
 	}
 	return ctx, database, repository, created
+}
+
+func ethernetEmptyFixture(t *testing.T) (context.Context, *sql.DB, *uplink.Repository) {
+	t.Helper()
+	ctx := context.Background()
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, database, uplink.NewRepository(database, 1101, 0x1101)
 }
 
 func observedDevice(id, ifname, carrier string, addresses []string) Device {

@@ -36,6 +36,13 @@ func TestSysFSProbeUsesMACOnlyWhenKernelMarksItPermanent(t *testing.T) {
 	}
 	makeNIC("ethperm", "pci0000:00/0000:00:01.0", "0")
 	makeNIC("ethrandom", "pci0000:00/0000:00:02.0", "1")
+	bridge := filepath.Join(root, "class", "net", "gateway-vpn-lan")
+	if err := os.MkdirAll(bridge, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(bridge, filepath.Join(root, "class", "net", "ethperm", "master")); err != nil {
+		t.Fatal(err)
+	}
 	probe := SysFSProbe{
 		Root: root, IdentitySalt: []byte(strings.Repeat("s", 32)),
 		Addresses: func(string) ([]string, error) { return []string{"172.20.1.2/24"}, nil },
@@ -51,6 +58,9 @@ func TestSysFSProbeUsesMACOnlyWhenKernelMarksItPermanent(t *testing.T) {
 	permanent := byName["ethperm"].Observation
 	if permanent.StableIdentityKind != "ETHERNET_PERMANENT_MAC" || permanent.PermanentMAC != "02:00:00:00:00:01" {
 		t.Fatalf("permanent identity = %+v", permanent)
+	}
+	if byName["ethperm"].MasterIfname != "gateway-vpn-lan" {
+		t.Fatalf("permanent bridge master = %q", byName["ethperm"].MasterIfname)
 	}
 	randomized := byName["ethrandom"].Observation
 	if randomized.StableIdentityKind != "ETHERNET_TOPOLOGY" || randomized.PermanentMAC != "" || randomized.TopologyPath != "pci0000:00/0000:00:02.0" {

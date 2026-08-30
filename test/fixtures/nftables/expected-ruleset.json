@@ -2,7 +2,7 @@
   "format_version": 1,
   "generated_by": "go run ./test/fixtures/generate",
   "sha256": {
-    "boot-blocked.nft": "eaaa90be2658d0fb627c9654673ae7f884dd49cc5d4ac950ebe74e7a6f7f4e79",
+    "boot-blocked.nft": "903d07df88ce244974e8679833c61ee4f471e9b3dca6e948b62f052b58164a74",
     "path-active-modem-a.nft": "cd84df003f644e81aa0c003fe549f9f6a86883468408f8f709bef6250a957726",
     "path-active-modem-b.nft": "735e51aa028c99323210dddcf1e2591e21c115a8542448165e6a0c3ce53a98f1",
     "path-direct-modem-a.nft": "96c9d399c4e560394a1d5e77e9113fb912ccc9fb5e2a0518f0677d4b53940831",
@@ -16,7 +16,8 @@
     "counter user_download",
     "counter service_upload",
     "counter service_download",
-    "wireguard_ingress_allowed_v4"
+    "wireguard_ingress_allowed_v4",
+    "local_management_interfaces"
   ],
   "forbidden_markers": [
     "flush ruleset",

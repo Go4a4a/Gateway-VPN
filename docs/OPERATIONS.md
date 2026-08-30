@@ -128,7 +128,7 @@ GRUB policy хранится только в owned `/etc/default/grub.d/90-gatew
 
 OpenSSH/SFTP — отдельный понятный шаг interactive wizard. Мастер показывает, установлен ли `openssh-server`, включён и запущен ли `ssh.service`, объясняет, что SFTP является частью OpenSSH, и рекомендует **Да**. `Enter` принимает рекомендацию; **Нет** означает, что installer не устанавливает/не включает OpenSSH и не создаёт TCP/22 rule. Automation также использует default-on; явный отказ передаётся только `--disable-ssh` и сохраняется как `network.disable_ssh_management: true` плюс `lan_ssh_enabled: false` в install report.
 
-При включённом выборе OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. До изменения service выполняется `sshd -t`, затем `systemctl enable --now ssh.service`, повторная проверка enabled/active и IPv4 wildcard listener TCP/22. nftables принимает новые SSH connections только с `gateway-vpn-lan`, поэтому один owned bridge делает SSH/SFTP доступными через любой выбранный LAN member, но не через отдельный Ethernet uplink/HiLink. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
+При включённом выборе OpenSSH входит в managed dependency plan. Если пакет отсутствует, его bytes скачиваются до включения fail-closed firewall без запуска daemon; установка и `ssh.service` activation происходят только после durable rollback marker и `PATH_BLOCKED`. До изменения service выполняется `sshd -t`, затем `systemctl enable --now ssh.service`, повторная проверка enabled/active и IPv4 wildcard listener TCP/22. nftables принимает новые SSH connections только через точный set `local_management_interfaces`: initially это выбранный LAN/bridge, а подтверждённый topology profile может добавить несколько явно назначенных management Ethernet-портов. Обычный dedicated Ethernet uplink и HiLink туда не попадают; исключение — сознательно выбранная общая карта `SHARED_ONE_ARM`. Existing SSH users/keys/password policy сохраняются; Gateway VPN не включает root login и не создаёт общий пароль SSH. При отключённом DHCP прямому management-компьютеру потребуется статический адрес из выбранной transit subnet.
 
 После установки используйте Ubuntu account, уже разрешённый политикой OpenSSH:
 
@@ -142,7 +142,7 @@ sudo ss -H -ltn 'sport = :22'
 sudo nft list chain inet gateway_vpn input
 ```
 
-Ожидается ровно одно owned разрешение вида `iifname "gateway-vpn-lan" tcp dport 22 accept`; правило на uplink является security defect. Если SSH/SFTP сознательно выключен, TCP/22 rule не должно быть вовсе, а watchdog показывает компонент как `NOT_APPLICABLE`.
+Ожидается ровно одно owned разрешение вида `iifname @local_management_interfaces tcp dport 22 accept`; сами разрешённые интерфейсы перечислены в одноимённом set. Попадание обычного dedicated uplink в этот set является security defect. Если SSH/SFTP сознательно выключен, TCP/22 rule не должно быть вовсе, а watchdog показывает компонент как `NOT_APPLICABLE`.
 
 Owned LAN networkd policies используют точные ранние имена `05-gateway-vpn-lan.*` и `06-gateway-vpn-lan-<port>.network`, чтобы выбранные interfaces не были перехвачены более поздними generated `10-netplan-*` matches после reboot. Installer не удаляет и не переписывает netplan; только явно выбранные dedicated ports получают более точную owned policy.
 
@@ -489,13 +489,14 @@ Traffic spike выполняется known-size transfer до/после Mihomo 
 
 Изменение transit LAN выполняется только во вкладке **Сеть → Топология и интерфейсы**:
 
-1. control plane проверяет конфликт нового CIDR с WireGuard и сохранёнными modem networks;
-2. root broker повторно сверяет CIDR со всеми фактически назначенными IPv4 networks host;
-3. старые config, dnsmasq, persistent `05-gateway-vpn-lan.network` и runtime firewall сохраняются в root-owned `/var/lib/gateway-vpn-privileged/network-transactions/<apply-id>/`;
-4. `gateway-vpn-network-rollback@<apply-id>.timer` вооружается на 60 секунд до изменения адреса;
-5. старый адрес остаётся secondary, а API возвращает одноразовую ссылку на `new_url`; token находится только во fragment `#network-confirm=...` и не отправляется HTTP-серверу при открытии страницы;
-6. на новом адресе нужно снова войти и нажать **Подтвердить сетевые настройки**; подтверждение через старый destination отклоняется. Альтернатива — API через `wg-mgmt`;
-7. candidate networkd policy атомарно устанавливается и перед подтверждением только reload-ится без destructive reconfigure; без подтверждения отдельный root helper восстанавливает persistent/runtime snapshot без зависимости от SQLite или процесса `gateway-vpn`.
+1. WebUI собирает один exact candidate и выполняет **Проверить профиль без применения**; любое последующее изменение формы инвалидирует Preview;
+2. control plane проверяет protected generation, комбинацию ролей и конфликт нового CIDR с WireGuard и сохранёнными uplink networks;
+3. root broker повторно сверяет candidate с фактическим inventory, current roles, fresh management path и обязательными внешними подтверждениями;
+4. старые config, bridge/member networkd, dnsmasq, `wg-ingress`, роли, routing и runtime firewall сохраняются в root-owned `/var/lib/gateway-vpn-privileged/network-transactions/<apply-id>/`;
+5. `gateway-vpn-network-rollback@<apply-id>.timer` вооружается на 60 секунд до изменения адреса;
+6. старый management path сохраняется, candidate применяется и reconfigure-ится только для точного affected-interface set; API возвращает одноразовую ссылку на `new_url`, а token находится только во fragment `#network-confirm=...`;
+7. на новом адресе нужно снова войти и нажать **Подтвердить сетевые настройки**; подтверждение через старый destination отклоняется. Альтернатива — свежий `wg-mgmt`, если candidate требует WireGuard-only confirmation;
+8. без подтверждения отдельный root helper восстанавливает весь persistent/runtime LKG snapshot без зависимости от живого процесса `gateway-vpn`; active firewall открывается только после полного успешного возврата network/routing/ingress/services.
 
 Диагностика незавершённой операции:
 
@@ -507,9 +508,9 @@ sudo find /var/lib/gateway-vpn-privileged/network-transactions -maxdepth 2 -type
 
 Не запускайте instance rollback timer вручную с придуманным ID. Production-ready статус safe apply требует отдельного netns-теста timeout/reboot и затем проверки на Ubuntu 24.04; Windows unit tests этого не доказывают.
 
-Successor применяет тем же durable механизмом не только CIDR, но и переход между Ethernet LAN→HiLink, Ethernet LAN→Ethernet uplink, `SHARED_ONE_ARM` и mixed profiles. Candidate включает roles/networkd/DHCP/DNS/firewall/policy routing/`wg-ingress`/API bind одной generation. Если изменяется единственный management path и нет подтверждённого VPS link, другого LAN member или локальной консоли, WebUI блокирует Apply. Старый management address/path остаётся до подтверждения через новый destination; reboot/process loss/timeout возвращают весь LKG profile, а не только IP.
+Schema 30 применяет тем же durable механизмом не только CIDR, но и переход между `ETHERNET_HILINK`, `ETHERNET_ETHERNET`, `ONE_ARM_WIREGUARD` и `MIXED`. Candidate включает roles/networkd/DHCP/DNS/firewall/policy routing/`wg-ingress`/API bind одной generation. Обычные Ethernet-LAN profiles используют owned bridge `gateway-vpn-lan`; one-arm принимает plaintext user traffic только через `wg-ingress`, а общая physical карта остаётся Ethernet uplink/явным management endpoint. Если удаляется последний локальный management path без свежего `wg-mgmt` либо нового проверяемого destination, Apply блокируется. Старый management address/path остаётся до подтверждения; reboot/process loss/timeout возвращают весь LKG profile, а не только IP.
 
-Этот full-profile contract добавлен 2026-08-30 и ещё не является возможностью текущего schema-25 release; фактическая готовность отмечается только в `PROJECT_STATUS.md` после netns/systemd/hardware gate.
+Full-profile contract реализован в текущем source tree, но его production-ready статус отмечается только в `PROJECT_STATUS.md` после Linux netns/systemd gate; физические кабели, настройки Keenetic и hardware-проверка остаются внешними действиями.
 
 ## Изменение политики проверки доступа
 
@@ -899,7 +900,7 @@ sudo systemctl kill -s SIGKILL gateway-vpn-mihomo.service
 
 После остановки Mihomo новый LAN traffic не должен попасть в HiLink напрямую. `nft flush ruleset`, reboot, unplug/replug обоих модемов и обратный USB-порядок входят в integration/hardware matrix и не заменяются unit-тестами.
 
-`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `5`, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
+`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `6`, точный набор локальных management-интерфейсов, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
 
 Диагностика guard:
 

@@ -265,6 +265,7 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	}
 	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin, Recovery: recoveryAdmin}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/topology/preview", server.previewTopology)
 	mux.HandleFunc("POST /v1/stage", server.stage)
 	mux.HandleFunc("POST /v1/apply", server.apply)
 	mux.HandleFunc("POST /v1/confirm", server.confirm)
@@ -861,6 +862,20 @@ func (server *BrokerServer) stage(writer http.ResponseWriter, request *http.Requ
 	writeBrokerJSON(writer, http.StatusCreated, prepared)
 }
 
+func (server *BrokerServer) previewTopology(writer http.ResponseWriter, request *http.Request) {
+	var candidate Candidate
+	if err := decodeBrokerJSON(request, &candidate); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	preview, err := server.Engine.PreviewTopology(request.Context(), candidate)
+	if err != nil {
+		writeBrokerDomainError(writer, err)
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, preview)
+}
+
 func (server *BrokerServer) apply(writer http.ResponseWriter, request *http.Request) {
 	var input brokerApplyRequest
 	if err := decodeBrokerJSON(request, &input); err != nil || !safeID(input.ApplyID) {
@@ -1110,6 +1125,12 @@ func newBrokerClientForHTTP(client *http.Client) *BrokerClient {
 func (client *BrokerClient) Stage(ctx context.Context, candidate Candidate) (Prepared, error) {
 	var result Prepared
 	err := client.call(ctx, "/v1/stage", candidate, http.StatusCreated, &result)
+	return result, err
+}
+
+func (client *BrokerClient) PreviewTopology(ctx context.Context, candidate Candidate) (TopologyPreview, error) {
+	var result TopologyPreview
+	err := client.call(ctx, "/v1/topology/preview", candidate, http.StatusOK, &result)
 	return result, err
 }
 

@@ -1695,17 +1695,24 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	}
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), "text-wrap:balance") || !strings.Contains(response.Body.String(), ".mobile-navigation{display:grid}") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), "text-wrap:balance") || !strings.Contains(response.Body.String(), ".mobile-navigation{display:grid}") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") || !strings.Contains(response.Body.String(), ".topology-role-row{") {
 		t.Fatalf("static stylesheet does not preserve hidden layout semantics: %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="mobile-navigation-select"`) || !strings.Contains(response.Body.String(), `<optgroup label="Интернет и VPN">`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="mobile-navigation-select"`) || !strings.Contains(response.Body.String(), `<optgroup label="Интернет и VPN">`) || !strings.Contains(response.Body.String(), `src="/topology-network.js"`) {
 		t.Fatalf("static responsive navigation missing: %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/topology-network.js", nil))
+	for _, required := range []string{"topologyProfilePanel", "/api/v1/network/topology/preview", "/api/v1/network/topology/apply", "ONE_ARM_WIREGUARD", "netif:managed:lan", "item.id!=='netif:managed:lan'", "acceptedPayload"} {
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("static topology UI missing %q: %d", required, response.Code)
+		}
+	}
+	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/app.js", nil))
-	for _, required := range []string{"stagePortableRestore", "discard-staged-restore", "apply-verified-restore", "ВОССТАНОВИТЬ", "gateway-vpn-restore-reconnect", "mobile-navigation-select"} {
+	for _, required := range []string{"stagePortableRestore", "discard-staged-restore", "apply-verified-restore", "ВОССТАНОВИТЬ", "gateway-vpn-restore-reconnect", "mobile-navigation-select", "window.scrollTo(0,0)"} {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("static restore UI missing %q: %d", required, response.Code)
 		}
@@ -1777,6 +1784,68 @@ func TestSafeNetworkApplyReturnsTokenBeforeAsyncApplyAndUsesSocketDestination(t 
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || broker.confirmed.LocalDestinationIP != "192.168.210.1" || broker.confirmed.ViaWireGuard {
 		t.Fatalf("new-destination confirm = %d %+v", response.Code, broker.confirmed)
+	}
+}
+
+func TestTopologyPreviewAndApplyUseOneBoundedSafeApplyCandidate(t *testing.T) {
+	server, _ := testServer(t)
+	attachBackupManager(t, server)
+	server.dependencies.NetworkInterface = "enp2s0"
+	server.dependencies.NetworkLANAddress = "192.168.200.1/24"
+	broker := &fakeNetworkBroker{
+		applied: make(chan string, 1),
+		prepared: networkapply.Prepared{
+			ApplyID: "apply-topology", ConfirmToken: strings.Repeat("c", 64),
+			OldURL: "https://192.168.200.1:8443", NewURL: "https://192.168.210.1:8443",
+			RollbackDeadline: time.Now().Add(time.Minute),
+		},
+		preview: networkapply.TopologyPreview{
+			CurrentProfile: "ETHERNET_HILINK", CandidateProfile: "MIXED",
+			CurrentDesiredGeneration: 1, CandidateDesiredGeneration: 2,
+			RequiredPrerequisites: []string{"ACCEPT_TEMPORARY_DISCONNECT", "CONFIGURE_KEENETIC_WAN_DHCP"},
+			MissingPrerequisites:  []string{"CONFIGURE_KEENETIC_WAN_DHCP"},
+		},
+	}
+	server.dependencies.NetworkBroker = broker
+	cookie, csrf := login(t, server)
+	body := `{
+        "expected_desired_generation":1,"profile":"MIXED",
+        "lan_interface_ids":["netif:lan"],"management_interface_ids":["netif:lan"],
+        "wg_endpoint_interface_ids":[],"shared_one_arm_interface_id":"",
+        "lan_interface_name":"gateway-vpn-lan","lan_address":"192.168.210.1/24",
+        "dhcp_dns_enabled":true,"ingress_enabled":false,"ingress_topology_mode":"ROUTED",
+        "ingress_listen_interfaces":[],
+        "acknowledged_prerequisites":["ACCEPT_TEMPORARY_DISCONNECT"],
+        "require_wireguard_confirmation":true
+    }`
+	call := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request = request.WithContext(context.WithValue(request.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("10.80.0.2"), Port: 8443}))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	preview := call("/api/v1/network/topology/preview")
+	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), `"missing_prerequisites":["CONFIGURE_KEENETIC_WAN_DHCP"]`) {
+		t.Fatalf("topology preview = %d %s", preview.Code, preview.Body.String())
+	}
+	if broker.previewed.Topology == nil || broker.previewed.OldURL != "https://192.168.200.1:8443" || broker.previewed.NewURL != "https://192.168.210.1:8443" || !broker.previewed.RequireWireGuardConfirmation {
+		t.Fatalf("bounded preview candidate = %+v", broker.previewed)
+	}
+
+	apply := call("/api/v1/network/topology/apply")
+	if apply.Code != http.StatusAccepted || broker.staged.Topology == nil || broker.staged.Topology.Profile != networkapply.TopologyMixed {
+		t.Fatalf("topology apply = %d %s candidate=%+v", apply.Code, apply.Body.String(), broker.staged)
+	}
+	select {
+	case id := <-broker.applied:
+		if id != broker.prepared.ApplyID {
+			t.Fatalf("async topology apply id = %s", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async topology apply did not start")
 	}
 }
 
@@ -2808,6 +2877,8 @@ func TestUninstallAPIRequiresImpactReauthenticationExactPhraseAndAcknowledgement
 type fakeNetworkBroker struct {
 	prepared  networkapply.Prepared
 	staged    networkapply.Candidate
+	previewed networkapply.Candidate
+	preview   networkapply.TopologyPreview
 	applied   chan string
 	confirmed networkapply.ConfirmEvidence
 }
@@ -3127,6 +3198,11 @@ func (refresher *fakeSubscriptionRefresher) ReclassifyOne(_ context.Context, id 
 func (broker *fakeNetworkBroker) Stage(_ context.Context, candidate networkapply.Candidate) (networkapply.Prepared, error) {
 	broker.staged = candidate
 	return broker.prepared, nil
+}
+
+func (broker *fakeNetworkBroker) PreviewTopology(_ context.Context, candidate networkapply.Candidate) (networkapply.TopologyPreview, error) {
+	broker.previewed = candidate
+	return broker.preview, nil
 }
 
 func (broker *fakeNetworkBroker) Apply(_ context.Context, id string) error {

@@ -16,11 +16,12 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 5
+	SchemaGeneration = 6
 )
 
 type BootConfig struct {
 	LANInterface         string
+	ManagementInterfaces []string
 	TUNInterface         string
 	WireGuardInterface   string
 	APIPort              uint16
@@ -40,10 +41,18 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	if config.APIPort == 0 || config.WireGuardListenPort == 0 {
 		return Ruleset{}, errors.New("firewall ports must be non-zero")
 	}
+	managementInterfaces, err := normalizeManagementInterfaces(config.LANInterface, config.ManagementInterfaces)
+	if err != nil {
+		return Ruleset{}, err
+	}
 
 	sshRule := ""
 	if !config.DisableSSHManagement {
-		sshRule = fmt.Sprintf("        iifname %s tcp dport 22 accept comment \"gateway-vpn LAN SSH\"\n", nftString(config.LANInterface))
+		sshRule = "        iifname @local_management_interfaces tcp dport 22 accept comment \"gateway-vpn management SSH\"\n"
+	}
+	userIngressInterfaces := nftString(config.LANInterface) + `, "wg-ingress"`
+	if config.LANInterface == "wg-ingress" {
+		userIngressInterfaces = `"wg-ingress"`
 	}
 
 	text := fmt.Sprintf(`table inet %s {
@@ -109,7 +118,12 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 
 	set user_ingress_interfaces {
 		type ifname
-		elements = { %s, "wg-ingress" }
+		elements = { %s }
+	}
+
+	set local_management_interfaces {
+		type ifname
+		elements = { %s }
 	}
 
 	set wireguard_ingress_listeners {
@@ -178,7 +192,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         iifname %s tcp dport 53 accept comment "gateway-vpn LAN DNS TCP"
 		iifname "wg-ingress" udp dport 53 accept comment "gateway-vpn WireGuard client DNS UDP"
 		iifname "wg-ingress" tcp dport 53 accept comment "gateway-vpn WireGuard client DNS TCP"
-        iifname %s tcp dport %d accept comment "gateway-vpn LAN API"
+        iifname @local_management_interfaces tcp dport %d accept comment "gateway-vpn management API"
 %s        iifname %s tcp dport %d accept comment "gateway-vpn WireGuard API"
 		iifname . udp dport @wireguard_ingress_listeners accept comment "gateway-vpn selected WireGuard ingress listener"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
@@ -188,13 +202,13 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         type filter hook forward priority filter; policy drop;
 		ct state invalid drop
 		jump management_fabric_forward
-        meta nfproto ipv4 iifname %s oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
+		meta nfproto ipv4 iifname %s iifname != "wg-ingress" oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn LAN to verified TUN"
 		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified TUN"
-        meta nfproto ipv4 iifname @active_tun_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
+		meta nfproto ipv4 iifname @active_tun_interfaces oifname %s oifname != "wg-ingress" ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to LAN"
 		meta nfproto ipv4 iifname @active_tun_interfaces oifname "wg-ingress" ip daddr @wireguard_ingress_allowed_v4 ct state { established, related } counter name user_download accept comment "gateway-vpn verified TUN to allowed WireGuard client"
-		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct uplink"
+		meta nfproto ipv4 iifname %s iifname != "wg-ingress" oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn LAN to verified direct uplink"
 		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context counter name user_upload accept comment "gateway-vpn allowed WireGuard client to verified direct uplink"
-		meta nfproto ipv4 iifname @active_direct_interfaces oifname %s ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct uplink to LAN"
+		meta nfproto ipv4 iifname @active_direct_interfaces oifname %s oifname != "wg-ingress" ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct uplink to LAN"
 		meta nfproto ipv4 iifname @active_direct_interfaces oifname "wg-ingress" ip daddr @wireguard_ingress_allowed_v4 ct state { established, related } counter name user_download accept comment "gateway-vpn verified direct uplink to allowed WireGuard client"
         counter comment "gateway-vpn PATH_BLOCKED"
     }
@@ -202,7 +216,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	chain postrouting {
 		type nat hook postrouting priority srcnat;
 		jump management_fabric_postrouting
-		meta nfproto ipv4 iifname %s oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct LAN NAT"
+		meta nfproto ipv4 iifname %s iifname != "wg-ingress" oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct LAN NAT"
 		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context masquerade comment "gateway-vpn selected direct WireGuard NAT"
 	}
 
@@ -244,8 +258,8 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 `,
 		TableName,
 		SchemaGeneration,
-		nftString(config.LANInterface),
-		nftString(config.LANInterface),
+		userIngressInterfaces,
+		managementInterfaces,
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
 		nftString(config.LANInterface),
@@ -263,6 +277,26 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 	)
 	digest := sha256.Sum256([]byte(text))
 	return Ruleset{Text: text, SHA256: hex.EncodeToString(digest[:])}, nil
+}
+
+func normalizeManagementInterfaces(lan string, configured []string) (string, error) {
+	values := append([]string{lan}, configured...)
+	if len(values) > 17 {
+		return "", errors.New("too many firewall management interfaces")
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if !validInterfaceName(value) {
+			return "", errors.New("firewall management interface name is invalid")
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, nftString(value))
+	}
+	return strings.Join(result, ", "), nil
 }
 
 type LoadOptions struct {

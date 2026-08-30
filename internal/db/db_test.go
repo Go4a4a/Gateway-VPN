@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 29 {
+	if err != nil || version != 30 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 29 {
+	if err != nil || latest != 30 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -183,6 +183,7 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"operations",
 		"nodes",
 		"network_apply_transactions",
+		"topology_profile_state",
 		"path_node_target_results",
 		"path_nodes",
 		"path_health_runtime",
@@ -256,8 +257,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 29 {
-		t.Fatalf("SchemaVersion() = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("SchemaVersion() = %d, want 30", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -301,8 +302,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 29 {
-		t.Fatalf("migration count = %d, want 29", count)
+	if count != 30 {
+		t.Fatalf("migration count = %d, want 30", count)
 	}
 }
 
@@ -434,7 +435,7 @@ FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode, &ma
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
+	if version != 30 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
 		t.Fatalf("watchdog migrations = version:%d interval:%d modes:%s/%s/%s count:%d", version, interval, loggingMode, managementFabricMode, wireGuardAdminMode, modeCount)
 	}
 }
@@ -488,6 +489,92 @@ FROM management_admin_vps_peers WHERE id='admin-peer:a'`).Scan(&version, &trustM
 	}
 	if err := ForeignKeyCheck(ctx, database); err != nil {
 		t.Fatalf("migration 29 foreign keys: %v", err)
+	}
+}
+
+func TestMigration30PreservesTypedTransactionsAndInitializesTopologyProfile(t *testing.T) {
+	profiles := []struct {
+		name    string
+		prepare []string
+		want    string
+	}{
+		{name: "HiLink default", want: "ETHERNET_HILINK"},
+		{name: "Ethernet uplink", want: "ETHERNET_ETHERNET", prepare: []string{
+			`INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at) VALUES('netif:lan','MAC','lan-hash','enp1s0','UP','now','now')`,
+			`INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at) VALUES('netif:wan','MAC','wan-hash','enp2s0','UP','now','now')`,
+			`INSERT INTO uplinks(id,display_number,type,name,enabled,priority,network_interface_id,address_mode,dns_json,routing_table_id,fwmark,state,created_at,updated_at) VALUES('uplink:wan',1,'ETHERNET','WAN',1,1,'netif:wan','DHCP','[]',1101,4353,'UPLINK_READY','now','now')`,
+			`INSERT INTO interface_role_assignments(id,network_interface_id,role,created_at,updated_at) VALUES('role:lan','netif:lan','LAN_MEMBER','now','now')`,
+		}},
+		{name: "mixed uplinks", want: "MIXED", prepare: []string{
+			`INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at) VALUES('netif:lan','MAC','lan-hash','enp1s0','UP','now','now')`,
+			`INSERT INTO uplinks(id,display_number,type,name,enabled,priority,address_mode,dns_json,routing_table_id,fwmark,state,created_at,updated_at) VALUES('uplink:wan',1,'ETHERNET','WAN',1,1,'DHCP','[]',1101,4353,'UPLINK_READY','now','now')`,
+			`INSERT INTO uplinks(id,display_number,type,name,enabled,priority,address_mode,dns_json,routing_table_id,fwmark,state,created_at,updated_at) VALUES('uplink:hilink',2,'HILINK','LTE',1,2,'DHCP','[]',1102,4354,'UPLINK_READY','now','now')`,
+			`INSERT INTO interface_role_assignments(id,network_interface_id,role,created_at,updated_at) VALUES('role:lan','netif:lan','LAN_MEMBER','now','now')`,
+		}},
+		{name: "one arm", want: "ONE_ARM_WIREGUARD", prepare: []string{
+			`INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at) VALUES('netif:shared','MAC','shared-hash','enp1s0','UP','now','now')`,
+			`INSERT INTO interface_role_assignments(id,network_interface_id,role,created_at,updated_at) VALUES('role:shared','netif:shared','SHARED_ONE_ARM','now','now')`,
+		}},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			ctx := context.Background()
+			database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			if err := migrateFS(ctx, database, migrationsThrough(t, 29)); err != nil {
+				t.Fatalf("migrate schema 29: %v", err)
+			}
+			for _, statement := range profile.prepare {
+				if _, err := database.ExecContext(ctx, statement); err != nil {
+					t.Fatalf("prepare topology profile: %v", err)
+				}
+			}
+			if _, err := database.ExecContext(ctx, `
+INSERT INTO network_apply_transactions(
+ id,state,confirm_token_sha256,interface_name,old_lan_cidr,new_lan_cidr,
+ old_url,new_url,new_destination_ip,rollback_deadline,transaction_dir,
+ created_at,updated_at,manifest_schema,operation_kind,candidate_json
+) VALUES(
+ 'apply-ethernet','CONFIRMED','digest','','','',
+ 'https://192.168.200.1:8443','https://192.168.200.1:8443','192.168.200.1',
+ '2026-08-30T12:01:00Z','/var/lib/gateway-vpn-privileged/network-transactions/apply-ethernet',
+ '2026-08-30T12:00:00Z','2026-08-30T12:00:30Z',2,'ETHERNET_UPLINK','{"operation":"CREATE"}'
+)`); err != nil {
+				t.Fatalf("insert schema-2 transaction: %v", err)
+			}
+			if err := Migrate(ctx, database); err != nil {
+				t.Fatalf("migrate schema 30: %v", err)
+			}
+			var active, state, kind, candidate string
+			var desired, applied, schema int64
+			if err := database.QueryRowContext(ctx, `SELECT active_profile,desired_generation,applied_generation,state FROM topology_profile_state WHERE singleton_id=1`).Scan(&active, &desired, &applied, &state); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.QueryRowContext(ctx, `SELECT manifest_schema,operation_kind,candidate_json FROM network_apply_transactions WHERE id='apply-ethernet'`).Scan(&schema, &kind, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			if active != profile.want || desired != 1 || applied != 1 || state != "ACTIVE" {
+				t.Fatalf("initial topology = %s %d/%d %s, want %s 1/1 ACTIVE", active, desired, applied, state, profile.want)
+			}
+			if schema != 2 || kind != "ETHERNET_UPLINK" || candidate != `{"operation":"CREATE"}` {
+				t.Fatalf("preserved transaction = %d / %s / %s", schema, kind, candidate)
+			}
+			if _, err := database.ExecContext(ctx, `INSERT INTO network_apply_transactions(
+ id,state,confirm_token_sha256,interface_name,old_lan_cidr,new_lan_cidr,old_url,new_url,
+ new_destination_ip,rollback_deadline,transaction_dir,created_at,updated_at,
+ manifest_schema,operation_kind,candidate_json
+) VALUES('invalid','FAILED','digest','','','','https://192.168.200.1:8443',
+ 'https://192.168.200.1:8443','192.168.200.1','2026-08-30T12:01:00Z','/tmp/invalid',
+ '2026-08-30T12:00:00Z','2026-08-30T12:00:00Z',4,'TOPOLOGY_PROFILE','{}')`); err == nil {
+				t.Fatal("migration 30 accepted unknown manifest schema")
+			}
+			if err := ForeignKeyCheck(ctx, database); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

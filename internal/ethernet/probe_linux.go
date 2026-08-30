@@ -97,6 +97,13 @@ func (probe SysFSProbe) List(ctx context.Context) ([]Device, error) {
 			driver = filepath.Base(path)
 		}
 		mtu, _ := readInteger(filepath.Join(base, "mtu"), 576, 9216)
+		masterIfname := ""
+		if masterPath, err := filepath.EvalSymlinks(filepath.Join(base, "master")); err == nil && pathInside(root, masterPath) {
+			candidate := filepath.Base(masterPath)
+			if validIfname(candidate) && candidate != name {
+				masterIfname = candidate
+			}
+		}
 		result = append(result, Device{Observation: uplink.InterfaceObservation{
 			ID: "netif:ethernet:" + hash[:24], StableIdentityKind: kind,
 			StableIdentityHash: hash, PermanentMAC: permanentMAC, TopologyPath: topology,
@@ -104,7 +111,7 @@ func (probe SysFSProbe) List(ctx context.Context) ([]Device, error) {
 			Vendor:       strings.TrimSpace(readSmall(filepath.Join(devicePath, "vendor"))),
 			Model:        strings.TrimSpace(readSmall(filepath.Join(devicePath, "device"))),
 			CarrierState: carrier, Addresses: addresses,
-		}, MTU: int64(mtu)})
+		}, MasterIfname: masterIfname, MTU: int64(mtu)})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Observation.ID < result[j].Observation.ID })
 	return result, nil

@@ -301,6 +301,20 @@ func TestFirewallBackendRejectsMissingMarkersWrongSchemaAndRedactsNftFailure(t *
 	}
 }
 
+func TestDirectOneArmTransactionDoesNotDuplicateWireGuardMarkElement(t *testing.T) {
+	payload, err := renderPathTransaction(PathState{
+		Active: true, Mode: PathModeDirect, Generation: 7,
+		DirectInterface: "wan0", DirectMark: 0x1101, RouteGeneration: 3,
+	}, "gateway-vpn-tun", "wg-ingress", []string{"10.90.0.2/32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := `add element inet gateway_vpn active_direct_marks { "wg-ingress" : 0x00001101 }`
+	if count := strings.Count(string(payload), marker); count != 1 {
+		t.Fatalf("one-arm direct mark count = %d:\n%s", count, payload)
+	}
+}
+
 func TestRenderPathTransactionRejectsHalfActiveStates(t *testing.T) {
 	for name, pathState := range map[string]PathState{
 		"blocked-with-generation": {Generation: 1},

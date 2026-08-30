@@ -103,6 +103,7 @@ func (guard *Guard) Inspect(ctx context.Context) error {
 		"set active_direct_interfaces",
 		"set active_direct_context",
 		"set user_ingress_interfaces",
+		"set local_management_interfaces",
 		"set wireguard_ingress_listeners",
 		"set wireguard_ingress_allowed_v4",
 		"map active_direct_marks",

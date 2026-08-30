@@ -20,7 +20,9 @@ getent passwd gateway-vpn-mihomo >/dev/null || useradd --system --no-create-home
 
 rendered=$(mktemp)
 trap 'rm -f "$rendered"; nft delete table inet gateway_vpn >/dev/null 2>&1 || true' EXIT
-sed 's|__LAN_INTERFACE__|enp2s0|g' "$TEMPLATE" >"$rendered"
+sed -e 's|__LAN_INTERFACE__|enp2s0|g' \
+    -e 's|__SSH_RULE__|        iifname @local_management_interfaces tcp dport 22 accept comment "gateway-vpn management SSH"|' \
+    "$TEMPLATE" >"$rendered"
 
 nft --check --file "$FIXTURE"
 nft --check --file "$rendered"

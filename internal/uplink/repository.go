@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -87,6 +88,16 @@ type InterfaceRole struct {
 type InterfaceInventory struct {
 	NetworkInterface
 	Roles []InterfaceRole
+}
+
+// InitialLANObservation is the minimum non-secret kernel topology used to
+// import installer-owned LAN ports into the stable interface inventory.  The
+// import is intentionally separate from ordinary observation: it is allowed
+// only for the untouched topology generation and never guesses an uplink.
+type InitialLANObservation struct {
+	NetworkInterfaceID string
+	CurrentIfname      string
+	MasterIfname       string
 }
 
 type CreateEthernetInput struct {
@@ -272,6 +283,127 @@ ON CONFLICT(id) DO UPDATE SET
 		return NetworkInterface{}, errors.New("managed LAN role was not published")
 	}
 	return item, nil
+}
+
+// SeedInitialLANRoles imports the physical LAN selected by the installer after
+// the first sysfs observation.  Direct-interface installs match the configured
+// L3 interface itself; bridge installs match only physical ports whose current
+// kernel master is that bridge.  Once any physical topology role exists, or
+// topology generation 1 is no longer untouched, this method is a no-op.
+func (repository *Repository) SeedInitialLANRoles(ctx context.Context, configuredLANIfname string, observations []InitialLANObservation) ([]string, error) {
+	if repository == nil || repository.database == nil || !validIfname(configuredLANIfname) {
+		return nil, errors.New("initial LAN repository and configured interface are required")
+	}
+	if len(observations) > 64 {
+		return nil, errors.New("initial LAN observation set is too large")
+	}
+	direct := make([]InitialLANObservation, 0, 1)
+	bridged := make([]InitialLANObservation, 0, len(observations))
+	seen := make(map[string]struct{}, len(observations))
+	for _, item := range observations {
+		if !validIdentifier(item.NetworkInterfaceID) || !validIfname(item.CurrentIfname) || item.MasterIfname != "" && !validIfname(item.MasterIfname) {
+			return nil, errors.New("initial LAN observation is invalid")
+		}
+		if item.NetworkInterfaceID == ManagedLANInterfaceID {
+			return nil, errors.New("managed virtual LAN cannot be imported as a physical member")
+		}
+		if _, duplicate := seen[item.NetworkInterfaceID]; duplicate {
+			return nil, errors.New("initial LAN observation is duplicated")
+		}
+		seen[item.NetworkInterfaceID] = struct{}{}
+		if item.CurrentIfname == configuredLANIfname {
+			direct = append(direct, item)
+		}
+		if item.MasterIfname == configuredLANIfname {
+			bridged = append(bridged, item)
+		}
+	}
+	selected := bridged
+	if len(direct) != 0 {
+		selected = direct
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].NetworkInterfaceID < selected[j].NetworkInterfaceID })
+
+	tx, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin initial LAN role import: %w", err)
+	}
+	defer tx.Rollback()
+	// This harmless conditional write obtains the SQLite writer lock before we
+	// inspect roles, preventing a concurrent topology safe-apply from racing the
+	// one-time import.
+	locked, err := tx.ExecContext(ctx, `
+UPDATE topology_profile_state SET updated_at=updated_at
+WHERE singleton_id=1 AND desired_generation=1 AND applied_generation=1 AND state='ACTIVE'`)
+	if err != nil {
+		return nil, fmt.Errorf("lock initial topology generation: %w", err)
+	}
+	if count, countErr := locked.RowsAffected(); countErr != nil {
+		return nil, countErr
+	} else if count != 1 {
+		return nil, nil
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM interface_role_assignments
+WHERE network_interface_id<>? AND role IN ('LAN_MEMBER','MANAGEMENT','WG_ENDPOINT','SHARED_ONE_ARM')`, ManagedLANInterfaceID).Scan(&existing); err != nil {
+		return nil, fmt.Errorf("inspect existing physical topology roles: %w", err)
+	}
+	if existing != 0 {
+		return nil, nil
+	}
+	now := repository.now().UTC().Format(time.RFC3339Nano)
+	seeded := make([]string, 0, len(selected))
+	for _, item := range selected {
+		var storedIfname string
+		if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(current_ifname,'') FROM network_interfaces
+WHERE id=? AND stable_identity_kind<>'MANAGED_VIRTUAL'`, item.NetworkInterfaceID).Scan(&storedIfname); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, errors.New("initial LAN interface disappeared before role import")
+			}
+			return nil, err
+		}
+		if storedIfname != item.CurrentIfname {
+			return nil, errors.New("initial LAN interface name changed before role import")
+		}
+		var conflicting int
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM interface_role_assignments
+WHERE network_interface_id=? AND role IN ('ETHERNET_UPLINK','HILINK_UPLINK')`, item.NetworkInterfaceID).Scan(&conflicting); err != nil {
+			return nil, err
+		}
+		if conflicting != 0 {
+			return nil, errors.New("installer LAN interface is already assigned as an uplink")
+		}
+		for _, role := range []string{"LAN_MEMBER", "MANAGEMENT"} {
+			digest := sha256.Sum256([]byte("initial:" + role + ":" + item.NetworkInterfaceID))
+			roleID := "role:initial:" + strings.ToLower(role) + ":" + hex.EncodeToString(digest[:8])
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO interface_role_assignments(
+ id,network_interface_id,role,desired_generation,observed_generation,state,created_at,updated_at
+) VALUES(?,?,?,1,1,'ACTIVE',?,?)`, roleID, item.NetworkInterfaceID, role, now, now); err != nil {
+				return nil, fmt.Errorf("import initial %s role: %w", role, err)
+			}
+		}
+		seeded = append(seeded, item.NetworkInterfaceID)
+	}
+	details, err := json.Marshal(map[string]any{"configured_lan_interface": configuredLANIfname, "network_interface_ids": seeded})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO events(occurred_at,severity,type,details_json)
+VALUES(?,'INFO','TOPOLOGY_INITIAL_LAN_ROLES_IMPORTED',?)`, now, string(details)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit initial LAN role import: %w", err)
+	}
+	return seeded, nil
 }
 
 func (repository *Repository) GetInterface(ctx context.Context, id string) (NetworkInterface, error) {

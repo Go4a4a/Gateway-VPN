@@ -589,6 +589,28 @@ paths:
       operationId: listNetworkInterfaces
       summary: Перечислить обнаруженные NIC и назначения ролей без identity hash и полного MAC
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/network/topology:
+    get:
+      tags: [Network]
+      operationId: getNetworkTopology
+      summary: Получить текущий topology profile и protected desired/applied generation
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/network/topology/preview:
+    post:
+      tags: [Network]
+      operationId: previewNetworkTopology
+      summary: Без мутации проверить роли, подсети, management safety и внешние prerequisites полного topology profile
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/network/topology/apply:
+    post:
+      tags: [Network]
+      operationId: applyNetworkTopology
+      summary: Применить весь profile одной durable transaction с LKG rollback и подтверждением нового management path
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/modems:
     get:

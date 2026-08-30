@@ -234,6 +234,9 @@ func validTransactionOperation(transaction Transaction) bool {
 	if transaction.ManifestSchema == ManifestSchema && transaction.OperationKind == OperationEthernetUplink {
 		return transaction.InterfaceName == "" && transaction.OldLANCIDR == "" && transaction.NewLANCIDR == "" && transaction.CandidateJSON != "" && transaction.CandidateJSON != "{}"
 	}
+	if transaction.ManifestSchema == TopologyManifestSchema && transaction.OperationKind == OperationTopologyProfile {
+		return transaction.InterfaceName == "" && transaction.OldLANCIDR == "" && transaction.NewLANCIDR == "" && transaction.CandidateJSON != "" && transaction.CandidateJSON != "{}"
+	}
 	return false
 }
 

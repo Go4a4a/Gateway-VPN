@@ -43,6 +43,30 @@ import (
 
 const defaultNetworkTransactionRoot = "/var/lib/gateway-vpn-privileged/network-transactions"
 
+type topologyRuntimeContext struct {
+	firewall *dataplane.FirewallBackend
+	routing  *dataplane.RoutingBackend
+	ingress  *wgingress.Backend
+}
+
+func (runtime topologyRuntimeContext) SetTopologyNetwork(interfaceName, lanCIDR string) error {
+	if runtime.firewall == nil || runtime.routing == nil || runtime.ingress == nil || len(interfaceName) == 0 || len(interfaceName) > 15 {
+		return errors.New("topology runtime context is incomplete")
+	}
+	prefix, err := netip.ParsePrefix(lanCIDR)
+	if err != nil || !prefix.Addr().Is4() {
+		return errors.New("topology runtime LAN prefix is invalid")
+	}
+	runtime.firewall.LANName = interfaceName
+	runtime.routing.LANPrefix = prefix.String()
+	if interfaceName == wgingress.DefaultInterfaceName {
+		runtime.ingress.Repository.ReservedPrefixes = nil
+	} else {
+		runtime.ingress.Repository.ReservedPrefixes = []netip.Prefix{prefix.Masked()}
+	}
+	return nil
+}
+
 func runNetworkBroker(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpn network-broker", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -252,7 +276,7 @@ func runNetworkRollback(args []string) int {
 		database = opened
 		defer database.Close()
 		backend = engine.Backend
-	} else if manifest.SchemaVersion == networkapply.ManifestSchema {
+	} else if manifest.SchemaVersion != networkapply.LegacyManifestSchema {
 		fmt.Fprintf(os.Stderr, "initialize Ethernet network rollback: %v\n", initErr)
 		return 1
 	}
@@ -330,10 +354,36 @@ func productionNetworkEngine(ctx context.Context, configPath, transactionRoot st
 	paths.ConfigFile = configPath
 	paths.ConfigGID = int(gid)
 	executor := platformexec.OSExecutor{}
+	uplinkRepository := uplink.NewRepository(database, configuration.Modems.RoutingTableStart, configuration.Modems.FwmarkStart)
+	topologyFirewall := &dataplane.FirewallBackend{
+		Database: database, Uplinks: uplinkRepository, Executor: executor, NFT: paths.NFT,
+		TUNName: configuration.Mihomo.TunName, LANName: configuration.Network.LANInterface,
+	}
+	topologyRouting := &dataplane.RoutingBackend{
+		Uplinks: uplinkRepository, Executor: executor, IP: paths.IP,
+		LANPrefix: configuration.Network.LANAddress, WireGuardPrefix: "10.80.0.0/24",
+		BootstrapDNS:      append([]string(nil), configuration.Mihomo.BootstrapDNS...),
+		RoutingTableStart: configuration.Modems.RoutingTableStart,
+		FwmarkStart:       configuration.Modems.FwmarkStart, Gate: topologyFirewall,
+	}
+	topologyFirewall.Routing = topologyRouting
+	lanPrefix, err := netip.ParsePrefix(configuration.Network.LANAddress)
+	if err != nil {
+		return fail(err)
+	}
+	ingressSecretRoot := filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress")
+	topologyIngress := &wgingress.Backend{
+		Repository: wgingress.Repository{Database: database, SecretRoot: ingressSecretRoot, ReservedPrefixes: []netip.Prefix{lanPrefix.Masked()}},
+		Keys:       wgingress.KeyStore{Root: ingressSecretRoot}, Executor: executor,
+		IP: paths.IP, WG: "/usr/bin/wg", NFT: paths.NFT, Mutate: true,
+	}
 	backend := networkapply.UbuntuBackend{
 		Executor: executor, Paths: paths, Database: database,
 		RoutingTableStart: configuration.Modems.RoutingTableStart,
 		FwmarkStart:       configuration.Modems.FwmarkStart,
+		TopologyGate:      topologyFirewall, TopologyRouting: topologyRouting,
+		TopologyIngress: topologyIngress,
+		TopologyContext: topologyRuntimeContext{firewall: topologyFirewall, routing: topologyRouting, ingress: topologyIngress},
 	}
 	timer := networkapply.SystemdRollbackTimer{Executor: executor, Systemctl: paths.Systemctl}
 	engine := networkapply.NewEngine(networkapply.NewRepository(database), networkapply.DiskStore{Root: transactionRoot}, backend, timer)

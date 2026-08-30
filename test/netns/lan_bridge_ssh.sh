@@ -104,7 +104,8 @@ ip netns exec "$GW" bridge -j link show dev lanp2 | grep -Eq '"state"[[:space:]]
 
 sed 's/lan_interface: enp2s0/lan_interface: gateway-vpn-lan/' "$ROOT/config.example.yaml" >"$WORK/config.yaml"
 ip netns exec "$GW" "$BINARY" firewall-boot --config "$WORK/config.yaml" --apply
-ip netns exec "$GW" nft list chain inet gateway_vpn input | grep -F 'iifname "gateway-vpn-lan" tcp dport 22 accept' >/dev/null
+ip netns exec "$GW" nft list set inet gateway_vpn local_management_interfaces | grep -F 'gateway-vpn-lan' >/dev/null
+ip netns exec "$GW" nft list chain inet gateway_vpn input | grep -F 'iifname @local_management_interfaces tcp dport 22 accept' >/dev/null
 
 ip netns exec "$GW" python3 -c 'import socket
 s=socket.socket()

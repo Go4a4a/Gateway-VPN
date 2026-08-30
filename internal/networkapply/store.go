@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,10 +20,12 @@ import (
 )
 
 const (
-	LegacyManifestSchema    = 1
-	ManifestSchema          = 2
-	OperationLANAddress     = "LAN_ADDRESS"
-	OperationEthernetUplink = "ETHERNET_UPLINK"
+	LegacyManifestSchema     = 1
+	ManifestSchema           = 2
+	TopologyManifestSchema   = 3
+	OperationLANAddress      = "LAN_ADDRESS"
+	OperationEthernetUplink  = "ETHERNET_UPLINK"
+	OperationTopologyProfile = "TOPOLOGY_PROFILE"
 
 	EthernetCreate           = "CREATE"
 	EthernetReplaceInterface = "REPLACE_INTERFACE"
@@ -40,18 +43,53 @@ const (
 )
 
 type Manifest struct {
-	SchemaVersion    int               `json:"schema_version"`
-	ID               string            `json:"id"`
-	OperationKind    string            `json:"operation_kind,omitempty"`
-	InterfaceName    string            `json:"interface_name,omitempty"`
-	OldLANCIDR       string            `json:"old_lan_cidr,omitempty"`
-	NewLANCIDR       string            `json:"new_lan_cidr,omitempty"`
-	OldURL           string            `json:"old_url"`
-	NewURL           string            `json:"new_url"`
-	NewDestinationIP string            `json:"new_destination_ip"`
-	Ethernet         *EthernetMutation `json:"ethernet,omitempty"`
-	RollbackDeadline string            `json:"rollback_deadline"`
-	CreatedAt        string            `json:"created_at"`
+	SchemaVersion                int               `json:"schema_version"`
+	ID                           string            `json:"id"`
+	OperationKind                string            `json:"operation_kind,omitempty"`
+	InterfaceName                string            `json:"interface_name,omitempty"`
+	OldLANCIDR                   string            `json:"old_lan_cidr,omitempty"`
+	NewLANCIDR                   string            `json:"new_lan_cidr,omitempty"`
+	OldURL                       string            `json:"old_url"`
+	NewURL                       string            `json:"new_url"`
+	NewDestinationIP             string            `json:"new_destination_ip"`
+	Ethernet                     *EthernetMutation `json:"ethernet,omitempty"`
+	Topology                     *TopologyMutation `json:"topology,omitempty"`
+	RequireWireGuardConfirmation bool              `json:"require_wireguard_confirmation,omitempty"`
+	RollbackDeadline             string            `json:"rollback_deadline"`
+	CreatedAt                    string            `json:"created_at"`
+}
+
+const (
+	TopologyEthernetHiLink   = "ETHERNET_HILINK"
+	TopologyEthernetEthernet = "ETHERNET_ETHERNET"
+	TopologyOneArmWireGuard  = "ONE_ARM_WIREGUARD"
+	TopologyMixed            = "MIXED"
+	topologyManagedLANName   = "gateway-vpn-lan"
+)
+
+type TopologyListenInterface struct {
+	NetworkInterfaceID string `json:"network_interface_id"`
+	ExposureMode       string `json:"exposure_mode"`
+	Priority           int    `json:"priority"`
+}
+
+// TopologyMutation is the complete desired post-install interface contour.
+// Uplink address settings remain owned by their existing durable records; the
+// profile assigns ingress and management roles and projects them atomically.
+type TopologyMutation struct {
+	ExpectedDesiredGeneration int64                     `json:"expected_desired_generation"`
+	Profile                   string                    `json:"profile"`
+	LANInterfaceIDs           []string                  `json:"lan_interface_ids"`
+	ManagementInterfaceIDs    []string                  `json:"management_interface_ids"`
+	WGEndpointInterfaceIDs    []string                  `json:"wg_endpoint_interface_ids"`
+	SharedOneArmInterfaceID   string                    `json:"shared_one_arm_interface_id,omitempty"`
+	LANInterfaceName          string                    `json:"lan_interface_name"`
+	LANAddress                string                    `json:"lan_address"`
+	DHCPDNSEnabled            bool                      `json:"dhcp_dns_enabled"`
+	IngressEnabled            bool                      `json:"ingress_enabled"`
+	IngressTopologyMode       string                    `json:"ingress_topology_mode"`
+	IngressListenInterfaces   []TopologyListenInterface `json:"ingress_listen_interfaces"`
+	AcknowledgedPrerequisites []string                  `json:"acknowledged_prerequisites"`
 }
 
 type EthernetMutation struct {
@@ -233,7 +271,7 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("network transaction deadline must be after creation and at most 90 seconds")
 	}
 	if manifest.SchemaVersion == LegacyManifestSchema {
-		if manifest.OperationKind != "" && manifest.OperationKind != OperationLANAddress || manifest.Ethernet != nil {
+		if manifest.OperationKind != "" && manifest.OperationKind != OperationLANAddress || manifest.Ethernet != nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation {
 			return errors.New("legacy LAN transaction manifest contains a foreign operation")
 		}
 		_, newPrefix, err := validateCandidate(Candidate{
@@ -248,7 +286,31 @@ func validateManifest(manifest Manifest) error {
 		}
 		return nil
 	}
-	if manifest.SchemaVersion != ManifestSchema || manifest.OperationKind != OperationEthernetUplink || manifest.InterfaceName != "" || manifest.OldLANCIDR != "" || manifest.NewLANCIDR != "" || manifest.Ethernet == nil {
+	if manifest.SchemaVersion == TopologyManifestSchema {
+		if manifest.OperationKind != OperationTopologyProfile || manifest.InterfaceName != "" || manifest.OldLANCIDR != "" || manifest.NewLANCIDR != "" || manifest.Ethernet != nil || manifest.Topology == nil {
+			return errors.New("network transaction topology operation is invalid")
+		}
+		if err := validateTopologyMutation(*manifest.Topology); err != nil {
+			return fmt.Errorf("network transaction topology candidate is invalid: %w", err)
+		}
+		destination, err := netip.ParseAddr(manifest.NewDestinationIP)
+		if err != nil || !destination.Is4() {
+			return errors.New("network transaction confirmation destination is invalid")
+		}
+		if err := validateManagementURL(manifest.NewURL, destination); err != nil {
+			return errors.New("topology transaction new management URL is invalid")
+		}
+		parsedOld, err := url.Parse(manifest.OldURL)
+		if err != nil {
+			return errors.New("topology transaction old management URL is invalid")
+		}
+		oldDestination, err := netip.ParseAddr(strings.Trim(parsedOld.Hostname(), "[]"))
+		if err != nil || validateManagementURL(manifest.OldURL, oldDestination) != nil {
+			return errors.New("topology transaction old management URL is invalid")
+		}
+		return nil
+	}
+	if manifest.SchemaVersion != ManifestSchema || manifest.OperationKind != OperationEthernetUplink || manifest.InterfaceName != "" || manifest.OldLANCIDR != "" || manifest.NewLANCIDR != "" || manifest.Ethernet == nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation {
 		return errors.New("network transaction manifest operation is invalid")
 	}
 	if err := validateEthernetMutation(*manifest.Ethernet); err != nil {
@@ -265,6 +327,135 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("Ethernet transaction management URL must remain unchanged")
 	}
 	return nil
+}
+
+func validateTopologyMutation(candidate TopologyMutation) error {
+	if candidate.ExpectedDesiredGeneration < 1 || !validInterfaceName(candidate.LANInterfaceName) || !netutil.ValidGatewayLAN(candidate.LANAddress) {
+		return errors.New("topology generation, LAN interface and private LAN address are required")
+	}
+	switch candidate.Profile {
+	case TopologyEthernetHiLink, TopologyEthernetEthernet, TopologyOneArmWireGuard, TopologyMixed:
+	default:
+		return errors.New("unsupported topology profile")
+	}
+	lan, err := validateTopologyIDs(candidate.LANInterfaceIDs, 16)
+	if err != nil {
+		return fmt.Errorf("LAN interfaces: %w", err)
+	}
+	management, err := validateTopologyIDs(candidate.ManagementInterfaceIDs, 16)
+	if err != nil {
+		return fmt.Errorf("management interfaces: %w", err)
+	}
+	endpoints, err := validateTopologyIDs(candidate.WGEndpointInterfaceIDs, 16)
+	if err != nil {
+		return fmt.Errorf("WireGuard endpoint interfaces: %w", err)
+	}
+	shared := strings.TrimSpace(candidate.SharedOneArmInterfaceID)
+	if shared != "" && !safeObjectID(shared) {
+		return errors.New("shared one-arm interface id is invalid")
+	}
+	for id := range management {
+		if _, isLAN := lan[id]; !isLAN && id != shared {
+			return errors.New("management interface must also be a LAN member or the shared one-arm interface")
+		}
+	}
+	if len(management) == 0 {
+		return errors.New("at least one local management interface is required")
+	}
+	if shared != "" {
+		if _, isLAN := lan[shared]; isLAN {
+			return errors.New("shared one-arm interface cannot also be a plaintext LAN member")
+		}
+	}
+	if candidate.Profile == TopologyOneArmWireGuard {
+		if candidate.LANInterfaceName != "wg-ingress" || shared == "" || len(lan) != 0 || len(management) != 1 || !candidate.IngressEnabled || candidate.IngressTopologyMode != "ONE_ARM" || candidate.DHCPDNSEnabled {
+			return errors.New("one-arm profile requires exactly one shared management/uplink interface, enabled ONE_ARM ingress and no LAN DHCP/DNS")
+		}
+	} else {
+		if candidate.LANInterfaceName != topologyManagedLANName || len(lan) == 0 || !candidate.DHCPDNSEnabled {
+			return errors.New("Ethernet LAN profiles require at least one LAN member and LAN DHCP/DNS")
+		}
+		if candidate.IngressTopologyMode == "ONE_ARM" {
+			return errors.New("ONE_ARM ingress is reserved for the one-arm topology profile")
+		}
+		if shared != "" && candidate.Profile != TopologyMixed {
+			return errors.New("shared one-arm role is allowed only in ONE_ARM or MIXED profile")
+		}
+	}
+	if candidate.IngressTopologyMode != "ROUTED" && candidate.IngressTopologyMode != "ONE_ARM" {
+		return errors.New("WireGuard ingress topology mode is invalid")
+	}
+	if len(candidate.IngressListenInterfaces) > 16 {
+		return errors.New("too many WireGuard ingress listeners")
+	}
+	listeners := make(map[string]struct{}, len(candidate.IngressListenInterfaces))
+	for index, item := range candidate.IngressListenInterfaces {
+		id := strings.TrimSpace(item.NetworkInterfaceID)
+		if !safeObjectID(id) || item.Priority != index+1 || item.ExposureMode != "LOCAL" && item.ExposureMode != "PUBLIC" {
+			return errors.New("WireGuard ingress listener list is invalid")
+		}
+		if _, duplicate := listeners[id]; duplicate {
+			return errors.New("WireGuard ingress listener is duplicated")
+		}
+		listeners[id] = struct{}{}
+		_, lanListener := lan[id]
+		_, endpointListener := endpoints[id]
+		if !lanListener && !endpointListener && id != shared && id != "netif:managed:lan" {
+			return errors.New("WireGuard ingress listener has no candidate LAN/WG endpoint role")
+		}
+		if item.ExposureMode == "PUBLIC" && !endpointListener && id != shared {
+			return errors.New("public WireGuard ingress listener requires WG_ENDPOINT or SHARED_ONE_ARM")
+		}
+	}
+	if candidate.IngressEnabled && len(listeners) == 0 || !candidate.IngressEnabled && len(listeners) != 0 {
+		return errors.New("WireGuard ingress listeners do not match enabled state")
+	}
+	allowedPrerequisites := map[string]struct{}{
+		"MOVE_LAN_CABLES": {}, "CONFIGURE_KEENETIC_WAN_DHCP": {},
+		"CONFIGURE_KEENETIC_WIREGUARD": {}, "VERIFY_UPSTREAM_RETURN_PATH": {},
+		"ACCEPT_TEMPORARY_DISCONNECT": {},
+	}
+	if len(candidate.AcknowledgedPrerequisites) > 8 {
+		return errors.New("too many topology prerequisite acknowledgements")
+	}
+	seenPrerequisites := make(map[string]struct{}, len(candidate.AcknowledgedPrerequisites))
+	for _, value := range candidate.AcknowledgedPrerequisites {
+		if _, allowed := allowedPrerequisites[value]; !allowed {
+			return errors.New("unknown topology prerequisite acknowledgement")
+		}
+		if _, duplicate := seenPrerequisites[value]; duplicate {
+			return errors.New("topology prerequisite acknowledgement is duplicated")
+		}
+		seenPrerequisites[value] = struct{}{}
+	}
+	return nil
+}
+
+func validateTopologyIDs(values []string, limit int) (map[string]struct{}, error) {
+	if len(values) > limit {
+		return nil, errors.New("too many interface assignments")
+	}
+	result := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if !safeObjectID(value) {
+			return nil, errors.New("interface id is invalid")
+		}
+		if _, exists := result[value]; exists {
+			return nil, errors.New("interface id is duplicated")
+		}
+		result[value] = struct{}{}
+	}
+	return result, nil
+}
+
+func cloneTopologyMutation(value TopologyMutation) TopologyMutation {
+	value.LANInterfaceIDs = append([]string(nil), value.LANInterfaceIDs...)
+	value.ManagementInterfaceIDs = append([]string(nil), value.ManagementInterfaceIDs...)
+	value.WGEndpointInterfaceIDs = append([]string(nil), value.WGEndpointInterfaceIDs...)
+	value.IngressListenInterfaces = append([]TopologyListenInterface(nil), value.IngressListenInterfaces...)
+	value.AcknowledgedPrerequisites = append([]string(nil), value.AcknowledgedPrerequisites...)
+	return value
 }
 
 func validateEthernetMutation(candidate EthernetMutation) error {

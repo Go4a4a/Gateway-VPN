@@ -101,6 +101,74 @@ func TestEnsureManagedLANInterfaceIsStableAndCannotBecomeAnUplink(t *testing.T) 
 	}
 }
 
+func TestSeedInitialLANRolesImportsObservedBridgeMembersOnce(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	if _, err := repository.EnsureManagedLANInterface(ctx, "gateway-vpn-lan", "192.168.200.1/24"); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []InterfaceObservation{
+		{ID: "netif:lan-a", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: strings.Repeat("a", 64), CurrentIfname: "enp1s0", CarrierState: "UP"},
+		{ID: "netif:lan-b", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: strings.Repeat("b", 64), CurrentIfname: "enp2s0", CarrierState: "UP"},
+		{ID: "netif:unused", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: strings.Repeat("c", 64), CurrentIfname: "enp3s0", CarrierState: "DOWN"},
+	} {
+		if _, err := repository.ObserveInterface(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observations := []InitialLANObservation{
+		{NetworkInterfaceID: "netif:unused", CurrentIfname: "enp3s0"},
+		{NetworkInterfaceID: "netif:lan-b", CurrentIfname: "enp2s0", MasterIfname: "gateway-vpn-lan"},
+		{NetworkInterfaceID: "netif:lan-a", CurrentIfname: "enp1s0", MasterIfname: "gateway-vpn-lan"},
+	}
+	seeded, err := repository.SeedInitialLANRoles(ctx, "gateway-vpn-lan", observations)
+	if err != nil || strings.Join(seeded, ",") != "netif:lan-a,netif:lan-b" {
+		t.Fatalf("SeedInitialLANRoles() = %v, %v", seeded, err)
+	}
+	seeded, err = repository.SeedInitialLANRoles(ctx, "gateway-vpn-lan", observations)
+	if err != nil || len(seeded) != 0 {
+		t.Fatalf("idempotent SeedInitialLANRoles() = %v, %v", seeded, err)
+	}
+	var importedRoles, unrelatedRoles, events int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM interface_role_assignments WHERE network_interface_id IN ('netif:lan-a','netif:lan-b') AND role IN ('LAN_MEMBER','MANAGEMENT')`).Scan(&importedRoles); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM interface_role_assignments WHERE network_interface_id='netif:unused'`).Scan(&unrelatedRoles); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE type='TOPOLOGY_INITIAL_LAN_ROLES_IMPORTED'`).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if importedRoles != 4 || unrelatedRoles != 0 || events != 1 {
+		t.Fatalf("imported/unrelated/events = %d/%d/%d", importedRoles, unrelatedRoles, events)
+	}
+}
+
+func TestSeedInitialLANRolesUsesDirectInterfaceAndHonorsGenerationGuard(t *testing.T) {
+	ctx, database, repository := newFixture(t)
+	for _, item := range []InterfaceObservation{
+		{ID: "netif:direct", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: strings.Repeat("d", 64), CurrentIfname: "enp1s0", CarrierState: "UP"},
+		{ID: "netif:bridge", StableIdentityKind: "PERMANENT_MAC", StableIdentityHash: strings.Repeat("e", 64), CurrentIfname: "enp2s0", CarrierState: "UP"},
+	} {
+		if _, err := repository.ObserveInterface(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seeded, err := repository.SeedInitialLANRoles(ctx, "enp1s0", []InitialLANObservation{
+		{NetworkInterfaceID: "netif:bridge", CurrentIfname: "enp2s0", MasterIfname: "enp1s0"},
+		{NetworkInterfaceID: "netif:direct", CurrentIfname: "enp1s0"},
+	})
+	if err != nil || strings.Join(seeded, ",") != "netif:direct" {
+		t.Fatalf("direct SeedInitialLANRoles() = %v, %v", seeded, err)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM interface_role_assignments WHERE network_interface_id<>'netif:managed:lan'; UPDATE topology_profile_state SET desired_generation=2,applied_generation=2 WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	seeded, err = repository.SeedInitialLANRoles(ctx, "enp2s0", []InitialLANObservation{{NetworkInterfaceID: "netif:bridge", CurrentIfname: "enp2s0"}})
+	if err != nil || len(seeded) != 0 {
+		t.Fatalf("generation-guarded SeedInitialLANRoles() = %v, %v", seeded, err)
+	}
+}
+
 func TestRepositoryRejectsUnsafeOrAlreadyAssignedEthernetInterface(t *testing.T) {
 	ctx, database, repository := newFixture(t)
 	_, err := repository.ObserveInterface(ctx, InterfaceObservation{

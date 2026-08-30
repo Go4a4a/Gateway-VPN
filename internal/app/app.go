@@ -278,8 +278,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	}
 	dataPlane.EthernetRunner.OnCycle = func(result ethernet.CycleResult) {
 		workerProgress.mark(watchdog.WorkerEthernetReconcile)
-		if len(result.ReadyUplinks) != 0 || len(result.OfflineUplinks) != 0 || len(result.ConflictUplinks) != 0 || len(result.RouteChanges) != 0 || len(result.Errors) != 0 {
-			routingLogger.Info("Ethernet uplink inventory reconciled", "ready", result.ReadyUplinks, "offline", result.OfflineUplinks, "conflicts", len(result.ConflictUplinks), "route_changes", result.RouteChanges, "errors", len(result.Errors))
+		if len(result.ReadyUplinks) != 0 || len(result.OfflineUplinks) != 0 || len(result.ConflictUplinks) != 0 || len(result.RouteChanges) != 0 || len(result.ImportedLANMembers) != 0 || len(result.Errors) != 0 {
+			routingLogger.Info("Ethernet uplink inventory reconciled", "ready", result.ReadyUplinks, "offline", result.OfflineUplinks, "conflicts", len(result.ConflictUplinks), "route_changes", result.RouteChanges, "imported_lan_members", result.ImportedLANMembers, "errors", len(result.Errors))
 		}
 	}
 	dataPlane.EthernetRunner.OnError = func(err error) {

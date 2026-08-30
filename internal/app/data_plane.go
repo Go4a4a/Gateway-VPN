@@ -214,7 +214,8 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 	modemRunner := &hilink.Runner{Manager: modemManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}
 	ethernetManager := &ethernet.Manager{
 		Probe: ethernet.HostProbe(identitySalt), LeaseReader: hilink.NetworkdLeaseReader{},
-		Routes: broker, Uplinks: uplinks, LANPrefix: configuration.Network.LANAddress,
+		Routes: broker, Uplinks: uplinks, LANInterface: configuration.Network.LANInterface,
+		LANPrefix:       configuration.Network.LANAddress,
 		WireGuardPrefix: "10.80.0.0/24",
 	}
 	ethernetRunner := &ethernet.Runner{Manager: ethernetManager, Watcher: hilink.HostLinkWatcher(), ReconcileInterval: 5 * time.Second}

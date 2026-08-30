@@ -19,10 +19,12 @@ type SystemConfig struct {
 }
 
 type NetworkConfig struct {
-	LANInterface         string `yaml:"lan_interface"`
-	LANAddress           string `yaml:"lan_address"`
-	IPv6Mode             string `yaml:"ipv6_mode"`
-	DisableSSHManagement bool   `yaml:"disable_ssh_management"`
+	LANInterface         string   `yaml:"lan_interface"`
+	LANAddress           string   `yaml:"lan_address"`
+	ManagementInterfaces []string `yaml:"management_interfaces,omitempty"`
+	LANServiceMode       string   `yaml:"lan_service_mode,omitempty"`
+	IPv6Mode             string   `yaml:"ipv6_mode"`
+	DisableSSHManagement bool     `yaml:"disable_ssh_management"`
 }
 
 type ModemDiscoveryConfig struct {
@@ -64,6 +66,8 @@ func Default() Config {
 		Network: NetworkConfig{
 			LANInterface:         "enp2s0",
 			LANAddress:           "192.168.200.1/24",
+			ManagementInterfaces: []string{"enp2s0"},
+			LANServiceMode:       "dhcp_dns",
 			IPv6Mode:             "disabled",
 			DisableSSHManagement: false,
 		},
