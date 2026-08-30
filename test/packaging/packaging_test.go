@@ -629,6 +629,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		"gateway-vpn-vps-fabric.service", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-fabric-recovery.service", "gateway-vpn-vps-fabric-watchdog.service", "gateway-vpn-vps-fabric-watchdog.timer", "gateway-vpn-vps-operations.service", "gateway-vpn-vps-operations.timer", "legacy-adopt", "fabric-apply",
 		"gateway-vpn-vps-update.service", "gateway-vpn-vps-update.path", "gateway-vpn-vps-update-recovery.service", "gateway-vpn-vps-update-finalize.service", "gateway-vpn-vps-update-finalize.timer", "/opt/gateway-vpn-vps/recovery", "update-transactions",
 		"identity-init", "init-admin", "systemctl is-active --quiet gateway-vpn-vps-agent.service", "127.0.0.1:9443", "10.80.0.1:9443",
+		"wait_for_vps_agent_listeners", "attempt < 100", "sleep 0.1", "VPS Agent stopped before both HTTPS listeners became ready",
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("VPS installer missing %q", required)

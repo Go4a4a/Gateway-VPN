@@ -77,7 +77,7 @@ if [[ -n "$HUB_ADMIN_PASSWORD_FILE" ]]; then
   "$RELEASE_DIR/bin/gateway-vpn-vps-agent" --check-password-file "$HUB_ADMIN_PASSWORD_FILE"
 fi
 
-for command in systemctl base64 sha256sum realpath sed awk grep getent timedatectl apt-get dpkg-query find sort sync date df wc cat readlink install mktemp mv rm stat uname flock groupadd groupdel useradd userdel chown chmod openssl ss hostname id; do
+for command in systemctl base64 sha256sum realpath sed awk grep getent timedatectl apt-get dpkg-query find sort sync date df wc cat readlink install mktemp mv rm stat uname flock groupadd groupdel useradd userdel chown chmod openssl ss hostname id sleep; do
   command -v "$command" >/dev/null || { echo "Missing base VPS prerequisite command: $command" >&2; exit 1; }
 done
 [[ -d /run/lock && ! -L /run/lock && $(stat -c '%u' /run/lock) == 0 ]] || { echo "VPS runtime lock directory is unavailable" >&2; exit 1; }
@@ -459,6 +459,24 @@ echo "WireGuard: wg-mgmt / 10.80.0.1/24 / UDP 51821"
 echo "Gateway peer: 10.80.0.2/32; admin peer: 10.80.0.10/32"
 echo "Gateway TCP forwarding ports: $PORTS"
 echo "VPS Hub WebUI: https://10.80.0.1:9443 through administrator WireGuard, plus localhost:9443"
+
+wait_for_vps_agent_listeners() {
+  local attempt
+  for ((attempt = 0; attempt < 100; attempt += 1)); do
+    if ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443' &&
+      ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'; then
+      return 0
+    fi
+    if ! systemctl is-active --quiet gateway-vpn-vps-agent.service; then
+      echo "VPS Agent stopped before both HTTPS listeners became ready" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "Timed out waiting for VPS Agent HTTPS listeners on 127.0.0.1:9443 and 10.80.0.1:9443" >&2
+  return 1
+}
+
 if ((EXISTING)); then
   if systemctl is-enabled --quiet gateway-vpn-vps-install-recovery.service; then
     echo "Completed VPS install unexpectedly has first-install recovery enabled" >&2
@@ -485,8 +503,7 @@ if ((EXISTING)); then
   [[ $(wg show wg-mgmt listen-port) == 51821 ]]
   [[ $(wg show wg-mgmt public-key) == "$VPS_PUBLIC_KEY" ]]
   nft list table inet gateway_vpn_vps >/dev/null
-  ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
-  ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
+  wait_for_vps_agent_listeners
   echo "Gateway VPN VPS $RELEASE_VERSION is already installed with the requested immutable release and peers."
   exit 0
 fi
@@ -684,8 +701,7 @@ systemctl is-active --quiet gateway-vpn-vps-operations.timer
 systemctl is-active --quiet gateway-vpn-vps-update.path
 systemctl is-active --quiet gateway-vpn-vps-update-finalize.timer
 [[ -f /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && ! -L /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json) == "root:gateway-vpn-vps:640" ]]
-ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
-ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
+wait_for_vps_agent_listeners
 
 install -d -m 0700 /var/lib/gateway-vpn-vps
 printf '{\n  "version": "%s",\n  "profile": "%s",\n  "public_endpoint": "%s",\n  "interface": "wg-mgmt",\n  "vps_address": "10.80.0.1/24",\n  "gateway_address": "10.80.0.2/32",\n  "admin_address": "10.80.0.10/32",\n  "vps_public_key": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$PROFILE" "$PUBLIC_ENDPOINT" "$VPS_PUBLIC_KEY" >/var/lib/gateway-vpn-vps/install-report.json
