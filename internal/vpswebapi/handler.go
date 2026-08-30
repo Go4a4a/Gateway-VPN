@@ -24,6 +24,7 @@ import (
 	"gateway-vpn/internal/vpsbackup"
 	"gateway-vpn/internal/vpsfabric"
 	"gateway-vpn/internal/vpsops"
+	"gateway-vpn/internal/vpsupdate"
 )
 
 const sessionCookieName = "gateway_vpn_vps_session"
@@ -43,6 +44,10 @@ type FabricApplyTrigger interface {
 	ApplyVPSFabric(context.Context) error
 }
 
+type UpdateApplyTrigger interface {
+	ApplyPendingVPSUpdate(context.Context) error
+}
+
 type Dependencies struct {
 	Database     *sql.DB
 	Auth         auth.Service
@@ -57,8 +62,10 @@ type Dependencies struct {
 	FabricStatusPath string
 	// Operations reads only a root-produced, bounded snapshot plus sanitized
 	// database events. It cannot execute host commands or mutate the host.
-	Operations *vpsops.Service
-	Now        func() time.Time
+	Operations  *vpsops.Service
+	Updates     *vpsupdate.Service
+	UpdateApply UpdateApplyTrigger
+	Now         func() time.Time
 }
 
 type Server struct {
@@ -117,6 +124,10 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("GET /api/v1/vps/logs", server.protected(http.HandlerFunc(server.vpsLogs)))
 	mux.Handle("GET /api/v1/vps/diagnostics/status", server.protected(http.HandlerFunc(server.diagnosticStatus)))
 	mux.Handle("POST /api/v1/vps/diagnostics/download", server.protected(http.HandlerFunc(server.downloadDiagnostics)))
+	mux.Handle("GET /api/v1/vps/update/status", server.protected(http.HandlerFunc(server.updateStatus)))
+	mux.Handle("POST /api/v1/vps/update/stage", server.protected(http.HandlerFunc(server.stageUpdate)))
+	mux.Handle("POST /api/v1/vps/update/apply", server.protected(http.HandlerFunc(server.applyUpdate)))
+	mux.Handle("DELETE /api/v1/vps/update", server.protected(http.HandlerFunc(server.discardUpdate)))
 	staticRoot, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return nil, err
@@ -836,6 +847,140 @@ func (server *Server) downloadDiagnostics(writer http.ResponseWriter, request *h
 	writer.Header().Set("Content-Length", strconv.Itoa(len(bundle.Content)))
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(bundle.Content)
+}
+
+func (server *Server) updateStatus(writer http.ResponseWriter, _ *http.Request) {
+	if server.dependencies.Updates == nil {
+		writeJSON(writer, http.StatusOK, map[string]any{"available": false, "reason": "UPDATE_SERVICE_UNAVAILABLE"})
+		return
+	}
+	view, err := server.dependencies.Updates.View()
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_STATUS_UNAVAILABLE", "Состояние обновления VPS недоступно")
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (server *Server) stageUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Updates == nil {
+		writeError(writer, http.StatusNotImplemented, "UPDATE_SERVICE_UNAVAILABLE", "Обновление VPS не подключено")
+		return
+	}
+	mediaType, parameters, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || parameters["boundary"] == "" {
+		writeError(writer, http.StatusBadRequest, "INVALID_UPDATE_UPLOAD", "Ожидается signed .tar.gz release")
+		return
+	}
+	maximum := vpsupdate.MaximumArchiveBytes + (1 << 20)
+	if request.ContentLength > maximum {
+		writeError(writer, http.StatusRequestEntityTooLarge, "UPDATE_UPLOAD_TOO_LARGE", "Архив обновления превышает допустимый размер")
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maximum)
+	reader, err := request.MultipartReader()
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_UPDATE_UPLOAD", "Не удалось прочитать upload")
+		return
+	}
+	part, err := reader.NextPart()
+	if err != nil || part.FormName() != "release" || part.FileName() == "" || len(part.FileName()) > 180 || filepath.Base(part.FileName()) != part.FileName() || !strings.HasSuffix(strings.ToLower(part.FileName()), ".tar.gz") {
+		writeError(writer, http.StatusBadRequest, "INVALID_UPDATE_UPLOAD", "Ожидается один signed VPS release .tar.gz")
+		return
+	}
+	operation, stageErr := server.dependencies.Updates.Stage(request.Context(), part)
+	part.Close()
+	if stageErr == nil {
+		if extra, extraErr := reader.NextPart(); extraErr == nil || extra != nil {
+			if extra != nil {
+				extra.Close()
+			}
+			_ = server.dependencies.Updates.Discard(operation.UpdateID)
+			writeError(writer, http.StatusBadRequest, "INVALID_UPDATE_UPLOAD", "Лишние multipart-части запрещены")
+			return
+		} else if !errors.Is(extraErr, io.EOF) {
+			_ = server.dependencies.Updates.Discard(operation.UpdateID)
+			writeError(writer, http.StatusBadRequest, "INVALID_UPDATE_UPLOAD", "Multipart upload завершён некорректно")
+			return
+		}
+	}
+	if errors.Is(stageErr, vpsupdate.ErrUpdatePending) {
+		writeError(writer, http.StatusConflict, "UPDATE_ALREADY_PENDING", "Сначала примените или отмените текущее обновление")
+		return
+	}
+	if errors.Is(stageErr, vpsupdate.ErrArchiveTooLarge) {
+		writeError(writer, http.StatusRequestEntityTooLarge, "UPDATE_UPLOAD_TOO_LARGE", "Архив обновления превышает допустимый размер")
+		return
+	}
+	if errors.Is(stageErr, vpsupdate.ErrHostContractChanged) {
+		writeError(writer, http.StatusConflict, "UPDATE_REQUIRES_INSTALLER", "Обновление меняет системные файлы: запустите signed installer вместо WebUI update")
+		return
+	}
+	if stageErr != nil {
+		writeError(writer, http.StatusBadRequest, "UPDATE_VERIFICATION_FAILED", "Подпись, версия, профиль, schema или содержимое release не прошли проверку")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_UPDATE_STAGED", map[string]any{"user_id": principal.UserID, "update_id": operation.UpdateID, "candidate_version": operation.CandidateVersion, "candidate_schema": operation.CandidateSchema})
+	writeJSON(writer, http.StatusCreated, map[string]any{"operation": operation, "confirmation_phrase": "ОБНОВИТЬ VPS HUB"})
+}
+
+func (server *Server) applyUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Updates == nil || server.dependencies.UpdateApply == nil {
+		writeError(writer, http.StatusNotImplemented, "UPDATE_APPLY_UNAVAILABLE", "Привилегированный updater не подключён")
+		return
+	}
+	var input struct {
+		UpdateID     string `json:"update_id"`
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+	}
+	if decodeJSON(request, &input, 4096) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректное подтверждение обновления")
+		return
+	}
+	view, err := server.dependencies.Updates.View()
+	if err != nil || !view.Staged || view.Operation == nil || view.Operation.UpdateID != input.UpdateID || input.Confirmation != view.Confirmation {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "UPDATE_CONFIRMATION_INVALID", "Release изменился либо контрольная фраза не совпадает")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		input.Password = ""
+		writeError(writer, http.StatusUnauthorized, "REAUTHENTICATION_FAILED", "Текущий пароль VPS Hub указан неверно")
+		return
+	}
+	input.Password, input.Confirmation = "", ""
+	_ = server.audit(request.Context(), "WARNING", "VPS_UPDATE_APPLY_REQUESTED", map[string]any{"user_id": principal.UserID, "update_id": input.UpdateID, "candidate_version": view.Operation.CandidateVersion})
+	if err := server.dependencies.UpdateApply.ApplyPendingVPSUpdate(request.Context()); err != nil {
+		writeError(writer, http.StatusBadGateway, "UPDATE_APPLY_START_FAILED", "Release проверен, но root updater не запустился; запрос можно повторить")
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{"update_id": input.UpdateID, "state": "APPLY_SCHEDULED", "management_reconnect_required": true})
+}
+
+func (server *Server) discardUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Updates == nil {
+		writeError(writer, http.StatusNotImplemented, "UPDATE_SERVICE_UNAVAILABLE", "Обновление VPS не подключено")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "discard-staged-vps-update" {
+		writeError(writer, http.StatusConflict, "UPDATE_DISCARD_CONFIRMATION_REQUIRED", "Требуется подтверждение отмены")
+		return
+	}
+	view, err := server.dependencies.Updates.View()
+	if err != nil || !view.Staged || view.Operation == nil {
+		writeError(writer, http.StatusConflict, "UPDATE_NOT_PENDING", "Staged update не найден")
+		return
+	}
+	if err := server.dependencies.Updates.Discard(view.Operation.UpdateID); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_DISCARD_FAILED", "Не удалось удалить staged update")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_UPDATE_DISCARDED", map[string]any{"user_id": principal.UserID, "update_id": view.Operation.UpdateID})
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (server *Server) downloadBackup(writer http.ResponseWriter, request *http.Request) {

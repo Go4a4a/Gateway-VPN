@@ -164,6 +164,25 @@ func TestVPSOperationalLogsAndDiagnosticDownloadUseDisplayOnlySnapshot(t *testin
 	}
 }
 
+func TestVPSUpdateRoutesFailClosedWhenUpdaterIsUnavailable(t *testing.T) {
+	server, _ := vpsAPIFixture(t)
+	unauthorized := httptest.NewRequest(http.MethodGet, "/api/v1/vps/update/status", nil)
+	unauthorizedRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthorizedRecorder, unauthorized)
+	if unauthorizedRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized update status = %d", unauthorizedRecorder.Code)
+	}
+	session := loginVPSHub(t, server, "administrator password 123")
+	status := authorizedRequest(server, session, http.MethodGet, "/api/v1/vps/update/status", nil, "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"available":false`) || !strings.Contains(status.Body.String(), "UPDATE_SERVICE_UNAVAILABLE") {
+		t.Fatalf("unavailable update status = %d %s", status.Code, status.Body.String())
+	}
+	stage := jsonRequest(t, server, session, http.MethodPost, "/api/v1/vps/update/stage", map[string]any{})
+	if stage.Code != http.StatusNotImplemented {
+		t.Fatalf("unavailable update stage = %d %s", stage.Code, stage.Body.String())
+	}
+}
+
 func TestVPSHubManagementAPIEndToEndAndDestructiveReauthentication(t *testing.T) {
 	server, _ := vpsAPIFixture(t)
 	session := loginVPSHub(t, server, "administrator password 123")
@@ -433,11 +452,13 @@ func TestVPSHubWebUIExposesFabricApplyAndRootWatchdogStatus(t *testing.T) {
 			"host_fabric", "Последняя root-проверка", "Привилегированный reconciler",
 			"/api/v1/hub/admin-relays", "/trust-mode", "private_keys_on_vps", "mobile-navigation-select",
 			"/api/v1/vps/logs", "/api/v1/vps/diagnostics/status", "/api/v1/vps/diagnostics/download", "Отображение очищено",
+			"/api/v1/vps/update/status", "/api/v1/vps/update/stage", "/api/v1/vps/update/apply", "автоматическим rollback",
 		},
 		"/": {
 			"последнюю root-проверку Management Fabric", "ownership-scoped root transaction с rollback",
 			"data-page=\"relays\"", "Создать и включить relay", "ключ не хранится на VPS", "id=\"mobile-navigation-select\"",
 			"data-page=\"logs\"", "Журналы VPS Hub", "Очистить окно", "data-page=\"diagnostics\"", "Собрать и скачать ZIP",
+			"data-page=\"update\"", "Обновление VPS Hub", "Подписанный VPS release .tar.gz",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)

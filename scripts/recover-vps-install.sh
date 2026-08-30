@@ -43,10 +43,12 @@ record_failure() {
   FAILED=1
 }
 
-systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-operations.timer gateway-vpn-vps-operations.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-update.path gateway-vpn-vps-update-finalize.timer gateway-vpn-vps-update.service gateway-vpn-vps-update-finalize.service gateway-vpn-vps-update-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-operations.timer gateway-vpn-vps-operations.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
 systemctl is-active --quiet gateway-vpn-vps-agent.service && record_failure "VPS Agent remained active"
 systemctl is-active --quiet gateway-vpn-vps-restore.path && record_failure "VPS restore watcher remained active"
 systemctl is-active --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained active"
+systemctl is-active --quiet gateway-vpn-vps-update.path && record_failure "VPS update watcher remained active"
+systemctl is-active --quiet gateway-vpn-vps-update-finalize.timer && record_failure "VPS update finalizer remained active"
 systemctl is-active --quiet wg-quick@wg-mgmt.service && record_failure "wg-mgmt remained active"
 systemctl is-active --quiet gateway-vpn-vps-firewall.service && record_failure "owned firewall remained active"
 if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
@@ -79,12 +81,18 @@ rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service || record_fail
 rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer || record_failure "remove owned fabric watchdog timer"
 rm -f /etc/systemd/system/gateway-vpn-vps-operations.service || record_failure "remove owned operations collector unit"
 rm -f /etc/systemd/system/gateway-vpn-vps-operations.timer || record_failure "remove owned operations collector timer"
+rm -f /etc/systemd/system/gateway-vpn-vps-update.service || record_failure "remove owned update unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-update.path || record_failure "remove owned update watcher"
+rm -f /etc/systemd/system/gateway-vpn-vps-update-recovery.service || record_failure "remove owned update recovery unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-update-finalize.service || record_failure "remove owned update finalizer"
+rm -f /etc/systemd/system/gateway-vpn-vps-update-finalize.timer || record_failure "remove owned update finalizer timer"
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d || record_failure "remove owned WireGuard drop-in"
 rm -rf /etc/gateway-vpn-vps || record_failure "remove owned VPS config"
-rm -f /opt/gateway-vpn-vps/current /opt/gateway-vpn-vps/.current.new || record_failure "remove release pointers"
+rm -f /opt/gateway-vpn-vps/current /opt/gateway-vpn-vps/recovery /opt/gateway-vpn-vps/.current.new /opt/gateway-vpn-vps/.recovery.new || record_failure "remove release pointers"
 rm -rf "/opt/gateway-vpn-vps/releases/v$VERSION" || record_failure "remove failed release"
 rm -f /var/lib/gateway-vpn-vps/install-report.json || record_failure "remove incomplete install report"
 rm -f /run/gateway-vpn-vps-install-authorized || record_failure "remove ephemeral service-start authorization"
+rm -f /run/gateway-vpn-vps-update-live || record_failure "remove ephemeral VPS update authorization"
 rm -rf /var/lib/gateway-vpn-vps-privileged || record_failure "remove privileged VPS restore state"
 if ((PRESERVE_AGENT_USER == 0)); then
   rm -rf /var/lib/gateway-vpn-vps/agent || record_failure "remove newly created VPS Agent state"
@@ -96,6 +104,8 @@ if ((PRESERVE_AGENT_USER == 0)); then
   fi
 else
   [[ -d /var/lib/gateway-vpn-vps/agent && ! -L /var/lib/gateway-vpn-vps/agent ]] || record_failure "preserved VPS Agent state is missing"
+  rm -f /var/lib/gateway-vpn-vps/agent/update.trigger /var/lib/gateway-vpn-vps/agent/update-status.json || record_failure "remove transient VPS update state"
+  rm -rf /var/lib/gateway-vpn-vps/agent/update-staging || record_failure "remove staged VPS update state"
 fi
 if ((PRESERVE_AGENT_USER)); then
   chown root:gateway-vpn-vps /var/lib/gateway-vpn-vps || record_failure "restore preserved VPS state-root ownership"
@@ -112,6 +122,8 @@ systemctl is-enabled --quiet gateway-vpn-vps-restore.path && record_failure "VPS
 systemctl is-enabled --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-fabric-watchdog.timer && record_failure "VPS fabric watchdog remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-operations.timer && record_failure "VPS operations collector remained enabled"
+systemctl is-enabled --quiet gateway-vpn-vps-update.path && record_failure "VPS update watcher remained enabled"
+systemctl is-enabled --quiet gateway-vpn-vps-update-finalize.timer && record_failure "VPS update finalizer remained enabled"
 if ((FAILED)); then
   echo "Gateway VPN VPS recovery is incomplete; active marker retained for retry" >&2
   exit 1

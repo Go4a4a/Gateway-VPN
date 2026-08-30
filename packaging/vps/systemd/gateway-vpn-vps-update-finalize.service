@@ -1,0 +1,41 @@
+[Unit]
+Description=Finalize a stable Gateway VPN VPS update
+Documentation=file:///opt/gateway-vpn-vps/recovery/share/doc/OPERATIONS.md
+After=gateway-vpn-vps-update-recovery.service gateway-vpn-vps-agent.service
+Requires=gateway-vpn-vps-update-recovery.service
+OnFailure=gateway-vpn-vps-update-recovery.service
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT=1
+ExecStartPre=/usr/bin/install -o root -g root -m 0600 /dev/null /run/gateway-vpn-vps-update-live
+ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-finalize --config /etc/gateway-vpn-vps/config.yaml --apply
+ExecStopPost=/usr/bin/rm -f /run/gateway-vpn-vps-update-live
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+ReadOnlyPaths=/etc/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent/secrets
+ReadWritePaths=/opt/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd
+SystemCallArchitectures=native

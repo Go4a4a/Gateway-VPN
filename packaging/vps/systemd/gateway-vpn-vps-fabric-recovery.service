@@ -2,7 +2,7 @@
 Description=Recover interrupted Gateway VPN VPS Management Fabric transaction
 Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
 DefaultDependencies=no
-After=local-fs.target gateway-vpn-vps-install-recovery.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service
+After=local-fs.target gateway-vpn-vps-install-recovery.service gateway-vpn-vps-update-recovery.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service
 Before=gateway-vpn-vps-fabric.path gateway-vpn-vps-agent.service
 ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-vps-install-authorized

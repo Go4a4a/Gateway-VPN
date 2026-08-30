@@ -1942,6 +1942,16 @@ POST   /api/v1/management/apply
 
 POST   /api/v1/system/backup
 POST   /api/v1/system/restore
+GET    /api/v1/system/update
+GET    /api/v1/system/update/settings
+PUT    /api/v1/system/update/settings
+POST   /api/v1/system/update/check
+POST   /api/v1/system/update/stage
+POST   /api/v1/system/update/apply
+DELETE /api/v1/system/update
+GET    /api/v1/system/versions
+POST   /api/v1/system/versions/{id}/rollback
+DELETE /api/v1/system/versions/{id}
 GET    /api/v1/system/power/capabilities
 POST   /api/v1/system/reboot
 POST   /api/v1/system/shutdown
@@ -1954,7 +1964,7 @@ POST   /api/v1/system/power-cycle
 
 ### 14.3 Web UI
 
-Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах. Sidebar не является плоским списком из десятков пунктов: он показывает шесть понятных групп, внутри которых открываются самостоятельные вкладки/подвкладки. Последняя выбранная подстраница и фильтры сохраняются локально, breadcrumbs и deep links ведут к конкретному объекту, а mobile navigation использует тот же порядок в drawer.
+Web UI разделяется по предметным областям; одна настройка имеет одного владельца и не дублируется на нескольких страницах. Sidebar не является плоским списком из десятков пунктов: он показывает семь понятных групп, внутри которых открываются самостоятельные вкладки/подвкладки. Последняя выбранная подстраница и фильтры сохраняются локально, breadcrumbs и deep links ведут к конкретному объекту, а mobile navigation использует тот же порядок в drawer.
 
 1. **Обзор**
    - **Состояние Gateway:** active tuple `метод → uplink → [подписка → node]`, quality, причина переключения, management links, traffic и критические предупреждения.
@@ -1985,10 +1995,16 @@ Web UI разделяется по предметным областям; одн
    - **Трафик:** current/daily/monthly total и CSV без ложной per-subscription детализации.
    - **Самоконтроль 24/7:** девятнадцать fixed components successor, effective recovery policy, history и suppression reasons.
 
-6. **Система**
-   - **Обновление и обслуживание:** version, update, backup/restore, diagnostic bundle и uninstall.
+6. **Обслуживание**
+   - **Обновление:** current version/channel, проверка наличия, источники, расписание, download/stage/apply и persistent operation status.
+   - **Версии и восстановление:** current/recovery/stabilizing versions, complete restore points, ручной rollback, retention и защищённое удаление старых версий.
+   - **Резервное копирование:** encrypted configuration backup/preview/restore; backup конфигурации не смешивается с внутренними update restore points.
+   - **Диагностика:** health summary, diagnostic bundle и ссылки на тематические журналы обновления/rollback.
+
+7. **Система**
    - **Безопасность:** users/sessions, TLS, SSH/SFTP, audit и key rotations.
    - **Питание:** manual reboot/shutdown и capability-gated RTC power-cycle.
+   - **Удаление:** отдельно подтверждаемое preserve/purge удаление Gateway VPN без обещания factory reset всей Ubuntu.
 
 Overview показывает только сводку и ссылки **«Открыть подробности»**; CRUD/advanced forms в него не копируются. Страница объекта использует один compact status header и локальные секции, а длинные tables получают server-side pagination/virtualization. Advanced network/CIDR/AllowedIPs/NAT details скрыты за **«Дополнительными сведениями»**, но ошибки всегда формулируются понятным языком и указывают точную вкладку исправления.
 
@@ -2074,6 +2090,8 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - версии Gateway, Mihomo и Web UI фиксированы;
 - release artifacts имеют SHA-256 и подпись/release provenance;
 - installer не скачивает `latest` без manifest;
+- runtime-updater принимает только immutable signed GitHub Release либо явно загруженный signed release artifact; `main`, произвольная branch/commit, `git pull` и исполнение исходного дерева запрещены;
+- публичный официальный репозиторий не требует GitHub token; для private-репозитория допускается только отдельный read-only credential, который не возвращается WebUI и не передаётся на redirect либо другой origin;
 - обновление сначала загружается и проверяется, затем устанавливается атомарно;
 - хранится предыдущая рабочая версия для rollback;
 - `curl | bash` допускается только как bootstrap скачивания подписанного installer artifact, не как непрозрачный поток команд.
@@ -2304,7 +2322,8 @@ gateway-vpn/
 │   │   ├── web/
 │   │   └── manifest.json
 │   └── v1.2.0/
-└── current -> releases/v1.1.0
+├── current -> releases/v1.1.0
+└── recovery -> releases/v1.1.0
 ```
 
 Systemd запускает `/opt/gateway-vpn/current/bin/gateway-vpn`. Новый symlink создаётся под временным именем в том же каталоге и заменяет `current` атомарным `rename`. Хранятся минимум текущий и предыдущий проверенный release; более старые версии удаляются только после stability window и при наличии отдельного DB backup.
@@ -2334,6 +2353,41 @@ Signed installer-upgrade для изменившегося host contract явл�
 7. любая ошибка или reboot/SIGKILL при живом marker запускает независимое восстановление старого signed tree, исходной DB/config/secrets/host projection и только после постановки старых service jobs переводит marker в terminal rollback. При ошибке самого rollback marker сохраняется, а data path остаётся закрыт.
 
 Down-migration новой БД старым binary не используется: rollback всегда восстанавливает snapshot до migration.
+
+#### 17.3.1 Отказоустойчивое удалённое обновление Gateway
+
+Gateway является единственным владельцем update transaction. Несколько связанных VPS могут показать доступную версию, запросить проверку/запуск и наблюдать одну операцию, но не переключают файлы либо БД сами. На Gateway действует один lifecycle lock для install/update/restore/network apply/uninstall/power actions; повторный запрос присоединяется к существующему operation ID либо получает понятный `OPERATION_CONFLICT`.
+
+Поддерживаются только следующие источники:
+
+1. официальный подписанный GitHub Release из каналов `Stable` или `Testing`;
+2. ручная загрузка подписанного `.tar.gz` через WebUI;
+3. advanced-вариант с прямым HTTPS URL конкретного immutable release artifact.
+
+Проверка наличия, загрузка и применение настраиваются раздельно. По умолчанию включена только периодическая проверка с jitter; автоматическое применение включается пользователем отдельно, имеет maintenance window, максимальную задержку и запрет запуска при другой durable operation. Путь загрузки control plane может последовательно использовать все разрешённые служебные маршруты через доступные Ethernet/HiLink uplinks, VPN-серверы и direct service fallback. Это не открывает прямой пользовательский трафик и не отменяет обязательную проверку подписи.
+
+До первого изменения updater обязан:
+
+- проверить подпись, manifest, SHA-256/size, exact version, architecture, Gateway OS profile, Mihomo compatibility, DB schema range и свободное место;
+- безопасно распаковать artifact без symlink/hardlink/path traversal и повторно сверить signed tree;
+- выполнить offline systemd/nftables/config/Mihomo проверки и migration/integrity check на копии SQLite;
+- записать baseline текущих services, firewall/policy routing/DNS/Mihomo/WireGuard/watchdog, active access tuple, свежих FULL/LIMITED results и всех работающих management links;
+- для автоматического apply потребовать устойчивый свежий `FULL` path и хотя бы один стабильный management channel; ручной apply без этого допускается только с отдельным предупреждением и re-authentication, но recovery всё равно остаётся обязательным.
+
+Транзакция использует immutable release directories, независимые атомарные `current` и `recovery` pointers, SQLite Online Backup restore point и две согласованные пары `binary + DB`. Candidate DB мигрируется и проверяется отдельно; затем control plane переключает release и DB атомарной bounded root operation. Durable boot recovery и fixed signed helper не зависят от WebUI, браузера, VPS или запуска candidate binary и после SIGKILL/reboot либо завершают подтверждённую операцию, либо возвращают `recovery` release с его pre-migration DB.
+
+После запуска candidate выполняются не только проверки `systemd active`, но и фактические проверки SQLite, owned nftables, policy routing, DNS, Mihomo/TUN, WireGuard management и ingress, WebUI, watchdog, uplinks, обязательных global targets и каждого management channel, который работал до обновления. Потеря физического модема, operator Internet или внешнего VPS классифицируется как `EXTERNAL_CONNECTIVITY_FAILURE` и сама по себе не обвиняет candidate. Если candidate разрушил ранее работающий локальный service/path/management channel, операция автоматически откатывается.
+
+Успех подтверждается в два этапа:
+
+1. initial health gate продолжительностью настраиваемые `5..10` минут, в течение которого любой software regression вызывает немедленный rollback;
+2. stability window по умолчанию 24 часа, в течение которого версия помечена `STABILIZING`, `recovery` остаётся на прежней LKG, а watchdog связывает релевантные failures/restarts с update operation.
+
+Только после stability window и повторной полной проверки candidate становится LKG, а `recovery` атомарно переводится на него. Update history и WebUI показывают стадии, источник/channel, версии, timestamps, безопасные reason codes и результат rollback без URL credentials, filesystem secrets либо backend command text.
+
+Retention применяется к полным restore points, а не к отдельным binaries. Каждый point содержит подписанный release, соответствующий SQLite snapshot, owned configuration/host metadata, hashes и verification result. Default: `current + обязательный recovery + две более старые точки`. Пользователь может ограничить количество, общий размер и возраст и вручную удалить eligible point; current, recovery и версия активной transaction не удаляются. Rollback на старую версию заранее предупреждает, что настройки и данные, созданные более новой schema, будут заменены snapshot этой точки.
+
+Pointer-only application update и signed full host-contract installer/update остаются разными операциями. Обычный updater не изменяет Ubuntu/APT, AmneziaVPN, Docker, UFW, чужие services/firewall/routes и любые файлы вне точного Gateway-owned allowlist. Изменившийся `host_contract_sha256` требует отдельной signed installer-upgrade transaction из раздела 17.3 и не может быть принят обычным переключением `current`.
 
 ### 17.4 GitHub zero-to-ready deployment
 
@@ -2505,6 +2559,11 @@ Linux network namespaces моделируют:
 - page corruption/partial write в основном DB-файле: `integrity_check` падает, запись прекращается, выполняется restore verified backup либо остаётся `PATH_BLOCKED`;
 - upgrade A→B с успешной migration и rollback B→A через pre-migration DB snapshot;
 - atomic switch `/opt/gateway-vpn/current` и rollback на предыдущий release directory;
+- remote update из signed GitHub Release, signed WebUI upload и direct immutable HTTPS URL; unsigned/altered artifact, `main`/branch/commit и cross-origin credential redirect отклоняются до mutation;
+- SIGKILL/reboot на каждой durable update stage восстанавливает согласованные `current/recovery + DB`, даже если WebUI/VPS недоступны;
+- initial `5..10` minute gate, 24-hour stability/finalize, software-caused loss прежнего path/management channel и отдельная классификация physical/operator/VPS outage;
+- retention сохраняет complete restore points, не удаляет current/recovery/active transaction и корректно предупреждает о потере newer-schema data при старом rollback;
+- concurrent requests с нескольких VPS наблюдают одну Gateway-owned locked transaction и не запускают параллельные apply;
 - safe network apply rollback.
 
 ### 18.3 Hardware-in-the-loop
@@ -2823,6 +2882,7 @@ Fixtures не содержат production credentials, настоящие subscr
 44. VPS install/update/watchdog/uninstall доказанно сосуществует с AmneziaVPN и другими foreign VPN/firewall/Docker owners: чужие interfaces, ports, routes, marks, sysctl dependencies, nft/iptables/UFW rules и connectivity не изменяются, а конфликт отклоняется до mutation.
 45. После стабилизации core Management Fabric API выпускается подписанный portable `gateway-vpn-deploy.exe` для Windows 10/11 x64; clean-VM test доказывает pinned SSH identity, отсутствие сохранённых credentials и тот же end-to-end readiness contract, что Linux launcher.
 46. Gateway и VPS Hub имеют удобный WebUI backup/preview/restore в раздельные encrypted role files; same-device restore защищён от active clone, import-as-new ротирует identity/keys, а corruption/wrong-role/SIGKILL/reboot не оставляют mixed state или открытый data/management path.
+47. Gateway удалённо обновляется только из signed immutable release либо signed WebUI upload: preflight и baseline предшествуют mutation, boot recovery не зависит от candidate/WebUI/VPS, software regression откатывает согласованные binary+DB, а LKG/recovery меняются только после initial gate и 24-часового stability window; retention хранит complete restore points и не затрагивает foreign host software.
 
 ---
 

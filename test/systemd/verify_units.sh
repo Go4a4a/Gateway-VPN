@@ -24,6 +24,7 @@ mkdir -p \
   /opt/gateway-vpn/current/libexec \
   /opt/gateway-vpn/recovery/bin \
   /opt/gateway-vpn-vps/current/bin \
+  /opt/gateway-vpn-vps/recovery/bin \
   /etc/gateway-vpn-vps \
   /usr/libexec
 
@@ -51,6 +52,7 @@ for executable in \
   /opt/gateway-vpn/current/libexec/mihomo \
   /opt/gateway-vpn/recovery/bin/gateway-vpn \
   /opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent \
+  /opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent \
   /usr/libexec/gateway-vpn-install-recovery \
   /usr/libexec/gateway-vpn-host-upgrade-recovery \
   /usr/libexec/gateway-vpn-uninstall-job \

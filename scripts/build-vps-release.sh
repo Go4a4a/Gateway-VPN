@@ -28,13 +28,15 @@ LDFLAGS="-s -w -X gateway-vpn/internal/buildinfo.Version=$VERSION -X gateway-vpn
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$DEST/bin/gateway-vpnctl" ./cmd/gateway-vpnctl
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags "$LDFLAGS" -o "$DEST/bin/gateway-vpn-vps-agent" ./cmd/gateway-vpn-vps-agent
 )
+DATABASE_SCHEMA=$("$DEST/bin/gateway-vpn-vps-agent" --schema-version)
+[[ "$DATABASE_SCHEMA" =~ ^[1-9][0-9]*$ ]] || { echo "VPS Agent database schema is invalid" >&2; exit 1; }
 install -m 0755 "$ROOT/scripts/install-vps.sh" "$ROOT/scripts/uninstall-vps.sh" "$ROOT/scripts/recover-vps-install.sh" "$DEST/scripts/"
 while IFS= read -r -d '' source; do
   relative=${source#"$ROOT/"}
   install -D -m 0644 "$source" "$DEST/$relative"
 done < <(find "$ROOT/packaging/vps" -type f -print0 | sort -z)
 install -m 0644 "$ROOT/docs/PLAN_v1.1.md" "$ROOT/docs/OPERATIONS.md" "$ROOT/docs/SECURITY.md" "$ROOT/docs/NETWORKING.md" "$DEST/share/doc/"
-printf '{\n  "format_version": 1,\n  "role": "vps",\n  "version": "%s",\n  "os": "linux",\n  "arch": "amd64",\n  "source_commit": "%s",\n  "build_date": "%s",\n  "supported_profiles": ["debian-12", "ubuntu-20.04", "ubuntu-22.04", "ubuntu-24.04", "ubuntu-26.04"],\n  "interface_name": "wg-mgmt",\n  "management_subnet": "10.80.0.0/24",\n  "listen_port": 51821\n}\n' "$VERSION" "$COMMIT" "$BUILD_DATE" >"$DEST/release.json"
+printf '{\n  "format_version": 1,\n  "role": "vps",\n  "version": "%s",\n  "os": "linux",\n  "arch": "amd64",\n  "source_commit": "%s",\n  "build_date": "%s",\n  "supported_profiles": ["debian-12", "ubuntu-20.04", "ubuntu-22.04", "ubuntu-24.04", "ubuntu-26.04"],\n  "interface_name": "wg-mgmt",\n  "management_subnet": "10.80.0.0/24",\n  "listen_port": 51821,\n  "database_schema_maximum": %s\n}\n' "$VERSION" "$COMMIT" "$BUILD_DATE" "$DATABASE_SCHEMA" >"$DEST/release.json"
 
 CONTROL_SHA256=$(sha256sum --binary "$DEST/bin/gateway-vpnctl" | awk '{print $1}')
 AGENT_SHA256=$(sha256sum --binary "$DEST/bin/gateway-vpn-vps-agent" | awk '{print $1}')

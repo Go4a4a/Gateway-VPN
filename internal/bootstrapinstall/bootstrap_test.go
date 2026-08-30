@@ -425,6 +425,11 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer":       []byte("[Timer]\nOnUnitActiveSec=60s\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-operations.service":          []byte("[Service]\nType=oneshot\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-operations.timer":            []byte("[Timer]\nOnUnitActiveSec=60s\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-update.service":              []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-update.path":                 []byte("[Path]\nPathExists=/tmp/update\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-update-recovery.service":     []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-update-finalize.service":     []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-update-finalize.timer":       []byte("[Timer]\nOnUnitActiveSec=60s\n"),
 		"packaging/vps/config/config.yaml":                                  []byte("version: 1\n"),
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": []byte("[Unit]\nAfter=gateway-vpn-vps-firewall.service\n"),
 		"manifest.sha256":                           []byte(strings.Repeat("0", 64) + "  placeholder\n"),
@@ -436,7 +441,7 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 	release := vpsrelease.Release{
 		FormatVersion: vpsrelease.ReleaseFormatVersion, Role: "vps", Version: fixture.version,
 		OS: "linux", Arch: "amd64", SourceCommit: fixture.commit, BuildDate: "2026-08-25T00:00:00Z",
-		SupportedProfiles: vpsrelease.SupportedProfiles(), InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821,
+		SupportedProfiles: vpsrelease.SupportedProfiles(), InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821, DatabaseSchemaMaximum: 4,
 	}
 	releaseJSON, _ := json.MarshalIndent(release, "", "  ")
 	writeFixtureFile(t, releaseRoot, "release.json", append(releaseJSON, '\n'))

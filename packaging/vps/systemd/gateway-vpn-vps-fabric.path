@@ -1,8 +1,8 @@
 [Unit]
 Description=Watch for Gateway VPN VPS Management Fabric changes
 Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
-After=gateway-vpn-vps-fabric-recovery.service
-Requires=gateway-vpn-vps-fabric-recovery.service
+After=gateway-vpn-vps-update-recovery.service gateway-vpn-vps-fabric-recovery.service
+Requires=gateway-vpn-vps-update-recovery.service gateway-vpn-vps-fabric-recovery.service
 ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
 ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active

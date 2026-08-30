@@ -47,6 +47,7 @@
           <option value="watchdog">Watchdog</option>
           <option value="logs">Журналы</option>
           <option value="backup">Backup / восстановление</option>
+          <option value="update">Обновление</option>
           <option value="diagnostics">Диагностика</option>
         </select>
       </label>
@@ -61,6 +62,7 @@
         <button data-page="watchdog">Watchdog</button>
         <button data-page="logs">Журналы</button>
         <button data-page="backup">Backup / восстановление</button>
+        <button data-page="update">Обновление</button>
         <button data-page="diagnostics">Диагностика</button>
       </nav>
       <p id="notice" role="status" aria-live="polite"></p>
@@ -214,6 +216,26 @@
             <div id="restore-preview"></div>
           </article>
         </div>
+      </section>
+
+      <section data-page-panel="update" hidden>
+        <div class="page-heading"><div><h2>Обновление VPS Hub</h2><p>WebUI принимает только подписанный release, совместимый с уже установленными системными файлами. Обновление ОС, AmneziaVPN, Docker, UFW и чужих сервисов не выполняется.</p></div><button class="secondary" data-refresh="update">Обновить статус</button></div>
+        <div class="grid">
+          <article class="card">
+            <h3>Текущая версия и транзакция</h3>
+            <div id="update-status"></div>
+          </article>
+          <article class="card">
+            <h3>Проверить signed release</h3>
+            <p>Файл сначала распаковывается в ограниченный staging, затем проверяются подпись, точное содержимое, версия, профиль Ubuntu/Debian, schema и host contract. Работающая версия при этом не меняется.</p>
+            <form id="update-stage-form">
+              <label title="Используйте VPS release .tar.gz из официального Gateway VPN Release. Неподписанные и изменённые файлы будут отклонены.">Подписанный VPS release .tar.gz<input name="release" type="file" accept=".tar.gz,.gz,application/gzip" required></label>
+              <button>Загрузить и проверить</button>
+            </form>
+            <p class="muted">Если release меняет systemd, nftables, sysctl или другую host-часть, WebUI безопасно откажет и предложит signed installer.</p>
+          </article>
+        </div>
+        <div id="update-candidate" class="stack"></div>
       </section>
 
       <section data-page-panel="diagnostics" hidden>

@@ -1,9 +1,10 @@
 [Unit]
-Description=Recover interrupted Gateway VPN VPS restore before Agent startup
+Description=Apply one verified pointer-compatible Gateway VPN VPS update
 Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
-DefaultDependencies=no
-After=local-fs.target gateway-vpn-vps-update-recovery.service
-Before=network.target gateway-vpn-vps-agent.service
+After=gateway-vpn-vps-agent.service gateway-vpn-vps-update-recovery.service
+Requires=gateway-vpn-vps-update-recovery.service
+Conflicts=gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service
+OnFailure=gateway-vpn-vps-update-recovery.service
 ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
 ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
@@ -13,8 +14,10 @@ ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
 Type=oneshot
 User=root
 Group=root
-ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent restore-recover --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
-ExecStartPost=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent fabric-restore-reset --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+Environment=GATEWAY_VPN_VPS_UPDATE_UNIT=1
+ExecStartPre=/usr/bin/install -o root -g root -m 0600 /dev/null /run/gateway-vpn-vps-update-live
+ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-apply --config /etc/gateway-vpn-vps/config.yaml --apply
+ExecStopPost=/usr/bin/rm -f /run/gateway-vpn-vps-update-live /var/lib/gateway-vpn-vps/agent/update.trigger
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -34,9 +37,6 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
-ReadOnlyPaths=/etc/gateway-vpn-vps/config.yaml /opt/gateway-vpn-vps/current
-ReadWritePaths=/etc/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged
+ReadOnlyPaths=/etc/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent/secrets
+ReadWritePaths=/opt/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd
 SystemCallArchitectures=native
-
-[Install]
-WantedBy=multi-user.target

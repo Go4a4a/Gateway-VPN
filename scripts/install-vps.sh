@@ -397,8 +397,8 @@ fi
 DEST="/opt/gateway-vpn-vps/releases/v$RELEASE_VERSION"
 EXISTING=0
 PRESERVED_WG_CONFIG=0
-if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/gateway-vpn-vps-agent.service || -e /etc/systemd/system/gateway-vpn-vps-operations.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
-  [[ $PRESERVE_AGENT_USER == 1 && -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/gateway-vpn-vps/config.yaml && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/gateway-vpn-vps-agent.service && -f /etc/systemd/system/gateway-vpn-vps-restore.service && -f /etc/systemd/system/gateway-vpn-vps-restore.path && -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.path && -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer && -f /etc/systemd/system/gateway-vpn-vps-operations.service && -f /etc/systemd/system/gateway-vpn-vps-operations.timer && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f "$AGENT_STATE/vps-agent.db" && -f "$AGENT_STATE/tls/cert.pem" && -f "$AGENT_STATE/tls/key.pem" && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
+if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -L /opt/gateway-vpn-vps/recovery || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/gateway-vpn-vps-agent.service || -e /etc/systemd/system/gateway-vpn-vps-operations.service || -e /etc/systemd/system/gateway-vpn-vps-update.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
+  [[ $PRESERVE_AGENT_USER == 1 && -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -L /opt/gateway-vpn-vps/recovery && $(readlink /opt/gateway-vpn-vps/recovery) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/gateway-vpn-vps/config.yaml && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/gateway-vpn-vps-agent.service && -f /etc/systemd/system/gateway-vpn-vps-restore.service && -f /etc/systemd/system/gateway-vpn-vps-restore.path && -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.path && -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer && -f /etc/systemd/system/gateway-vpn-vps-operations.service && -f /etc/systemd/system/gateway-vpn-vps-operations.timer && -f /etc/systemd/system/gateway-vpn-vps-update.service && -f /etc/systemd/system/gateway-vpn-vps-update.path && -f /etc/systemd/system/gateway-vpn-vps-update-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-update-finalize.service && -f /etc/systemd/system/gateway-vpn-vps-update-finalize.timer && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f "$AGENT_STATE/vps-agent.db" && -f "$AGENT_STATE/tls/cert.pem" && -f "$AGENT_STATE/tls/key.pem" && -f /var/lib/gateway-vpn-vps/install-report.json && ! -e /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json && ! -L /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json ]] || { echo "Partial, stabilizing, or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
   "$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$RELEASE_VERSION" --profile "$PROFILE"
   validate_preserved_wg_config /etc/wireguard/wg-mgmt.conf
   "$DEST/bin/gateway-vpn-vps-agent" --check-config /etc/gateway-vpn-vps/config.yaml
@@ -410,7 +410,7 @@ elif [[ -e /etc/wireguard/wg-mgmt.conf || -L /etc/wireguard/wg-mgmt.conf ]]; the
 fi
 
 if ((EXISTING == 0)); then
-  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-agent.service /etc/systemd/system/gateway-vpn-vps-restore.service /etc/systemd/system/gateway-vpn-vps-restore.path /etc/systemd/system/gateway-vpn-vps-restore-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric.service /etc/systemd/system/gateway-vpn-vps-fabric.path /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer /etc/systemd/system/gateway-vpn-vps-operations.service /etc/systemd/system/gateway-vpn-vps-operations.timer /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new; do
+  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-agent.service /etc/systemd/system/gateway-vpn-vps-restore.service /etc/systemd/system/gateway-vpn-vps-restore.path /etc/systemd/system/gateway-vpn-vps-restore-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric.service /etc/systemd/system/gateway-vpn-vps-fabric.path /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer /etc/systemd/system/gateway-vpn-vps-operations.service /etc/systemd/system/gateway-vpn-vps-operations.timer /etc/systemd/system/gateway-vpn-vps-update.service /etc/systemd/system/gateway-vpn-vps-update.path /etc/systemd/system/gateway-vpn-vps-update-recovery.service /etc/systemd/system/gateway-vpn-vps-update-finalize.service /etc/systemd/system/gateway-vpn-vps-update-finalize.timer /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new /opt/gateway-vpn-vps/.recovery.new; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting VPS managed path exists: $conflict" >&2; exit 1; }
   done
   if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
@@ -476,6 +476,11 @@ if ((EXISTING)); then
   systemctl is-enabled --quiet gateway-vpn-vps-fabric-watchdog.timer
   systemctl is-enabled --quiet gateway-vpn-vps-operations.timer
   systemctl is-active --quiet gateway-vpn-vps-operations.timer
+  systemctl is-enabled --quiet gateway-vpn-vps-update-recovery.service
+  systemctl is-enabled --quiet gateway-vpn-vps-update.path
+  systemctl is-active --quiet gateway-vpn-vps-update.path
+  systemctl is-enabled --quiet gateway-vpn-vps-update-finalize.timer
+  systemctl is-active --quiet gateway-vpn-vps-update-finalize.timer
   [[ -f /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && ! -L /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json) == "root:gateway-vpn-vps:640" ]]
   [[ $(wg show wg-mgmt listen-port) == 51821 ]]
   [[ $(wg show wg-mgmt public-key) == "$VPS_PUBLIC_KEY" ]]
@@ -559,7 +564,7 @@ chown root:root /var/lib/gateway-vpn-vps/install-transactions
 chmod 0700 /var/lib/gateway-vpn-vps/install-transactions
 install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$AGENT_STATE" "$AGENT_STATE/backups" "$AGENT_STATE/secrets" "$AGENT_STATE/secrets/wireguard" "$AGENT_STATE/secrets/update" "$AGENT_STATE/tls"
 install -d -o root -g "$AGENT_USER" -m 0710 /var/lib/gateway-vpn-vps-privileged
-install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps-privileged/restore-transactions /var/lib/gateway-vpn-vps-privileged/fabric
+install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps-privileged/restore-transactions /var/lib/gateway-vpn-vps-privileged/fabric /var/lib/gateway-vpn-vps-privileged/update-transactions
 install -d -o root -g "$AGENT_USER" -m 0750 /var/lib/gateway-vpn-vps-privileged/operations
 
 install -d -m 0755 "$DEST"
@@ -615,6 +620,11 @@ install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric-watch
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer" /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-operations.service" /etc/systemd/system/gateway-vpn-vps-operations.service
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-operations.timer" /etc/systemd/system/gateway-vpn-vps-operations.timer
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-update.service" /etc/systemd/system/gateway-vpn-vps-update.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-update.path" /etc/systemd/system/gateway-vpn-vps-update.path
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-update-recovery.service" /etc/systemd/system/gateway-vpn-vps-update-recovery.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-update-finalize.service" /etc/systemd/system/gateway-vpn-vps-update-finalize.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-update-finalize.timer" /etc/systemd/system/gateway-vpn-vps-update-finalize.timer
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf" /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf
 install -d -o root -g "$AGENT_USER" -m 0750 /etc/gateway-vpn-vps
 install -o root -g "$AGENT_USER" -m 0640 "$ROOT_DIR/packaging/vps/config/config.yaml" /etc/gateway-vpn-vps/config.yaml
@@ -627,7 +637,9 @@ sysctl -q -p /etc/sysctl.d/90-gateway-vpn-vps.conf
 
 install -d -m 0755 /opt/gateway-vpn-vps
 ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn-vps/.current.new
+ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn-vps/.recovery.new
 mv -Tf /opt/gateway-vpn-vps/.current.new /opt/gateway-vpn-vps/current
+mv -Tf /opt/gateway-vpn-vps/.recovery.new /opt/gateway-vpn-vps/recovery
 sync
 if ((PRESERVE_AGENT_USER == 0)); then
   HOST_LABEL=$(hostname -s)
@@ -639,16 +651,17 @@ if ((PRESERVE_AGENT_USER == 0)); then
   find "$AGENT_STATE" -type f -exec chmod 0600 {} +
   sync
 else
-  [[ ! -e "$AGENT_STATE/restore.trigger" && ! -L "$AGENT_STATE/restore.trigger" && ! -e "$AGENT_STATE/fabric.trigger" && ! -L "$AGENT_STATE/fabric.trigger" ]] || { echo "A pending preserved VPS transaction must finish before reinstall" >&2; false; }
+  [[ ! -e "$AGENT_STATE/restore.trigger" && ! -L "$AGENT_STATE/restore.trigger" && ! -e "$AGENT_STATE/fabric.trigger" && ! -L "$AGENT_STATE/fabric.trigger" && ! -e "$AGENT_STATE/update.trigger" && ! -L "$AGENT_STATE/update.trigger" ]] || { echo "A pending preserved VPS transaction must finish before reinstall" >&2; false; }
 fi
 "$DEST/bin/gateway-vpn-vps-agent" legacy-adopt --config /etc/gateway-vpn-vps/config.yaml --gateway-public-key "$GATEWAY_PUBLIC_KEY" --admin-public-key "$ADMIN_PUBLIC_KEY" --endpoint "$PUBLIC_ENDPOINT" >/dev/null
 systemctl daemon-reload
 (set -o noclobber; : >/run/gateway-vpn-vps-install-authorized) || { echo "Cannot create ephemeral VPS service-start authorization safely" >&2; exit 1; }
 chmod 0600 /run/gateway-vpn-vps-install-authorized
 [[ -f /run/gateway-vpn-vps-install-authorized && ! -L /run/gateway-vpn-vps-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-vps-install-authorized) == "0:0:600" ]] || { echo "Ephemeral VPS service-start authorization is unsafe" >&2; exit 1; }
-systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-operations.timer gateway-vpn-vps-agent.service
+systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service gateway-vpn-vps-update-recovery.service gateway-vpn-vps-update.path gateway-vpn-vps-update-finalize.timer gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-operations.timer gateway-vpn-vps-agent.service
 systemctl restart gateway-vpn-vps-firewall.service
 systemctl restart wg-quick@wg-mgmt.service
+systemctl restart gateway-vpn-vps-update-recovery.service
 systemctl restart gateway-vpn-vps-restore-recovery.service
 systemctl restart gateway-vpn-vps-fabric-recovery.service
 "$DEST/bin/gateway-vpn-vps-agent" fabric-apply --config /etc/gateway-vpn-vps/config.yaml --agent-user "$AGENT_USER"
@@ -657,6 +670,8 @@ systemctl restart gateway-vpn-vps-fabric.path
 systemctl restart gateway-vpn-vps-fabric-watchdog.timer
 systemctl start gateway-vpn-vps-operations.service
 systemctl restart gateway-vpn-vps-operations.timer
+systemctl restart gateway-vpn-vps-update.path
+systemctl restart gateway-vpn-vps-update-finalize.timer
 systemctl restart gateway-vpn-vps-agent.service
 [[ $(wg show wg-mgmt listen-port) == 51821 ]]
 ip -4 -o address show dev wg-mgmt | grep -Fq '10.80.0.1/24'
@@ -666,6 +681,8 @@ systemctl is-active --quiet gateway-vpn-vps-agent.service
 systemctl is-active --quiet gateway-vpn-vps-restore.path
 systemctl is-active --quiet gateway-vpn-vps-fabric.path
 systemctl is-active --quiet gateway-vpn-vps-operations.timer
+systemctl is-active --quiet gateway-vpn-vps-update.path
+systemctl is-active --quiet gateway-vpn-vps-update-finalize.timer
 [[ -f /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && ! -L /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json) == "root:gateway-vpn-vps:640" ]]
 ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
 ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'

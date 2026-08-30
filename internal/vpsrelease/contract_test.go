@@ -104,6 +104,11 @@ func writeValidVPSRelease(t *testing.T) string {
 		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer":       "[Timer]\nOnUnitActiveSec=60s\n",
 		"packaging/vps/systemd/gateway-vpn-vps-operations.service":          "[Service]\nType=oneshot\n",
 		"packaging/vps/systemd/gateway-vpn-vps-operations.timer":            "[Timer]\nOnUnitActiveSec=60s\n",
+		"packaging/vps/systemd/gateway-vpn-vps-update.service":              "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-update.path":                 "[Path]\nPathExists=/tmp/update\n",
+		"packaging/vps/systemd/gateway-vpn-vps-update-recovery.service":     "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-update-finalize.service":     "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-update-finalize.timer":       "[Timer]\nOnUnitActiveSec=60s\n",
 		"packaging/vps/config/config.yaml":                                  "version: 1\n",
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": "[Unit]\nAfter=gateway-vpn-vps-firewall.service\n",
 		LegacyHashFilename:                          strings.Repeat("0", 64) + "  placeholder\n",
@@ -126,7 +131,7 @@ func writeValidVPSRelease(t *testing.T) string {
 	writeJSON(t, filepath.Join(root, ReleaseFilename), Release{
 		FormatVersion: ReleaseFormatVersion, Role: "vps", Version: "1.2.0", OS: "linux", Arch: "amd64",
 		SourceCommit: strings.Repeat("a", 40), BuildDate: "2026-08-25T00:00:00Z", SupportedProfiles: SupportedProfiles(),
-		InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821,
+		InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821, DatabaseSchemaMaximum: 4,
 	})
 	return root
 }

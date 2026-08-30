@@ -48,17 +48,18 @@ var (
 )
 
 type Release struct {
-	FormatVersion     int      `json:"format_version"`
-	Role              string   `json:"role"`
-	Version           string   `json:"version"`
-	OS                string   `json:"os"`
-	Arch              string   `json:"arch"`
-	SourceCommit      string   `json:"source_commit"`
-	BuildDate         string   `json:"build_date"`
-	SupportedProfiles []string `json:"supported_profiles"`
-	InterfaceName     string   `json:"interface_name"`
-	ManagementSubnet  string   `json:"management_subnet"`
-	ListenPort        int      `json:"listen_port"`
+	FormatVersion         int      `json:"format_version"`
+	Role                  string   `json:"role"`
+	Version               string   `json:"version"`
+	OS                    string   `json:"os"`
+	Arch                  string   `json:"arch"`
+	SourceCommit          string   `json:"source_commit"`
+	BuildDate             string   `json:"build_date"`
+	SupportedProfiles     []string `json:"supported_profiles"`
+	InterfaceName         string   `json:"interface_name"`
+	ManagementSubnet      string   `json:"management_subnet"`
+	ListenPort            int      `json:"listen_port"`
+	DatabaseSchemaMaximum int64    `json:"database_schema_maximum"`
 }
 
 type FileRecord struct {
@@ -222,6 +223,11 @@ func validateRequiredFiles(files []FileRecord) error {
 		{"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-operations.service", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-operations.timer", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-update.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-update.path", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-update-recovery.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-update-finalize.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-update-finalize.timer", false},
 		{"packaging/vps/config/config.yaml", false},
 		{"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf", false},
 		{ReleaseFilename, false},
@@ -237,7 +243,7 @@ func validateRequiredFiles(files []FileRecord) error {
 
 func ValidateRelease(release Release) error {
 	buildDate, dateErr := time.Parse(time.RFC3339, release.BuildDate)
-	if release.FormatVersion != ReleaseFormatVersion || release.Role != "vps" || updatepkg.ValidateGatewayVersion(release.Version) != nil || release.OS != "linux" || release.Arch != "amd64" || !commitPattern.MatchString(release.SourceCommit) || dateErr != nil || buildDate.IsZero() || !equalStrings(release.SupportedProfiles, profiles) || release.InterfaceName != "wg-mgmt" || release.ManagementSubnet != "10.80.0.0/24" || release.ListenPort != 51821 {
+	if release.FormatVersion != ReleaseFormatVersion || release.Role != "vps" || updatepkg.ValidateGatewayVersion(release.Version) != nil || release.OS != "linux" || release.Arch != "amd64" || !commitPattern.MatchString(release.SourceCommit) || dateErr != nil || buildDate.IsZero() || !equalStrings(release.SupportedProfiles, profiles) || release.InterfaceName != "wg-mgmt" || release.ManagementSubnet != "10.80.0.0/24" || release.ListenPort != 51821 || release.DatabaseSchemaMaximum < 1 {
 		return errors.New("VPS release metadata contract is invalid")
 	}
 	return nil

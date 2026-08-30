@@ -79,7 +79,7 @@ func TestActualGatewayAndVPSSourceTreesFitStrictSignedReleaseContracts(t *testin
 		writeSignedTreeJSON(t, filepath.Join(root, "release.json"), vpsrelease.Release{
 			FormatVersion: vpsrelease.ReleaseFormatVersion, Role: "vps", Version: "1.2.0", OS: "linux", Arch: "amd64",
 			SourceCommit: strings.Repeat("a", 40), BuildDate: "2026-08-25T00:00:00Z", SupportedProfiles: vpsrelease.SupportedProfiles(),
-			InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821,
+			InterfaceName: "wg-mgmt", ManagementSubnet: "10.80.0.0/24", ListenPort: 51821, DatabaseSchemaMaximum: 4,
 		})
 		manifest, err := vpsrelease.SignRelease(root, privateKey)
 		if err != nil {

@@ -53,6 +53,7 @@ async function loadPage(page){
   if(page==='watchdog')return loadWatchdog();
   if(page==='logs')return loadLogs();
   if(page==='backup')return refreshBackupStatus();
+  if(page==='update')return loadUpdate();
   if(page==='diagnostics')return loadDiagnostics();
 }
 
@@ -168,6 +169,46 @@ async function loadDiagnostics(){
   root.append(summary([['Доступно',item.available?'Да':'Нет'],['Формат',item.format||'—'],['Приватные данные',item.secrets_included?'ОШИБКА: включены':'Не включаются'],['Root-снимок',item.snapshot_state||item.reason||'—'],['Собран',item.snapshot_collected_at||'—'],['Лимит архива',item.maximum_archive_bytes?`${Math.round(item.maximum_archive_bytes/1048576)} МиБ`:'—'],['Разделы',(item.sections||[]).join(', ')||'—'],['Неполные секции',(item.snapshot_section_errors||[]).join(', ')||'нет']]))
 }
 
+async function loadUpdate(){
+  const view=await api('/api/v1/vps/update/status'),root=$('update-status');clear(root);
+  const transaction=view.transaction||{};
+  root.append(summary([
+    ['Доступно',view.available?'Да':'Нет'],['Текущая версия',view.current_version||'—'],['Schema',view.current_schema??'—'],
+    ['Root updater',view.apply_available?'Подключён':'Недоступен'],['Состояние транзакции',transaction.state||'Нет активной'],
+    ['Предыдущая версия',transaction.previous_version||'—'],['Кандидат',transaction.candidate_version||'—'],
+    ['Stability deadline',transaction.stability_deadline||'—'],['Последняя ошибка',transaction.error_code||'нет']
+  ]));
+  const candidateRoot=$('update-candidate');clear(candidateRoot);
+  if(view.staged&&view.operation){renderUpdateCandidate(view.operation,view.confirmation_phrase);}
+  else empty(candidateRoot,transaction.state==='STABILIZING'?'Новая версия работает в окне стабильности; старая версия сохранена для автоматического rollback.':'Проверенный release пока не загружен.');
+  const pending=sessionStorage.getItem('vps-update-pending');
+  if(pending){notice(pending);sessionStorage.removeItem('vps-update-pending')}
+}
+
+function renderUpdateCandidate(operation,confirmationPhrase){
+  const root=$('update-candidate'),card=document.createElement('article');card.className='card object';
+  card.append(textElement('h3',`Проверенный кандидат ${operation.candidate_version}`),summary([
+    ['Update ID',operation.update_id],['Текущая версия',operation.current_version],['Версия кандидата',operation.candidate_version],
+    ['Schema сейчас / максимум кандидата',`${operation.current_schema} / ${operation.candidate_schema}`],['Файлов',operation.file_count],
+    ['Распаковано',`${Math.round(operation.uncompressed_bytes/1024)} КиБ`],['Проверен',operation.created_at]
+  ]));
+  const form=document.createElement('form'),password=document.createElement('input'),confirmation=document.createElement('input');
+  password.type='password';password.autocomplete='current-password';password.required=true;
+  confirmation.autocomplete='off';confirmation.required=true;
+  const passwordLabel=textElement('label','Текущий пароль VPS Hub');passwordLabel.append(password);
+  const confirmationLabel=textElement('label',`Введите: ${confirmationPhrase}`);confirmationLabel.append(confirmation);
+  const apply=actionButton('Обновить с автоматическим rollback',async()=>{
+    if(!confirm('VPS Agent временно перезапустится. При ошибке release и база данных будут автоматически возвращены. Продолжить?'))return;
+    apply.disabled=true;
+    try{await api('/api/v1/vps/update/apply',{method:'POST',body:JSON.stringify({update_id:operation.update_id,password:password.value,confirmation:confirmation.value})});password.value='';confirmation.value='';sessionStorage.setItem('vps-update-pending','Обновление запущено. Если соединение прервалось, переподключитесь: boot recovery завершит apply или rollback.');notice('Root updater запущен; VPS Hub может кратковременно переподключиться.')}catch(error){notice(error.message);apply.disabled=false}
+  },true);
+  const discard=actionButton('Удалить проверенный кандидат',async()=>{
+    if(!confirm('Удалить только staged release без изменения работающей версии?'))return;
+    try{await api('/api/v1/vps/update',{method:'DELETE',headers:{'X-Confirm-Destructive':'discard-staged-vps-update'}});notice('Staged VPS release удалён; работающая версия не менялась.');await loadUpdate()}catch(error){notice(error.message)}
+  });
+  form.append(passwordLabel,confirmationLabel,apply,discard);card.append(form);root.append(card);
+}
+
 $('login-form').addEventListener('submit',async event=>{event.preventDefault();const data=new FormData(event.target);try{showApp(await api('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username:data.get('username'),password:data.get('password')})}))}catch(error){$('login-error').textContent=error.message}});
 $('logout').addEventListener('click',async()=>{try{await api('/api/v1/auth/logout',{method:'POST'})}finally{ui.csrf='';showLogin()}});
 $('password-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,data=new FormData(form);if(data.get('new_password')!==data.get('password_confirmation')){notice('Новый пароль и подтверждение не совпадают');return}try{await api('/api/v1/auth/password',{method:'PUT',body:JSON.stringify({current_password:data.get('current_password'),new_password:data.get('new_password'),password_confirmation:data.get('password_confirmation')})});form.reset();showApp(await api('/api/v1/auth/session'));notice('Пароль VPS Hub изменён')}catch(error){notice(error.message)}});
@@ -177,6 +218,7 @@ document.querySelectorAll('[data-refresh]').forEach(button=>button.addEventListe
 $('log-filter').addEventListener('submit',event=>{event.preventDefault();loadLogs().catch(error=>notice(error.message))});
 $('clear-log-view').addEventListener('click',()=>{empty($('log-window'),'Окно очищено только в этом браузере. Системный журнал и audit trail сохранены.');notice('Отображение очищено; записи на VPS не удалялись.')});
 $('download-diagnostics').addEventListener('click',async event=>{const button=event.currentTarget;button.disabled=true;try{const response=await fetch('/api/v1/vps/diagnostics/download',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':ui.csrf}});if(!response.ok){const body=await response.json();throw new Error(body.error.message)}const blob=await response.blob(),name=(response.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/)?.[1]||'gateway-vpn-vps-diagnostics.zip',digest=response.headers.get('X-Content-SHA256')||'не указан',link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);notice(`Диагностика ${name} скачана; SHA-256 ${digest}`)}catch(error){notice(error.message)}finally{button.disabled=false}});
+$('update-stage-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,data=new FormData(form),upload=new FormData(),button=form.querySelector('button');upload.append('release',data.get('release'));button.disabled=true;try{const result=await api('/api/v1/vps/update/stage',{method:'POST',body:upload});form.reset();notice(`Release ${result.operation.candidate_version} подписан и совместим. Применение ещё не началось.`);await loadUpdate()}catch(error){notice(error.message)}finally{button.disabled=false}});
 
 $('pairing-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,data=new FormData(form);try{const result=await api('/api/v1/hub/pairing-invitations',{method:'POST',body:JSON.stringify({gateway_name:data.get('gateway_name'),endpoint:data.get('endpoint'),assigned_subnet:data.get('assigned_subnet'),expiry_seconds:Number(data.get('expiry_minutes'))*60})});ui.invitation=result.invitation;$('pairing-bundle').textContent=JSON.stringify(result.invitation,null,2);$('pairing-once').hidden=false;notice('Приглашение создано. Токен больше не будет показан после ухода со страницы.');await loadGateways()}catch(error){notice(error.message)}});
 $('download-pairing').addEventListener('click',()=>{if(!ui.invitation)return;const blob=new Blob([JSON.stringify(ui.invitation,null,2)+'\n'],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`gateway-vpn-pairing-${ui.invitation.invitation_id}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000)});

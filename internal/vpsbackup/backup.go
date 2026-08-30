@@ -411,6 +411,16 @@ func (manager *Manager) now() time.Time {
 	return time.Now().UTC()
 }
 
+// CreateOnlineDatabaseCopy exposes the same SQLite Online Backup primitive to
+// the root-owned VPS updater. It copies only the database; configuration and
+// secrets remain untouched by a pointer-compatible application update.
+func CreateOnlineDatabaseCopy(ctx context.Context, database *sql.DB, destination string) error {
+	if database == nil || !filepath.IsAbs(destination) {
+		return errors.New("VPS online database copy requires a database and absolute destination")
+	}
+	return onlineBackup(ctx, database, filepath.Clean(destination))
+}
+
 func onlineBackup(ctx context.Context, database *sql.DB, destination string) error {
 	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {

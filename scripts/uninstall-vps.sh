@@ -29,6 +29,7 @@ flock -n 9 || { echo "Another Gateway VPN VPS install/recovery/uninstall transac
 [[ ! -e /var/lib/gateway-vpn-vps/install-transactions/active && ! -L /var/lib/gateway-vpn-vps/install-transactions/active ]] || { echo "Recover the interrupted VPS install before uninstall" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-vps/agent/restore.trigger && ! -L /var/lib/gateway-vpn-vps/agent/restore.trigger ]] || { echo "Finish or discard the pending VPS restore before uninstall" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-vps/agent/fabric.trigger && ! -L /var/lib/gateway-vpn-vps/agent/fabric.trigger ]] || { echo "Finish the pending VPS Management Fabric apply before uninstall" >&2; exit 1; }
+[[ ! -e /var/lib/gateway-vpn-vps/agent/update.trigger && ! -L /var/lib/gateway-vpn-vps/agent/update.trigger ]] || { echo "Finish the pending VPS update before uninstall" >&2; exit 1; }
 if [[ -d /var/lib/gateway-vpn-vps-privileged/restore-transactions ]] && find /var/lib/gateway-vpn-vps-privileged/restore-transactions -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
   echo "Recover the interrupted VPS restore before uninstall" >&2
   exit 1
@@ -37,8 +38,12 @@ if [[ -d /var/lib/gateway-vpn-vps-privileged/fabric ]] && find /var/lib/gateway-
   echo "Recover the pending VPS Management Fabric transaction before uninstall" >&2
   exit 1
 fi
+if [[ -e /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json || -L /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json ]]; then
+  echo "Recover or finalize the active VPS update before uninstall" >&2
+  exit 1
+fi
 
-systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-operations.timer gateway-vpn-vps-operations.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-update.path gateway-vpn-vps-update-finalize.timer gateway-vpn-vps-update.service gateway-vpn-vps-update-finalize.service gateway-vpn-vps-update-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-operations.timer gateway-vpn-vps-operations.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
 if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
   /usr/sbin/nft delete table inet gateway_vpn_vps
 fi
@@ -68,13 +73,21 @@ rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service
 rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer
 rm -f /etc/systemd/system/gateway-vpn-vps-operations.service
 rm -f /etc/systemd/system/gateway-vpn-vps-operations.timer
+rm -f /etc/systemd/system/gateway-vpn-vps-update.service
+rm -f /etc/systemd/system/gateway-vpn-vps-update.path
+rm -f /etc/systemd/system/gateway-vpn-vps-update-recovery.service
+rm -f /etc/systemd/system/gateway-vpn-vps-update-finalize.service
+rm -f /etc/systemd/system/gateway-vpn-vps-update-finalize.timer
 rm -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d
 rm -rf /etc/gateway-vpn-vps
 rm -rf /opt/gateway-vpn-vps
 rm -f /usr/libexec/gateway-vpn-vps-install-recovery
 rm -f /run/gateway-vpn-vps-install-authorized
+rm -f /run/gateway-vpn-vps-update-live
 rm -rf /var/lib/gateway-vpn-vps-privileged
+rm -f /var/lib/gateway-vpn-vps/agent/update.trigger /var/lib/gateway-vpn-vps/agent/update-status.json
+rm -rf /var/lib/gateway-vpn-vps/agent/update-staging
 if ((PURGE_KEYS)); then
   rm -f /etc/wireguard/wg-mgmt.conf
   rm -rf /var/lib/gateway-vpn-vps

@@ -31,6 +31,8 @@ import (
 	"gateway-vpn/internal/vpsconfig"
 	"gateway-vpn/internal/vpsfabric"
 	"gateway-vpn/internal/vpsops"
+	"gateway-vpn/internal/vpsrelease"
+	"gateway-vpn/internal/vpsupdate"
 	"gateway-vpn/internal/vpswebapi"
 	"gateway-vpn/internal/wgingress"
 )
@@ -68,11 +70,20 @@ func run(args []string) int {
 			return runFabricWatchdog(args[1:])
 		case "operations-collect":
 			return runOperationsCollect(args[1:])
+		case "update-offline-check":
+			return runUpdateOfflineCheck(args[1:])
+		case "update-apply":
+			return runVPSUpdateApply(args[1:])
+		case "update-recover":
+			return runVPSUpdateRecover(args[1:])
+		case "update-finalize":
+			return runVPSUpdateFinalize(args[1:])
 		}
 	}
 	flags := flag.NewFlagSet("gateway-vpn-vps-agent", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	showVersion := flags.Bool("version", false, "print build version")
+	showSchema := flags.Bool("schema-version", false, "print VPS Agent database schema version")
 	checkConfig := flags.String("check-config", "", "strictly validate a VPS Agent YAML file")
 	checkPassword := flags.String("check-password-file", "", "validate a protected VPS Hub bootstrap password file")
 	if err := flags.Parse(args); err != nil {
@@ -81,6 +92,9 @@ func run(args []string) int {
 	switch {
 	case *showVersion:
 		fmt.Println(buildinfo.String("gateway-vpn-vps-agent"))
+		return 0
+	case *showSchema:
+		fmt.Println(vpsagent.SchemaVersion)
 		return 0
 	case *checkConfig != "":
 		if _, err := vpsconfig.Load(*checkConfig); err != nil {
@@ -99,9 +113,79 @@ func run(args []string) int {
 		fmt.Println("VPS Hub password file is valid")
 		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog|operations-collect]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--schema-version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog|operations-collect|update-offline-check|update-apply|update-recover|update-finalize]")
 		return 2
 	}
+}
+
+func runUpdateOfflineCheck(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent update-offline-check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databasePath := flags.String("database", "", "fixed root transaction candidate database")
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	expectedVersion := flags.String("expected-version", "", "signed candidate version")
+	expectedSchema := flags.Int64("expected-schema", 0, "signed candidate schema")
+	jsonOutput := flags.Bool("json", false, "write strict JSON result")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*jsonOutput || *configPath != defaultConfigPath || !validVPSUpdateCandidatePath(*databasePath) || *expectedVersion != buildinfo.Version || *expectedSchema != vpsagent.SchemaVersion {
+		return 2
+	}
+	if _, err := vpsconfig.Load(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "candidate VPS configuration is invalid")
+		return 1
+	}
+	database, err := vpsagent.Open(context.Background(), *databasePath)
+	if err != nil || vpsagent.Verify(context.Background(), database) != nil {
+		if database != nil {
+			_ = database.Close()
+		}
+		fmt.Fprintln(os.Stderr, "candidate VPS database migration or verification failed")
+		return 1
+	}
+	if _, err := database.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		_ = database.Close()
+		fmt.Fprintln(os.Stderr, "candidate VPS database checkpoint failed")
+		return 1
+	}
+	if _, err := database.ExecContext(context.Background(), "PRAGMA journal_mode=DELETE"); err != nil {
+		_ = database.Close()
+		fmt.Fprintln(os.Stderr, "candidate VPS database journal finalization failed")
+		return 1
+	}
+	if err := database.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "candidate VPS database close failed")
+		return 1
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(*databasePath + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "candidate VPS database sidecar cleanup failed")
+			return 1
+		}
+	}
+	file, err := os.Open(*databasePath)
+	if err != nil {
+		return 1
+	}
+	info, statErr := file.Stat()
+	hash := sha256.New()
+	written, copyErr := io.Copy(hash, io.LimitReader(file, vpsbackup.MaximumFileBytes+1))
+	closeErr := file.Close()
+	if statErr != nil || copyErr != nil || closeErr != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > vpsbackup.MaximumFileBytes || written != info.Size() {
+		fmt.Fprintln(os.Stderr, "candidate VPS database hash failed")
+		return 1
+	}
+	result := vpsupdate.OfflineResult{Version: buildinfo.Version, SchemaVersion: vpsagent.SchemaVersion, DatabaseBytes: written, DatabaseSHA256: hex.EncodeToString(hash.Sum(nil)), QuickCheck: "PASS", IntegrityCheck: "PASS", ForeignKeyCheck: "PASS"}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func validVPSUpdateCandidatePath(path string) bool {
+	if !filepath.IsAbs(path) || filepath.Base(path) != "candidate.db" {
+		return false
+	}
+	transaction := filepath.Dir(filepath.Clean(path))
+	return strings.HasPrefix(filepath.Base(transaction), "vps-update-") && filepath.Base(filepath.Dir(transaction)) == "update-transactions" && filepath.Base(filepath.Dir(filepath.Dir(transaction))) == "gateway-vpn-vps-privileged"
 }
 
 func runServe(args []string) int {
@@ -145,12 +229,26 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "clean consumed VPS administrator keys failed: %v\n", err)
 		return 1
 	}
+	profile, err := vpsHostProfile()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "identify VPS update profile failed: %v\n", err)
+		return 1
+	}
+	updates := &vpsupdate.Service{
+		Stager:     &vpsupdate.Stager{StateDirectory: configuration.System.StateDirectory, ReleaseRoot: "/opt/gateway-vpn-vps", TrustedKeyPath: "/etc/gateway-vpn-vps/update-signing.pub", CurrentVersion: buildinfo.Version, CurrentSchema: vpsagent.SchemaVersion, Profile: profile},
+		StatusPath: filepath.Join(configuration.System.StateDirectory, "update-status.json"), CurrentVersion: buildinfo.Version, CurrentSchema: vpsagent.SchemaVersion, ApplyAvailable: true,
+	}
+	if err := updates.EnsureInitialStatus(); err != nil {
+		fmt.Fprintf(os.Stderr, "initialize VPS update status failed: %v\n", err)
+		return 1
+	}
 	web, err := vpswebapi.New(vpswebapi.Dependencies{
 		Database: database, Auth: authService, Backups: backups, Restores: restores,
 		AdminKeys:        &adminKeys,
 		RestoreApply:     systemdRestoreTrigger{path: filepath.Join(configuration.System.StateDirectory, "restore.trigger")},
 		FabricApply:      systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")},
 		FabricStatusPath: filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename),
+		Updates:          updates, UpdateApply: systemdUpdateTrigger{path: filepath.Join(configuration.System.StateDirectory, "update.trigger")},
 		Operations: &vpsops.Service{
 			Database: database, SnapshotPath: vpsops.DefaultPaths().Output,
 			FabricStatusPath: filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename),
@@ -205,6 +303,122 @@ func runServe(args []string) int {
 		_ = server.Shutdown(shutdown)
 	}
 	return 0
+}
+
+func runVPSUpdateApply(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent update-apply", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	apply := flags.Bool("apply", false, "apply the fixed staged VPS update")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_UNIT") != "1" || os.Geteuid() != 0 {
+		return 2
+	}
+	engine, err := productionVPSUpdateEngine(*configPath, true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "initialize VPS update transaction failed")
+		return 1
+	}
+	result, err := engine.Apply(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update failed; rollback completed or boot recovery remains armed")
+		return 1
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(result)
+	return 0
+}
+
+func runVPSUpdateRecover(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent update-recover", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	apply := flags.Bool("apply", false, "recover the fixed VPS update transaction")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_RECOVERY_UNIT") != "1" || os.Geteuid() != 0 {
+		return 2
+	}
+	engine, err := productionVPSUpdateEngine(*configPath, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "initialize VPS update recovery failed")
+		return 1
+	}
+	recovered, err := engine.Recover(context.Background())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update recovery failed; management remains stopped for another recovery attempt")
+		return 1
+	}
+	fmt.Printf("VPS update recovery completed; rolled_back=%t\n", recovered)
+	return 0
+}
+
+func runVPSUpdateFinalize(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent update-finalize", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	apply := flags.Bool("apply", false, "finalize the fixed stable VPS update")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT") != "1" || os.Geteuid() != 0 {
+		return 2
+	}
+	engine, err := productionVPSUpdateEngine(*configPath, false)
+	if err != nil {
+		return 1
+	}
+	journal, err := engine.Finalize(context.Background())
+	if errors.Is(err, vpsupdate.ErrNoFinalizationPending) || errors.Is(err, vpsupdate.ErrStabilityWindowActive) {
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update finalization failed; rollback completed or recovery remains armed")
+		return 1
+	}
+	fmt.Printf("VPS update %s finalized at version %s\n", journal.UpdateID, journal.NewVersion)
+	return 0
+}
+
+func productionVPSUpdateEngine(configPath string, withStager bool) (*vpsupdate.Engine, error) {
+	configuration, err := vpsconfig.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	uid, gid, err := resolveAccount("gateway-vpn-vps")
+	if err != nil {
+		return nil, err
+	}
+	profile, err := vpsHostProfile()
+	if err != nil {
+		return nil, err
+	}
+	engine := &vpsupdate.Engine{
+		Store:       vpsupdate.JournalStore{Root: "/var/lib/gateway-vpn-vps-privileged/update-transactions"},
+		Status:      vpsupdate.StatusStore{Path: filepath.Join(configuration.System.StateDirectory, "update-status.json"), UID: uid, GID: gid},
+		Runtime:     vpsupdate.SystemRuntime{Executor: platformexec.OSExecutor{}, Systemctl: "/usr/bin/systemctl", ReleaseRoot: "/opt/gateway-vpn-vps"},
+		ReleaseRoot: "/opt/gateway-vpn-vps", StateDirectory: configuration.System.StateDirectory, DatabasePath: configuration.System.Database, ConfigPath: configPath,
+		TrustedKeyPath: "/etc/gateway-vpn-vps/update-signing.pub", Profile: profile, RunningVersion: buildinfo.Version, RunningSchema: vpsagent.SchemaVersion, AgentUID: uid, AgentGID: gid,
+	}
+	if withStager {
+		engine.Stager = &vpsupdate.Stager{StateDirectory: configuration.System.StateDirectory, ReleaseRoot: engine.ReleaseRoot, TrustedKeyPath: engine.TrustedKeyPath, CurrentVersion: engine.RunningVersion, CurrentSchema: engine.RunningSchema, Profile: profile}
+	}
+	return engine, nil
+}
+
+func vpsHostProfile() (string, error) {
+	content, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "", err
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		values[key] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	profile := values["ID"] + "-" + values["VERSION_ID"]
+	for _, supported := range vpsrelease.SupportedProfiles() {
+		if profile == supported {
+			return profile, nil
+		}
+	}
+	return "", errors.New("unsupported VPS OS profile")
 }
 
 func runLegacyAdopt(args []string) int {
@@ -533,7 +747,7 @@ func runStateCheck(args []string) int {
 	flags.SetOutput(os.Stderr)
 	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
 	expectedPublicKey := flags.String("expected-public-key", "", "expected VPS WireGuard public key")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(*expectedPublicKey) == "" {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2
 	}
 	configuration, database, err := openConfigured(*configPath)
@@ -543,6 +757,9 @@ func runStateCheck(args []string) int {
 	}
 	defer database.Close()
 	identity, err := vpsagent.ReadIdentity(context.Background(), database)
+	if strings.TrimSpace(*expectedPublicKey) == "" && err == nil {
+		*expectedPublicKey = identity.PublicKey
+	}
 	if err != nil || vpsagent.Verify(context.Background(), database) != nil || identity.PublicKey != strings.TrimSpace(*expectedPublicKey) {
 		fmt.Fprintln(os.Stderr, "VPS Agent database identity does not match the expected WireGuard identity")
 		return 1
@@ -700,6 +917,7 @@ func readProtectedSecret(path string, maximum int64) (string, error) {
 type systemdRestoreTrigger struct{ path string }
 
 type systemdFabricTrigger struct{ path string }
+type systemdUpdateTrigger struct{ path string }
 
 func (trigger systemdFabricTrigger) ApplyVPSFabric(ctx context.Context) error {
 	return createSystemdTrigger(ctx, trigger.path, "fabric.trigger")
@@ -709,11 +927,15 @@ func (trigger systemdRestoreTrigger) ApplyPendingVPSRestore(ctx context.Context)
 	return createSystemdTrigger(ctx, trigger.path, "restore.trigger")
 }
 
+func (trigger systemdUpdateTrigger) ApplyPendingVPSUpdate(ctx context.Context) error {
+	return createSystemdTrigger(ctx, trigger.path, "update.trigger")
+}
+
 func createSystemdTrigger(ctx context.Context, path, expectedBase string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(path) || filepath.Base(path) != expectedBase || expectedBase != "restore.trigger" && expectedBase != "fabric.trigger" {
+	if !filepath.IsAbs(path) || filepath.Base(path) != expectedBase || expectedBase != "restore.trigger" && expectedBase != "fabric.trigger" && expectedBase != "update.trigger" {
 		return errors.New("VPS systemd trigger path is invalid")
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

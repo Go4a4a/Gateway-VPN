@@ -627,6 +627,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		"--hub-admin-password-file", "--check-password-file", "preserve_agent_user=%s", "$AGENT_STATE/vps-agent.db",
 		"gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-restore-recovery.service",
 		"gateway-vpn-vps-fabric.service", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-fabric-recovery.service", "gateway-vpn-vps-fabric-watchdog.service", "gateway-vpn-vps-fabric-watchdog.timer", "gateway-vpn-vps-operations.service", "gateway-vpn-vps-operations.timer", "legacy-adopt", "fabric-apply",
+		"gateway-vpn-vps-update.service", "gateway-vpn-vps-update.path", "gateway-vpn-vps-update-recovery.service", "gateway-vpn-vps-update-finalize.service", "gateway-vpn-vps-update-finalize.timer", "/opt/gateway-vpn-vps/recovery", "update-transactions",
 		"identity-init", "init-admin", "systemctl is-active --quiet gateway-vpn-vps-agent.service", "127.0.0.1:9443", "10.80.0.1:9443",
 	} {
 		if !strings.Contains(installer, required) {
@@ -668,6 +669,10 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-fabric.path"),
 		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-fabric-watchdog.service"),
 		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-operations.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-update.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-update-recovery.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-update-finalize.service"),
+		filepath.Join(root, "packaging", "vps", "systemd", "gateway-vpn-vps-update.path"),
 		filepath.Join(root, "packaging", "vps", "systemd", "wg-quick@wg-mgmt.service.d", "gateway-vpn.conf"),
 	} {
 		unit := read(t, unitPath)
@@ -676,7 +681,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-vps-install.sh"))
-	for _, required := range []string{"nft delete table inet gateway_vpn_vps", "old_ipv4_forward", "preserve_wg_config", "PRESERVE_WG_CONFIG", "preserve_agent_user", "PRESERVE_AGENT_USER", "gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-operations.timer", "remove newly created VPS Agent state", "active marker retained for retry", ".gateway-vpn-wg-mgmt.conf.tmp", "install-report.json", "/run/lock/gateway-vpn-vps-install.lock", "flock -n 9", "marker field count is invalid", "duplicate or missing field", "wg-mgmt remained enabled", "if ((FAILED))"} {
+	for _, required := range []string{"nft delete table inet gateway_vpn_vps", "old_ipv4_forward", "preserve_wg_config", "PRESERVE_WG_CONFIG", "preserve_agent_user", "PRESERVE_AGENT_USER", "gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-operations.timer", "gateway-vpn-vps-update.path", "gateway-vpn-vps-update-finalize.timer", "/opt/gateway-vpn-vps/recovery", "update-status.json", "update-staging", "remove newly created VPS Agent state", "active marker retained for retry", ".gateway-vpn-wg-mgmt.conf.tmp", "install-report.json", "/run/lock/gateway-vpn-vps-install.lock", "flock -n 9", "marker field count is invalid", "duplicate or missing field", "wg-mgmt remained enabled", "if ((FAILED))"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("VPS recovery missing %q", required)
 		}
@@ -685,13 +690,74 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		t.Fatal("VPS first-install recovery does not restore only owned state")
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall-vps.sh"))
-	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || !strings.Contains(uninstaller, "VPS Hub settings/backups/account") || !strings.Contains(uninstaller, "gateway-vpn-vps-restore.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-fabric.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-operations.timer") || strings.Contains(uninstaller, "flush ruleset") {
+	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || !strings.Contains(uninstaller, "VPS Hub settings/backups/account") || !strings.Contains(uninstaller, "gateway-vpn-vps-restore.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-fabric.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-operations.timer") || !strings.Contains(uninstaller, "gateway-vpn-vps-update.path") || !strings.Contains(uninstaller, "update-transactions/active.json") || !strings.Contains(uninstaller, "update-staging") || strings.Contains(uninstaller, "flush ruleset") {
 		t.Fatal("VPS uninstall key-preservation or firewall ownership contract is incomplete")
 	}
 	commandGenerator := read(t, filepath.Join(root, "scripts", "generate-vps-install-command.sh"))
 	for _, required := range []string{"channel-vps-install-command", "install-vps-$VERSION.command.txt", "--gateway-public-key", "--admin-public-key", "--install-dependencies", "--apply"} {
 		if !strings.Contains(commandGenerator, required) {
 			t.Errorf("VPS command generator missing %q", required)
+		}
+	}
+}
+
+func TestVPSUpdatePackagingHasIndependentLiveAndBootRecoveryBoundaries(t *testing.T) {
+	root := repositoryRoot(t)
+	directory := filepath.Join(root, "packaging", "vps", "systemd")
+	update := read(t, filepath.Join(directory, "gateway-vpn-vps-update.service"))
+	recovery := read(t, filepath.Join(directory, "gateway-vpn-vps-update-recovery.service"))
+	finalize := read(t, filepath.Join(directory, "gateway-vpn-vps-update-finalize.service"))
+	pathUnit := read(t, filepath.Join(directory, "gateway-vpn-vps-update.path"))
+	timer := read(t, filepath.Join(directory, "gateway-vpn-vps-update-finalize.timer"))
+	agent := read(t, filepath.Join(directory, "gateway-vpn-vps-agent.service"))
+	installRecovery := read(t, filepath.Join(directory, "gateway-vpn-vps-install-recovery.service"))
+
+	for _, required := range []string{
+		"GATEWAY_VPN_VPS_UPDATE_UNIT=1",
+		"ExecStartPre=/usr/bin/install -o root -g root -m 0600 /dev/null /run/gateway-vpn-vps-update-live",
+		"ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-apply",
+		"ExecStopPost=/usr/bin/rm -f /run/gateway-vpn-vps-update-live /var/lib/gateway-vpn-vps/agent/update.trigger",
+		"OnFailure=gateway-vpn-vps-update-recovery.service",
+		"ReadWritePaths=/opt/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd",
+		"RestrictAddressFamilies=AF_UNIX",
+	} {
+		if !strings.Contains(update, required) {
+			t.Errorf("VPS update unit missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"ConditionPathExists=!/run/gateway-vpn-vps-update-live",
+		"ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-update-live",
+		"ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-recover",
+		"Before=network.target",
+	} {
+		if !strings.Contains(recovery, required) {
+			t.Errorf("VPS update recovery unit missing %q", required)
+		}
+	}
+	if strings.Contains(recovery, "ConditionPathExists=/var/lib/gateway-vpn-vps-privileged/update-transactions/active.json") {
+		t.Fatal("VPS boot recovery can be skipped after active.json is lost between redundant journal writes")
+	}
+	for _, required := range []string{"GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT=1", "/run/gateway-vpn-vps-update-live", "update-finalize", "OnFailure=gateway-vpn-vps-update-recovery.service"} {
+		if !strings.Contains(finalize, required) {
+			t.Errorf("VPS update finalize unit missing %q", required)
+		}
+	}
+	if !strings.Contains(pathUnit, "PathExists=/var/lib/gateway-vpn-vps/agent/update.trigger") || !strings.Contains(pathUnit, "Unit=gateway-vpn-vps-update.service") || !strings.Contains(timer, "OnUnitActiveSec=15min") || !strings.Contains(timer, "Persistent=true") {
+		t.Fatal("VPS update path/finalize timer contract is incomplete")
+	}
+	if !strings.Contains(agent, "Requires=gateway-vpn-vps-update-recovery.service") || !strings.Contains(agent, "After=network-online.target gateway-vpn-vps-install-recovery.service gateway-vpn-vps-update-recovery.service") {
+		t.Fatal("VPS Agent is not ordered behind boot update recovery")
+	}
+	if !strings.Contains(installRecovery, "Before=network-pre.target") || !strings.Contains(installRecovery, "gateway-vpn-vps-update-recovery.service") || !strings.Contains(installRecovery, "gateway-vpn-vps-update.path") {
+		t.Fatal("first-install recovery is not ordered before VPS update units")
+	}
+	for name, content := range map[string]string{"update": update, "recovery": recovery, "finalize": finalize, "path": pathUnit, "timer": timer} {
+		lower := strings.ToLower(content)
+		for _, forbidden := range []string{"amnezia", "docker", "ufw", "firewalld", "nft flush ruleset", "systemctl reboot"} {
+			if strings.Contains(lower, forbidden) {
+				t.Errorf("VPS %s unit crosses ownership boundary with %q", name, forbidden)
+			}
 		}
 	}
 }

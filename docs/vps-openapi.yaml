@@ -27,6 +27,7 @@ tags:
   - name: Logs
   - name: Diagnostics
   - name: Backup
+  - name: Updates
 paths:
   /api/v1/auth/login:
     post:
@@ -311,6 +312,36 @@ paths:
       summary: Собрать в памяти bounded ZIP без секретов и host mutation
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       responses: {'200': {$ref: '#/components/responses/VPSDiagnostics'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/update/status:
+    get:
+      tags: [Updates]
+      operationId: getVPSUpdateStatus
+      summary: Получить current/staged/transaction state без privileged paths и digests
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/update/stage:
+    post:
+      tags: [Updates]
+      operationId: stageVPSUpdate
+      summary: Загрузить и проверить signed pointer-compatible VPS release
+      description: Изменение signed packaging/vps host contract отклоняется с UPDATE_REQUIRES_INSTALLER.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/VPSUpdateUpload'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/update/apply:
+    post:
+      tags: [Updates]
+      operationId: applyVPSUpdate
+      summary: После re-authentication запустить root-owned apply/health/rollback transaction
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/VPSUpdateApply'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/update:
+    delete:
+      tags: [Updates]
+      operationId: discardVPSUpdate
+      summary: Удалить verified staged release без изменения live state
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
 components:
   securitySchemes:
     cookieAuth:
@@ -419,6 +450,23 @@ components:
       content:
         application/json:
           schema: {$ref: '#/components/schemas/VPSRestoreApply'}
+    VPSUpdateUpload:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [release]
+            properties:
+              release: {type: string, format: binary, description: Signed Gateway VPN VPS .tar.gz release}
+          encoding:
+            release: {contentType: application/gzip}
+    VPSUpdateApply:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/VPSUpdateApply'}
   responses:
     JSON:
       description: Успешный secret-free JSON response.
@@ -582,6 +630,14 @@ components:
         mode: {type: string, enum: [SAME_VPS, IMPORT_AS_NEW]}
         password: {type: string, maxLength: 1024, format: password, writeOnly: true}
         confirmation: {type: string, maxLength: 256}
+    VPSUpdateApply:
+      type: object
+      additionalProperties: false
+      required: [update_id, password, confirmation]
+      properties:
+        update_id: {type: string, pattern: '^vps-update-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{24}$'}
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, const: ОБНОВИТЬ VPS HUB}
     WireGuardPublicKey:
       type: string
       minLength: 44
