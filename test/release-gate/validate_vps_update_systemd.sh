@@ -75,6 +75,10 @@ systemctl is-active --quiet gateway-vpn-vps-agent.service
 [[ $(readlink /opt/gateway-vpn-vps/current) == "releases/v$SUCCESS_VERSION" ]]
 [[ $(readlink /opt/gateway-vpn-vps/recovery) == "releases/v$BASE_VERSION" ]]
 [[ $(/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent --version) == "gateway-vpn-vps-agent $SUCCESS_VERSION "* ]]
+# The guarded helper requires its synthetic updated_at to remain strictly
+# newer than every real journal write while the forced deadline stays in the
+# past. A fast container can reach STABILIZING in well under two seconds.
+sleep 3
 GATEWAY_VPN_RELEASE_GATE=1 "$DEADLINE_HELPER" --expected-update-id "$SUCCESS_ID" --release-gate-only >/dev/null
 systemctl start gateway-vpn-vps-update-finalize.service
 [[ $(readlink /opt/gateway-vpn-vps/current) == "releases/v$SUCCESS_VERSION" ]]

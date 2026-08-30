@@ -42,6 +42,8 @@ type Runtime interface {
 	Quiesce(context.Context) error
 	OfflineCheck(context.Context, string, string, string, string, int64) (OfflineResult, error)
 	StartAndHealth(context.Context, string, string) error
+	VerifyCurrent(context.Context, string, string) error
+	ScheduleStart(context.Context, string, string) error
 }
 
 type Engine struct {
@@ -89,7 +91,7 @@ func (engine *Engine) Apply(ctx context.Context) (ApplyResult, error) {
 		if active.State == StateStabilizing {
 			return ApplyResult{}, ErrUpdateStabilizing
 		}
-		if _, err := engine.recoverLocked(ctx); err != nil {
+		if _, err := engine.recoverLocked(ctx, false); err != nil {
 			return ApplyResult{}, err
 		}
 	}
@@ -134,7 +136,7 @@ func (engine *Engine) Apply(ctx context.Context) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 	fail := func(code string, cause error) (ApplyResult, error) {
-		if rollbackErr := engine.rollback(ctx, &journal, code); rollbackErr != nil {
+		if rollbackErr := engine.rollback(ctx, &journal, code, false); rollbackErr != nil {
 			return ApplyResult{}, fmt.Errorf("VPS update failed (%v) and rollback failed: %w", cause, rollbackErr)
 		}
 		return ApplyResult{}, fmt.Errorf("VPS update rejected and rolled back: %w", cause)
@@ -230,20 +232,20 @@ func (engine *Engine) Recover(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer unlock()
-	return engine.recoverLocked(ctx)
+	return engine.recoverLocked(ctx, true)
 }
 
-func (engine *Engine) recoverLocked(ctx context.Context) (bool, error) {
+func (engine *Engine) recoverLocked(ctx context.Context, scheduleStart bool) (bool, error) {
 	journal, exists, err := engine.Store.LoadActive()
 	if err != nil || !exists {
 		return false, err
 	}
 	if journal.State == StateStabilizing {
-		if err := engine.verifyCurrent(ctx, journal.NewCurrentTarget, journal.NewVersion, journal.NewSchema); err == nil {
+		if err := engine.verifyCurrentOffline(ctx, journal.NewCurrentTarget, journal.NewVersion, journal.NewSchema); err == nil {
 			return false, nil
 		}
 	}
-	if err := engine.rollback(ctx, &journal, "BOOT_OR_PROCESS_RECOVERY"); err != nil {
+	if err := engine.rollback(ctx, &journal, "BOOT_OR_PROCESS_RECOVERY", scheduleStart); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -266,7 +268,7 @@ func (engine *Engine) Finalize(ctx context.Context) (Journal, error) {
 		return Journal{}, ErrNoFinalizationPending
 	}
 	if err := engine.verifyCurrent(ctx, journal.NewCurrentTarget, journal.NewVersion, journal.NewSchema); err != nil {
-		if rollbackErr := engine.rollback(ctx, &journal, "FINALIZE_HEALTH_FAILED"); rollbackErr != nil {
+		if rollbackErr := engine.rollback(ctx, &journal, "FINALIZE_HEALTH_FAILED", false); rollbackErr != nil {
 			return Journal{}, rollbackErr
 		}
 		return Journal{}, errors.New("VPS candidate health failed and was rolled back")
@@ -288,7 +290,7 @@ func (engine *Engine) Finalize(ctx context.Context) (Journal, error) {
 	return journal, nil
 }
 
-func (engine *Engine) rollback(ctx context.Context, journal *Journal, code string) error {
+func (engine *Engine) rollback(ctx context.Context, journal *Journal, code string, scheduleStart bool) error {
 	journal.ErrorCode = sanitizeCode(code)
 	if err := engine.saveNoHook(journal, StateRollingBack); err != nil {
 		return err
@@ -328,7 +330,11 @@ func (engine *Engine) rollback(ctx context.Context, journal *Journal, code strin
 	if err := engine.switchPointer("current", journal.OldCurrentTarget, journal.UpdateID+"-rollback"); err != nil {
 		return failed("ROLLBACK_CURRENT_POINTER_FAILED", err)
 	}
-	if err := engine.Runtime.StartAndHealth(ctx, journal.OldVersion, engine.DatabasePath); err != nil {
+	if scheduleStart {
+		if err := engine.Runtime.ScheduleStart(ctx, journal.OldVersion, engine.DatabasePath); err != nil {
+			return failed("ROLLBACK_OLD_RELEASE_SCHEDULE_FAILED", err)
+		}
+	} else if err := engine.Runtime.StartAndHealth(ctx, journal.OldVersion, engine.DatabasePath); err != nil {
 		return failed("ROLLBACK_OLD_RELEASE_HEALTH_FAILED", err)
 	}
 	journal.StabilityDeadline = ""
@@ -348,6 +354,18 @@ func (engine *Engine) verifyCurrent(ctx context.Context, expectedTarget, version
 		return errors.New("current VPS release differs from update journal")
 	}
 	return engine.Runtime.StartAndHealth(ctx, version, engine.DatabasePath)
+}
+
+func (engine *Engine) verifyCurrentOffline(ctx context.Context, expectedTarget, version string, schema int64) error {
+	policy, err := engine.policy()
+	if err != nil {
+		return err
+	}
+	target, verified, err := engine.currentRelease(policy)
+	if err != nil || target != expectedTarget || verified.Release.Version != version || verified.Release.DatabaseSchemaMaximum != schema {
+		return errors.New("current VPS release differs from update journal")
+	}
+	return engine.Runtime.VerifyCurrent(ctx, version, engine.DatabasePath)
 }
 
 func (engine *Engine) save(journal *Journal, state State) error {

@@ -55,6 +55,21 @@ func TestEngineAppliesSignedCandidateAndFinalizes(t *testing.T) {
 	}
 }
 
+func TestEngineStabilizingRecoveryVerifiesOfflineWithoutStartingDependentUnits(t *testing.T) {
+	fixture := newEngineFixture(t)
+	if _, err := fixture.engine.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	started := len(fixture.runtime.started)
+	recovered, err := fixture.engine.Recover(context.Background())
+	if err != nil || recovered {
+		t.Fatalf("Recover() = %v,%v", recovered, err)
+	}
+	if len(fixture.runtime.started) != started || len(fixture.runtime.scheduled) != 0 || len(fixture.runtime.verified) != 1 || fixture.runtime.verified[0] != "1.2.0" {
+		t.Fatalf("stabilizing recovery runtime calls started=%v scheduled=%v verified=%v", fixture.runtime.started, fixture.runtime.scheduled, fixture.runtime.verified)
+	}
+}
+
 func TestEngineHealthFailureRestoresOldReleaseAndDatabase(t *testing.T) {
 	fixture := newEngineFixture(t)
 	fixture.runtime.mutateCandidate = true
@@ -116,6 +131,9 @@ func TestEngineBootRecoveryAfterDatabaseSwitch(t *testing.T) {
 	}
 	assertPointer(t, fixture.releaseRoot, "current", "releases/v1.1.0")
 	assertProbeTable(t, fixture.databasePath, false)
+	if len(fixture.runtime.scheduled) != 1 || fixture.runtime.scheduled[0] != "1.1.0" {
+		t.Fatalf("boot recovery scheduled releases = %v", fixture.runtime.scheduled)
+	}
 }
 
 func TestEngineRejectsTamperedRollbackSnapshot(t *testing.T) {
@@ -396,6 +414,8 @@ func newStagerFixture(t *testing.T, candidateVersion string, mutate func(string)
 
 type fakeRuntime struct {
 	started         []string
+	verified        []string
+	scheduled       []string
 	failVersion     string
 	mutateCandidate bool
 }
@@ -426,6 +446,22 @@ func (runtime *fakeRuntime) StartAndHealth(_ context.Context, version, _ string)
 	runtime.started = append(runtime.started, version)
 	if version == runtime.failVersion {
 		return errors.New("candidate health failed")
+	}
+	return nil
+}
+
+func (runtime *fakeRuntime) VerifyCurrent(_ context.Context, version, _ string) error {
+	runtime.verified = append(runtime.verified, version)
+	if version == runtime.failVersion {
+		return errors.New("current release verification failed")
+	}
+	return nil
+}
+
+func (runtime *fakeRuntime) ScheduleStart(_ context.Context, version, _ string) error {
+	runtime.scheduled = append(runtime.scheduled, version)
+	if version == runtime.failVersion {
+		return errors.New("recovered release scheduling failed")
 	}
 	return nil
 }

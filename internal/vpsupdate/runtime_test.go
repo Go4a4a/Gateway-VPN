@@ -90,6 +90,28 @@ func TestSystemRuntimeStartsAndRequiresThreeHealthyObservations(t *testing.T) {
 	}
 }
 
+func TestSystemRuntimeRecoveryVerificationAndDeferredStartAvoidDependencyDeadlock(t *testing.T) {
+	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn-vps")
+	databasePath := filepath.Join(t.TempDir(), "vps-agent.db")
+	executor := &runtimeExecutor{version: "1.2.0", database: databasePath}
+	runtime := SystemRuntime{Executor: executor, Systemctl: filepath.Join(t.TempDir(), "systemctl"), ReleaseRoot: releaseRoot}
+	if err := runtime.VerifyCurrent(context.Background(), "1.2.0", databasePath); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range executor.requests {
+		if request.Executable == runtime.Systemctl {
+			t.Fatalf("offline recovery verification invoked systemd: %+v", request)
+		}
+	}
+	executor.requests = nil
+	if err := runtime.ScheduleStart(context.Background(), "1.2.0", databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.requests) != 4 || executor.requests[2].Arguments[0] != "reset-failed" || !reflect.DeepEqual(executor.requests[3].Arguments[:2], []string{"start", "--no-block"}) {
+		t.Fatalf("deferred recovery start ordering = %+v", executor.requests)
+	}
+}
+
 func TestSystemRuntimeOfflineCheckRejectsEscapedPathsAndInvalidResult(t *testing.T) {
 	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn-vps")
 	candidate := filepath.Join(releaseRoot, "releases", "v1.2.0", "bin", "gateway-vpn-vps-agent")

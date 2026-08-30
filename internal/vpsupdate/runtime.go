@@ -20,6 +20,18 @@ var managedControlUnits = []string{
 	"gateway-vpn-vps-operations.timer",
 }
 
+var managedStartUnits = []string{
+	"gateway-vpn-vps-firewall.service",
+	"wg-quick@wg-mgmt.service",
+	"gateway-vpn-vps-restore-recovery.service",
+	"gateway-vpn-vps-fabric-recovery.service",
+	"gateway-vpn-vps-restore.path",
+	"gateway-vpn-vps-fabric.path",
+	"gateway-vpn-vps-fabric-watchdog.timer",
+	"gateway-vpn-vps-operations.timer",
+	"gateway-vpn-vps-agent.service",
+}
+
 type SystemRuntime struct {
 	Executor    platformexec.Executor
 	Systemctl   string
@@ -62,12 +74,10 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, version, databa
 	if !filepath.IsAbs(databasePath) {
 		return errors.New("absolute VPS database path is required")
 	}
-	reset := append([]string{"reset-failed", "gateway-vpn-vps-firewall.service", "wg-quick@wg-mgmt.service", "gateway-vpn-vps-restore-recovery.service", "gateway-vpn-vps-fabric-recovery.service"}, managedControlUnits...)
-	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: reset, MaxOutputBytes: 64 << 10}); err != nil {
-		return fmt.Errorf("reset owned VPS unit start limits: %w", err)
+	if err := runtime.resetStartLimits(ctx); err != nil {
+		return err
 	}
-	start := []string{"start", "gateway-vpn-vps-firewall.service", "wg-quick@wg-mgmt.service", "gateway-vpn-vps-restore-recovery.service", "gateway-vpn-vps-fabric-recovery.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-fabric-watchdog.timer", "gateway-vpn-vps-operations.timer", "gateway-vpn-vps-agent.service"}
-	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: start, MaxOutputBytes: 64 << 10}); err != nil {
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: append([]string{"start"}, managedStartUnits...), MaxOutputBytes: 64 << 10}); err != nil {
 		return fmt.Errorf("start selected VPS Hub release: %w", err)
 	}
 	required := append([]string{"gateway-vpn-vps-firewall.service", "wg-quick@wg-mgmt.service"}, managedControlUnits...)
@@ -107,6 +117,48 @@ func (runtime SystemRuntime) StartAndHealth(ctx context.Context, version, databa
 		case <-timer.C:
 		}
 	}
+}
+
+func (runtime SystemRuntime) VerifyCurrent(ctx context.Context, version, databasePath string) error {
+	if err := runtime.validateDatabasePath(databasePath); err != nil {
+		return err
+	}
+	return runtime.checkVersionAndState(ctx, version, databasePath)
+}
+
+func (runtime SystemRuntime) ScheduleStart(ctx context.Context, version, databasePath string) error {
+	if err := runtime.validateDatabasePath(databasePath); err != nil {
+		return err
+	}
+	if err := runtime.checkVersionAndState(ctx, version, databasePath); err != nil {
+		return err
+	}
+	if err := runtime.resetStartLimits(ctx); err != nil {
+		return err
+	}
+	arguments := append([]string{"start", "--no-block"}, managedStartUnits...)
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: arguments, MaxOutputBytes: 64 << 10}); err != nil {
+		return fmt.Errorf("schedule selected VPS Hub release after recovery: %w", err)
+	}
+	return nil
+}
+
+func (runtime SystemRuntime) resetStartLimits(ctx context.Context) error {
+	reset := append([]string{"reset-failed", "gateway-vpn-vps-firewall.service", "wg-quick@wg-mgmt.service", "gateway-vpn-vps-restore-recovery.service", "gateway-vpn-vps-fabric-recovery.service"}, managedControlUnits...)
+	if _, err := runtime.Executor.Run(ctx, platformexec.Request{Executable: runtime.Systemctl, Arguments: reset, MaxOutputBytes: 64 << 10}); err != nil {
+		return fmt.Errorf("reset owned VPS unit start limits: %w", err)
+	}
+	return nil
+}
+
+func (runtime SystemRuntime) validateDatabasePath(databasePath string) error {
+	if err := runtime.validate(); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(databasePath) {
+		return errors.New("absolute VPS database path is required")
+	}
+	return nil
 }
 
 func (runtime SystemRuntime) checkVersionAndState(ctx context.Context, version, databasePath string) error {
