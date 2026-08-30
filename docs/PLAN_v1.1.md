@@ -80,7 +80,7 @@ Gateway VPN — домашний IPv4-шлюз, который:
 - coexistence VPS-роли с AmneziaVPN, Docker, UFW и другими VPN/firewall owners без изменения их interfaces/routes/rules/services;
 - SQLite, структурированные события и учёт трафика;
 - idempotent install/update/uninstall scripts;
-- удобные encrypted file backup/restore через WebUI отдельно для Gateway и VPS Hub, а также diagnostic bundle;
+- обязательные удобные encrypted file backup/restore через WebUI отдельно для Gateway и VPS Hub, а также diagnostic bundle;
 - круглосуточный self-health supervisor с настраиваемой через Web UI безопасной лестницей восстановления и защитой от restart/reboot loop.
 - отдельные direct-only индикаторы белых списков, не смешиваемые с проверкой полноценного Internet через VPN;
 - опциональный входящий WireGuard-сервер `wg-ingress` с полным управлением peers/клиентами через Web UI, включая однокарточную схему через Keenetic;
@@ -1764,7 +1764,7 @@ WireGuard private keys/PSK, reusable pairing secrets и downloadable admin priva
 
 ### 12.5 Переносимые role backup files
 
-Gateway WebUI сохраняет существующий encrypted `.gvpn`, а VPS Hub — отдельный encrypted `.gvpn-vps`; cross-role restore отклоняется. Оба формата versioned, имеют authenticated role/schema/source identity, bounded manifest и per-file SHA-256, шифруются chunked AES-256-GCM с ключом Argon2id из введённой пользователем passphrase. Passphrase, plaintext archive и upload после staging не сохраняются; logs, sessions, login attempts, diagnostic archives и временные/использованные pairing invitations не входят в portable backup.
+Файловый backup и restore являются обязательной функцией WebUI обеих ролей и не требуют CLI: на Gateway пользователь скачивает encrypted `.gvpn`, а в VPS Hub — отдельный encrypted `.gvpn-vps`; для восстановления выбирает соответствующий файл, вводит passphrase, проверяет preview и явно подтверждает Apply. Файлы можно перенести и хранить на компьютере администратора либо внешнем носителе. Cross-role restore отклоняется. Оба формата versioned, имеют authenticated role/schema/source identity, bounded manifest и per-file SHA-256, шифруются chunked AES-256-GCM с ключом Argon2id из введённой пользователем passphrase. Passphrase, plaintext archive и upload после staging не сохраняются; logs, sessions, login attempts, diagnostic archives и временные/использованные pairing invitations не входят в portable backup.
 
 Gateway file содержит DB/config/TLS/Mihomo/subscription и локальные management/ingress secrets, VPS file — VPS Agent DB/config/TLS, собственные outer/relay/admin private keys, public peer inventory, prefix allocations, ACL/resources и update identity. Один backup никогда не содержит private keys другой роли. WebUI до Apply показывает role/version/schema/site-or-vps identity, состав, конфликты и режим восстановления; требует password re-authentication, passphrase и typed confirmation, создаёт verified pre-restore backup, а root transaction имеет durable journal, reboot recovery и rollback.
 

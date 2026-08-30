@@ -10,15 +10,19 @@
   <main>
     <section id="login" class="card narrow">
       <h1>Gateway VPN — VPS Hub</h1>
-      <p class="muted">Локальное управление VPS-компонентами Gateway VPN. Это не панель управления всей ОС.</p>
+      <p class="muted">Локальное управление только компонентами Gateway VPN на VPS. Это не панель управления всей операционной системой.</p>
       <form id="login-form">
         <label>Пользователь<input name="username" autocomplete="username" required value="admin"></label>
         <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
         <button>Войти</button><p id="login-error" class="error"></p>
       </form>
     </section>
+
     <section id="app" hidden>
-      <header><div><h1>Gateway VPN — VPS Hub</h1><p class="muted">Restricted Agent WebUI</p></div><button id="logout" class="secondary">Выйти</button></header>
+      <header>
+        <div><h1>Gateway VPN — VPS Hub</h1><p class="muted">Защищённая управляющая плоскость VPS</p></div>
+        <button id="logout" class="secondary">Выйти</button>
+      </header>
       <section id="password-card" class="card narrow" hidden>
         <h2>Замените временный пароль</h2>
         <p class="warning">Перед работой с ключами и резервными копиями задайте собственный пароль VPS Hub.</p>
@@ -29,31 +33,132 @@
           <button>Сохранить новый пароль</button>
         </form>
       </section>
+
       <nav id="navigation" aria-label="Разделы VPS Hub">
-        <button disabled title="Будет подключено к VPS Agent API">Обзор</button><button disabled>Gateway</button><button disabled>Каналы</button><button disabled>Администраторы</button><button disabled>Локальные ресурсы</button><button disabled>Матрица доступа</button><button disabled>Watchdog</button><button disabled>Журналы</button><button class="active">Backup / восстановление</button><button disabled>Диагностика</button>
+        <button data-page="overview" class="active">Обзор</button>
+        <button data-page="gateways">Gateway</button>
+        <button data-page="channels">Каналы</button>
+        <button data-page="admins">Администраторы</button>
+        <button data-page="resources">Локальные ресурсы</button>
+        <button data-page="matrix">Матрица доступа</button>
+        <button data-page="watchdog">Watchdog</button>
+        <button disabled title="Будет подключено к allowlisted journald reader VPS Agent">Журналы</button>
+        <button data-page="backup">Backup / восстановление</button>
+        <button disabled title="Диагностический bundle подключается после ownership-scoped host observer">Диагностика</button>
       </nav>
-      <p id="notice" role="status"></p>
-      <section id="backup-grid" class="grid">
-        <article class="card">
-          <h2>Скачать настройки VPS</h2>
-          <p>Создаётся отдельный зашифрованный файл <code>.gvpn-vps</code>. Он содержит настройки и ключи только этого VPS Hub и не подходит для восстановления Gateway.</p>
-          <form id="backup-form">
-            <label title="Повторная проверка защищает экспорт приватных ключей.">Текущий пароль VPS Hub<input name="password" type="password" autocomplete="current-password" required></label>
-            <label title="Этим паролем шифруется файл. Он нигде не сохраняется; без него восстановление невозможно.">Пароль файла, минимум 12 байт<input name="passphrase" type="password" autocomplete="new-password" minlength="12" required></label>
-            <label>Повторите пароль файла<input name="passphrase_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
-            <button>Создать и скачать .gvpn-vps</button>
-          </form>
-        </article>
-        <article class="card">
-          <h2>Восстановить настройки VPS</h2>
-          <p class="warning">Сначала файл полностью проверяется. Текущие настройки не меняются до отдельного подтверждения.</p>
-          <form id="restore-form">
-            <label title="Можно выбрать только резервную копию VPS Hub.">Файл .gvpn-vps<input name="backup" type="file" accept=".gvpn-vps" required></label>
-            <label>Пароль файла<input name="passphrase" type="password" required></label>
-            <button>Проверить файл</button>
-          </form>
-          <div id="restore-preview"></div>
-        </article>
+      <p id="notice" role="status" aria-live="polite"></p>
+
+      <section data-page-panel="overview">
+        <div class="page-heading"><div><h2>Обзор VPS Hub</h2><p>Сводка берётся с сервера и не вычисляется браузером.</p></div><button class="secondary" data-refresh="overview">Обновить</button></div>
+        <div id="overview-content" class="grid"></div>
+      </section>
+
+      <section data-page-panel="gateways" hidden>
+        <div class="page-heading"><div><h2>Gateway</h2><p>Создайте одноразовое приглашение и перенесите полученный файл/код в WebUI Gateway.</p></div><button class="secondary" data-refresh="gateways">Обновить</button></div>
+        <div class="grid">
+          <article class="card">
+            <h3>Новое pairing-приглашение</h3>
+            <form id="pairing-form">
+              <label title="Понятное имя будущего Gateway. Identity после pairing задаётся самим Gateway.">Название Gateway<input name="gateway_name" maxlength="128" required></label>
+              <label title="Публичный UDP endpoint этого VPS, который будет записан в приглашение.">Endpoint VPS<input name="endpoint" placeholder="vps.example:51820" required></label>
+              <label title="Отдельная непересекающаяся /30 подсеть для одной связи Gateway ↔ VPS.">Свободная подсеть /30<input name="assigned_subnet" placeholder="10.82.0.0/30" required></label>
+              <label title="После этого времени токен больше не принимается.">Срок действия, минут<input name="expiry_minutes" type="number" min="5" max="1440" value="30" required></label>
+              <button>Создать одноразовое приглашение</button>
+            </form>
+            <div id="pairing-once" hidden>
+              <p class="warning">Токен показывается один раз. Сохраните файл и передайте его только владельцу Gateway.</p>
+              <pre id="pairing-bundle"></pre><button id="download-pairing" class="secondary">Скачать pairing JSON</button>
+            </div>
+          </article>
+          <article class="card"><h3>Приглашения</h3><div id="pairing-list"></div></article>
+        </div>
+        <div id="gateway-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="channels" hidden>
+        <div class="page-heading"><div><h2>Каналы</h2><p>На этом VPS один Gateway peer является отдельным management-каналом. Host apply появится отдельной root transaction.</p></div><button class="secondary" data-refresh="channels">Обновить</button></div>
+        <div id="channel-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="admins" hidden>
+        <div class="page-heading"><div><h2>Администраторы</h2><p>Сейчас безопасно принимается внешний WireGuard public key. Выдача managed private config будет отдельной re-authenticated операцией.</p></div><button class="secondary" data-refresh="admins">Обновить</button></div>
+        <div class="grid">
+          <article class="card"><h3>Добавить внешний ключ</h3><form id="admin-form">
+            <label>Название устройства<input name="name" maxlength="128" required></label>
+            <label title="Приватный ключ остаётся на устройстве администратора.">WireGuard public key<input name="public_key" required></label>
+            <label title="Уникальный адрес администратора на этом VPS; он не должен входить в подсети каналов.">Private IPv4<input name="assigned_address" placeholder="10.81.0.10" required></label>
+            <button>Добавить администратора</button>
+          </form></article>
+          <article class="card"><h3>Почему только public key?</h3><p class="muted">VPS Hub не просит пароль или приватный ключ устройства. Managed-конфиги будут выдаваться один раз после повторного ввода пароля и подключения host apply.</p></article>
+        </div>
+        <div id="admin-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="resources" hidden>
+        <div class="page-heading"><div><h2>Локальные ресурсы</h2><p>Публикуются только конкретные типизированные адреса. Доступ появляется лишь после отдельного ACL.</p></div><button class="secondary" data-refresh="resources">Обновить</button></div>
+        <div class="grid">
+          <article class="card"><h3>Добавить публикацию</h3><form id="resource-form">
+            <label>Gateway<select name="gateway_peer_id" required></select></label>
+            <label>Стабильный ID ресурса<input name="resource_id" placeholder="gateway:web" required></label>
+            <label>Понятное название<input name="display_name" required></label>
+            <label>Тип<select name="resource_kind"><option>GATEWAY_SERVICE</option><option>KEENETIC_SERVICE</option><option>LOCAL_HOST</option><option>LOCAL_SUBNET</option><option>CUSTOM_SERVICE</option></select></label>
+            <label title="Один private IPv4, а для LOCAL_SUBNET — canonical CIDR.">Локальный адрес<input name="local_destination" placeholder="192.168.200.2" required></label>
+            <label title="Уникальный private alias на этом VPS. Для subnet длина prefix должна совпадать.">Публикуемый alias<input name="published_alias" placeholder="10.96.0.2" required></label>
+            <label>Профиль доступа<select name="access_profile"><option>GATEWAY_ONLY</option><option>KEENETIC_WAN</option><option>VIA_KEENETIC_WAN_ROUTED</option><option>VIA_WG_ROUTER</option><option>VIA_DEDICATED_LAN</option></select></label>
+            <label class="check"><input name="enabled" type="checkbox" checked> Публикация включена</label>
+            <label class="check warning"><input name="advanced_scope_acknowledged" type="checkbox"> Я понимаю расширенный охват LOCAL_SUBNET</label>
+            <button>Сохранить публикацию</button>
+          </form></article>
+          <article class="card"><h3>Безопасный default</h3><p>Сначала выбирайте <code>GATEWAY_SERVICE</code> или один <code>LOCAL_HOST</code>. Целая сеть требует отдельного подтверждения и всё равно не получает доступ без точных ACL.</p></article>
+        </div>
+        <div id="resource-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="matrix" hidden>
+        <div class="page-heading"><div><h2>Матрица доступа</h2><p>Разрешение связывает одного администратора, одну публикацию, протокол и конкретный диапазон портов.</p></div><button class="secondary" data-refresh="matrix">Обновить</button></div>
+        <div class="grid">
+          <article class="card"><h3>Новое правило</h3><form id="acl-form">
+            <label>Администратор<select name="admin_peer_id" required></select></label>
+            <label>Ресурс<select name="publication_id" required></select></label>
+            <label>Протокол<select name="protocol"><option>TCP</option><option>UDP</option><option>ICMP</option></select></label>
+            <label>Первый порт<input name="port_start" type="number" min="0" max="65535" value="443" required></label>
+            <label>Последний порт<input name="port_end" type="number" min="0" max="65535" value="443" required></label>
+            <button>Добавить правило</button>
+          </form></article>
+          <article class="card"><h3>Generation</h3><dl id="matrix-generation" class="summary"></dl></article>
+        </div>
+        <div id="acl-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="watchdog" hidden>
+        <div class="page-heading"><div><h2>Watchdog VPS Hub</h2><p>Проверяет только owned state Gateway VPN. AmneziaVPN, Docker, UFW и чужие WireGuard-интерфейсы исключены.</p></div><button class="secondary" data-refresh="watchdog">Проверить сейчас</button></div>
+        <div id="watchdog-content" class="stack"></div>
+      </section>
+
+      <section data-page-panel="backup" hidden>
+        <div class="page-heading"><div><h2>Backup и восстановление</h2><p>Gateway и VPS используют разные несовместимые форматы.</p></div></div>
+        <div id="backup-grid" class="grid">
+          <article class="card">
+            <h3>Скачать настройки VPS</h3>
+            <p>Создаётся зашифрованный файл <code>.gvpn-vps</code> только для VPS Hub.</p>
+            <form id="backup-form">
+              <label title="Повторная проверка защищает экспорт приватных ключей.">Текущий пароль VPS Hub<input name="password" type="password" autocomplete="current-password" required></label>
+              <label title="Пароль файла не сохраняется; без него восстановление невозможно.">Пароль файла, минимум 12 байт<input name="passphrase" type="password" autocomplete="new-password" minlength="12" required></label>
+              <label>Повторите пароль файла<input name="passphrase_confirmation" type="password" autocomplete="new-password" minlength="12" required></label>
+              <button>Создать и скачать .gvpn-vps</button>
+            </form>
+          </article>
+          <article class="card">
+            <h3>Восстановить настройки VPS</h3>
+            <p class="warning">Сначала файл полностью проверяется. Текущие настройки не меняются до отдельного подтверждения.</p>
+            <form id="restore-form">
+              <label>Файл .gvpn-vps<input name="backup" type="file" accept=".gvpn-vps" required></label>
+              <label>Пароль файла<input name="passphrase" type="password" required></label>
+              <button>Проверить файл</button>
+            </form>
+            <div id="restore-preview"></div>
+          </article>
+        </div>
       </section>
     </section>
   </main>

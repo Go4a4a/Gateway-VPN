@@ -175,3 +175,46 @@ CREATE TABLE operations(
     updated_at TEXT NOT NULL
 );
 `
+
+// schemaV2 extends the initial backup-capable Hub with the durable control
+// plane required by the management UI. Raw invitation tokens, private keys,
+// transient probe output and host commands are deliberately not stored here.
+const schemaV2 = `
+ALTER TABLE pairing_invitations ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'
+    CHECK(json_valid(payload_json));
+ALTER TABLE pairing_invitations ADD COLUMN consumed_peer_id TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE gateway_peers ADD COLUMN endpoint TEXT NOT NULL DEFAULT '';
+ALTER TABLE gateway_peers ADD COLUMN webui_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE gateway_peers ADD COLUMN latest_handshake_at TEXT;
+ALTER TABLE gateway_peers ADD COLUMN rx_bytes INTEGER NOT NULL DEFAULT 0 CHECK(rx_bytes>=0);
+ALTER TABLE gateway_peers ADD COLUMN tx_bytes INTEGER NOT NULL DEFAULT 0 CHECK(tx_bytes>=0);
+ALTER TABLE gateway_peers ADD COLUMN rtt_ms INTEGER CHECK(rtt_ms IS NULL OR rtt_ms BETWEEN 0 AND 600000);
+ALTER TABLE gateway_peers ADD COLUMN status_reason TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE admin_peers ADD COLUMN key_mode TEXT NOT NULL DEFAULT 'EXTERNAL'
+    CHECK(key_mode IN ('MANAGED','EXTERNAL'));
+ALTER TABLE admin_peers ADD COLUMN latest_handshake_at TEXT;
+ALTER TABLE admin_peers ADD COLUMN rx_bytes INTEGER NOT NULL DEFAULT 0 CHECK(rx_bytes>=0);
+ALTER TABLE admin_peers ADD COLUMN tx_bytes INTEGER NOT NULL DEFAULT 0 CHECK(tx_bytes>=0);
+ALTER TABLE admin_peers ADD COLUMN status_reason TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE resource_publications ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE resource_publications ADD COLUMN access_profile TEXT NOT NULL DEFAULT 'GATEWAY_ONLY'
+    CHECK(access_profile IN ('GATEWAY_ONLY','KEENETIC_WAN','VIA_KEENETIC_WAN_ROUTED','VIA_WG_ROUTER','VIA_DEDICATED_LAN'));
+ALTER TABLE resource_publications ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));
+ALTER TABLE resource_publications ADD COLUMN advanced_scope_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(advanced_scope_acknowledged IN (0,1));
+ALTER TABLE resource_publications ADD COLUMN health TEXT NOT NULL DEFAULT 'UNKNOWN'
+    CHECK(health IN ('UNKNOWN','READY','DEGRADED','WAITING_EXTERNAL_CONFIGURATION','FAILED'));
+ALTER TABLE resource_publications ADD COLUMN status_reason TEXT NOT NULL DEFAULT '';
+
+INSERT INTO vps_settings(key,value_json,updated_at) VALUES
+('fabric','{"desired_generation":1,"applied_generation":0,"state":"CONFIGURED"}',strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+ON CONFLICT(key) DO NOTHING;
+
+CREATE INDEX pairing_invitations_state_expiry ON pairing_invitations(state,expires_at);
+CREATE INDEX gateway_peers_state_updated ON gateway_peers(state,updated_at DESC);
+CREATE INDEX admin_peers_state_updated ON admin_peers(state,updated_at DESC);
+CREATE INDEX resource_publications_gateway_state ON resource_publications(gateway_peer_id,state);
+CREATE INDEX acl_grants_publication_admin ON acl_grants(publication_id,admin_peer_id);
+`

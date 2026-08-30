@@ -20,6 +20,7 @@ import (
 
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/backup"
+	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
 )
 
@@ -41,6 +42,7 @@ type Dependencies struct {
 	Auth         auth.Service
 	Backups      *vpsbackup.Manager
 	Restores     *vpsbackup.RestoreManager
+	Hub          vpsagent.HubRepository
 	RestoreApply RestoreApplyTrigger
 	Now          func() time.Time
 }
@@ -54,12 +56,36 @@ func New(dependencies Dependencies) (*Server, error) {
 	if dependencies.Database == nil || dependencies.Auth.Database == nil || dependencies.Backups == nil || dependencies.Restores == nil {
 		return nil, errors.New("complete VPS Hub Web API dependencies are required")
 	}
+	if dependencies.Hub.Database == nil {
+		dependencies.Hub.Database = dependencies.Database
+	}
+	if dependencies.Hub.Now == nil && dependencies.Now != nil {
+		dependencies.Hub.Now = dependencies.Now
+	}
 	server := &Server{dependencies: dependencies}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", server.login)
 	mux.Handle("POST /api/v1/auth/logout", server.protected(http.HandlerFunc(server.logout)))
 	mux.Handle("GET /api/v1/auth/session", server.protected(http.HandlerFunc(server.session)))
 	mux.Handle("PUT /api/v1/auth/password", server.protected(http.HandlerFunc(server.changePassword)))
+	mux.HandleFunc("POST /api/v1/pairing/complete", server.completePairing)
+	mux.Handle("GET /api/v1/hub/overview", server.protected(http.HandlerFunc(server.hubOverview)))
+	mux.Handle("GET /api/v1/hub/pairing-invitations", server.protected(http.HandlerFunc(server.listPairingInvitations)))
+	mux.Handle("POST /api/v1/hub/pairing-invitations", server.protected(http.HandlerFunc(server.createPairingInvitation)))
+	mux.Handle("DELETE /api/v1/hub/pairing-invitations/{id}", server.protected(http.HandlerFunc(server.rejectPairingInvitation)))
+	mux.Handle("GET /api/v1/hub/gateways", server.protected(http.HandlerFunc(server.listGateways)))
+	mux.Handle("POST /api/v1/hub/gateways/{id}/revoke", server.protected(http.HandlerFunc(server.revokeGateway)))
+	mux.Handle("GET /api/v1/hub/admins", server.protected(http.HandlerFunc(server.listAdmins)))
+	mux.Handle("POST /api/v1/hub/admins", server.protected(http.HandlerFunc(server.createAdmin)))
+	mux.Handle("POST /api/v1/hub/admins/{id}/revoke", server.protected(http.HandlerFunc(server.revokeAdmin)))
+	mux.Handle("GET /api/v1/hub/resources", server.protected(http.HandlerFunc(server.listResources)))
+	mux.Handle("POST /api/v1/hub/resources", server.protected(http.HandlerFunc(server.createResource)))
+	mux.Handle("PUT /api/v1/hub/resources/{id}", server.protected(http.HandlerFunc(server.updateResource)))
+	mux.Handle("DELETE /api/v1/hub/resources/{id}", server.protected(http.HandlerFunc(server.deleteResource)))
+	mux.Handle("GET /api/v1/hub/access-matrix", server.protected(http.HandlerFunc(server.accessMatrix)))
+	mux.Handle("POST /api/v1/hub/acl", server.protected(http.HandlerFunc(server.createACL)))
+	mux.Handle("DELETE /api/v1/hub/acl/{id}", server.protected(http.HandlerFunc(server.deleteACL)))
+	mux.Handle("GET /api/v1/hub/watchdog", server.protected(http.HandlerFunc(server.hubWatchdog)))
 	mux.Handle("GET /api/v1/vps/backup/status", server.protected(http.HandlerFunc(server.backupStatus)))
 	mux.Handle("POST /api/v1/vps/backup/download", server.protected(http.HandlerFunc(server.downloadBackup)))
 	mux.Handle("POST /api/v1/vps/restore/stage", server.protected(http.HandlerFunc(server.stageRestore)))
@@ -163,6 +189,285 @@ func (server *Server) changePassword(writer http.ResponseWriter, request *http.R
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) completePairing(writer http.ResponseWriter, request *http.Request) {
+	var input vpsagent.PairingCompletion
+	if err := decodeJSON(request, &input, 8192); err != nil {
+		writeError(writer, http.StatusBadRequest, "PAIRING_REQUEST_INVALID", "Некорректное завершение pairing")
+		return
+	}
+	peer, err := server.dependencies.Hub.CompletePairing(request.Context(), input)
+	input.Token = ""
+	if err != nil {
+		writeHubError(writer, err, "Pairing не завершён")
+		return
+	}
+	_ = server.audit(request.Context(), "WARNING", "VPS_GATEWAY_PAIRING_COMPLETED", map[string]any{"gateway_peer_id": peer.ID, "site_id": peer.SiteID})
+	writeJSON(writer, http.StatusCreated, map[string]any{"gateway": peer, "state": "AWAITING_HOST_APPLY"})
+}
+
+func (server *Server) hubOverview(writer http.ResponseWriter, request *http.Request) {
+	overview, err := server.dependencies.Hub.Overview(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "HUB_OVERVIEW_UNAVAILABLE", "Состояние VPS Hub недоступно")
+		return
+	}
+	writeJSON(writer, http.StatusOK, overview)
+}
+
+func (server *Server) listPairingInvitations(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.Hub.ListPairings(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "PAIRING_LIST_UNAVAILABLE", "Список приглашений недоступен")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) createPairingInvitation(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		GatewayName   string `json:"gateway_name"`
+		Endpoint      string `json:"endpoint"`
+		Subnet        string `json:"assigned_subnet"`
+		ExpirySeconds int64  `json:"expiry_seconds"`
+	}
+	if err := decodeJSON(request, &input, 8192); err != nil || input.ExpirySeconds != 0 && (input.ExpirySeconds < 300 || input.ExpirySeconds > 86400) {
+		writeError(writer, http.StatusBadRequest, "PAIRING_INVITATION_INVALID", "Проверьте имя, endpoint, /30 подсеть и срок 5 минут–24 часа")
+		return
+	}
+	bundle, err := server.dependencies.Hub.CreatePairing(request.Context(), vpsagent.PairingCreateInput{
+		GatewayName: input.GatewayName, Endpoint: input.Endpoint, Subnet: input.Subnet, ExpiresIn: time.Duration(input.ExpirySeconds) * time.Second,
+	})
+	if err != nil {
+		writeHubError(writer, err, "Не удалось создать pairing-приглашение")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_PAIRING_INVITATION_CREATED", map[string]any{"user_id": principal.UserID, "invitation_id": bundle.InvitationID, "assigned_subnet": bundle.AssignedSubnet, "expires_at": bundle.ExpiresAt})
+	writeJSON(writer, http.StatusCreated, map[string]any{"invitation": bundle, "token_shown_once": true})
+}
+
+func (server *Server) rejectPairingInvitation(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || request.Header.Get("X-Confirm-Destructive") != "reject-pairing-invitation" {
+		writeError(writer, http.StatusConflict, "PAIRING_REJECT_CONFIRMATION_REQUIRED", "Требуется подтверждение отзыва приглашения")
+		return
+	}
+	if err := server.dependencies.Hub.RejectPairing(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Приглашение не отозвано")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_PAIRING_INVITATION_REJECTED", map[string]any{"user_id": principal.UserID, "invitation_id": id})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) listGateways(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.Hub.ListGateways(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "GATEWAY_LIST_UNAVAILABLE", "Список Gateway недоступен")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) revokeGateway(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || !server.requireReauthenticatedPhrase(writer, request, "ОТОЗВАТЬ GATEWAY "+id) {
+		return
+	}
+	if err := server.dependencies.Hub.RevokeGateway(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Gateway не отозван")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "CRITICAL", "VPS_GATEWAY_REVOKED", map[string]any{"user_id": principal.UserID, "gateway_peer_id": id})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) listAdmins(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.Hub.ListAdmins(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "ADMIN_LIST_UNAVAILABLE", "Список администраторов недоступен")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items, "managed_key_creation_available": false})
+}
+
+func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Name            string `json:"name"`
+		PublicKey       string `json:"public_key"`
+		AssignedAddress string `json:"assigned_address"`
+		KeyMode         string `json:"key_mode"`
+	}
+	if err := decodeJSON(request, &input, 8192); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_REQUEST_INVALID", "Некорректные параметры администратора")
+		return
+	}
+	if input.KeyMode == "" {
+		input.KeyMode = "EXTERNAL"
+	}
+	if strings.ToUpper(input.KeyMode) != "EXTERNAL" {
+		writeError(writer, http.StatusNotImplemented, "MANAGED_ADMIN_KEY_PENDING", "На этом этапе поддерживается безопасное добавление внешнего public key; выдача managed-конфига будет подключена к root apply отдельно")
+		return
+	}
+	item, err := server.dependencies.Hub.CreateAdmin(request.Context(), vpsagent.AdminCreateInput{Name: input.Name, PublicKey: input.PublicKey, AssignedAddress: input.AssignedAddress, KeyMode: "EXTERNAL"})
+	if err != nil {
+		writeHubError(writer, err, "Администратор не добавлен")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_PEER_CREATED", map[string]any{"user_id": principal.UserID, "admin_peer_id": item.ID, "assigned_address": item.AssignedAddress, "key_mode": item.KeyMode})
+	writeJSON(writer, http.StatusCreated, item)
+}
+
+func (server *Server) revokeAdmin(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || !server.requireReauthenticatedPhrase(writer, request, "ОТОЗВАТЬ АДМИНИСТРАТОРА "+id) {
+		return
+	}
+	if err := server.dependencies.Hub.RevokeAdmin(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Администратор не отозван")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "CRITICAL", "VPS_ADMIN_PEER_REVOKED", map[string]any{"user_id": principal.UserID, "admin_peer_id": id})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) listResources(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.Hub.ListResources(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "RESOURCE_LIST_UNAVAILABLE", "Список ресурсов недоступен")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) createResource(writer http.ResponseWriter, request *http.Request) {
+	var input vpsagent.ResourceInput
+	if err := decodeJSON(request, &input, 16384); err != nil {
+		writeError(writer, http.StatusBadRequest, "RESOURCE_REQUEST_INVALID", "Некорректные параметры ресурса")
+		return
+	}
+	item, err := server.dependencies.Hub.CreateResource(request.Context(), input)
+	if err != nil {
+		writeHubError(writer, err, "Ресурс не создан")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_CREATED", map[string]any{"user_id": principal.UserID, "publication_id": item.ID, "gateway_peer_id": item.GatewayPeerID, "resource_kind": item.ResourceKind})
+	writeJSON(writer, http.StatusCreated, item)
+}
+
+func (server *Server) updateResource(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "RESOURCE_ID_INVALID", "Некорректный идентификатор ресурса")
+		return
+	}
+	var input vpsagent.ResourceInput
+	if err := decodeJSON(request, &input, 16384); err != nil {
+		writeError(writer, http.StatusBadRequest, "RESOURCE_REQUEST_INVALID", "Некорректные параметры ресурса")
+		return
+	}
+	item, err := server.dependencies.Hub.UpdateResource(request.Context(), id, input)
+	if err != nil {
+		writeHubError(writer, err, "Ресурс не изменён")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_UPDATED", map[string]any{"user_id": principal.UserID, "publication_id": item.ID, "desired_generation": item.DesiredGeneration})
+	writeJSON(writer, http.StatusOK, item)
+}
+
+func (server *Server) deleteResource(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || request.Header.Get("X-Confirm-Destructive") != "delete-resource-publication" {
+		writeError(writer, http.StatusConflict, "RESOURCE_DELETE_CONFIRMATION_REQUIRED", "Требуется подтверждение удаления публикации")
+		return
+	}
+	if err := server.dependencies.Hub.DeleteResource(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Ресурс не удалён")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_DELETED", map[string]any{"user_id": principal.UserID, "publication_id": id})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) accessMatrix(writer http.ResponseWriter, request *http.Request) {
+	gateways, gatewayErr := server.dependencies.Hub.ListGateways(request.Context())
+	admins, adminErr := server.dependencies.Hub.ListAdmins(request.Context())
+	resources, resourceErr := server.dependencies.Hub.ListResources(request.Context())
+	grants, grantErr := server.dependencies.Hub.ListACL(request.Context())
+	overview, overviewErr := server.dependencies.Hub.Overview(request.Context())
+	if errors.Join(gatewayErr, adminErr, resourceErr, grantErr, overviewErr) != nil {
+		writeError(writer, http.StatusServiceUnavailable, "ACCESS_MATRIX_UNAVAILABLE", "Матрица доступа недоступна")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"gateways": gateways, "administrators": admins, "resources": resources, "grants": grants,
+		"desired_generation": overview.DesiredGeneration, "applied_generation": overview.AppliedGeneration,
+		"state": overview.FabricState, "host_apply_available": overview.HostApplyAvailable,
+	})
+}
+
+func (server *Server) createACL(writer http.ResponseWriter, request *http.Request) {
+	var input vpsagent.ACLInput
+	if err := decodeJSON(request, &input, 8192); err != nil {
+		writeError(writer, http.StatusBadRequest, "ACL_REQUEST_INVALID", "Некорректное правило доступа")
+		return
+	}
+	item, err := server.dependencies.Hub.CreateACL(request.Context(), input)
+	if err != nil {
+		writeHubError(writer, err, "Правило доступа не создано")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ACL_GRANT_CREATED", map[string]any{"user_id": principal.UserID, "acl_id": item.ID, "generation": item.Generation})
+	writeJSON(writer, http.StatusCreated, item)
+}
+
+func (server *Server) deleteACL(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || request.Header.Get("X-Confirm-Destructive") != "delete-acl-grant" {
+		writeError(writer, http.StatusConflict, "ACL_DELETE_CONFIRMATION_REQUIRED", "Требуется подтверждение удаления правила")
+		return
+	}
+	if err := server.dependencies.Hub.DeleteACL(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Правило доступа не удалено")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ACL_GRANT_DELETED", map[string]any{"user_id": principal.UserID, "acl_id": id})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) hubWatchdog(writer http.ResponseWriter, request *http.Request) {
+	writeJSON(writer, http.StatusOK, server.dependencies.Hub.ControllerHealth(request.Context()))
+}
+
+func (server *Server) requireReauthenticatedPhrase(writer http.ResponseWriter, request *http.Request, expected string) bool {
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	var input struct {
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input, 4096); err != nil || input.Confirmation != expected {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "DESTRUCTIVE_CONFIRMATION_INVALID", "Контрольная фраза не совпадает")
+		return false
+	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusUnauthorized, "REAUTHENTICATION_FAILED", "Текущий пароль VPS Hub указан неверно")
+		return false
+	}
+	input.Password, input.Confirmation = "", ""
+	return true
 }
 
 func (server *Server) backupStatus(writer http.ResponseWriter, _ *http.Request) {
@@ -417,6 +722,27 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 
 func writeError(writer http.ResponseWriter, status int, code, message string) {
 	writeJSON(writer, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+func writeHubError(writer http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, vpsagent.ErrHubNotFound):
+		writeError(writer, http.StatusNotFound, "HUB_OBJECT_NOT_FOUND", "Объект VPS Hub не найден")
+	case errors.Is(err, vpsagent.ErrHubConflict):
+		writeError(writer, http.StatusConflict, "HUB_STATE_CONFLICT", "Адрес, подсеть, ключ или идентификатор конфликтует с существующей конфигурацией")
+	case errors.Is(err, vpsagent.ErrPairingRejected):
+		writeError(writer, http.StatusForbidden, "PAIRING_REJECTED", "Приглашение истекло, отозвано, уже использовано или токен неверен")
+	default:
+		writeError(writer, http.StatusBadRequest, "HUB_OPERATION_REJECTED", fallback+"; проверьте значения и текущие состояния")
+	}
+}
+
+func boundedPathID(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 || strings.ContainsAny(value, "/\\\x00\r\n\t") {
+		return "", false
+	}
+	return value, true
 }
 
 func securityHeaders(next http.Handler) http.Handler {

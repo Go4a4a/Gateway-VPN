@@ -22,7 +22,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion int64 = 1
+const SchemaVersion int64 = 2
+
+type migration struct {
+	version int64
+	name    string
+	sql     string
+}
+
+var migrations = []migration{
+	{version: 1, name: "initial_vps_hub", sql: schemaV1},
+	{version: 2, name: "management_control_plane", sql: schemaV2},
+}
 
 var (
 	vpsIDPattern       = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$`)
@@ -100,36 +111,50 @@ CREATE TABLE IF NOT EXISTS schema_migrations(
 )`); err != nil {
 		return fmt.Errorf("create VPS Agent migration table: %w", err)
 	}
-	var version int64
-	if err := database.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&version); err != nil {
-		return fmt.Errorf("read VPS Agent schema version: %w", err)
+	rows, err := database.QueryContext(ctx, "SELECT version,name,checksum_sha256 FROM schema_migrations ORDER BY version")
+	if err != nil {
+		return fmt.Errorf("read VPS Agent migration history: %w", err)
 	}
-	if version > SchemaVersion {
-		return errors.New("VPS Agent database schema is newer than this binary")
-	}
-	digest := schemaChecksum()
-	if version == SchemaVersion {
-		var stored string
-		if err := database.QueryRowContext(ctx, "SELECT checksum_sha256 FROM schema_migrations WHERE version=1").Scan(&stored); err != nil || stored != digest {
+	var applied int64
+	for rows.Next() {
+		var version int64
+		var name, checksum string
+		if err := rows.Scan(&version, &name, &checksum); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan VPS Agent migration history: %w", err)
+		}
+		if version != applied+1 || version > SchemaVersion {
+			rows.Close()
+			return errors.New("VPS Agent migration history is not a supported contiguous prefix")
+		}
+		expected := migrations[version-1]
+		if name != expected.name || checksum != schemaChecksum(expected.sql) {
+			rows.Close()
 			return errors.New("VPS Agent migration history checksum mismatch")
 		}
-		return nil
+		applied = version
 	}
-	transaction, err := database.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin VPS Agent migration: %w", err)
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close VPS Agent migration history: %w", err)
 	}
-	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, schemaV1); err != nil {
-		return fmt.Errorf("apply VPS Agent schema 1: %w", err)
-	}
-	if _, err := transaction.ExecContext(ctx, `
+	for _, item := range migrations[applied:] {
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin VPS Agent migration %d: %w", item.version, err)
+		}
+		if _, err := transaction.ExecContext(ctx, item.sql); err != nil {
+			transaction.Rollback()
+			return fmt.Errorf("apply VPS Agent migration %d: %w", item.version, err)
+		}
+		if _, err := transaction.ExecContext(ctx, `
 INSERT INTO schema_migrations(version,name,checksum_sha256,applied_at)
-VALUES(1,'initial_vps_hub',?,?)`, digest, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return fmt.Errorf("record VPS Agent schema 1: %w", err)
-	}
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("commit VPS Agent schema 1: %w", err)
+VALUES(?,?,?,?)`, item.version, item.name, schemaChecksum(item.sql), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			transaction.Rollback()
+			return fmt.Errorf("record VPS Agent migration %d: %w", item.version, err)
+		}
+		if err := transaction.Commit(); err != nil {
+			return fmt.Errorf("commit VPS Agent migration %d: %w", item.version, err)
+		}
 	}
 	return nil
 }
@@ -206,9 +231,11 @@ func Verify(ctx context.Context, database *sql.DB) error {
 	if err != nil || version != SchemaVersion {
 		return errors.New("VPS Agent schema version is invalid")
 	}
-	var checksum string
-	if err := database.QueryRowContext(ctx, "SELECT checksum_sha256 FROM schema_migrations WHERE version=1").Scan(&checksum); err != nil || checksum != schemaChecksum() {
-		return errors.New("VPS Agent migration history is invalid")
+	for _, item := range migrations {
+		var name, checksum string
+		if err := database.QueryRowContext(ctx, "SELECT name,checksum_sha256 FROM schema_migrations WHERE version=?", item.version).Scan(&name, &checksum); err != nil || name != item.name || checksum != schemaChecksum(item.sql) {
+			return errors.New("VPS Agent migration history is invalid")
+		}
 	}
 	if err := databasepkg.QuickCheck(ctx, database); err != nil {
 		return err
@@ -358,8 +385,8 @@ func scanIdentity(row scanner, item *Identity) error {
 		&item.PrivateKeySecretRef, &item.UpdateIdentityRef, &item.CreatedAt, &item.UpdatedAt)
 }
 
-func schemaChecksum() string {
-	digest := sha256.Sum256([]byte(schemaV1))
+func schemaChecksum(content string) string {
+	digest := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(digest[:])
 }
 

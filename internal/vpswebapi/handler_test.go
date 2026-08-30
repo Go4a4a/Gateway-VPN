@@ -126,6 +126,106 @@ func TestVPSHubRejectsMissingCSRFBadReauthenticationAndCanDiscardStage(t *testin
 	}
 }
 
+func TestVPSHubManagementAPIEndToEndAndDestructiveReauthentication(t *testing.T) {
+	server, _ := vpsAPIFixture(t)
+	session := loginVPSHub(t, server, "administrator password 123")
+	invitationResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/pairing-invitations", map[string]any{
+		"gateway_name": "Дом", "endpoint": "vps.example:51820", "assigned_subnet": "10.82.0.0/30", "expiry_seconds": 900,
+	})
+	if invitationResponse.Code != http.StatusCreated {
+		t.Fatalf("create invitation = %d %s", invitationResponse.Code, invitationResponse.Body.String())
+	}
+	var invitation struct {
+		Invitation vpsagent.PairingBundle `json:"invitation"`
+		ShownOnce  bool                   `json:"token_shown_once"`
+	}
+	if err := json.Unmarshal(invitationResponse.Body.Bytes(), &invitation); err != nil || invitation.Invitation.Token == "" || !invitation.ShownOnce {
+		t.Fatalf("invitation response = %+v, %v", invitation, err)
+	}
+	pair, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion := jsonRequest(t, server, apiSession{}, http.MethodPost, "/api/v1/pairing/complete", map[string]any{
+		"invitation_id": invitation.Invitation.InvitationID, "token": invitation.Invitation.Token,
+		"site_id": "site:home", "display_name": "Дом", "public_key": pair.Public, "webui_url": "https://10.82.0.2/",
+	})
+	if completion.Code != http.StatusCreated || strings.Contains(completion.Body.String(), invitation.Invitation.Token) {
+		t.Fatalf("complete pairing = %d %s", completion.Code, completion.Body.String())
+	}
+	var paired struct {
+		Gateway vpsagent.GatewayPeer `json:"gateway"`
+	}
+	if err := json.Unmarshal(completion.Body.Bytes(), &paired); err != nil || paired.Gateway.ID == "" {
+		t.Fatalf("paired Gateway = %+v, %v", paired, err)
+	}
+
+	adminPair, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
+		"name": "Ноутбук", "public_key": adminPair.Public, "assigned_address": "10.81.0.10", "key_mode": "EXTERNAL",
+	})
+	if adminResponse.Code != http.StatusCreated {
+		t.Fatalf("create admin = %d %s", adminResponse.Code, adminResponse.Body.String())
+	}
+	var admin vpsagent.AdminPeer
+	if err := json.Unmarshal(adminResponse.Body.Bytes(), &admin); err != nil || admin.ID == "" {
+		t.Fatalf("admin = %+v, %v", admin, err)
+	}
+	managed := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
+		"name": "Managed", "assigned_address": "10.81.0.11", "key_mode": "MANAGED",
+	})
+	if managed.Code != http.StatusNotImplemented {
+		t.Fatalf("managed admin without key service = %d %s", managed.Code, managed.Body.String())
+	}
+
+	resourceResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/resources", map[string]any{
+		"gateway_peer_id": paired.Gateway.ID, "resource_id": "gateway:web", "display_name": "Gateway WebUI",
+		"resource_kind": "GATEWAY_SERVICE", "local_destination": "192.168.200.2", "published_alias": "10.96.0.2",
+		"access_profile": "GATEWAY_ONLY", "enabled": true, "advanced_scope_acknowledged": false,
+	})
+	if resourceResponse.Code != http.StatusCreated {
+		t.Fatalf("create resource = %d %s", resourceResponse.Code, resourceResponse.Body.String())
+	}
+	var resource vpsagent.ResourcePublication
+	if err := json.Unmarshal(resourceResponse.Body.Bytes(), &resource); err != nil || resource.ID == "" {
+		t.Fatalf("resource = %+v, %v", resource, err)
+	}
+	aclResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/acl", map[string]any{
+		"admin_peer_id": admin.ID, "publication_id": resource.ID, "protocol": "TCP", "port_start": 443, "port_end": 443,
+	})
+	if aclResponse.Code != http.StatusCreated {
+		t.Fatalf("create ACL = %d %s", aclResponse.Code, aclResponse.Body.String())
+	}
+	matrix := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/access-matrix", nil, "")
+	if matrix.Code != http.StatusOK || !strings.Contains(matrix.Body.String(), `"host_apply_available":false`) || !strings.Contains(matrix.Body.String(), admin.ID) || !strings.Contains(matrix.Body.String(), resource.ID) {
+		t.Fatalf("access matrix = %d %s", matrix.Code, matrix.Body.String())
+	}
+	watchdog := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/watchdog", nil, "")
+	if watchdog.Code != http.StatusOK || !strings.Contains(watchdog.Body.String(), `"state":"PENDING"`) || !strings.Contains(watchdog.Body.String(), "HOST_APPLY_NOT_IMPLEMENTED") {
+		t.Fatalf("watchdog = %d %s", watchdog.Code, watchdog.Body.String())
+	}
+
+	wrong := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins/"+admin.ID+"/revoke", map[string]any{
+		"password": "wrong password", "confirmation": "ОТОЗВАТЬ АДМИНИСТРАТОРА " + admin.ID,
+	})
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong admin revoke = %d %s", wrong.Code, wrong.Body.String())
+	}
+	revoke := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins/"+admin.ID+"/revoke", map[string]any{
+		"password": "administrator password 123", "confirmation": "ОТОЗВАТЬ АДМИНИСТРАТОРА " + admin.ID,
+	})
+	if revoke.Code != http.StatusNoContent {
+		t.Fatalf("revoke admin = %d %s", revoke.Code, revoke.Body.String())
+	}
+	matrix = authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/access-matrix", nil, "")
+	if strings.Contains(matrix.Body.String(), `"admin_peer_id":"`+admin.ID+`"`) {
+		t.Fatalf("revoked admin ACL survived: %s", matrix.Body.String())
+	}
+}
+
 func vpsAPIFixture(t *testing.T) (*Server, *fakeRestoreTrigger) {
 	t.Helper()
 	ctx := context.Background()
