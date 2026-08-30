@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gateway-vpn/internal/managementfabric"
@@ -54,6 +55,7 @@ type Applier struct {
 	Executor   platformexec.Executor
 	Paths      Paths
 	Now        func() time.Time
+	mutex      sync.Mutex
 }
 
 type Receipt struct {
@@ -113,6 +115,12 @@ func (applier *Applier) NeedsApply(ctx context.Context) (bool, string, error) {
 }
 
 func (applier *Applier) Apply(ctx context.Context) error {
+	applier.mutex.Lock()
+	defer applier.mutex.Unlock()
+	return applier.applyUnlocked(ctx)
+}
+
+func (applier *Applier) applyUnlocked(ctx context.Context) error {
 	if err := applier.validate(); err != nil {
 		return err
 	}
@@ -199,6 +207,12 @@ func (applier *Applier) Apply(ctx context.Context) error {
 }
 
 func (applier *Applier) Recover(ctx context.Context) (bool, error) {
+	applier.mutex.Lock()
+	defer applier.mutex.Unlock()
+	return applier.recoverUnlocked(ctx)
+}
+
+func (applier *Applier) recoverUnlocked(ctx context.Context) (bool, error) {
 	if err := applier.validate(); err != nil {
 		return false, err
 	}
@@ -275,6 +289,9 @@ func (applier *Applier) replaceRuntime(ctx context.Context, oldPlan, newPlan man
 		return err
 	}
 	if err := applier.applyPlan(ctx, apply); err != nil {
+		return err
+	}
+	if err := applier.replaceAdminContour(ctx, oldPlan.AdminContour, newPlan.AdminContour); err != nil {
 		return err
 	}
 	firewall, err := RenderFirewallTransaction(newPlan)
@@ -390,6 +407,124 @@ func (applier *Applier) applyPlan(ctx context.Context, plan managementfabric.Gat
 	return nil
 }
 
+func (applier *Applier) replaceAdminContour(ctx context.Context, oldContour, newContour *managementfabric.RenderedAdminContour) error {
+	if oldContour == nil && newContour == nil {
+		return nil
+	}
+	identityChanged := oldContour == nil || newContour == nil || !sameAdminContourIdentity(*oldContour, *newContour)
+	if identityChanged && oldContour != nil {
+		if err := applier.removeAdminContour(ctx, *oldContour); err != nil {
+			return err
+		}
+	}
+	if newContour == nil {
+		return nil
+	}
+	if identityChanged {
+		return applier.createAdminContour(ctx, *newContour)
+	}
+	// Reassert the fixed identity even when the durable projection is unchanged.
+	// A failed candidate rotation can leave the owned interface present but only
+	// partially configured before the transaction rollback gets control.  Peer
+	// deltas alone cannot repair that state.
+	if err := applier.configureAdminContourIdentity(ctx, *newContour); err != nil {
+		return err
+	}
+
+	oldPeers := make(map[string]managementfabric.RenderedAdminPeer, len(oldContour.Peers))
+	newPeers := make(map[string]managementfabric.RenderedAdminPeer, len(newContour.Peers))
+	for _, peer := range oldContour.Peers {
+		oldPeers[peer.TunnelID] = peer
+	}
+	for _, peer := range newContour.Peers {
+		newPeers[peer.TunnelID] = peer
+	}
+	for _, peer := range oldContour.Peers {
+		if next, exists := newPeers[peer.TunnelID]; exists && reflect.DeepEqual(peer, next) {
+			continue
+		}
+		_, _ = applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"set", managementfabric.AdminInterfaceName, "peer", peer.PublicKey, "remove"}, nil))
+		_, _ = applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-4", "route", "del", peer.AssignedAddress, "dev", managementfabric.AdminInterfaceName, "table", "main", "protocol", strconv.Itoa(managementfabric.OwnedRouteProtocol)}, nil))
+		if err := applier.verifyRouteAbsent(ctx, peer.AssignedAddress, managementfabric.AdminInterfaceName, "main"); err != nil {
+			return errors.New("remove Gateway administrator peer route failed")
+		}
+	}
+	for _, peer := range newContour.Peers {
+		if previous, exists := oldPeers[peer.TunnelID]; exists && reflect.DeepEqual(previous, peer) {
+			continue
+		}
+		if _, err := applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"set", managementfabric.AdminInterfaceName, "peer", peer.PublicKey, "allowed-ips", peer.AssignedAddress}, nil)); err != nil {
+			return errors.New("configure Gateway administrator peer failed")
+		}
+		if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-4", "route", "replace", peer.AssignedAddress, "dev", managementfabric.AdminInterfaceName, "table", "main", "protocol", strconv.Itoa(managementfabric.OwnedRouteProtocol)}, nil)); err != nil {
+			return errors.New("configure Gateway administrator peer route failed")
+		}
+	}
+	if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"link", "set", "dev", newContour.InterfaceName, "up"}, nil)); err != nil {
+		return errors.New("activate Gateway administrator WireGuard interface failed")
+	}
+	return nil
+}
+
+func sameAdminContourIdentity(left, right managementfabric.RenderedAdminContour) bool {
+	return left.InterfaceName == right.InterfaceName && left.PrivateKeySecretRef == right.PrivateKeySecretRef &&
+		left.PublicKey == right.PublicKey && left.Subnet == right.Subnet &&
+		left.GatewayAddress == right.GatewayAddress && left.ListenPort == right.ListenPort
+}
+
+func (applier *Applier) createAdminContour(ctx context.Context, contour managementfabric.RenderedAdminContour) error {
+	if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"link", "add", "name", contour.InterfaceName, "type", "wireguard"}, nil)); err != nil {
+		return errors.New("create Gateway administrator WireGuard interface failed")
+	}
+	if err := applier.configureAdminContourIdentity(ctx, contour); err != nil {
+		return err
+	}
+	for _, peer := range contour.Peers {
+		if _, err := applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"set", contour.InterfaceName, "peer", peer.PublicKey, "allowed-ips", peer.AssignedAddress}, nil)); err != nil {
+			return errors.New("configure Gateway administrator WireGuard peer failed")
+		}
+		if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-4", "route", "replace", peer.AssignedAddress, "dev", contour.InterfaceName, "table", "main", "protocol", strconv.Itoa(managementfabric.OwnedRouteProtocol)}, nil)); err != nil {
+			return errors.New("configure Gateway administrator route failed")
+		}
+	}
+	if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"link", "set", "dev", contour.InterfaceName, "up"}, nil)); err != nil {
+		return errors.New("activate Gateway administrator WireGuard interface failed")
+	}
+	return nil
+}
+
+func (applier *Applier) configureAdminContourIdentity(ctx context.Context, contour managementfabric.RenderedAdminContour) error {
+	if _, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-4", "address", "replace", contour.GatewayAddress, "dev", contour.InterfaceName}, nil)); err != nil {
+		return errors.New("configure Gateway administrator address failed")
+	}
+	secretPath, err := applier.secretPath(contour.PrivateKeySecretRef)
+	if err != nil {
+		return err
+	}
+	if _, err := applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"set", contour.InterfaceName, "private-key", secretPath, "listen-port", strconv.Itoa(contour.ListenPort)}, nil)); err != nil {
+		return errors.New("configure Gateway administrator WireGuard identity failed")
+	}
+	return nil
+}
+
+func (applier *Applier) removeAdminContour(ctx context.Context, contour managementfabric.RenderedAdminContour) error {
+	for _, peer := range contour.Peers {
+		_, _ = applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-4", "route", "del", peer.AssignedAddress, "dev", contour.InterfaceName, "table", "main", "protocol", strconv.Itoa(managementfabric.OwnedRouteProtocol)}, nil))
+		if err := applier.verifyRouteAbsent(ctx, peer.AssignedAddress, contour.InterfaceName, "main"); err != nil {
+			return errors.New("remove Gateway administrator route failed")
+		}
+	}
+	_, _ = applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"link", "del", "dev", contour.InterfaceName}, nil))
+	names, err := applier.interfaceNames(ctx)
+	if err != nil {
+		return errors.New("verify removed Gateway administrator interface failed")
+	}
+	if _, exists := names[contour.InterfaceName]; exists {
+		return errors.New("Gateway administrator interface remained after removal")
+	}
+	return nil
+}
+
 func (applier *Applier) verifyRuntime(ctx context.Context, plan managementfabric.GatewayHostPlan) error {
 	for _, link := range plan.Links {
 		for _, check := range []struct {
@@ -428,6 +563,43 @@ func (applier *Applier) verifyRuntime(ctx context.Context, plan managementfabric
 			}
 		}
 	}
+	if plan.AdminContour != nil {
+		contour := plan.AdminContour
+		for _, check := range []struct {
+			args []string
+			want string
+		}{
+			{[]string{"show", contour.InterfaceName, "public-key"}, contour.PublicKey},
+			{[]string{"show", contour.InterfaceName, "listen-port"}, strconv.Itoa(contour.ListenPort)},
+		} {
+			result, err := applier.Executor.Run(ctx, request(applier.Paths.WG, check.args, nil))
+			if err != nil || strings.TrimSpace(result.Stdout) != check.want {
+				return errors.New("Gateway administrator WireGuard identity verification failed")
+			}
+		}
+		peerResult, err := applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"show", contour.InterfaceName, "peers"}, nil))
+		if err != nil {
+			return errors.New("read Gateway administrator peer set failed")
+		}
+		actualPeers := strings.Fields(peerResult.Stdout)
+		expectedPeers := make([]string, 0, len(contour.Peers))
+		for _, peer := range contour.Peers {
+			expectedPeers = append(expectedPeers, peer.PublicKey)
+			route, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-json", "-4", "route", "show", "table", "main", "exact", peer.AssignedAddress, "dev", contour.InterfaceName, "protocol", strconv.Itoa(managementfabric.OwnedRouteProtocol)}, nil))
+			if err != nil || !exactOwnedRoute(route.Stdout, peer.AssignedAddress, contour.InterfaceName) {
+				return errors.New("Gateway administrator owned route verification failed")
+			}
+		}
+		sort.Strings(actualPeers)
+		sort.Strings(expectedPeers)
+		if !reflect.DeepEqual(actualPeers, expectedPeers) {
+			return errors.New("Gateway administrator peer set differs from plan")
+		}
+		addresses, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-json", "-4", "address", "show", "dev", contour.InterfaceName}, nil))
+		if err != nil || !exactInterfaceAddress(addresses.Stdout, contour.GatewayAddress) {
+			return errors.New("Gateway administrator address verification failed")
+		}
+	}
 	if err := applier.verifyOwnedInterfaceInventory(ctx, plan); err != nil {
 		return err
 	}
@@ -454,6 +626,19 @@ func (applier *Applier) preflightKeys(plan managementfabric.GatewayHostPlan) err
 			return fmt.Errorf("Gateway Management Fabric private key for %s does not match its public identity", link.LinkID)
 		}
 	}
+	if plan.AdminContour != nil {
+		content, err := applier.readSecret(plan.AdminContour.PrivateKeySecretRef)
+		if err != nil {
+			return err
+		}
+		public, keyErr := wgingress.PublicKey(strings.TrimSpace(string(content)))
+		for index := range content {
+			content[index] = 0
+		}
+		if keyErr != nil || public != plan.AdminContour.PublicKey {
+			return errors.New("Gateway administrator private key does not match its public identity")
+		}
+	}
 	return nil
 }
 
@@ -462,6 +647,9 @@ func (applier *Applier) preflightInterfaces(ctx context.Context, target, previou
 	if hasPrevious {
 		for _, link := range previous.Links {
 			owned[link.InterfaceName] = struct{}{}
+		}
+		if previous.AdminContour != nil {
+			owned[previous.AdminContour.InterfaceName] = struct{}{}
 		}
 	}
 	names, err := applier.interfaceNames(ctx)
@@ -490,6 +678,14 @@ func (applier *Applier) preflightInterfaces(ctx context.Context, target, previou
 		public, keyErr := applier.Executor.Run(ctx, request(applier.Paths.WG, []string{"show", link.InterfaceName, "public-key"}, nil))
 		if keyErr != nil || strings.TrimSpace(public.Stdout) != link.LocalPublicKey {
 			return errors.New("legacy wg-mgmt interface does not match the adopted slot-0 identity")
+		}
+	}
+	if target.AdminContour != nil {
+		if _, exists := owned[target.AdminContour.InterfaceName]; !exists {
+			result, err := applier.Executor.Run(ctx, request(applier.Paths.IP, []string{"-json", "link", "show", "dev", target.AdminContour.InterfaceName}, nil))
+			if err == nil && strings.TrimSpace(result.Stdout) != "" && strings.TrimSpace(result.Stdout) != "[]" {
+				return errors.New("Gateway administrator interface exists outside the applied receipt")
+			}
 		}
 	}
 	return nil
@@ -527,6 +723,9 @@ func (applier *Applier) verifyOwnedInterfaceInventory(ctx context.Context, plan 
 			expected[link.InterfaceName] = struct{}{}
 		}
 	}
+	if plan.AdminContour != nil {
+		expected[plan.AdminContour.InterfaceName] = struct{}{}
+	}
 	for name := range names {
 		if !reservedInterfaceName(name) {
 			continue
@@ -543,6 +742,9 @@ func (applier *Applier) verifyOwnedInterfaceInventory(ctx context.Context, plan 
 }
 
 func reservedInterfaceName(name string) bool {
+	if name == managementfabric.AdminInterfaceName {
+		return true
+	}
 	if !strings.HasPrefix(name, "gvm") || len(name) <= 3 || name[3] == '0' {
 		return false
 	}

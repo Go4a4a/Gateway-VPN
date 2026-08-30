@@ -12,7 +12,7 @@ import (
 
 const (
 	WatchdogStatusFilename = "fabric-watchdog.json"
-	watchdogStatusVersion  = 1
+	watchdogStatusVersion  = 2
 )
 
 var watchdogReasonPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
@@ -26,6 +26,12 @@ type WatchdogStatus struct {
 	ReconcileScheduled bool   `json:"reconcile_scheduled"`
 	Reason             string `json:"reason"`
 	CheckedAt          string `json:"checked_at"`
+	DesiredGeneration  int64  `json:"desired_generation"`
+	AppliedGeneration  int64  `json:"applied_generation"`
+	RelayCount         int    `json:"relay_count"`
+	RelayRuleCount     int    `json:"relay_rule_count"`
+	RelayPackets       uint64 `json:"relay_packets"`
+	RelayBytes         uint64 `json:"relay_bytes"`
 }
 
 func NewWatchdogStatus(state, reason string, healthy, scheduled bool, checkedAt time.Time) WatchdogStatus {
@@ -124,7 +130,9 @@ func validateWatchdogStatus(status WatchdogStatus) (time.Time, error) {
 	checkedAt, err := time.Parse(time.RFC3339Nano, status.CheckedAt)
 	validState := status.State == "HEALTHY" || status.State == "PENDING" || status.State == "FAILED"
 	coherent := status.State == "HEALTHY" && status.Healthy && !status.ReconcileScheduled || status.State != "HEALTHY" && !status.Healthy
-	if status.FormatVersion != watchdogStatusVersion || !validState || !coherent || !watchdogReasonPattern.MatchString(status.Reason) || err != nil || status.CheckedAt != checkedAt.UTC().Format(time.RFC3339Nano) {
+	validTelemetry := status.DesiredGeneration >= 0 && status.AppliedGeneration >= 0 && status.AppliedGeneration <= status.DesiredGeneration &&
+		status.RelayCount >= 0 && status.RelayCount <= 256 && status.RelayRuleCount >= 0 && status.RelayRuleCount <= 5*256
+	if status.FormatVersion != watchdogStatusVersion || !validState || !coherent || !validTelemetry || !watchdogReasonPattern.MatchString(status.Reason) || err != nil || status.CheckedAt != checkedAt.UTC().Format(time.RFC3339Nano) {
 		return time.Time{}, errors.New("VPS fabric watchdog status content is invalid")
 	}
 	return checkedAt, nil

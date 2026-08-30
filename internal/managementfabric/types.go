@@ -34,6 +34,10 @@ const (
 
 	MaximumLinks     = 4096
 	MaximumEndpoints = 8
+
+	AdminInterfaceName       = "wg-admin"
+	AdminListenPort          = 51822
+	AdminPrivateKeySecretRef = "/var/lib/gateway-vpn/secrets/management/wg-admin.key"
 )
 
 type Site struct {
@@ -141,6 +145,165 @@ type AdminSpec struct {
 	ID              string
 	VPSID           string
 	AssignedAddress string
+	TrustMode       string
+}
+
+// AdminContourSpec describes the single Gateway-terminated WireGuard server.
+// Private key material is never part of this value; only a fixed root-owned
+// reference crosses the control/root boundary.
+type AdminContourSpec struct {
+	InterfaceName       string
+	PrivateKeySecretRef string
+	PublicKey           string
+	Subnet              string
+	GatewayAddress      string
+	ListenPort          int
+}
+
+type AdminRelaySpec struct {
+	ID                 string
+	LinkID             string
+	PublicEndpointHost string
+	PublicBindAddress  string
+	PublicUDPPort      int
+	DestinationPort    int
+	RateLimitPerSecond int
+	BurstPackets       int
+}
+
+type AdminTunnelSpec struct {
+	ID              string
+	AdminID         string
+	RelayID         string
+	PublicKey       string
+	AssignedAddress string
+}
+
+// AdminContour is the public, secret-free durable state of the optional
+// Gateway-terminated administrator WireGuard interface. The private key path
+// remains internal to the repository/root broker and is never serialized to
+// WebUI clients.
+type AdminContour struct {
+	Enabled             bool   `json:"enabled"`
+	InterfaceName       string `json:"interface_name"`
+	PublicKey           string `json:"public_key"`
+	Subnet              string `json:"subnet"`
+	GatewayAddress      string `json:"gateway_address"`
+	ListenPort          int    `json:"listen_port"`
+	DesiredGeneration   int64  `json:"desired_generation"`
+	AppliedGeneration   int64  `json:"applied_generation"`
+	State               string `json:"state"`
+	LastErrorCode       string `json:"last_error_code,omitempty"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+	privateKeySecretRef string
+}
+
+// AdminContourRootInput is accepted only by the fixed privileged controller.
+// Web/API callers can choose only Enabled/Subnet/GatewayAddress; the root
+// controller supplies the fixed interface, key reference and generated public
+// identity.
+type AdminContourRootInput struct {
+	Enabled             bool
+	InterfaceName       string
+	PrivateKeySecretRef string
+	PublicKey           string
+	Subnet              string
+	GatewayAddress      string
+	ListenPort          int
+}
+
+type AdminContourRequest struct {
+	Enabled        bool   `json:"enabled"`
+	Subnet         string `json:"subnet"`
+	GatewayAddress string `json:"gateway_address"`
+}
+
+// AdminIdentityRotationSnapshot is an opaque rollback token created in the
+// same database transaction that stages a new wg-admin public identity.  Its
+// fields stay private so callers cannot forge partial database state.
+type AdminIdentityRotationSnapshot struct {
+	candidatePublic string
+	fabric          adminIdentityFabricState
+	contour         adminIdentityContourState
+	tunnels         []adminIdentityTunnelState
+}
+
+type adminIdentityFabricState struct {
+	desiredGeneration int64
+	appliedGeneration int64
+	state             string
+	errorCode         string
+}
+
+type adminIdentityContourState struct {
+	publicKey         string
+	desiredGeneration int64
+	appliedGeneration int64
+	state             string
+	errorCode         string
+}
+
+type adminIdentityTunnelState struct {
+	id                string
+	desiredGeneration int64
+	appliedGeneration int64
+	state             string
+	errorCode         string
+}
+
+type AdminRelay struct {
+	ID                 string `json:"id"`
+	LinkID             string `json:"link_id"`
+	Enabled            bool   `json:"enabled"`
+	PublicEndpointHost string `json:"public_endpoint_host"`
+	PublicBindAddress  string `json:"public_bind_address"`
+	PublicUDPPort      int    `json:"public_udp_port"`
+	DestinationPort    int    `json:"destination_port"`
+	RateLimitPerSecond int    `json:"rate_limit_per_second"`
+	BurstPackets       int    `json:"burst_packets"`
+	DesiredGeneration  int64  `json:"desired_generation"`
+	AppliedGeneration  int64  `json:"applied_generation"`
+	State              string `json:"state"`
+	LastErrorCode      string `json:"last_error_code,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
+type AdminRelayInput struct {
+	ID                 string `json:"id"`
+	LinkID             string `json:"link_id"`
+	Enabled            bool   `json:"enabled"`
+	PublicEndpointHost string `json:"public_endpoint_host"`
+	PublicBindAddress  string `json:"public_bind_address"`
+	PublicUDPPort      int    `json:"public_udp_port"`
+	RateLimitPerSecond int    `json:"rate_limit_per_second"`
+	BurstPackets       int    `json:"burst_packets"`
+}
+
+type AdminTunnel struct {
+	ID                string `json:"id"`
+	AdminID           string `json:"admin_id"`
+	RelayID           string `json:"relay_id"`
+	PublicKey         string `json:"public_key"`
+	AssignedAddress   string `json:"assigned_address"`
+	State             string `json:"state"`
+	DesiredGeneration int64  `json:"desired_generation"`
+	AppliedGeneration int64  `json:"applied_generation"`
+	LatestHandshakeAt string `json:"latest_handshake_at,omitempty"`
+	RXBytes           int64  `json:"rx_bytes"`
+	TXBytes           int64  `json:"tx_bytes"`
+	LastErrorCode     string `json:"last_error_code,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
+}
+
+type AdminTunnelInput struct {
+	ID              string `json:"id"`
+	AdminID         string `json:"admin_id"`
+	RelayID         string `json:"relay_id"`
+	PublicKey       string `json:"public_key"`
+	AssignedAddress string `json:"assigned_address"`
 }
 
 type ResourceSpec struct {
@@ -165,6 +328,9 @@ type FabricSpec struct {
 	Links            []LinkSpec
 	Publications     []PublicationSpec
 	Admins           []AdminSpec
+	AdminContour     *AdminContourSpec
+	AdminRelays      []AdminRelaySpec
+	AdminTunnels     []AdminTunnelSpec
 	Resources        []ResourceSpec
 	ACL              []ACLSpec
 	ReservedPrefixes []ReservedPrefix

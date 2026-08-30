@@ -302,6 +302,80 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-contour:
+    put:
+      tags: [ManagementFabric]
+      operationId: configureGatewayAdminContour
+      summary: Создать, включить, отключить или перенумеровать fixed wg-admin; private identity генерирует только root broker
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-contour/rotate:
+    post:
+      tags: [ManagementFabric]
+      operationId: rotateGatewayAdminContourIdentity
+      summary: После password re-authentication явно заменить root-owned wg-admin identity с rollback
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-relays:
+    post:
+      tags: [ManagementFabric]
+      operationId: createGatewayAdminRelay
+      summary: Добавить bounded VPS UDP relay к одному management link
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-relays/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [ManagementFabric]
+      operationId: updateGatewayAdminRelay
+      summary: Изменить allowlisted endpoint/port/rate или enabled одного relay
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [ManagementFabric]
+      operationId: deleteGatewayAdminRelay
+      summary: Удалить заранее отключённый relay без активных inner peers
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-tunnels:
+    post:
+      tags: [ManagementFabric]
+      operationId: createGatewayAdminTunnel
+      summary: Импортировать public identity администратора как inner wg-admin peer и связать с relay
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-tunnels/{id}/revoke:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [ManagementFabric]
+      operationId: revokeGatewayAdminTunnel
+      summary: Отозвать inner peer до удаления
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admin-tunnels/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [ManagementFabric]
+      operationId: deleteGatewayAdminTunnel
+      summary: Удалить ранее отозванный inner peer
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/admins/{admin_id}/vps/{vps_id}/trust-mode:
+    parameters:
+      - $ref: '#/components/parameters/AdminID'
+      - $ref: '#/components/parameters/VPSID'
+    put:
+      tags: [ManagementFabric]
+      operationId: updateGatewayAdminTrustMode
+      summary: Переключить ROUTED_HUB или END_TO_END_RELAY только при согласованном inner tunnel lifecycle
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/management-fabric/sync:
     post:
       tags: [ManagementFabric]
@@ -1115,6 +1189,16 @@ components:
       in: path
       required: true
       schema: {type: string, minLength: 1, maxLength: 256}
+    AdminID:
+      name: admin_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    VPSID:
+      name: vps_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
     NodeID:
       name: node_id
       in: path

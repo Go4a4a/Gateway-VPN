@@ -63,7 +63,7 @@ func TestCorruptMainDatabaseIsQuarantinedAndLatestValidSnapshotRestored(t *testi
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 28 {
+	if result.State != RecoveryRestored || result.SnapshotID != first.Manifest.SnapshotID || result.QuarantineID == "" || result.SchemaVersion != 29 {
 		t.Fatalf("recovery result = %+v", result)
 	}
 	preserved, err := os.ReadFile(filepath.Join(stateDirectory, "recovery", "quarantine", result.QuarantineID, "state.db"))
@@ -165,7 +165,7 @@ func TestOpenManagedCreatesFreshSchemaWithoutPretendingItWasRecovery(t *testing.
 		t.Fatalf("fresh managed recovery = %+v", managed.Recovery)
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 28 {
+	if err != nil || version != 29 {
 		t.Fatalf("managed schema = %d, %v", version, err)
 	}
 	if err := databasepkg.IntegrityCheck(ctx, managed.Database); err != nil {
@@ -196,7 +196,7 @@ func TestOpenManagedCreatesVerifiedSnapshotBeforeMigration(t *testing.T) {
 		t.Fatal("pre-migration snapshot id is empty")
 	}
 	version, err := databasepkg.ReadSchemaVersion(ctx, managed.Database)
-	if err != nil || version != 28 {
+	if err != nil || version != 29 {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	items, err := managed.Backups.List(ctx, true)

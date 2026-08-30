@@ -375,6 +375,10 @@ func runFabricWatchdog(args []string) int {
 	paths.TransactionRoot = filepath.Join(filepath.Dir(configuration.System.TransactionRoot), "fabric")
 	applier := &vpsfabric.Applier{Repository: vpsagent.HubRepository{Database: database, HostApplyAvailable: true}, Executor: platformexec.OSExecutor{}, Paths: paths}
 	needed, reason, checkErr := applier.NeedsApply(context.Background())
+	telemetry, telemetryErr := applier.ReadWatchdogTelemetry(context.Background())
+	if checkErr == nil && !needed && telemetryErr != nil {
+		checkErr = telemetryErr
+	}
 	triggerErr := error(nil)
 	if checkErr == nil && needed {
 		triggerErr = (systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")}).ApplyVPSFabric(context.Background())
@@ -393,6 +397,12 @@ func runFabricWatchdog(args []string) int {
 		state, healthy, scheduled = "PENDING", false, true
 	}
 	status := vpsfabric.NewWatchdogStatus(state, statusReason, healthy, scheduled, time.Now().UTC())
+	status.DesiredGeneration = telemetry.DesiredGeneration
+	status.AppliedGeneration = telemetry.AppliedGeneration
+	status.RelayCount = telemetry.RelayCount
+	status.RelayRuleCount = telemetry.RelayRuleCount
+	status.RelayPackets = telemetry.RelayPackets
+	status.RelayBytes = telemetry.RelayBytes
 	statusErr := vpsfabric.WriteWatchdogStatus(filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename), status, uid, gid)
 	if err := errors.Join(operationErr, statusErr); err != nil {
 		fmt.Fprintf(os.Stderr, "VPS fabric watchdog failed (%s): %v\n", reason, err)

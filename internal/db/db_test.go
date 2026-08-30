@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 28 {
+	if err != nil || version != 29 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 28 {
+	if err != nil || latest != 29 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -232,6 +232,9 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"management_link_key_rotations",
 		"management_admins",
 		"management_admin_vps_peers",
+		"management_admin_contour",
+		"management_admin_relays",
+		"management_admin_tunnels",
 		"management_resources",
 		"management_resource_ports",
 		"management_resource_publications",
@@ -253,8 +256,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 28 {
-		t.Fatalf("SchemaVersion() = %d, want 28", version)
+	if version != 29 {
+		t.Fatalf("SchemaVersion() = %d, want 29", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -298,8 +301,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 28 {
-		t.Fatalf("migration count = %d, want 28", count)
+	if count != 29 {
+		t.Fatalf("migration count = %d, want 29", count)
 	}
 }
 
@@ -431,8 +434,60 @@ FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode, &ma
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
+	if version != 29 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
 		t.Fatalf("watchdog migrations = version:%d interval:%d modes:%s/%s/%s count:%d", version, interval, loggingMode, managementFabricMode, wireGuardAdminMode, modeCount)
+	}
+}
+
+func TestMigration29PreservesRoutedHubAdminsAndAddsEndToEndContour(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 28)); err != nil {
+		t.Fatalf("migrate schema 28: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO management_sites(id,display_name,is_local,identity_state,created_at,updated_at)
+VALUES('site:home','Home',1,'ACTIVE','now','now');
+INSERT INTO vps_nodes(
+  id,display_number,name,enabled,priority,verified_fingerprint,public_key,
+  admin_address_pool,resource_alias_pool,state,created_at,updated_at
+) VALUES('vps:a',1,'VPS A',1,1,?,'vps-public-key','10.81.0.0/24','10.96.0.0/16','CONFIGURED','now','now');
+INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at)
+VALUES('admin:a','Administrator','ADMIN',1,'ACTIVE','now','now');
+INSERT INTO management_admin_vps_peers(
+  id,admin_id,vps_id,public_key,assigned_address,state,
+  desired_generation,applied_generation,created_at,updated_at
+) VALUES('admin-peer:a','admin:a','vps:a','admin-public-key','10.81.0.10','ACTIVE',3,2,'now','now')`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateFS(ctx, database, migrationsThrough(t, 29)); err != nil {
+		t.Fatalf("migrate schema 29: %v", err)
+	}
+	var version, desired, applied int
+	var trustMode, state string
+	if err := database.QueryRowContext(ctx, `
+SELECT (SELECT MAX(version) FROM schema_migrations),trust_mode,state,desired_generation,applied_generation
+FROM management_admin_vps_peers WHERE id='admin-peer:a'`).Scan(&version, &trustMode, &state, &desired, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if version != 29 || trustMode != "ROUTED_HUB" || state != "ACTIVE" || desired != 3 || applied != 2 {
+		t.Fatalf("migration 29 admin = version:%d trust:%s state:%s generations:%d/%d", version, trustMode, state, desired, applied)
+	}
+	for _, table := range []string{"management_admin_contour", "management_admin_relays", "management_admin_tunnels"} {
+		var count int
+		if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("migration 29 table %s count = %d, %v", table, count, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE management_admin_vps_peers SET trust_mode='UNSAFE' WHERE id='admin-peer:a'"); err == nil {
+		t.Fatal("migration 29 accepted an unknown administrator trust mode")
+	}
+	if err := ForeignKeyCheck(ctx, database); err != nil {
+		t.Fatalf("migration 29 foreign keys: %v", err)
 	}
 }
 

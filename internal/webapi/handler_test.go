@@ -48,6 +48,7 @@ import (
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
+	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -98,8 +99,10 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 }
 
 type fakeManagementFabricAdmin struct {
-	status networkapply.ManagementFabricStatus
-	syncs  int
+	status     networkapply.ManagementFabricStatus
+	syncs      int
+	configures int
+	rotations  int
 }
 
 func (admin *fakeManagementFabricAdmin) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
@@ -109,6 +112,16 @@ func (admin *fakeManagementFabricAdmin) ManagementFabricStatus(context.Context) 
 func (admin *fakeManagementFabricAdmin) SyncManagementFabric(context.Context) error {
 	admin.syncs++
 	return nil
+}
+
+func (admin *fakeManagementFabricAdmin) ConfigureAdminContour(_ context.Context, input managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
+	admin.configures++
+	return managementfabric.AdminContour{Enabled: input.Enabled, InterfaceName: managementfabric.AdminInterfaceName, Subnet: input.Subnet, GatewayAddress: input.GatewayAddress, ListenPort: managementfabric.AdminListenPort}, nil
+}
+
+func (admin *fakeManagementFabricAdmin) RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error) {
+	admin.rotations++
+	return managementfabric.AdminContour{Enabled: true, InterfaceName: managementfabric.AdminInterfaceName, ListenPort: managementfabric.AdminListenPort}, nil
 }
 
 func TestManagementFabricAPIIsAuthenticatedRedactedAndParameterFree(t *testing.T) {
@@ -176,6 +189,136 @@ func TestManagementFabricAPIIsAuthenticatedRedactedAndParameterFree(t *testing.T
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || admin.syncs != 2 {
 		t.Fatalf("parameter-free Management Fabric sync = %d syncs:%d %s", response.Code, admin.syncs, response.Body.String())
+	}
+}
+
+func TestManagementAdminRelayAPIRejectsSecretsAndRequiresLifecycleOrder(t *testing.T) {
+	server, ctx := testServer(t)
+	repository := managementfabric.NewRepository(server.dependencies.Database, nil)
+	if _, err := repository.EnsureLocalSite(ctx, "site:home", "Home"); err != nil {
+		t.Fatal(err)
+	}
+	remoteKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	localKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))
+	vps, err := repository.CreateVPS(ctx, managementfabric.CreateVPSInput{
+		ID: "vps:a", Name: "VPS A", VerifiedFingerprint: strings.Repeat("a", 64), PublicKey: remoteKey,
+		AdminAddressPool: "10.81.0.0/24", ResourceAliasPool: "10.96.0.0/16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := repository.CreateLink(ctx, managementfabric.CreateLinkInput{
+		ID: "link:a", SiteID: "site:home", VPSID: vps.ID, Enabled: true,
+		ManagementSubnet: "10.82.0.0/24", LocalAddress: "10.82.0.2", RemoteAddress: "10.82.0.1",
+		LocalPrivateKeySecretRef: "/var/lib/gateway-vpn/secrets/management/link:a.key",
+		LocalPublicKey:           localKey, RemotePublicKey: remoteKey, UplinkPolicy: managementfabric.UplinkAuto,
+		PersistentKeepalive: 25, Endpoints: []managementfabric.EndpointSpec{{Host: "203.0.113.10", Port: 51821}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.dependencies.ManagementFabric, server.dependencies.ManagementFabricAdmin = repository, &fakeManagementFabricAdmin{}
+	stamp := "2026-08-30T12:00:00Z"
+	adminKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	if _, err := server.dependencies.Database.ExecContext(ctx, `
+INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at)
+VALUES('admin:a','Admin','ADMIN',1,'ACTIVE',?,?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.dependencies.Database.ExecContext(ctx, `
+INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at)
+VALUES('admin-peer:a','admin:a','vps:a',?,'10.81.0.10','CONFIGURED',1,0,?,?)`, adminKey, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := login(t, server)
+	call := func(method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.AddCookie(cookie)
+		request.Header.Set("X-CSRF-Token", csrf)
+		for key, value := range headers {
+			request.Header.Set(key, value)
+		}
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		return response
+	}
+	response := call(http.MethodPut, "/api/v1/management-fabric/admin-contour", `{"enabled":true,"subnet":"10.85.0.0/24","gateway_address":"10.85.0.1","private_key":"forbidden"}`, nil)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("secret-bearing contour request = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/management-fabric/admin-contour", `{"enabled":true,"subnet":"10.85.0.0/24","gateway_address":"10.85.0.1"}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("bounded contour request = %d %s", response.Code, response.Body.String())
+	}
+	serverKeys, _ := wgingress.GenerateKeyPair()
+	if _, err := repository.ConfigureAdminContour(ctx, managementfabric.AdminContourRootInput{
+		Enabled: true, InterfaceName: managementfabric.AdminInterfaceName,
+		PrivateKeySecretRef: managementfabric.AdminPrivateKeySecretRef, PublicKey: serverKeys.Public,
+		Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response = call(http.MethodPost, "/api/v1/management-fabric/admin-relays", `{"id":"relay:a","link_id":"`+link.ID+`","enabled":true,"public_endpoint_host":"relay.example.net","public_bind_address":"203.0.113.20","public_udp_port":53000}`, nil)
+	if response.Code != http.StatusCreated || strings.Contains(response.Body.String(), "/var/lib/") {
+		t.Fatalf("relay create = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPost, "/api/v1/management-fabric/admin-tunnels", `{"id":"tunnel:a","admin_id":"admin:a","relay_id":"relay:a","public_key":"`+adminKey+`","assigned_address":"10.85.0.10"}`, nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("tunnel create = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodDelete, "/api/v1/management-fabric/admin-relays/relay:a", "", map[string]string{"X-Confirm-Destructive": "delete-disabled-admin-relay"})
+	if response.Code == http.StatusNoContent {
+		t.Fatal("enabled relay with an active tunnel was deleted")
+	}
+	response = call(http.MethodPost, "/api/v1/management-fabric/admin-tunnels/tunnel:a/revoke", "", map[string]string{"X-Confirm-Destructive": "revoke-admin-tunnel"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("tunnel revoke = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodPut, "/api/v1/management-fabric/admin-relays/relay:a", `{"link_id":"link:a","enabled":false,"public_endpoint_host":"relay.example.net","public_bind_address":"203.0.113.20","public_udp_port":53000,"rate_limit_per_second":100,"burst_packets":200}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("relay disable = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodDelete, "/api/v1/management-fabric/admin-tunnels/tunnel:a", "", map[string]string{"X-Confirm-Destructive": "delete-revoked-admin-tunnel"})
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("tunnel delete = %d %s", response.Code, response.Body.String())
+	}
+	response = call(http.MethodDelete, "/api/v1/management-fabric/admin-relays/relay:a", "", map[string]string{"X-Confirm-Destructive": "delete-disabled-admin-relay"})
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("relay delete = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestManagementAdminRelayWebUIIsExplicitAndSecretFree(t *testing.T) {
+	server, _ := testServer(t)
+	for path, required := range map[string][]string{
+		"/management-fabric.js": {
+			"Контур wg-admin на Gateway", "Добавить inner peer", "Relay ID из VPS Hub",
+			"/api/v1/management-fabric/admin-contour", "/api/v1/management-fabric/admin-relays",
+			"/api/v1/management-fabric/admin-tunnels", "/trust-mode",
+		},
+		"/styles.css": {
+			".settings-form label.check", "grid-template-columns:auto minmax(0,1fr) auto",
+			"overflow-wrap:anywhere", ".table-wrap .actions",
+		},
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d", path, response.Code)
+		}
+		body := response.Body.String()
+		for _, value := range required {
+			if !strings.Contains(body, value) {
+				t.Errorf("GET %s missing %q", path, value)
+			}
+		}
+		for _, forbidden := range []string{
+			managementfabric.AdminPrivateKeySecretRef, `"private_key"`, `"private_key_secret_ref"`,
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("GET %s exposes forbidden key material %q", path, forbidden)
+			}
+		}
 	}
 }
 
@@ -1552,12 +1695,17 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	}
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), "text-wrap:balance") || !strings.Contains(response.Body.String(), ".mobile-navigation{display:grid}") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") {
 		t.Fatalf("static stylesheet does not preserve hidden layout semantics: %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="mobile-navigation-select"`) || !strings.Contains(response.Body.String(), `<optgroup label="Интернет и VPN">`) {
+		t.Fatalf("static responsive navigation missing: %d %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/app.js", nil))
-	for _, required := range []string{"stagePortableRestore", "discard-staged-restore", "apply-verified-restore", "ВОССТАНОВИТЬ", "gateway-vpn-restore-reconnect"} {
+	for _, required := range []string{"stagePortableRestore", "discard-staged-restore", "apply-verified-restore", "ВОССТАНОВИТЬ", "gateway-vpn-restore-reconnect", "mobile-navigation-select"} {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("static restore UI missing %q: %d", required, response.Code)
 		}

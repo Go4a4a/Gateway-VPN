@@ -13,13 +13,16 @@ import (
 // after a failed kernel/nftables apply.  Desired configuration is never
 // rewritten by rollback.
 type GatewayAppliedSnapshot struct {
-	Generation int64                     `json:"generation"`
-	State      string                    `json:"state"`
-	ErrorCode  string                    `json:"error_code"`
-	Links      []GatewayLinkAppliedState `json:"links"`
-	Resources  []GatewayResourceApplied  `json:"resources"`
-	Aliases    []GatewayAliasApplied     `json:"aliases"`
-	AdminPeers []GatewayAdminPeerApplied `json:"admin_peers"`
+	Generation   int64                       `json:"generation"`
+	State        string                      `json:"state"`
+	ErrorCode    string                      `json:"error_code"`
+	Links        []GatewayLinkAppliedState   `json:"links"`
+	Resources    []GatewayResourceApplied    `json:"resources"`
+	Aliases      []GatewayAliasApplied       `json:"aliases"`
+	AdminPeers   []GatewayAdminPeerApplied   `json:"admin_peers"`
+	AdminContour *GatewayAdminContourApplied `json:"admin_contour,omitempty"`
+	AdminRelays  []GatewayAdminRelayApplied  `json:"admin_relays"`
+	AdminTunnels []GatewayAdminTunnelApplied `json:"admin_tunnels"`
 }
 
 type GatewayLinkAppliedState struct {
@@ -46,6 +49,25 @@ type GatewayAliasApplied struct {
 }
 
 type GatewayAdminPeerApplied struct {
+	ID         string `json:"id"`
+	Generation int64  `json:"generation"`
+	State      string `json:"state"`
+}
+
+type GatewayAdminContourApplied struct {
+	Generation int64  `json:"generation"`
+	State      string `json:"state"`
+	ErrorCode  string `json:"error_code"`
+}
+
+type GatewayAdminRelayApplied struct {
+	ID         string `json:"id"`
+	Generation int64  `json:"generation"`
+	State      string `json:"state"`
+	ErrorCode  string `json:"error_code"`
+}
+
+type GatewayAdminTunnelApplied struct {
 	ID         string `json:"id"`
 	Generation int64  `json:"generation"`
 	State      string `json:"state"`
@@ -116,6 +138,32 @@ func (repository *Repository) CaptureGatewayAppliedState(ctx context.Context) (G
 			return err
 		}
 		snapshot.AdminPeers = append(snapshot.AdminPeers, item)
+		return nil
+	}); err != nil {
+		return GatewayAppliedSnapshot{}, err
+	}
+	var contour GatewayAdminContourApplied
+	if err := tx.QueryRowContext(ctx, `SELECT applied_generation,state,last_error_code FROM management_admin_contour WHERE singleton_id=1`).Scan(&contour.Generation, &contour.State, &contour.ErrorCode); err == nil {
+		snapshot.AdminContour = &contour
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return GatewayAppliedSnapshot{}, err
+	}
+	if err := scanAppliedRows(ctx, tx, `SELECT id,applied_generation,state,last_error_code FROM management_admin_relays ORDER BY id`, func(rows *sql.Rows) error {
+		var item GatewayAdminRelayApplied
+		if err := rows.Scan(&item.ID, &item.Generation, &item.State, &item.ErrorCode); err != nil {
+			return err
+		}
+		snapshot.AdminRelays = append(snapshot.AdminRelays, item)
+		return nil
+	}); err != nil {
+		return GatewayAppliedSnapshot{}, err
+	}
+	if err := scanAppliedRows(ctx, tx, `SELECT id,applied_generation,state FROM management_admin_tunnels ORDER BY id`, func(rows *sql.Rows) error {
+		var item GatewayAdminTunnelApplied
+		if err := rows.Scan(&item.ID, &item.Generation, &item.State); err != nil {
+			return err
+		}
+		snapshot.AdminTunnels = append(snapshot.AdminTunnels, item)
 		return nil
 	}); err != nil {
 		return GatewayAppliedSnapshot{}, err
@@ -202,6 +250,30 @@ WHERE state!='REVOKED' AND vps_id=(SELECT vps_id FROM management_links WHERE id=
 			return err
 		}
 	}
+	if plan.AdminContour != nil {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE management_admin_contour
+SET applied_generation=desired_generation,state='ACTIVE',last_error_code='',updated_at=?
+WHERE singleton_id=1 AND enabled=1`, stamp); err != nil {
+			return err
+		}
+		for _, relay := range plan.AdminContour.Relays {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE management_admin_relays
+SET applied_generation=desired_generation,state='ACTIVE',last_error_code='',updated_at=?
+WHERE id=? AND enabled=1`, stamp, relay.RelayID); err != nil {
+				return err
+			}
+		}
+		for _, peer := range plan.AdminContour.Peers {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE management_admin_tunnels
+SET applied_generation=desired_generation,state='ACTIVE',updated_at=?
+WHERE id=? AND state!='REVOKED'`, stamp, peer.TunnelID); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }
 
@@ -235,6 +307,21 @@ func (repository *Repository) RestoreGatewayAppliedState(ctx context.Context, sn
 	}
 	for _, item := range snapshot.AdminPeers {
 		if _, err := tx.ExecContext(ctx, `UPDATE management_admin_vps_peers SET applied_generation=?,state=?,updated_at=? WHERE id=?`, item.Generation, item.State, stamp, item.ID); err != nil {
+			return err
+		}
+	}
+	if snapshot.AdminContour != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE management_admin_contour SET applied_generation=?,state=?,last_error_code=?,updated_at=? WHERE singleton_id=1`, snapshot.AdminContour.Generation, snapshot.AdminContour.State, snapshot.AdminContour.ErrorCode, stamp); err != nil {
+			return err
+		}
+	}
+	for _, item := range snapshot.AdminRelays {
+		if _, err := tx.ExecContext(ctx, `UPDATE management_admin_relays SET applied_generation=?,state=?,last_error_code=?,updated_at=? WHERE id=?`, item.Generation, item.State, item.ErrorCode, stamp, item.ID); err != nil {
+			return err
+		}
+	}
+	for _, item := range snapshot.AdminTunnels {
+		if _, err := tx.ExecContext(ctx, `UPDATE management_admin_tunnels SET applied_generation=?,state=?,updated_at=? WHERE id=?`, item.Generation, item.State, stamp, item.ID); err != nil {
 			return err
 		}
 	}

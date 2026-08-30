@@ -76,6 +76,83 @@ func TestRenderFabricIsDeterministicAndRejectsNegativeFixtures(t *testing.T) {
 	}
 }
 
+func TestRenderFabricTerminatesEndToEndAdministratorAtGateway(t *testing.T) {
+	spec := renderEndToEndFixture(t)
+	plan, err := RenderFabric(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Peers) != 1 || !reflect.DeepEqual(plan.Peers[0].AllowedSources, []string{"10.80.0.1/32"}) {
+		t.Fatalf("outer Gateway peer contains end-to-end administrator source: %+v", plan.Peers)
+	}
+	for _, route := range plan.Routes {
+		if route.Purpose == "ADMIN_PEER" || route.Destination == "10.81.0.10/32" || route.Destination == "10.83.0.10/32" {
+			t.Fatalf("end-to-end administrator escaped into outer routes: %+v", route)
+		}
+	}
+	if plan.AdminContour == nil || plan.AdminContour.InterfaceName != AdminInterfaceName ||
+		plan.AdminContour.GatewayAddress != "10.83.0.1/32" || len(plan.AdminContour.Relays) != 1 || len(plan.AdminContour.Peers) != 1 {
+		t.Fatalf("rendered administrator contour = %+v", plan.AdminContour)
+	}
+	relay := plan.AdminContour.Relays[0]
+	if relay.InputInterface != "gvm1" || relay.OuterSource != "10.80.0.1/32" || relay.OuterDestination != "10.80.0.2/32" || relay.DestinationPort != AdminListenPort {
+		t.Fatalf("rendered relay ingress = %+v", relay)
+	}
+	peer := plan.AdminContour.Peers[0]
+	if peer.AssignedAddress != "10.83.0.10/32" || peer.LinkID != "link:a" || peer.RelayID != "relay:a" {
+		t.Fatalf("rendered inner administrator peer = %+v", peer)
+	}
+	if len(plan.ACL) != 1 {
+		t.Fatalf("rendered end-to-end ACL count = %d", len(plan.ACL))
+	}
+	rule := plan.ACL[0]
+	if rule.TrustMode != TrustEndToEndRelay || rule.InputInterface != AdminInterfaceName ||
+		rule.Source != "10.83.0.10/32" || rule.TunnelID != "tunnel:a" || rule.RelayID != "relay:a" {
+		t.Fatalf("rendered end-to-end ACL = %+v", rule)
+	}
+}
+
+func TestRenderFabricRejectsUnsafeEndToEndRelayBindings(t *testing.T) {
+	base := renderEndToEndFixture(t)
+	tests := []struct {
+		name   string
+		mutate func(*FabricSpec)
+	}{
+		{"outer WireGuard port reuse", func(spec *FabricSpec) { spec.AdminRelays[0].PublicUDPPort = 51821 }},
+		{"contour subnet overlap", func(spec *FabricSpec) {
+			spec.AdminContour.Subnet = "10.80.0.0/24"
+			spec.AdminContour.GatewayAddress = "10.80.0.254"
+		}},
+		{"duplicate inner key and address", func(spec *FabricSpec) {
+			duplicate := spec.AdminTunnels[0]
+			duplicate.ID = "tunnel:b"
+			spec.AdminTunnels = append(spec.AdminTunnels, duplicate)
+		}},
+		{"tunnel without end-to-end trust", func(spec *FabricSpec) { spec.Admins[0].TrustMode = TrustRoutedHub }},
+		{"duplicate public relay port", func(spec *FabricSpec) {
+			link := spec.Links[0]
+			link.ID, link.VPSID, link.Slot, link.InterfaceName = "link:b", "vps:b", 2, "gvm2"
+			link.ManagementSubnet, link.LocalAddress, link.RemoteAddress = "10.84.0.0/24", "10.84.0.2", "10.84.0.1"
+			link.LocalPublicKey, link.RemotePublicKey = testPublicKey(t), testPublicKey(t)
+			link.LocalPrivateKeySecretRef = "/var/lib/gateway-vpn/secrets/management/link:b.key"
+			link.Endpoints = []EndpointSpec{{Host: "vps-b.example.net", Port: 51821}}
+			spec.Links = append(spec.Links, link)
+			relay := spec.AdminRelays[0]
+			relay.ID, relay.LinkID = "relay:b", "link:b"
+			spec.AdminRelays = append(spec.AdminRelays, relay)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneFabric(t, base)
+			test.mutate(&candidate)
+			if _, err := RenderFabric(candidate); err == nil {
+				t.Fatal("unsafe end-to-end relay fixture was accepted")
+			}
+		})
+	}
+}
+
 func renderFixture(t *testing.T) FabricSpec {
 	t.Helper()
 	return FabricSpec{
@@ -88,7 +165,7 @@ func renderFixture(t *testing.T) FabricSpec {
 			UplinkPolicy: UplinkAuto, PersistentKeepalive: 25,
 			Endpoints: []EndpointSpec{{Host: "vps-a.example.net", Port: 51821}},
 		}},
-		Admins: []AdminSpec{{ID: "admin:a", VPSID: "vps:a", AssignedAddress: "10.81.0.10"}},
+		Admins: []AdminSpec{{ID: "admin:a", VPSID: "vps:a", AssignedAddress: "10.81.0.10", TrustMode: TrustRoutedHub}},
 		Resources: []ResourceSpec{{
 			ID: "resource:host", SiteID: "site:a", Kind: ResourceLocalHost,
 			AccessProfile: ProfileDedicatedLAN, LocalDestination: "192.168.50.10",
@@ -102,4 +179,22 @@ func renderFixture(t *testing.T) FabricSpec {
 			Protocol: ProtocolTCP, PortStart: 443, PortEnd: 443,
 		}},
 	}
+}
+
+func renderEndToEndFixture(t *testing.T) FabricSpec {
+	t.Helper()
+	spec := renderFixture(t)
+	spec.Admins[0].TrustMode = TrustEndToEndRelay
+	spec.AdminContour = &AdminContourSpec{
+		InterfaceName: AdminInterfaceName, PrivateKeySecretRef: "/var/lib/gateway-vpn/secrets/management/wg-admin.key",
+		PublicKey: testPublicKey(t), Subnet: "10.83.0.0/24", GatewayAddress: "10.83.0.1", ListenPort: AdminListenPort,
+	}
+	spec.AdminRelays = []AdminRelaySpec{{
+		ID: "relay:a", LinkID: "link:a", PublicEndpointHost: "vps-a.example.net", PublicBindAddress: "203.0.113.10",
+		PublicUDPPort: 51823, DestinationPort: AdminListenPort, RateLimitPerSecond: 100, BurstPackets: 200,
+	}}
+	spec.AdminTunnels = []AdminTunnelSpec{{
+		ID: "tunnel:a", AdminID: "admin:a", RelayID: "relay:a", PublicKey: testPublicKey(t), AssignedAddress: "10.83.0.10",
+	}}
+	return spec
 }

@@ -68,7 +68,7 @@ var fixedComponentSpecs = []ComponentSpec{
 	{ID: ComponentMihomo, Label: "Mihomo/TUN", Reconcileable: true, Restartable: true, RebootEligible: true},
 	{ID: ComponentWireGuardMgmt, Label: "WireGuard удалённого управления", Reconcileable: true, Restartable: true},
 	{ID: ComponentManagementFabric, Label: "Маршруты и ACL Management Fabric", Reconcileable: true, Restartable: true, RestartWithoutPathBlock: true},
-	{ID: ComponentWireGuardAdmin, Label: "WireGuard-связи Gateway с VPS", Reconcileable: true, Restartable: true, RestartWithoutPathBlock: true},
+	{ID: ComponentWireGuardAdmin, Label: "WireGuard Gateway↔VPS и внутренний wg-admin", Reconcileable: true, Restartable: true, RestartWithoutPathBlock: true},
 	{ID: ComponentWireGuardIngress, Label: "WireGuard входящего трафика", Reconcileable: true, Restartable: true},
 	{ID: ComponentPolicyRouting, Label: "Policy routing физических выходов", Reconcileable: true, Restartable: true, RebootEligible: true},
 	{ID: ComponentWorkerRuntime, Label: "Фоновые циклы и планировщики", Reconcileable: true, Restartable: true, RebootEligible: true},

@@ -45,7 +45,7 @@ func (manager AdminKeyManager) Available() bool {
 }
 
 func (manager AdminKeyManager) Create(ctx context.Context, name, assignedAddress string) (AdminPeer, error) {
-	return manager.create(ctx, name, assignedAddress, "")
+	return manager.create(ctx, name, assignedAddress, "", TrustRoutedHub)
 }
 
 func (manager AdminKeyManager) Rotate(ctx context.Context, sourceID, name, assignedAddress string) (AdminPeer, error) {
@@ -63,10 +63,10 @@ func (manager AdminKeyManager) Rotate(ctx context.Context, sourceID, name, assig
 			name = name[:128]
 		}
 	}
-	return manager.create(ctx, name, assignedAddress, source.ID)
+	return manager.create(ctx, name, assignedAddress, source.ID, source.TrustMode)
 }
 
-func (manager AdminKeyManager) create(ctx context.Context, name, assignedAddress, rotationSourceID string) (AdminPeer, error) {
+func (manager AdminKeyManager) create(ctx context.Context, name, assignedAddress, rotationSourceID, trustMode string) (AdminPeer, error) {
 	if !manager.Available() {
 		return AdminPeer{}, errors.New("managed administrator key service is unavailable")
 	}
@@ -88,7 +88,7 @@ func (manager AdminKeyManager) create(ctx context.Context, name, assignedAddress
 	}
 	item, createErr := manager.Repository.CreateAdmin(ctx, AdminCreateInput{
 		Name: name, PublicKey: pair.Public, AssignedAddress: assignedAddress, KeyMode: "MANAGED",
-		PrivateKeySecretRef: secretReference, RotationSourceID: rotationSourceID,
+		PrivateKeySecretRef: secretReference, RotationSourceID: rotationSourceID, TrustMode: trustMode,
 	})
 	pair.Private = ""
 	if createErr != nil {

@@ -26,15 +26,29 @@ const (
 // reconciler. It deliberately cannot carry commands, arbitrary interfaces,
 // wildcard routes, foreign nftables objects, or private key material.
 type VPSHostPlan struct {
-	Generation         int64            `json:"generation"`
-	InterfaceName      string           `json:"interface_name"`
-	ListenPort         int              `json:"listen_port"`
-	RouteProtocol      int              `json:"route_protocol"`
-	InterfaceAddresses []string         `json:"interface_addresses"`
-	Peers              []VPSHostPeer    `json:"peers"`
-	ResourceRoutes     []VPSHostRoute   `json:"resource_routes"`
-	ACL                []VPSHostACLRule `json:"acl"`
-	HubAdminSources    []string         `json:"hub_admin_sources"`
+	Generation         int64               `json:"generation"`
+	InterfaceName      string              `json:"interface_name"`
+	ListenPort         int                 `json:"listen_port"`
+	RouteProtocol      int                 `json:"route_protocol"`
+	InterfaceAddresses []string            `json:"interface_addresses"`
+	Peers              []VPSHostPeer       `json:"peers"`
+	ResourceRoutes     []VPSHostRoute      `json:"resource_routes"`
+	ACL                []VPSHostACLRule    `json:"acl"`
+	HubAdminSources    []string            `json:"hub_admin_sources"`
+	AdminRelays        []VPSHostAdminRelay `json:"admin_relays"`
+}
+
+type VPSHostAdminRelay struct {
+	ID                 string `json:"id"`
+	GatewayPeerID      string `json:"gateway_peer_id"`
+	PublicEndpointHost string `json:"public_endpoint_host"`
+	PublicBindAddress  string `json:"public_bind_address"`
+	PublicUDPPort      int    `json:"public_udp_port"`
+	GatewayAddress     string `json:"gateway_address"`
+	VPSSourceAddress   string `json:"vps_source_address"`
+	DestinationPort    int    `json:"destination_port"`
+	RateLimitPerSecond int    `json:"rate_limit_per_second"`
+	BurstPackets       int    `json:"burst_packets"`
 }
 
 type VPSHostPeer struct {
@@ -141,13 +155,13 @@ ORDER BY id`)
 		plan.Peers[index].AllowedIPs = uniqueSorted(gatewayPrefixes[plan.Peers[index].ID])
 	}
 	adminRows, err := repository.Database.QueryContext(ctx, `
-SELECT id,public_key,assigned_address FROM admin_peers WHERE state!='REVOKED' ORDER BY id`)
+SELECT id,public_key,assigned_address,trust_mode FROM admin_peers WHERE state!='REVOKED' ORDER BY id`)
 	if err != nil {
 		return VPSHostPlan{}, err
 	}
 	for adminRows.Next() {
-		var id, publicKey, addressText string
-		if err := adminRows.Scan(&id, &publicKey, &addressText); err != nil {
+		var id, publicKey, addressText, trustMode string
+		if err := adminRows.Scan(&id, &publicKey, &addressText, &trustMode); err != nil {
 			adminRows.Close()
 			return VPSHostPlan{}, err
 		}
@@ -156,9 +170,14 @@ SELECT id,public_key,assigned_address FROM admin_peers WHERE state!='REVOKED' OR
 			adminRows.Close()
 			return VPSHostPlan{}, errors.New("stored administrator host projection is invalid")
 		}
-		prefix := netip.PrefixFrom(address, 32).String()
-		plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "ADMIN", PublicKey: publicKey, Address: prefix, AllowedIPs: []string{prefix}})
-		plan.HubAdminSources = append(plan.HubAdminSources, prefix)
+		if trustMode == TrustRoutedHub {
+			prefix := netip.PrefixFrom(address, 32).String()
+			plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "ADMIN", PublicKey: publicKey, Address: prefix, AllowedIPs: []string{prefix}})
+			plan.HubAdminSources = append(plan.HubAdminSources, prefix)
+		} else if trustMode != TrustEndToEndRelay {
+			adminRows.Close()
+			return VPSHostPlan{}, errors.New("stored administrator trust mode is invalid")
+		}
 	}
 	if err := adminRows.Close(); err != nil {
 		return VPSHostPlan{}, err
@@ -168,6 +187,7 @@ SELECT grant.id,grant.admin_peer_id,publication.gateway_peer_id,publication.id,
        admin.assigned_address,publication.published_alias,grant.protocol,grant.port_start,grant.port_end
 FROM acl_grants AS grant
 JOIN admin_peers AS admin ON admin.id=grant.admin_peer_id AND admin.state!='REVOKED'
+    AND admin.trust_mode='ROUTED_HUB'
 JOIN resource_publications AS publication ON publication.id=grant.publication_id
     AND publication.enabled=1 AND publication.state!='DISABLED'
 JOIN gateway_peers AS gateway ON gateway.id=publication.gateway_peer_id AND gateway.state!='REVOKED'
@@ -199,6 +219,31 @@ ORDER BY grant.id`)
 	if err := aclRows.Close(); err != nil {
 		return VPSHostPlan{}, err
 	}
+	relayRows, err := repository.Database.QueryContext(ctx, `
+SELECT relay.id,relay.gateway_peer_id,relay.public_endpoint_host,relay.public_bind_address,
+       relay.public_udp_port,gateway.assigned_address,gateway.remote_address,
+       relay.destination_port,relay.rate_limit_per_second,relay.burst_packets
+FROM admin_relays AS relay
+JOIN gateway_peers AS gateway ON gateway.id=relay.gateway_peer_id AND gateway.state!='REVOKED'
+WHERE relay.enabled=1 AND relay.state NOT IN ('DISABLED','CONFLICT','FAILED')
+ORDER BY relay.id`)
+	if err != nil {
+		return VPSHostPlan{}, err
+	}
+	for relayRows.Next() {
+		var item VPSHostAdminRelay
+		if err := relayRows.Scan(&item.ID, &item.GatewayPeerID, &item.PublicEndpointHost,
+			&item.PublicBindAddress, &item.PublicUDPPort, &item.GatewayAddress,
+			&item.VPSSourceAddress, &item.DestinationPort, &item.RateLimitPerSecond,
+			&item.BurstPackets); err != nil {
+			relayRows.Close()
+			return VPSHostPlan{}, err
+		}
+		plan.AdminRelays = append(plan.AdminRelays, item)
+	}
+	if err := relayRows.Close(); err != nil {
+		return VPSHostPlan{}, err
+	}
 	sort.Slice(plan.Peers, func(i, j int) bool {
 		return plan.Peers[i].Kind+"\x00"+plan.Peers[i].ID < plan.Peers[j].Kind+"\x00"+plan.Peers[j].ID
 	})
@@ -206,6 +251,7 @@ ORDER BY grant.id`)
 		return plan.ResourceRoutes[i].PublicationID < plan.ResourceRoutes[j].PublicationID
 	})
 	sort.Slice(plan.ACL, func(i, j int) bool { return plan.ACL[i].ID < plan.ACL[j].ID })
+	sort.Slice(plan.AdminRelays, func(i, j int) bool { return plan.AdminRelays[i].ID < plan.AdminRelays[j].ID })
 	plan.InterfaceAddresses = uniqueSorted(plan.InterfaceAddresses)
 	plan.HubAdminSources = uniqueSorted(plan.HubAdminSources)
 	if err := validateVPSHostPlan(plan); err != nil {
@@ -252,6 +298,7 @@ func validateVPSHostPlan(plan VPSHostPlan) error {
 		return errors.New("VPS host-plan interface addresses are invalid")
 	}
 	interfaceNetworks := make([]netip.Prefix, 0, len(plan.InterfaceAddresses))
+	interfaceSources := make(map[string]string, len(plan.InterfaceAddresses))
 	previousInterface := ""
 	for _, raw := range plan.InterfaceAddresses {
 		prefix, err := netip.ParsePrefix(raw)
@@ -266,6 +313,7 @@ func validateVPSHostPlan(plan VPSHostPlan) error {
 			}
 		}
 		interfaceNetworks = append(interfaceNetworks, network)
+		interfaceSources[network.String()] = prefix.Addr().String()
 	}
 	keys := map[string]struct{}{}
 	peerIDs := map[string]struct{}{}
@@ -348,6 +396,40 @@ func validateVPSHostPlan(plan VPSHostPlan) error {
 			return errors.New("VPS host-plan Hub administrator source is invalid")
 		}
 		previousSource = source
+	}
+	previousRelay := ""
+	relayPorts := map[string]struct{}{}
+	for _, relay := range plan.AdminRelays {
+		gateway := netip.Prefix{}
+		vpsSource := netip.Prefix{}
+		expectedVPSSource := ""
+		for _, peer := range plan.Peers {
+			if peer.Kind == "GATEWAY" && peer.ID == relay.GatewayPeerID {
+				gateway, _ = hostPlanPrefix(peer.Address)
+				for _, network := range interfaceNetworks {
+					if network.Contains(gateway.Addr()) {
+						expectedVPSSource = interfaceSources[network.String()]
+						break
+					}
+				}
+			}
+		}
+		var err error
+		vpsSource, err = hostPlanPrefix(relay.VPSSourceAddress)
+		bind, bindErr := netip.ParseAddr(relay.PublicBindAddress)
+		portKey := relay.PublicBindAddress + "\x00" + strconv.Itoa(relay.PublicUDPPort)
+		if !hubIdentifierPattern.MatchString(relay.ID) || relay.ID <= previousRelay || gateway.Bits() != 32 ||
+			relay.GatewayAddress != gateway.Addr().String() || err != nil || vpsSource.Bits() != 32 || relay.VPSSourceAddress != expectedVPSSource ||
+			bindErr != nil || !bind.Is4() || !bind.IsGlobalUnicast() || bind.IsUnspecified() || bind.IsLoopback() || bind.IsLinkLocalUnicast() ||
+			!validRelayHost(relay.PublicEndpointHost) || relay.PublicUDPPort < 1 || relay.PublicUDPPort > 65535 || relay.PublicUDPPort == VPSManagementPort ||
+			relay.DestinationPort != AdminRelayDestinationPort || relay.RateLimitPerSecond < 1 || relay.RateLimitPerSecond > 10000 || relay.BurstPackets < 1 || relay.BurstPackets > 10000 {
+			return errors.New("VPS host-plan administrator relay is invalid")
+		}
+		if _, exists := relayPorts[portKey]; exists {
+			return errors.New("VPS host-plan administrator relay port is duplicated")
+		}
+		relayPorts[portKey] = struct{}{}
+		previousRelay = relay.ID
 	}
 	return nil
 }

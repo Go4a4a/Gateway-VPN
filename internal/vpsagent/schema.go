@@ -234,3 +234,36 @@ SET config_state=CASE WHEN key_mode='MANAGED' THEN 'AVAILABLE' ELSE 'NOT_APPLICA
 
 CREATE INDEX admin_peers_rotation_source ON admin_peers(rotation_source_id,state);
 `
+
+// schemaV4 adds only the public relay allocation and administrator trust
+// selection. The inner wg-admin private/session key is intentionally absent:
+// a compromised VPS may drop encrypted datagrams, but cannot authenticate as
+// an administrator at the Gateway.
+const schemaV4 = `
+ALTER TABLE admin_peers ADD COLUMN trust_mode TEXT NOT NULL DEFAULT 'ROUTED_HUB'
+    CHECK(trust_mode IN ('ROUTED_HUB','END_TO_END_RELAY'));
+
+CREATE TABLE admin_relays(
+    id TEXT PRIMARY KEY,
+    gateway_peer_id TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    public_endpoint_host TEXT NOT NULL,
+    public_bind_address TEXT NOT NULL,
+    public_udp_port INTEGER NOT NULL CHECK(public_udp_port BETWEEN 1 AND 65535),
+    destination_port INTEGER NOT NULL CHECK(destination_port BETWEEN 1 AND 65535),
+    rate_limit_per_second INTEGER NOT NULL DEFAULT 100 CHECK(rate_limit_per_second BETWEEN 1 AND 10000),
+    burst_packets INTEGER NOT NULL DEFAULT 200 CHECK(burst_packets BETWEEN 1 AND 10000),
+    state TEXT NOT NULL DEFAULT 'CONFIGURED'
+        CHECK(state IN ('DISABLED','CONFIGURED','ACTIVE','DEGRADED','CONFLICT','FAILED')),
+    desired_generation INTEGER NOT NULL DEFAULT 1 CHECK(desired_generation>0),
+    applied_generation INTEGER NOT NULL DEFAULT 0 CHECK(applied_generation>=0),
+    status_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(public_bind_address,public_udp_port),
+    FOREIGN KEY(gateway_peer_id) REFERENCES gateway_peers(id) ON DELETE CASCADE,
+    CHECK((enabled=1 AND state!='DISABLED') OR (enabled=0 AND state='DISABLED'))
+);
+
+CREATE INDEX admin_relays_state ON admin_relays(enabled,state,gateway_peer_id);
+`

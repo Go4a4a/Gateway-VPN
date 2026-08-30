@@ -69,6 +69,63 @@ func TestRenderFirewallTransactionMapsForwardedSubnetAndMasqueradesReplies(t *te
 	}
 }
 
+func TestRenderFirewallTransactionBindsRelayAndACLToInnerIdentity(t *testing.T) {
+	plan := gatewayPlanFixture(t)
+	innerGateway, _ := wgingress.GenerateKeyPair()
+	innerAdmin, _ := wgingress.GenerateKeyPair()
+	plan.Links[0].AllowedIPs = []string{"10.82.0.1/32"}
+	plan.AdminContour = &managementfabric.RenderedAdminContour{
+		InterfaceName:       managementfabric.AdminInterfaceName,
+		PrivateKeySecretRef: "/var/lib/gateway-vpn/secrets/management/wg-admin.key",
+		PublicKey:           innerGateway.Public, Subnet: "10.83.0.0/24", GatewayAddress: "10.83.0.1/32",
+		ListenPort: managementfabric.AdminListenPort,
+		Relays: []managementfabric.RenderedAdminRelayIngress{{
+			RelayID: "relay:a", LinkID: "link:a", InputInterface: "gvm1",
+			OuterSource: "10.82.0.1/32", OuterDestination: "10.82.0.2/32",
+			PublicEndpointHost: "vps-a.example.net", PublicBindAddress: "203.0.113.10", PublicUDPPort: 51823,
+			DestinationPort: managementfabric.AdminListenPort, RateLimitPerSecond: 100, BurstPackets: 200,
+		}},
+		Peers: []managementfabric.RenderedAdminPeer{{
+			TunnelID: "tunnel:a", AdminID: "admin:a", RelayID: "relay:a", LinkID: "link:a",
+			PublicKey: innerAdmin.Public, AssignedAddress: "10.83.0.10/32",
+		}},
+	}
+	plan.ACL[0].InputInterface = managementfabric.AdminInterfaceName
+	plan.ACL[0].Source = "10.83.0.10/32"
+	plan.ACL[0].TrustMode = managementfabric.TrustEndToEndRelay
+	plan.ACL[0].TunnelID = "tunnel:a"
+	plan.ACL[0].RelayID = "relay:a"
+	payload, err := RenderFirewallTransaction(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, required := range []string{
+		`add element inet gateway_vpn management_fabric_interfaces { "gvm1", "wg-admin" }`,
+		`iifname "gvm1" ip saddr 10.82.0.1/32 ip daddr 10.82.0.2/32 udp dport 51822 limit rate 100/second burst 200 packets`,
+		`iifname "wg-admin" ip saddr 10.83.0.10/32 ip daddr 10.96.1.1/32 tcp dport 8443`,
+		`iifname "wg-admin" ip saddr 10.83.0.10/32 ip daddr 192.168.200.1/32 ct state new tcp dport 8443`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("end-to-end Gateway transaction missing %q:\n%s", required, text)
+		}
+	}
+	for _, forbidden := range []string{"ip saddr 10.81.0.10/32", "0.0.0.0/0", "flush ruleset"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("end-to-end Gateway transaction contains unsafe scope %q:\n%s", forbidden, text)
+		}
+	}
+
+	tampered := plan
+	contour := *plan.AdminContour
+	tampered.AdminContour = &contour
+	tampered.AdminContour.Relays = append([]managementfabric.RenderedAdminRelayIngress(nil), plan.AdminContour.Relays...)
+	tampered.AdminContour.Relays[0].OuterSource = "10.90.0.1/32"
+	if _, err := RenderFirewallTransaction(tampered); err == nil {
+		t.Fatal("Gateway renderer accepted a relay outside its authenticated outer link")
+	}
+}
+
 func gatewayPlanFixture(t *testing.T) managementfabric.GatewayHostPlan {
 	t.Helper()
 	local, _ := wgingress.GenerateKeyPair()
@@ -94,7 +151,7 @@ func gatewayPlanFixture(t *testing.T) managementfabric.GatewayHostPlan {
 			RuleID: "acl:a", AdminID: "admin:a", ResourceID: "resource:a", PublicationID: "publication:a", LinkID: "link:a", InputInterface: "gvm1",
 			ResourceKind: managementfabric.ResourceGatewayService, AccessProfile: managementfabric.ProfileGatewayOnly,
 			Source: "10.81.0.10/32", PublishedAlias: "10.96.1.1/32", LocalDestination: "192.168.200.1",
-			Protocol: managementfabric.ProtocolTCP, PortStart: 8443, PortEnd: 8443,
+			Protocol: managementfabric.ProtocolTCP, PortStart: 8443, PortEnd: 8443, TrustMode: managementfabric.TrustRoutedHub,
 		}},
 	}
 }

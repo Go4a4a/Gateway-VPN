@@ -91,6 +91,11 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/hub/admins/{id}/config", server.protected(http.HandlerFunc(server.downloadAdminConfig)))
 	mux.Handle("POST /api/v1/hub/admins/{id}/rotate", server.protected(http.HandlerFunc(server.rotateAdmin)))
 	mux.Handle("POST /api/v1/hub/admins/{id}/revoke", server.protected(http.HandlerFunc(server.revokeAdmin)))
+	mux.Handle("PUT /api/v1/hub/admins/{id}/trust-mode", server.protected(http.HandlerFunc(server.updateAdminTrustMode)))
+	mux.Handle("GET /api/v1/hub/admin-relays", server.protected(http.HandlerFunc(server.listAdminRelays)))
+	mux.Handle("POST /api/v1/hub/admin-relays", server.protected(http.HandlerFunc(server.createAdminRelay)))
+	mux.Handle("PUT /api/v1/hub/admin-relays/{id}/enabled", server.protected(http.HandlerFunc(server.setAdminRelayEnabled)))
+	mux.Handle("DELETE /api/v1/hub/admin-relays/{id}", server.protected(http.HandlerFunc(server.deleteAdminRelay)))
 	mux.Handle("GET /api/v1/hub/resources", server.protected(http.HandlerFunc(server.listResources)))
 	mux.Handle("POST /api/v1/hub/resources", server.protected(http.HandlerFunc(server.createResource)))
 	mux.Handle("PUT /api/v1/hub/resources/{id}", server.protected(http.HandlerFunc(server.updateResource)))
@@ -319,6 +324,7 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 		KeyMode         string `json:"key_mode"`
 		Password        string `json:"password"`
 		Confirmation    string `json:"confirmation"`
+		TrustMode       string `json:"trust_mode"`
 	}
 	if err := decodeJSON(request, &input, 8192); err != nil {
 		writeError(writer, http.StatusBadRequest, "ADMIN_REQUEST_INVALID", "Некорректные параметры администратора")
@@ -331,6 +337,11 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 	var item vpsagent.AdminPeer
 	var err error
 	if mode == "MANAGED" {
+		trustMode := strings.ToUpper(strings.TrimSpace(input.TrustMode))
+		if trustMode != "" && trustMode != vpsagent.TrustRoutedHub {
+			writeError(writer, http.StatusBadRequest, "MANAGED_ADMIN_TRUST_MODE_INVALID", "Управляемый VPS-ключ поддерживает только ROUTED_HUB; для END_TO_END_RELAY приватный ключ должен оставаться на устройстве администратора")
+			return
+		}
 		if server.dependencies.AdminKeys == nil || !server.dependencies.AdminKeys.Available() {
 			writeError(writer, http.StatusServiceUnavailable, "MANAGED_ADMIN_KEYS_UNAVAILABLE", "Управляемая выдача конфигурации на этом VPS недоступна")
 			return
@@ -344,7 +355,7 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 		}
 		item, err = server.dependencies.AdminKeys.Create(request.Context(), input.Name, input.AssignedAddress)
 	} else if mode == "EXTERNAL" {
-		item, err = server.dependencies.Hub.CreateAdmin(request.Context(), vpsagent.AdminCreateInput{Name: input.Name, PublicKey: input.PublicKey, AssignedAddress: input.AssignedAddress, KeyMode: "EXTERNAL"})
+		item, err = server.dependencies.Hub.CreateAdmin(request.Context(), vpsagent.AdminCreateInput{Name: input.Name, PublicKey: input.PublicKey, AssignedAddress: input.AssignedAddress, KeyMode: "EXTERNAL", TrustMode: input.TrustMode})
 	} else {
 		writeError(writer, http.StatusBadRequest, "ADMIN_KEY_MODE_INVALID", "Выберите внешний или управляемый режим ключа")
 		return
@@ -358,6 +369,94 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_PEER_CREATED", map[string]any{"user_id": principal.UserID, "admin_peer_id": item.ID, "assigned_address": item.AssignedAddress, "key_mode": item.KeyMode})
 	server.scheduleFabric(request.Context(), "ADMIN_CREATED")
 	writeJSON(writer, http.StatusCreated, item)
+}
+
+func (server *Server) updateAdminTrustMode(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "ADMIN_ID_INVALID", "Некорректный идентификатор администратора")
+		return
+	}
+	var input struct {
+		TrustMode string `json:"trust_mode"`
+	}
+	if err := decodeJSON(request, &input, 2048); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_TRUST_MODE_INVALID", "Выберите ROUTED_HUB или END_TO_END_RELAY")
+		return
+	}
+	if err := server.dependencies.Hub.SetAdminTrustMode(request.Context(), id, input.TrustMode); err != nil {
+		writeHubError(writer, err, "Trust mode администратора не изменён")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_TRUST_MODE_UPDATED", map[string]any{"user_id": principal.UserID, "admin_peer_id": id, "trust_mode": strings.ToUpper(strings.TrimSpace(input.TrustMode))})
+	server.scheduleFabric(request.Context(), "ADMIN_TRUST_MODE_UPDATED")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) listAdminRelays(writer http.ResponseWriter, request *http.Request) {
+	items, err := server.dependencies.Hub.ListAdminRelays(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "ADMIN_RELAY_LIST_UNAVAILABLE", "Список end-to-end relay недоступен")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items, "destination_port": vpsagent.AdminRelayDestinationPort, "private_keys_on_vps": false})
+}
+
+func (server *Server) createAdminRelay(writer http.ResponseWriter, request *http.Request) {
+	var input vpsagent.AdminRelayInput
+	if err := decodeJSON(request, &input, 8192); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_RELAY_REQUEST_INVALID", "Некорректные параметры end-to-end relay")
+		return
+	}
+	item, err := server.dependencies.Hub.CreateAdminRelay(request.Context(), input)
+	if err != nil {
+		writeHubError(writer, err, "End-to-end relay не создан")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_RELAY_CREATED", map[string]any{"user_id": principal.UserID, "relay_id": item.ID, "gateway_peer_id": item.GatewayPeerID, "public_udp_port": item.PublicUDPPort})
+	server.scheduleFabric(request.Context(), "ADMIN_RELAY_CREATED")
+	writeJSON(writer, http.StatusCreated, item)
+}
+
+func (server *Server) setAdminRelayEnabled(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "ADMIN_RELAY_ID_INVALID", "Некорректный идентификатор relay")
+		return
+	}
+	var input struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(request, &input, 2048); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_RELAY_REQUEST_INVALID", "Некорректное состояние relay")
+		return
+	}
+	if err := server.dependencies.Hub.SetAdminRelayEnabled(request.Context(), id, input.Enabled); err != nil {
+		writeHubError(writer, err, "Состояние relay не изменено")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_RELAY_STATE_UPDATED", map[string]any{"user_id": principal.UserID, "relay_id": id, "enabled": input.Enabled})
+	server.scheduleFabric(request.Context(), "ADMIN_RELAY_STATE_UPDATED")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) deleteAdminRelay(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || request.Header.Get("X-Confirm-Destructive") != "delete-disabled-admin-relay" {
+		writeError(writer, http.StatusConflict, "ADMIN_RELAY_DELETE_CONFIRMATION_REQUIRED", "Удалить можно только заранее отключённый relay после подтверждения")
+		return
+	}
+	if err := server.dependencies.Hub.DeleteAdminRelay(request.Context(), id); err != nil {
+		writeHubError(writer, err, "Relay не удалён")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_RELAY_DELETED", map[string]any{"user_id": principal.UserID, "relay_id": id})
+	server.scheduleFabric(request.Context(), "ADMIN_RELAY_DELETED")
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (server *Server) downloadAdminConfig(writer http.ResponseWriter, request *http.Request) {
@@ -609,6 +708,9 @@ func (server *Server) hubWatchdog(writer http.ResponseWriter, request *http.Requ
 			host = map[string]any{
 				"available": true, "state": status.State, "healthy": status.Healthy,
 				"reconcile_scheduled": status.ReconcileScheduled, "reason": status.Reason, "checked_at": status.CheckedAt,
+				"desired_generation": status.DesiredGeneration, "applied_generation": status.AppliedGeneration,
+				"relay_count": status.RelayCount, "relay_rule_count": status.RelayRuleCount,
+				"relay_packets": status.RelayPackets, "relay_bytes": status.RelayBytes,
 			}
 			if status.State == "FAILED" {
 				report.State = "FAILED"

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/wgingress"
 )
@@ -18,6 +19,7 @@ import (
 func TestVPSRestoreStageVerifiesPreviewAndLeavesNoUploadOrPassphrase(t *testing.T) {
 	ctx := context.Background()
 	backupManager, database, stateDirectory := vpsBackupFixture(t)
+	relayFixture := seedVPSRelayBackupFixture(t, backupManager, database)
 	passphrase := "correct horse battery staple"
 	artifact, err := backupManager.Build(ctx, passphrase)
 	if err != nil {
@@ -47,6 +49,15 @@ func TestVPSRestoreStageVerifiesPreviewAndLeavesNoUploadOrPassphrase(t *testing.
 	verified, err := restoreManager.VerifyPending(ctx)
 	if err != nil || verified.Identity.VPSID != "vps:primary" || verified.Manifest.Role != "vps" || verified.TreeRoot == "" {
 		t.Fatalf("VerifyPending() = %+v, %v", verified, err)
+	}
+	stagedDatabase, err := databasepkg.OpenImmutable(ctx, filepath.Join(verified.TreeRoot, "database", "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertVPSRelayBackupFixture(t, ctx, stagedDatabase, relayFixture, "ACTIVE", "ACTIVE", "RELAY_BACKUP_FIXTURE")
+	stagedDatabase.Close()
+	if _, err := os.Stat(filepath.Join(verified.TreeRoot, "state", "secrets", "management", "wg-admin.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged VPS restore contains forbidden inner administrator private key: %v", err)
 	}
 	operationRoot := filepath.Join(restoreManager.Root, operation.RestoreID)
 	for _, removed := range []string{"upload.gvpn-vps", "payload.zip"} {

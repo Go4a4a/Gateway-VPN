@@ -23,6 +23,35 @@
   <div id="app-view" class="app-shell" hidden>
     <aside>
       <div class="brand"><span class="brand-mark small">GV</span><span><strong>Gateway VPN</strong><small>Control plane</small></span></div>
+      <label id="mobile-navigation" class="mobile-navigation" for="mobile-navigation-select">
+        <span>Раздел WebUI</span>
+        <select id="mobile-navigation-select">
+          <optgroup label="Состояние">
+            <option value="overview">Обзор</option>
+            <option value="health">Состояние и события</option>
+            <option value="traffic">Трафик</option>
+          </optgroup>
+          <optgroup label="Интернет и VPN">
+            <option value="uplinks">Физические выходы</option>
+            <option value="modems">Модемы</option>
+            <option value="access">Способы доступа</option>
+            <option value="subscriptions">Подписки</option>
+            <option value="matrix">Матрица путей</option>
+            <option value="targets">Серверы проверки</option>
+            <option value="matchers">Правила отбора</option>
+            <option value="nodes">VPN-серверы</option>
+          </optgroup>
+          <optgroup label="Туннели и управление">
+            <option value="wireguard-ingress">WireGuard-клиенты</option>
+            <option value="management-fabric">VPS и удалённое управление</option>
+            <option value="remote">Legacy VPS-канал</option>
+          </optgroup>
+          <optgroup label="Gateway">
+            <option value="network">Сеть</option>
+            <option value="system">Система и безопасность</option>
+          </optgroup>
+        </select>
+      </label>
       <nav id="navigation" aria-label="Разделы">
         <div class="nav-group">Состояние</div>
         <button data-tab="overview" class="active">Обзор</button>

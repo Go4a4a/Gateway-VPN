@@ -182,7 +182,7 @@ func TestValidateFabricRequiresTypedBoundedSameSiteACL(t *testing.T) {
 			LocalPublicKey:           localKey, RemotePublicKey: remoteKey, UplinkPolicy: UplinkAuto,
 			PersistentKeepalive: 25, Endpoints: []EndpointSpec{{Host: "vps-a.example.net", Port: 51821}},
 		}},
-		Admins: []AdminSpec{{ID: "admin:a", VPSID: "vps:a", AssignedAddress: "10.81.0.10"}},
+		Admins: []AdminSpec{{ID: "admin:a", VPSID: "vps:a", AssignedAddress: "10.81.0.10", TrustMode: TrustRoutedHub}},
 		Resources: []ResourceSpec{{
 			ID: "resource:host", SiteID: "site:a", Kind: ResourceLocalHost,
 			AccessProfile: ProfileDedicatedLAN, LocalDestination: "192.168.50.10",

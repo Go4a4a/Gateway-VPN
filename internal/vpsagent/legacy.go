@@ -141,7 +141,7 @@ func (repository HubRepository) MarkHostPlanApplied(ctx context.Context, generat
 	if _, err := transaction.ExecContext(ctx, "UPDATE vps_settings SET value_json=?,updated_at=? WHERE key='fabric'", string(encoded), stamp); err != nil {
 		return err
 	}
-	for _, table := range []string{"gateway_peers", "admin_peers", "resource_publications"} {
+	for _, table := range []string{"gateway_peers", "admin_peers", "resource_publications", "admin_relays"} {
 		if _, err := transaction.ExecContext(ctx, "UPDATE "+table+" SET applied_generation=desired_generation,updated_at=?", stamp); err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func (repository HubRepository) RestoreHostPlanAppliedGeneration(ctx context.Con
 	if _, err := transaction.ExecContext(ctx, "UPDATE vps_settings SET value_json=?,updated_at=? WHERE key='fabric'", string(encoded), stamp); err != nil {
 		return err
 	}
-	for _, table := range []string{"gateway_peers", "admin_peers", "resource_publications"} {
+	for _, table := range []string{"gateway_peers", "admin_peers", "resource_publications", "admin_relays"} {
 		if _, err := transaction.ExecContext(ctx, "UPDATE "+table+" SET applied_generation=CASE WHEN desired_generation<? THEN desired_generation ELSE ? END,updated_at=?", generation, generation, stamp); err != nil {
 			return err
 		}

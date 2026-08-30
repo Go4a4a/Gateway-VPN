@@ -206,6 +206,44 @@ func TestManagementFabricWatchdogSeparatesConvergenceFromExternalAdminHandshake(
 	}); err != nil {
 		t.Fatal(err)
 	}
+	innerGateway, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	innerAdmin, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at)
+VALUES('admin:a','Administrator','ADMIN',1,'ACTIVE',?,?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO management_admin_vps_peers(
+ id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at
+) VALUES('admin-peer:a','admin:a','vps:a',?,'10.81.0.10','ACTIVE',1,1,?,?)`, innerAdmin.Public, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.ConfigureAdminContour(ctx, managementfabric.AdminContourRootInput{
+		Enabled: true, InterfaceName: managementfabric.AdminInterfaceName,
+		PrivateKeySecretRef: managementfabric.AdminPrivateKeySecretRef, PublicKey: innerGateway.Public,
+		Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateAdminRelay(ctx, managementfabric.AdminRelayInput{
+		ID: "relay:a", LinkID: "link:a", Enabled: true, PublicEndpointHost: "relay.example.net",
+		PublicBindAddress: "203.0.113.10", PublicUDPPort: 51830, RateLimitPerSecond: 100, BurstPackets: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateAdminTunnel(ctx, managementfabric.AdminTunnelInput{
+		ID: "tunnel:a", AdminID: "admin:a", RelayID: "relay:a", PublicKey: innerAdmin.Public, AssignedAddress: "10.85.0.10",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := repository.BuildGatewayHostPlan(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -215,11 +253,18 @@ func TestManagementFabricWatchdogSeparatesConvergenceFromExternalAdminHandshake(
 	}
 	runtime := &fakeManagementFabricRuntime{}
 	executor := &exactOutputExecutor{outputs: map[string]string{
-		"/usr/sbin/ip -json link show dev gvm1":       `[{"flags":["UP"]}]`,
-		"/usr/sbin/ip -json -4 address show dev gvm1": `[{"addr_info":[{"local":"10.82.0.2","prefixlen":32}]}]`,
-		"/usr/bin/wg show gvm1 public-key":            localKeys.Public + "\n",
-		"/usr/bin/wg show gvm1 peers":                 vpsKeys.Public + "\n",
-		"/usr/bin/wg show gvm1 latest-handshakes":     vpsKeys.Public + "\t" + strconv.FormatInt(now.Add(-30*time.Second).Unix(), 10) + "\n",
+		"/usr/sbin/ip -json link show dev gvm1":                                    `[{"flags":["UP"]}]`,
+		"/usr/sbin/ip -json -4 address show dev gvm1":                              `[{"addr_info":[{"local":"10.82.0.2","prefixlen":32}]}]`,
+		"/usr/bin/wg show gvm1 public-key":                                         localKeys.Public + "\n",
+		"/usr/bin/wg show gvm1 peers":                                              vpsKeys.Public + "\n",
+		"/usr/bin/wg show gvm1 latest-handshakes":                                  vpsKeys.Public + "\t" + strconv.FormatInt(now.Add(-30*time.Second).Unix(), 10) + "\n",
+		"/usr/sbin/ip -json link show dev wg-admin":                                `[{"flags":["UP"]}]`,
+		"/usr/sbin/ip -json -4 address show dev wg-admin":                          `[{"addr_info":[{"local":"10.85.0.1","prefixlen":32}]}]`,
+		"/usr/bin/wg show wg-admin public-key":                                     innerGateway.Public + "\n",
+		"/usr/bin/wg show wg-admin listen-port":                                    "51822\n",
+		"/usr/bin/wg show wg-admin peers":                                          innerAdmin.Public + "\n",
+		"/usr/bin/wg show wg-admin latest-handshakes":                              innerAdmin.Public + "\t" + strconv.FormatInt(now.Add(-20*time.Second).Unix(), 10) + "\n",
+		"/usr/sbin/ip -N -json -4 route show table main dev wg-admin protocol 186": `[{"dst":"10.85.0.10/32","dev":"wg-admin","protocol":186}]`,
 	}}
 	probe := &SystemProbe{Executor: executor, IP: "/usr/sbin/ip", WG: "/usr/bin/wg", DatabasePath: databasePath, ManagementFabric: runtime}
 
@@ -228,9 +273,21 @@ func TestManagementFabricWatchdogSeparatesConvergenceFromExternalAdminHandshake(
 		t.Fatalf("healthy management fabric routes = %+v", routes)
 	}
 	admin := probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
-	if !admin.Applicable || !admin.Healthy || admin.Classification != "" {
+	if !admin.Applicable || !admin.Healthy || admin.Classification != "" || admin.Details["inner_tunnels"] != 1 || admin.Details["enabled_relays"] != 1 {
 		t.Fatalf("healthy admin WireGuard = %+v", admin)
 	}
+	executor.outputs["/usr/bin/wg show wg-admin latest-handshakes"] = innerAdmin.Public + "\t" + strconv.FormatInt(now.Add(-time.Hour).Unix(), 10) + "\n"
+	admin = probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
+	if admin.Healthy || admin.Classification != ClassificationExternal || admin.ErrorCode != "WG_ADMIN_EXTERNAL_OUTAGE" {
+		t.Fatalf("stale inner administrator handshake = %+v", admin)
+	}
+	executor.outputs["/usr/bin/wg show wg-admin latest-handshakes"] = innerAdmin.Public + "\t" + strconv.FormatInt(now.Add(-20*time.Second).Unix(), 10) + "\n"
+	executor.outputs["/usr/bin/wg show wg-admin listen-port"] = "51823\n"
+	admin = probe.wireGuardAdminHealth(ctx, now, DefaultPolicy())
+	if admin.Healthy || admin.Classification == ClassificationExternal || admin.ErrorCode != "WG_ADMIN_LOCAL_DRIFT" {
+		t.Fatalf("wg-admin identity drift = %+v", admin)
+	}
+	executor.outputs["/usr/bin/wg show wg-admin listen-port"] = "51822\n"
 
 	runtime.status = ManagementFabricStatus{NeedsApply: true, Reason: "KERNEL_STATE_DIVERGED"}
 	routes = probe.managementFabricRouteHealth(ctx)

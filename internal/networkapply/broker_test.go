@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/removal"
@@ -112,11 +113,15 @@ type fakeRemovalAdmin struct {
 }
 
 type fakeManagementFabricAdmin struct {
-	applyCalls  int
-	statusCalls int
-	needed      bool
-	reason      string
-	err         error
+	applyCalls     int
+	statusCalls    int
+	configureCalls int
+	rotateCalls    int
+	needed         bool
+	reason         string
+	contour        managementfabric.AdminContour
+	request        managementfabric.AdminContourRequest
+	err            error
 }
 
 type fakePortableBackupAdmin struct {
@@ -203,10 +208,24 @@ func (admin *fakeManagementFabricAdmin) NeedsApply(context.Context) (bool, strin
 	return admin.needed, admin.reason, admin.err
 }
 
+func (admin *fakeManagementFabricAdmin) ConfigureAdminContour(_ context.Context, input managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
+	admin.configureCalls++
+	admin.request = input
+	return admin.contour, admin.err
+}
+
+func (admin *fakeManagementFabricAdmin) RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error) {
+	admin.rotateCalls++
+	return admin.contour, admin.err
+}
+
 func TestBrokerManagementFabricIsParameterFreeAndRedactsRootErrors(t *testing.T) {
 	ctx, database := networkApplyDatabase(t)
 	engine, _, _ := testEngine(t, database)
-	admin := &fakeManagementFabricAdmin{needed: true, reason: "DESIRED_GENERATION_PENDING"}
+	admin := &fakeManagementFabricAdmin{needed: true, reason: "DESIRED_GENERATION_PENDING", contour: managementfabric.AdminContour{
+		Enabled: true, InterfaceName: managementfabric.AdminInterfaceName, PublicKey: "public-redacted-by-fixture",
+		Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
+	}}
 	server, err := NewBrokerServer(engine)
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +251,33 @@ func TestBrokerManagementFabricIsParameterFreeAndRedactsRootErrors(t *testing.T)
 	response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest || admin.applyCalls != 1 {
 		t.Fatalf("parameterized Management Fabric status/calls = %d/%d", response.StatusCode, admin.applyCalls)
+	}
+	configured, err := client.ConfigureAdminContour(ctx, managementfabric.AdminContourRequest{Enabled: true, Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1"})
+	if err != nil || configured.InterfaceName != managementfabric.AdminInterfaceName || admin.configureCalls != 1 || admin.request.Subnet != "10.85.0.0/24" {
+		t.Fatalf("ConfigureAdminContour() = %+v request=%+v calls=%d error=%v", configured, admin.request, admin.configureCalls, err)
+	}
+	if _, err := client.RotateAdminContourIdentity(ctx); err != nil || admin.rotateCalls != 1 {
+		t.Fatalf("RotateAdminContourIdentity() calls=%d error=%v", admin.rotateCalls, err)
+	}
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/management-fabric/admin-contour/configure", strings.NewReader(`{"enabled":true,"subnet":"10.85.0.0/24","gateway_address":"10.85.0.1","private_key":"forbidden","path":"/etc/shadow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err = httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || admin.configureCalls != 1 {
+		t.Fatalf("unbounded administrator contour request = %d calls=%d", response.StatusCode, admin.configureCalls)
+	}
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/management-fabric/admin-contour/rotate", strings.NewReader(`{"command":"wg genkey"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err = httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || admin.rotateCalls != 1 {
+		t.Fatalf("parameterized administrator contour rotation = %d calls=%d", response.StatusCode, admin.rotateCalls)
 	}
 	admin.err = errors.New("private key path and nft command detail")
 	if err := client.SyncManagementFabric(ctx); err == nil || strings.Contains(err.Error(), "key path") || strings.Contains(err.Error(), "nft command") {

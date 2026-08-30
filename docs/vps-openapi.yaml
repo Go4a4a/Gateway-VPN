@@ -1,0 +1,623 @@
+openapi: 3.1.0
+info:
+  title: Gateway VPN VPS Hub API
+  version: 1.0.0-dev
+  description: |
+    Отдельный restricted API lightweight VPS Agent. Он обслуживает только
+    объекты Gateway VPN и не является общей панелью управления VPS. Все
+    маршруты, кроме login и одноразового pairing completion, требуют
+    VPS-specific session cookie; mutations дополнительно требуют CSRF.
+    End-to-end relay хранит только публичную allocation/forwarding policy:
+    inner WireGuard private key на VPS отсутствует.
+servers:
+  - url: https://127.0.0.1:9443
+    description: Локальный listener VPS
+  - url: https://10.80.0.1:9443
+    description: Legacy/admin WireGuard listener
+tags:
+  - name: Auth
+  - name: Pairing
+  - name: Hub
+  - name: Gateways
+  - name: Administrators
+  - name: Relays
+  - name: Resources
+  - name: Access
+  - name: Watchdog
+  - name: Backup
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: loginVPSHub
+      summary: Создать VPS-specific административную сессию
+      security: []
+      requestBody: {$ref: '#/components/requestBodies/Login'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logoutVPSHub
+      summary: Отозвать текущую VPS Hub сессию
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/auth/session:
+    get:
+      tags: [Auth]
+      operationId: getVPSHubSession
+      summary: Получить сессию и ротированный CSRF token
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/auth/password:
+    put:
+      tags: [Auth]
+      operationId: changeVPSHubPassword
+      summary: Изменить собственный пароль и отозвать остальные сессии
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PasswordChange'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/pairing/complete:
+    post:
+      tags: [Pairing]
+      operationId: completeVPSPairing
+      summary: Однократно завершить pairing по bounded invitation token
+      description: Публичная cookie-сессия не нужна; авторизацией служит одноразовый token с expiry/attempt budget.
+      security: []
+      requestBody: {$ref: '#/components/requestBodies/PairingCompletion'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/overview:
+    get:
+      tags: [Hub]
+      operationId: getVPSHubOverview
+      summary: Получить secret-free состояние VPS Hub
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/pairing-invitations:
+    get:
+      tags: [Pairing]
+      operationId: listVPSPairingInvitations
+      summary: Перечислить приглашения без token digest
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Pairing]
+      operationId: createVPSPairingInvitation
+      summary: Создать одноразовое приглашение на 5 минут–24 часа
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/PairingInvitation'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/pairing-invitations/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [Pairing]
+      operationId: rejectVPSPairingInvitation
+      summary: Отозвать приглашение до использования
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/gateways:
+    get:
+      tags: [Gateways]
+      operationId: listVPSGateways
+      summary: Перечислить paired Gateway без private keys
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/gateways/{id}/revoke:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Gateways]
+      operationId: revokeVPSGateway
+      summary: Отозвать Gateway после password re-authentication и точной фразы
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/ReauthenticatedConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admins:
+    get:
+      tags: [Administrators]
+      operationId: listVPSAdministrators
+      summary: Перечислить external/managed administrators и trust mode
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Administrators]
+      operationId: createVPSAdministrator
+      summary: Создать external либо one-use managed administrator
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/AdminCreate'}
+      responses: {'201': {$ref: '#/components/responses/AdminPeer'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admins/{id}/config:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Administrators]
+      operationId: downloadVPSAdministratorConfig
+      summary: Один раз выдать managed WireGuard config и удалить private key на VPS
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/AdminConfigDownload'}
+      responses: {'200': {$ref: '#/components/responses/WireGuardConfig'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admins/{id}/rotate:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Administrators]
+      operationId: rotateVPSAdministrator
+      summary: Начать make-before-break rotation managed administrator
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/AdminRotation'}
+      responses: {'201': {$ref: '#/components/responses/AdminPeer'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admins/{id}/revoke:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [Administrators]
+      operationId: revokeVPSAdministrator
+      summary: Отозвать administrator после password re-authentication
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/ReauthenticatedConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admins/{id}/trust-mode:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Administrators]
+      operationId: updateVPSAdministratorTrustMode
+      summary: Выбрать ROUTED_HUB либо END_TO_END_RELAY
+      description: END_TO_END_RELAY допускается только для EXTERNAL key; VPS не получает inner private key.
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/AdminTrustMode'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admin-relays:
+    get:
+      tags: [Relays]
+      operationId: listVPSAdminRelays
+      summary: Перечислить публичные relay allocations и явно сообщить private_keys_on_vps=false
+      responses: {'200': {$ref: '#/components/responses/AdminRelayList'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Relays]
+      operationId: createVPSAdminRelay
+      summary: Создать и включить allowlisted/rate-limited UDP relay к одному Gateway
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/AdminRelayCreate'}
+      responses: {'201': {$ref: '#/components/responses/AdminRelay'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admin-relays/{id}/enabled:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Relays]
+      operationId: setVPSAdminRelayEnabled
+      summary: Включить или отключить relay с root reconciliation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/Enabled'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/admin-relays/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [Relays]
+      operationId: deleteVPSAdminRelay
+      summary: Удалить только заранее отключённый relay
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/resources:
+    get:
+      tags: [Resources]
+      operationId: listVPSResources
+      summary: Перечислить typed local-resource publications
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Resources]
+      operationId: createVPSResource
+      summary: Создать allowlisted публикацию ресурса
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/resources/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [Resources]
+      operationId: updateVPSResource
+      summary: Изменить typed публикацию ресурса
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [Resources]
+      operationId: deleteVPSResource
+      summary: Удалить публикацию после явного подтверждения
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/access-matrix:
+    get:
+      tags: [Access]
+      operationId: getVPSAccessMatrix
+      summary: Получить Gateway/admin/resource/ACL read model и generations
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/acl:
+    post:
+      tags: [Access]
+      operationId: createVPSACLGrant
+      summary: Разрешить конкретному administrator один resource/protocol/port range
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/acl/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [Access]
+      operationId: deleteVPSACLGrant
+      summary: Удалить ACL grant после явного подтверждения
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/watchdog:
+    get:
+      tags: [Watchdog]
+      operationId: getVPSHubWatchdog
+      summary: Получить control-plane и root-owned fabric/relay status
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/hub/fabric/apply:
+    post:
+      tags: [Watchdog]
+      operationId: applyVPSHubFabric
+      summary: Запустить parameter-free root reconciliation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/backup/status:
+    get:
+      tags: [Backup]
+      operationId: getVPSBackupStatus
+      summary: Получить role-specific backup/restore status без authorization token
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/backup/download:
+    post:
+      tags: [Backup]
+      operationId: downloadVPSBackup
+      summary: Создать, проверить и скачать encrypted .gvpn-vps
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/VPSBackup'}
+      responses: {'200': {$ref: '#/components/responses/VPSBackup'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/restore/stage:
+    post:
+      tags: [Backup]
+      operationId: stageVPSRestore
+      summary: Загрузить и проверить encrypted .gvpn-vps без изменения live state
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/VPSRestoreUpload'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/restore/apply:
+    post:
+      tags: [Backup]
+      operationId: applyVPSRestore
+      summary: Authorize durable same-VPS либо import-as-new root restore
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/VPSRestoreApply'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/restore:
+    delete:
+      tags: [Backup]
+      operationId: discardVPSRestore
+      summary: Удалить verified staging без изменения live state
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: gateway_vpn_vps_session
+      description: Secure, HttpOnly, SameSite=Strict VPS-specific opaque session token.
+  parameters:
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: {type: string, minLength: 32, maxLength: 256}
+    DestructiveConfirmation:
+      name: X-Confirm-Destructive
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128}
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'}
+  requestBodies:
+    JSON:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericObject'}
+    Login:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Login'}
+    PasswordChange:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/PasswordChange'}
+    PairingCompletion:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/PairingCompletion'}
+    PairingInvitation:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/PairingInvitation'}
+    ReauthenticatedConfirmation:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ReauthenticatedConfirmation'}
+    AdminCreate:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminCreate'}
+    AdminConfigDownload:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminConfigDownload'}
+    AdminRotation:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminRotation'}
+    AdminTrustMode:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminTrustMode'}
+    AdminRelayCreate:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminRelayCreate'}
+    Enabled:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Enabled'}
+    VPSBackup:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/VPSBackupRequest'}
+    VPSRestoreUpload:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [passphrase, backup]
+            properties:
+              passphrase: {type: string, minLength: 12, maxLength: 256, format: password}
+              backup: {type: string, format: binary}
+          encoding:
+            passphrase: {contentType: text/plain}
+            backup: {contentType: application/vnd.gateway-vpn.vps-backup}
+    VPSRestoreApply:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/VPSRestoreApply'}
+  responses:
+    JSON:
+      description: Успешный secret-free JSON response.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/GenericObject'}
+    NoContent: {description: Операция завершена без response body.}
+    Error:
+      description: Redacted error envelope.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    AdminPeer:
+      description: Secret-free administrator state.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminPeer'}
+    AdminRelay:
+      description: Public relay allocation; private key fields отсутствуют.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminRelay'}
+    AdminRelayList:
+      description: Relay allocations and fixed no-private-key invariant.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AdminRelayList'}
+    WireGuardConfig:
+      description: One-use managed WireGuard configuration.
+      headers:
+        Cache-Control: {schema: {type: string, const: no-store}}
+      content:
+        application/x-wireguard-profile:
+          schema: {type: string, format: binary, writeOnly: true}
+    VPSBackup:
+      description: Encrypted role-separated VPS backup.
+      headers:
+        X-Backup-Role: {schema: {type: string, const: vps}}
+        X-Content-SHA256: {schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+      content:
+        application/vnd.gateway-vpn.vps-backup:
+          schema: {type: string, format: binary}
+  schemas:
+    GenericObject: {type: object, additionalProperties: true}
+    Login:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 3, maxLength: 64}
+        password: {type: string, minLength: 1, maxLength: 1024, format: password, writeOnly: true}
+    PasswordChange:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password, password_confirmation]
+      properties:
+        current_password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        new_password: {type: string, minLength: 12, maxLength: 1024, format: password, writeOnly: true}
+        password_confirmation: {type: string, minLength: 12, maxLength: 1024, format: password, writeOnly: true}
+    PairingCompletion:
+      type: object
+      additionalProperties: false
+      required: [invitation_id, token, site_id, display_name, public_key]
+      properties:
+        invitation_id: {type: string, maxLength: 128}
+        token: {type: string, minLength: 32, maxLength: 128, format: password, writeOnly: true}
+        site_id: {type: string, maxLength: 128}
+        display_name: {type: string, minLength: 1, maxLength: 128}
+        public_key: {$ref: '#/components/schemas/WireGuardPublicKey'}
+        webui_url: {type: string, maxLength: 512}
+    PairingInvitation:
+      type: object
+      additionalProperties: false
+      required: [gateway_name, endpoint, assigned_subnet]
+      properties:
+        gateway_name: {type: string, minLength: 1, maxLength: 128}
+        endpoint: {type: string, minLength: 3, maxLength: 512}
+        assigned_subnet: {type: string, pattern: '^10\.[0-9.]+/30$'}
+        expiry_seconds: {type: integer, minimum: 300, maximum: 86400, default: 1800}
+    ReauthenticatedConfirmation:
+      type: object
+      additionalProperties: false
+      required: [password, confirmation]
+      properties:
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, minLength: 1, maxLength: 256}
+    AdminCreate:
+      type: object
+      additionalProperties: false
+      required: [name, assigned_address, key_mode]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        public_key: {$ref: '#/components/schemas/WireGuardPublicKey'}
+        assigned_address: {type: string, format: ipv4}
+        key_mode: {type: string, enum: [EXTERNAL, MANAGED]}
+        trust_mode: {$ref: '#/components/schemas/TrustMode'}
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, maxLength: 256}
+    AdminConfigDownload:
+      type: object
+      additionalProperties: false
+      required: [endpoint, password, confirmation]
+      properties:
+        endpoint: {type: string, minLength: 3, maxLength: 512}
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, maxLength: 256}
+    AdminRotation:
+      type: object
+      additionalProperties: false
+      required: [name, assigned_address, password, confirmation]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        assigned_address: {type: string, format: ipv4}
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, maxLength: 256}
+    AdminTrustMode:
+      type: object
+      additionalProperties: false
+      required: [trust_mode]
+      properties:
+        trust_mode: {$ref: '#/components/schemas/TrustMode'}
+    AdminRelayCreate:
+      type: object
+      additionalProperties: false
+      required: [gateway_peer_id, public_endpoint_host, public_bind_address, public_udp_port]
+      properties:
+        id: {type: string, maxLength: 128}
+        gateway_peer_id: {type: string, minLength: 1, maxLength: 128}
+        public_endpoint_host: {type: string, minLength: 1, maxLength: 253}
+        public_bind_address: {type: string, format: ipv4}
+        public_udp_port: {type: integer, minimum: 1, maximum: 65535, not: {const: 51821}}
+        destination_port: {type: integer, const: 51822, default: 51822}
+        rate_limit_per_second: {type: integer, minimum: 1, maximum: 10000, default: 100}
+        burst_packets: {type: integer, minimum: 1, maximum: 10000, default: 200}
+    Enabled:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties: {enabled: {type: boolean}}
+    VPSBackupRequest:
+      type: object
+      additionalProperties: false
+      required: [password, passphrase, passphrase_confirmation]
+      properties:
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        passphrase: {type: string, minLength: 12, maxLength: 256, format: password, writeOnly: true}
+        passphrase_confirmation: {type: string, minLength: 12, maxLength: 256, format: password, writeOnly: true}
+    VPSRestoreApply:
+      type: object
+      additionalProperties: false
+      required: [restore_id, mode, password, confirmation]
+      properties:
+        restore_id: {type: string, maxLength: 128}
+        mode: {type: string, enum: [SAME_VPS, IMPORT_AS_NEW]}
+        password: {type: string, maxLength: 1024, format: password, writeOnly: true}
+        confirmation: {type: string, maxLength: 256}
+    WireGuardPublicKey:
+      type: string
+      minLength: 44
+      maxLength: 44
+      pattern: '^[A-Za-z0-9+/]{43}=$'
+    TrustMode: {type: string, enum: [ROUTED_HUB, END_TO_END_RELAY]}
+    AdminPeer:
+      type: object
+      additionalProperties: false
+      required: [id, name, public_key, assigned_address, key_mode, trust_mode, state, desired_generation, applied_generation]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        public_key: {$ref: '#/components/schemas/WireGuardPublicKey'}
+        assigned_address: {type: string, format: ipv4}
+        key_mode: {type: string, enum: [EXTERNAL, MANAGED]}
+        trust_mode: {$ref: '#/components/schemas/TrustMode'}
+        state: {type: string}
+        desired_generation: {type: integer, minimum: 0}
+        applied_generation: {type: integer, minimum: 0}
+        latest_handshake_at: {type: string, format: date-time}
+        rx_bytes: {type: integer, minimum: 0}
+        tx_bytes: {type: integer, minimum: 0}
+        status_reason: {type: string}
+        config_state: {type: string}
+        config_downloaded_at: {type: string, format: date-time}
+        rotation_source_id: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminRelay:
+      type: object
+      additionalProperties: false
+      required: [id, gateway_peer_id, enabled, public_endpoint_host, public_bind_address, public_udp_port, destination_port, rate_limit_per_second, burst_packets, state, desired_generation, applied_generation, status_reason, created_at, updated_at]
+      properties:
+        id: {type: string}
+        gateway_peer_id: {type: string}
+        enabled: {type: boolean}
+        public_endpoint_host: {type: string}
+        public_bind_address: {type: string, format: ipv4}
+        public_udp_port: {type: integer, minimum: 1, maximum: 65535}
+        destination_port: {type: integer, const: 51822}
+        rate_limit_per_second: {type: integer, minimum: 1, maximum: 10000}
+        burst_packets: {type: integer, minimum: 1, maximum: 10000}
+        state: {type: string}
+        desired_generation: {type: integer, minimum: 0}
+        applied_generation: {type: integer, minimum: 0}
+        status_reason: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AdminRelayList:
+      type: object
+      additionalProperties: false
+      required: [items, destination_port, private_keys_on_vps]
+      properties:
+        items: {type: array, maxItems: 256, items: {$ref: '#/components/schemas/AdminRelay'}}
+        destination_port: {type: integer, const: 51822}
+        private_keys_on_vps: {type: boolean, const: false}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code: {type: string, pattern: '^[A-Z0-9_]+$'}
+            message: {type: string}
+security:
+  - cookieAuth: []

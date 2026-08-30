@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/dataplane"
 	"gateway-vpn/internal/diagnostics"
 	loggingpkg "gateway-vpn/internal/logging"
+	"gateway-vpn/internal/managementfabric"
 	"gateway-vpn/internal/modemrecovery"
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/removal"
@@ -164,12 +165,14 @@ type RemovalAdmin interface {
 	Dispatch(context.Context, removal.Request) error
 }
 
-// ManagementFabricAdmin exposes only parameter-free convergence and status.
-// Root re-reads SQLite, protected key files and kernel state; no interface,
-// route, key path, nft expression or generation is accepted from WebUI.
+// ManagementFabricAdmin exposes parameter-free convergence/status plus the
+// single typed wg-admin identity operation. Interface name, listen port, key
+// path, key bytes, routes and nft expressions never cross this boundary.
 type ManagementFabricAdmin interface {
 	Apply(context.Context) error
 	NeedsApply(context.Context) (bool, string, error)
+	ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error)
+	RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error)
 }
 
 // PortableBackupAdmin is implemented only by the root broker. It reads the
@@ -325,6 +328,8 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	mux.HandleFunc("POST /v1/uninstall/dispatch", server.dispatchUninstall)
 	mux.HandleFunc("POST /v1/management-fabric/sync", server.syncManagementFabric)
 	mux.HandleFunc("POST /v1/management-fabric/status", server.managementFabricStatus)
+	mux.HandleFunc("POST /v1/management-fabric/admin-contour/configure", server.configureAdminContour)
+	mux.HandleFunc("POST /v1/management-fabric/admin-contour/rotate", server.rotateAdminContour)
 	mux.HandleFunc("POST /v1/backup/export", server.exportPortableBackup)
 	server.handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -424,6 +429,44 @@ func (server *BrokerServer) managementFabricStatus(writer http.ResponseWriter, r
 		return
 	}
 	writeBrokerJSON(writer, http.StatusOK, ManagementFabricStatus{NeedsApply: needed, Reason: reason})
+}
+
+func (server *BrokerServer) configureAdminContour(writer http.ResponseWriter, request *http.Request) {
+	var input managementfabric.AdminContourRequest
+	if err := decodeBrokerJSON(request, &input); err != nil || managementfabric.ValidateAdminContourRequest(input) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "ADMIN_CONTOUR_REQUEST_INVALID")
+		return
+	}
+	if server.ManagementFabric == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_UNAVAILABLE")
+		return
+	}
+	item, err := server.ManagementFabric.ConfigureAdminContour(request.Context(), input)
+	if err != nil {
+		server.logPrivilegedFailure("management_admin_contour_configure", err)
+		writeBrokerError(writer, http.StatusConflict, "ADMIN_CONTOUR_CONFIGURE_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
+}
+
+func (server *BrokerServer) rotateAdminContour(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if server.ManagementFabric == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_UNAVAILABLE")
+		return
+	}
+	item, err := server.ManagementFabric.RotateAdminContourIdentity(request.Context())
+	if err != nil {
+		server.logPrivilegedFailure("management_admin_contour_rotate", err)
+		writeBrokerError(writer, http.StatusConflict, "ADMIN_CONTOUR_ROTATE_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, item)
 }
 
 func (server *BrokerServer) uninstallImpact(writer http.ResponseWriter, request *http.Request) {
@@ -1127,6 +1170,18 @@ func (client *BrokerClient) ManagementFabricStatus(ctx context.Context) (Managem
 	var status ManagementFabricStatus
 	err := client.call(ctx, "/v1/management-fabric/status", struct{}{}, http.StatusOK, &status)
 	return status, err
+}
+
+func (client *BrokerClient) ConfigureAdminContour(ctx context.Context, input managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
+	var item managementfabric.AdminContour
+	err := client.call(ctx, "/v1/management-fabric/admin-contour/configure", input, http.StatusOK, &item)
+	return item, err
+}
+
+func (client *BrokerClient) RotateAdminContourIdentity(ctx context.Context) (managementfabric.AdminContour, error) {
+	var item managementfabric.AdminContour
+	err := client.call(ctx, "/v1/management-fabric/admin-contour/rotate", struct{}{}, http.StatusOK, &item)
+	return item, err
 }
 
 // ExportPortableBackup requests a root-built encrypted backup. The passphrase

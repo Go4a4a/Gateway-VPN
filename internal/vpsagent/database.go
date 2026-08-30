@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion int64 = 3
+const SchemaVersion int64 = 4
 
 type migration struct {
 	version int64
@@ -34,6 +34,7 @@ var migrations = []migration{
 	{version: 1, name: "initial_vps_hub", sql: schemaV1},
 	{version: 2, name: "management_control_plane", sql: schemaV2},
 	{version: 3, name: "managed_administrator_config_lifecycle", sql: schemaV3},
+	{version: 4, name: "end_to_end_administrator_relay", sql: schemaV4},
 }
 
 var (
@@ -251,6 +252,7 @@ FROM admin_peers AS peer
 LEFT JOIN admin_peers AS source ON source.id=peer.rotation_source_id
 WHERE (peer.key_mode='EXTERNAL' AND (peer.private_key_secret_ref IS NOT NULL OR peer.config_state!='NOT_APPLICABLE'))
    OR (peer.key_mode='MANAGED' AND (peer.private_key_secret_ref IS NULL OR peer.config_state='NOT_APPLICABLE'))
+   OR (peer.trust_mode='END_TO_END_RELAY' AND peer.key_mode!='EXTERNAL')
    OR (peer.rotation_source_id!='' AND (source.id IS NULL OR source.id=peer.id OR source.key_mode!='MANAGED'))`).Scan(&invalidAdminLifecycle); err != nil {
 		return err
 	}
@@ -313,6 +315,7 @@ func QuarantineRestoredRuntime(ctx context.Context, database *sql.DB, now time.T
 		"UPDATE admin_peers SET state='CONFIGURED',updated_at=? WHERE state!='REVOKED'",
 		"UPDATE prefix_allocations SET state='QUARANTINED',updated_at=? WHERE state!='RELEASED'",
 		"UPDATE resource_publications SET state='PENDING_RETRY',updated_at=? WHERE state NOT IN ('DISABLED','ROLLED_BACK')",
+		"UPDATE admin_relays SET state='CONFIGURED',status_reason='RESTORE_REQUIRES_HOST_APPLY',updated_at=? WHERE enabled=1",
 	}
 	for _, statement := range statements {
 		if _, err := transaction.ExecContext(ctx, statement, stamp); err != nil {
@@ -344,7 +347,7 @@ func ImportPortableAsNew(ctx context.Context, database *sql.DB, input IdentityIn
 		return Identity{}, err
 	}
 	defer transaction.Rollback()
-	for _, table := range []string{"acl_grants", "resource_publications", "gateway_peers", "admin_peers", "prefix_allocations"} {
+	for _, table := range []string{"acl_grants", "resource_publications", "admin_relays", "gateway_peers", "admin_peers", "prefix_allocations"} {
 		if _, err := transaction.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return Identity{}, fmt.Errorf("clear source VPS table %s: %w", table, err)
 		}

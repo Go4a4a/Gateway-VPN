@@ -311,6 +311,17 @@ type wireGuardAdminLink struct {
 	SelectedUplinkID, UplinkState                                    string
 }
 
+type wireGuardAdminContour struct {
+	InterfaceName, PublicKey, Subnet, GatewayAddress string
+	ListenPort                                       int
+	DesiredGeneration, AppliedGeneration             int64
+	State, LastErrorCode                             string
+}
+
+type wireGuardAdminTunnel struct {
+	ID, PublicKey, AssignedAddress string
+}
+
 func (probe *SystemProbe) wireGuardAdminHealth(ctx context.Context, now time.Time, policy Policy) Observation {
 	observation := Observation{ComponentID: ComponentWireGuardAdmin, Details: map[string]any{}}
 	database, err := databasepkg.OpenReadOnly(ctx, probe.DatabasePath)
@@ -358,8 +369,24 @@ ORDER BY l.slot,l.id`)
 		observation.ErrorCode = "WG_ADMIN_LINKS_UNAVAILABLE"
 		return observation
 	}
-	observation.Applicable = len(links) > 0
+	contour, tunnels, relays, divergentRelays, contourErr := readWireGuardAdminContour(ctx, database)
+	if contourErr != nil {
+		observation.Applicable = true
+		observation.ErrorCode = "WG_ADMIN_CONTOUR_STATE_UNAVAILABLE"
+		return observation
+	}
+	observation.Applicable = len(links) > 0 || contour != nil
 	observation.Details["enabled_links"] = len(links)
+	observation.Details["inner_tunnels"] = len(tunnels)
+	observation.Details["enabled_relays"] = relays
+	observation.Details["divergent_relays"] = divergentRelays
+	if contour != nil {
+		observation.Details["wg_admin_state"] = contour.State
+		observation.Details["wg_admin_generation"] = fmt.Sprintf("%d/%d", contour.AppliedGeneration, contour.DesiredGeneration)
+		if contour.LastErrorCode != "" {
+			observation.Details["wg_admin_last_error_code"] = safeCode(contour.LastErrorCode)
+		}
+	}
 	if !observation.Applicable {
 		observation.Healthy = true
 		return observation
@@ -406,6 +433,34 @@ ORDER BY l.slot,l.id`)
 			externalFailures = append(externalFailures, link.ID+":HANDSHAKE_STALE")
 		}
 	}
+	if contour != nil {
+		if contour.State != "ACTIVE" || contour.DesiredGeneration != contour.AppliedGeneration || divergentRelays != 0 {
+			localFailures = append(localFailures, "wg-admin:GENERATION_OR_STATE_DIVERGED")
+		} else if !probe.wireGuardAdminContourLocalStateHealthy(ctx, *contour, tunnels) {
+			localFailures = append(localFailures, "wg-admin:LOCAL_RUNTIME_DRIFT")
+		} else if len(tunnels) != 0 {
+			handshakes, err := probe.fixedOutput(ctx, probe.WG, "show", contour.InterfaceName, "latest-handshakes")
+			if err != nil {
+				localFailures = append(localFailures, "wg-admin:HANDSHAKE_READ_FAILED")
+			} else {
+				for _, tunnel := range tunnels {
+					latest := peerHandshake(handshakes, tunnel.PublicKey)
+					if latest.IsZero() {
+						externalFailures = append(externalFailures, tunnel.ID+":NEVER_CONNECTED")
+						continue
+					}
+					age := now.Sub(latest)
+					if age < 0 {
+						age = 0
+					}
+					handshakeAges[tunnel.ID] = int64(age / time.Second)
+					if age > time.Duration(policy.WireGuardHandshakeStaleSeconds)*time.Second {
+						externalFailures = append(externalFailures, tunnel.ID+":HANDSHAKE_STALE")
+					}
+				}
+			}
+		}
+	}
 	observation.Details["handshake_age_seconds"] = handshakeAges
 	if len(localFailures) != 0 {
 		observation.Details["local_failures"] = localFailures
@@ -420,6 +475,93 @@ ORDER BY l.slot,l.id`)
 	}
 	observation.Healthy = true
 	return observation
+}
+
+func readWireGuardAdminContour(ctx context.Context, database *sql.DB) (*wireGuardAdminContour, []wireGuardAdminTunnel, int, int, error) {
+	var contour wireGuardAdminContour
+	var enabled int
+	err := database.QueryRowContext(ctx, `
+SELECT enabled,interface_name,public_key,subnet,gateway_address,listen_port,
+       desired_generation,applied_generation,state,last_error_code
+FROM management_admin_contour WHERE singleton_id=1`).Scan(
+		&enabled, &contour.InterfaceName, &contour.PublicKey, &contour.Subnet,
+		&contour.GatewayAddress, &contour.ListenPort, &contour.DesiredGeneration,
+		&contour.AppliedGeneration, &contour.State, &contour.LastErrorCode,
+	)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && enabled == 0 && contour.DesiredGeneration == contour.AppliedGeneration {
+		return nil, nil, 0, 0, nil
+	}
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	rows, err := database.QueryContext(ctx, `
+SELECT id,public_key,assigned_address
+FROM management_admin_tunnels WHERE state IN ('CONFIGURED','ACTIVE') ORDER BY id`)
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	tunnels := make([]wireGuardAdminTunnel, 0)
+	for rows.Next() {
+		var tunnel wireGuardAdminTunnel
+		if err := rows.Scan(&tunnel.ID, &tunnel.PublicKey, &tunnel.AssignedAddress); err != nil {
+			rows.Close()
+			return nil, nil, 0, 0, err
+		}
+		tunnels = append(tunnels, tunnel)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, 0, 0, err
+	}
+	var relays, divergentRelays int
+	if err := database.QueryRowContext(ctx, `
+SELECT COUNT(*),COALESCE(SUM(CASE WHEN desired_generation!=applied_generation OR state!='ACTIVE' THEN 1 ELSE 0 END),0)
+FROM management_admin_relays WHERE enabled=1`).Scan(&relays, &divergentRelays); err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return &contour, tunnels, relays, divergentRelays, nil
+}
+
+func (probe *SystemProbe) wireGuardAdminContourLocalStateHealthy(ctx context.Context, contour wireGuardAdminContour, tunnels []wireGuardAdminTunnel) bool {
+	if contour.InterfaceName != "wg-admin" || contour.ListenPort != 51822 {
+		return false
+	}
+	link, err := probe.fixedOutput(ctx, probe.IP, "-json", "link", "show", "dev", contour.InterfaceName)
+	if err != nil || !jsonFlagsContain(link, "UP") {
+		return false
+	}
+	gateway, gatewayErr := netip.ParseAddr(contour.GatewayAddress)
+	subnet, subnetErr := netip.ParsePrefix(contour.Subnet)
+	if gatewayErr != nil || subnetErr != nil || !subnet.Contains(gateway) {
+		return false
+	}
+	addresses, err := probe.fixedOutput(ctx, probe.IP, "-json", "-4", "address", "show", "dev", contour.InterfaceName)
+	if err != nil || !jsonAddressContains(addresses, netip.PrefixFrom(gateway, 32).String()) {
+		return false
+	}
+	publicKey, err := probe.fixedOutput(ctx, probe.WG, "show", contour.InterfaceName, "public-key")
+	if err != nil || strings.TrimSpace(publicKey) != contour.PublicKey {
+		return false
+	}
+	listenPort, err := probe.fixedOutput(ctx, probe.WG, "show", contour.InterfaceName, "listen-port")
+	if err != nil || strings.TrimSpace(listenPort) != strconv.Itoa(contour.ListenPort) {
+		return false
+	}
+	expectedPeers := make([]string, 0, len(tunnels))
+	expectedRoutes := make(map[string]struct{}, len(tunnels))
+	for _, tunnel := range tunnels {
+		expectedPeers = append(expectedPeers, tunnel.PublicKey)
+		address, err := netip.ParseAddr(tunnel.AssignedAddress)
+		if err != nil || !subnet.Contains(address) || address == gateway {
+			return false
+		}
+		expectedRoutes[netip.PrefixFrom(address, 32).String()] = struct{}{}
+	}
+	peers, err := probe.fixedOutput(ctx, probe.WG, "show", contour.InterfaceName, "peers")
+	if err != nil || !exactLineSet(peers, expectedPeers) {
+		return false
+	}
+	routes, err := probe.fixedOutput(ctx, probe.IP, "-N", "-json", "-4", "route", "show", "table", "main", "dev", contour.InterfaceName, "protocol", "186")
+	return err == nil && jsonRouteSetExact(routes, contour.InterfaceName, 186, expectedRoutes)
 }
 
 func (probe *SystemProbe) wireGuardAdminLocalStateHealthy(ctx context.Context, link wireGuardAdminLink) bool {

@@ -32,7 +32,22 @@ const (
 	restoreActive   = "ACTIVE"
 )
 
-var restoreIDPattern = regexp.MustCompile(`^vps-restore-[a-f0-9]{32}$`)
+var (
+	restoreIDPattern    = regexp.MustCompile(`^vps-restore-[a-f0-9]{32}$`)
+	relayCounterPattern = regexp.MustCompile(`counter packets ([0-9]+) bytes ([0-9]+).*comment "gateway-vpn administrator relay (?:rate limit|dnat|ingress|return|snat) ([A-Za-z0-9_.:-]{1,128})"`)
+)
+
+// WatchdogTelemetry is a bounded, secret-free projection for the VPS Hub
+// status file. It never authorizes reconciliation and contains no addresses,
+// peer keys, paths or individual relay identifiers.
+type WatchdogTelemetry struct {
+	DesiredGeneration int64
+	AppliedGeneration int64
+	RelayCount        int
+	RelayRuleCount    int
+	RelayPackets      uint64
+	RelayBytes        uint64
+}
 
 type Paths struct {
 	TransactionRoot string
@@ -256,6 +271,77 @@ func (applier *Applier) NeedsApply(ctx context.Context) (bool, string, error) {
 		return true, "RUNTIME_PROJECTION_DRIFT", nil
 	}
 	return false, "HEALTHY", nil
+}
+
+// ReadWatchdogTelemetry verifies that every configured relay has exactly five
+// owned nftables rules and aggregates their counters without exposing tuples.
+func (applier *Applier) ReadWatchdogTelemetry(ctx context.Context) (WatchdogTelemetry, error) {
+	var telemetry WatchdogTelemetry
+	if err := applier.validate(); err != nil {
+		return telemetry, err
+	}
+	plan, err := applier.Repository.RenderHostPlan(ctx)
+	if err != nil {
+		return telemetry, err
+	}
+	telemetry.DesiredGeneration, telemetry.AppliedGeneration, err = applier.Repository.FabricGenerations(ctx)
+	if err != nil || telemetry.DesiredGeneration != plan.Generation {
+		return telemetry, errors.New("VPS watchdog telemetry generation is invalid")
+	}
+	telemetry.RelayCount = len(plan.AdminRelays)
+	result, err := applier.Executor.Run(ctx, platformexec.Request{
+		Executable: applier.Paths.NFT, Arguments: []string{"list", "table", "inet", "gateway_vpn_vps"}, MaxOutputBytes: 1 << 20,
+	})
+	if err != nil {
+		return telemetry, errors.New("read VPS relay counters failed")
+	}
+	expected := make([]string, 0, len(plan.AdminRelays))
+	for _, relay := range plan.AdminRelays {
+		expected = append(expected, relay.ID)
+	}
+	telemetry.RelayRuleCount, telemetry.RelayPackets, telemetry.RelayBytes, err = parseRelayCounters(result.Stdout, expected)
+	if err != nil {
+		return telemetry, err
+	}
+	return telemetry, nil
+}
+
+func parseRelayCounters(output string, expectedIDs []string) (int, uint64, uint64, error) {
+	expected := make(map[string]int, len(expectedIDs))
+	for _, id := range expectedIDs {
+		if id == "" || len(id) > 128 || strings.ContainsAny(id, " /\\\x00\r\n\t") {
+			return 0, 0, 0, errors.New("VPS relay telemetry inventory is invalid")
+		}
+		if _, duplicate := expected[id]; duplicate {
+			return 0, 0, 0, errors.New("VPS relay telemetry inventory is duplicated")
+		}
+		expected[id] = 0
+	}
+	var ruleCount int
+	var packetTotal, byteTotal uint64
+	for _, match := range relayCounterPattern.FindAllStringSubmatch(output, -1) {
+		if len(match) != 4 {
+			return 0, 0, 0, errors.New("VPS relay counter output is invalid")
+		}
+		if _, exists := expected[match[3]]; !exists {
+			return 0, 0, 0, errors.New("VPS relay counter escaped desired inventory")
+		}
+		packets, packetErr := strconv.ParseUint(match[1], 10, 64)
+		bytes, byteErr := strconv.ParseUint(match[2], 10, 64)
+		if packetErr != nil || byteErr != nil || expected[match[3]] >= 5 {
+			return 0, 0, 0, errors.New("VPS relay counter value is invalid")
+		}
+		expected[match[3]]++
+		ruleCount++
+		packetTotal += packets
+		byteTotal += bytes
+	}
+	for _, count := range expected {
+		if count != 5 {
+			return 0, 0, 0, errors.New("VPS relay rule inventory is incomplete")
+		}
+	}
+	return ruleCount, packetTotal, byteTotal, nil
 }
 
 func (applier *Applier) Apply(ctx context.Context) error {
@@ -620,8 +706,9 @@ func expectedFirewallRuleCount(plan vpsagent.VPSHostPlan) int {
 	// input: generation marker, established, two rules for each
 	// administrator/address pair, final reject. forward: established, two
 	// management rules per administrator/Gateway pair, ACLs, two final rejects.
+	// Each relay adds rate-limit + DNAT, ingress + return forwarding and SNAT.
 	return 1 + 1 + 2*len(plan.HubAdminSources)*len(plan.InterfaceAddresses) + 1 +
-		1 + 2*len(plan.HubAdminSources)*gateways + len(plan.ACL) + 2
+		1 + 2*len(plan.HubAdminSources)*gateways + len(plan.ACL) + 2 + 5*len(plan.AdminRelays)
 }
 
 func (applier *Applier) readOwnedRoutes(ctx context.Context) ([]string, error) {

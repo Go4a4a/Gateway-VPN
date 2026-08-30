@@ -41,6 +41,12 @@ func TestRenderedFirewallPassesRealNFTParser(t *testing.T) {
 			{ID: "acl-kernel-2", AdminPeerID: "admin-kernel-2", GatewayPeerID: "gateway-kernel-2", PublicationID: "publication-kernel-2", Source: "10.81.0.11/32", Destination: "10.97.0.2/32", Protocol: "UDP", PortStart: 53, PortEnd: 53},
 		},
 		HubAdminSources: []string{"10.81.0.10/32", "10.81.0.11/32"},
+		AdminRelays: []vpsagent.VPSHostAdminRelay{{
+			ID: "relay-kernel", GatewayPeerID: "gateway-kernel", PublicEndpointHost: "vps.example.net",
+			PublicBindAddress: "203.0.113.10", PublicUDPPort: 51823,
+			GatewayAddress: "10.82.0.2", VPSSourceAddress: "10.82.0.1", DestinationPort: 51822,
+			RateLimitPerSecond: 100, BurstPackets: 200,
+		}},
 	}
 	rules, err := RenderFirewall(plan)
 	if err != nil {

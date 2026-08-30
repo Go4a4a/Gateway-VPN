@@ -29,6 +29,9 @@ const (
 	maximumResources   = 1024
 	maximumACLGrants   = 4096
 	maximumInvitations = 64
+
+	TrustRoutedHub     = "ROUTED_HUB"
+	TrustEndToEndRelay = "END_TO_END_RELAY"
 )
 
 var (
@@ -110,6 +113,7 @@ type AdminCreateInput struct {
 	KeyMode             string `json:"key_mode"`
 	PrivateKeySecretRef string `json:"-"`
 	RotationSourceID    string `json:"-"`
+	TrustMode           string `json:"trust_mode"`
 }
 
 type AdminPeer struct {
@@ -128,6 +132,7 @@ type AdminPeer struct {
 	ConfigState        string `json:"config_state"`
 	ConfigDownloadedAt string `json:"config_downloaded_at,omitempty"`
 	RotationSourceID   string `json:"rotation_source_id,omitempty"`
+	TrustMode          string `json:"trust_mode"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }
@@ -506,6 +511,9 @@ func (repository HubRepository) RevokeGateway(ctx context.Context, id string) er
 	if _, err := transaction.ExecContext(ctx, "DELETE FROM acl_grants WHERE publication_id IN (SELECT id FROM resource_publications WHERE gateway_peer_id=?)", id); err != nil {
 		return err
 	}
+	if _, err := transaction.ExecContext(ctx, "UPDATE admin_relays SET enabled=0,state='DISABLED',desired_generation=desired_generation+1,status_reason='GATEWAY_REVOKED',updated_at=? WHERE gateway_peer_id=?", stamp, id); err != nil {
+		return err
+	}
 	if _, err := transaction.ExecContext(ctx, "UPDATE resource_publications SET enabled=0,state='DISABLED',desired_generation=desired_generation+1,updated_at=? WHERE gateway_peer_id=?", stamp, id); err != nil {
 		return err
 	}
@@ -525,8 +533,18 @@ func (repository HubRepository) CreateAdmin(ctx context.Context, input AdminCrea
 	input.Name = strings.TrimSpace(input.Name)
 	input.KeyMode = strings.ToUpper(strings.TrimSpace(input.KeyMode))
 	input.RotationSourceID = strings.TrimSpace(input.RotationSourceID)
+	input.TrustMode = strings.ToUpper(strings.TrimSpace(input.TrustMode))
+	if input.TrustMode == "" {
+		input.TrustMode = TrustRoutedHub
+	}
 	if input.Name == "" || len(input.Name) > 128 || !wgingress.ValidKey(input.PublicKey) || input.KeyMode != "MANAGED" && input.KeyMode != "EXTERNAL" {
 		return AdminPeer{}, errors.New("valid administrator name, key and key mode are required")
+	}
+	if input.TrustMode != TrustRoutedHub && input.TrustMode != TrustEndToEndRelay {
+		return AdminPeer{}, errors.New("administrator trust mode is invalid")
+	}
+	if input.TrustMode == TrustEndToEndRelay && input.KeyMode == "MANAGED" {
+		return AdminPeer{}, errors.New("end-to-end administrator private keys must not be managed by the VPS")
 	}
 	if input.KeyMode == "MANAGED" && !validSecretRef(input.PrivateKeySecretRef) || input.KeyMode == "EXTERNAL" && input.PrivateKeySecretRef != "" {
 		return AdminPeer{}, errors.New("administrator private-key reference does not match key mode")
@@ -583,9 +601,9 @@ func (repository HubRepository) CreateAdmin(ctx context.Context, input AdminCrea
 	if _, err := transaction.ExecContext(ctx, `
 INSERT INTO admin_peers(
  id,name,public_key,private_key_secret_ref,assigned_address,state,desired_generation,applied_generation,
- created_at,updated_at,key_mode,status_reason,config_state,rotation_source_id
+ created_at,updated_at,key_mode,status_reason,config_state,rotation_source_id,trust_mode
 )
-VALUES(?,?,?,?,?,'CONFIGURED',1,0,?,?,?,'AWAITING_HOST_APPLY',?,?)`, id, input.Name, input.PublicKey, privateRef, address.String(), stamp, stamp, input.KeyMode, configState, input.RotationSourceID); err != nil {
+VALUES(?,?,?,?,?,'CONFIGURED',1,0,?,?,?,'AWAITING_HOST_APPLY',?,?,?)`, id, input.Name, input.PublicKey, privateRef, address.String(), stamp, stamp, input.KeyMode, configState, input.RotationSourceID, input.TrustMode); err != nil {
 		return AdminPeer{}, fmt.Errorf("create administrator peer: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
@@ -1009,7 +1027,7 @@ FROM gateway_peers`
 const adminSelect = `
 SELECT id,name,public_key,assigned_address,key_mode,state,desired_generation,applied_generation,
        latest_handshake_at,rx_bytes,tx_bytes,status_reason,config_state,config_downloaded_at,
-       rotation_source_id,created_at,updated_at
+       rotation_source_id,trust_mode,created_at,updated_at
 FROM admin_peers`
 
 const resourceSelect = `
@@ -1046,7 +1064,7 @@ func scanAdmin(scanner interface{ Scan(...any) error }) (AdminPeer, error) {
 	err := scanner.Scan(&item.ID, &item.Name, &item.PublicKey, &item.AssignedAddress, &item.KeyMode,
 		&item.State, &item.DesiredGeneration, &item.AppliedGeneration, &handshake, &item.RXBytes,
 		&item.TXBytes, &item.StatusReason, &item.ConfigState, &downloaded, &item.RotationSourceID,
-		&item.CreatedAt, &item.UpdatedAt)
+		&item.TrustMode, &item.CreatedAt, &item.UpdatedAt)
 	if handshake.Valid {
 		item.LatestHandshakeAt = handshake.String
 	}
@@ -1221,7 +1239,7 @@ SELECT
 }
 
 func enforceCount(ctx context.Context, transaction *sql.Tx, table string, maximum int64) error {
-	allowed := map[string]bool{"pairing_invitations": true, "gateway_peers": true, "admin_peers": true, "resource_publications": true, "acl_grants": true}
+	allowed := map[string]bool{"pairing_invitations": true, "gateway_peers": true, "admin_peers": true, "admin_relays": true, "resource_publications": true, "acl_grants": true}
 	if !allowed[table] {
 		return errors.New("internal VPS table count request is invalid")
 	}

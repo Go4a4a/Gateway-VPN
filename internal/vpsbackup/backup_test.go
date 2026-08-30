@@ -22,6 +22,7 @@ import (
 func TestBuildProducesRoleSeparatedVerifiedSanitizedVPSBackup(t *testing.T) {
 	ctx := context.Background()
 	manager, database, stateDirectory := vpsBackupFixture(t)
+	relayFixture := seedVPSRelayBackupFixture(t, manager, database)
 	passphrase := "correct horse battery staple"
 	ephemeral := "ephemeral-vps-session-secret-must-not-survive"
 	if _, err := database.ExecContext(ctx, "INSERT INTO users(id,username,password_hash,enabled,must_change_password,created_at,updated_at) VALUES('user:test','test','hash',1,0,'now','now')"); err != nil {
@@ -41,7 +42,7 @@ func TestBuildProducesRoleSeparatedVerifiedSanitizedVPSBackup(t *testing.T) {
 	if filepath.Ext(artifact.Filename) != ".gvpn-vps" || !filenamePattern.MatchString(artifact.Filename) || artifact.Bytes <= 0 || !digestPattern.MatchString(artifact.SHA256) {
 		t.Fatalf("artifact = %+v", artifact)
 	}
-	if artifact.Manifest.Role != "vps" || artifact.Manifest.SourceVPSID != "vps:primary" || artifact.Manifest.SchemaVersion != vpsagent.SchemaVersion || !artifact.Manifest.SecretsIncluded || !backupIDPattern.MatchString(artifact.Manifest.BackupID) {
+	if artifact.Manifest.Role != "vps" || artifact.Manifest.SourceVPSID != "vps:primary" || artifact.Manifest.SchemaVersion != 4 || !artifact.Manifest.SecretsIncluded || !backupIDPattern.MatchString(artifact.Manifest.BackupID) {
 		t.Fatalf("manifest = %+v", artifact.Manifest)
 	}
 	encrypted, err := os.ReadFile(artifact.Path)
@@ -102,6 +103,15 @@ func TestBuildProducesRoleSeparatedVerifiedSanitizedVPSBackup(t *testing.T) {
 	if identity, err := vpsagent.ReadIdentity(ctx, verified); err != nil || identity.VPSID != "vps:primary" {
 		t.Fatalf("portable identity = %+v, %v", identity, err)
 	}
+	assertVPSRelayBackupFixture(t, ctx, verified, relayFixture, "ACTIVE", "ACTIVE", "RELAY_BACKUP_FIXTURE")
+	for path := range contents {
+		if strings.Contains(strings.ToLower(path), "wg-admin") {
+			t.Fatalf("VPS backup retained forbidden inner administrator private-key path %q", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDirectory, "secrets", "management", "wg-admin.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("VPS fixture unexpectedly contains an inner administrator private key: %v", err)
+	}
 
 	reader, err := manager.Open(artifact)
 	if err != nil {
@@ -118,7 +128,6 @@ func TestBuildProducesRoleSeparatedVerifiedSanitizedVPSBackup(t *testing.T) {
 	if _, err := os.Stat(artifact.Path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("served VPS artifact remains: %v", err)
 	}
-	_ = stateDirectory
 }
 
 func TestVPSBackupRejectsWrongPassphraseTamperingTruncationAndUnsafeSources(t *testing.T) {
@@ -241,6 +250,72 @@ func pairGatewayForBackup(t *testing.T, repository vpsagent.HubRepository) {
 	}
 	if _, err := repository.CompletePairing(context.Background(), vpsagent.PairingCompletion{InvitationID: bundle.InvitationID, Token: bundle.Token, SiteID: "site:backup", DisplayName: "Gateway", PublicKey: pair.Public}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type vpsRelayBackupFixture struct {
+	GatewayPeerID string
+	AdminPeerID   string
+	RelayID       string
+}
+
+func seedVPSRelayBackupFixture(t *testing.T, manager *Manager, database *sql.DB) vpsRelayBackupFixture {
+	t.Helper()
+	ctx := context.Background()
+	repository := vpsagent.HubRepository{Database: database, Now: manager.Now}
+	bundle, err := repository.CreatePairing(ctx, vpsagent.PairingCreateInput{GatewayName: "Relay Gateway", Endpoint: "relay-vps.example:51820", Subnet: "10.82.20.0/30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := repository.CompletePairing(ctx, vpsagent.PairingCompletion{InvitationID: bundle.InvitationID, Token: bundle.Token, SiteID: "site:relay-backup", DisplayName: "Relay Gateway", PublicKey: gatewayKeys.Public})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := repository.CreateAdmin(ctx, vpsagent.AdminCreateInput{Name: "External end-to-end administrator", PublicKey: adminKeys.Public, AssignedAddress: "10.81.0.10", KeyMode: "EXTERNAL", TrustMode: vpsagent.TrustEndToEndRelay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := repository.CreateAdminRelay(ctx, vpsagent.AdminRelayInput{ID: "relay:backup", GatewayPeerID: gateway.ID, PublicEndpointHost: "relay.example.net", PublicBindAddress: "203.0.113.10", PublicUDPPort: 51823, DestinationPort: vpsagent.AdminRelayDestinationPort, RateLimitPerSecond: 137, BurstPackets: 271})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE gateway_peers SET desired_generation=7,applied_generation=6,state='ACTIVE',status_reason='GATEWAY_BACKUP_FIXTURE' WHERE id=?`, gateway.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE admin_peers SET desired_generation=9,applied_generation=8,state='ACTIVE',status_reason='ADMIN_BACKUP_FIXTURE' WHERE id=?`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE admin_relays SET desired_generation=11,applied_generation=10,state='ACTIVE',status_reason='RELAY_BACKUP_FIXTURE' WHERE id=?`, relay.ID); err != nil {
+		t.Fatal(err)
+	}
+	return vpsRelayBackupFixture{GatewayPeerID: gateway.ID, AdminPeerID: admin.ID, RelayID: relay.ID}
+}
+
+func assertVPSRelayBackupFixture(t *testing.T, ctx context.Context, database *sql.DB, fixture vpsRelayBackupFixture, expectedAdminState, expectedRelayState, expectedRelayReason string) {
+	t.Helper()
+	var gatewaySite, gatewaySubnet, gatewayAddress string
+	var gatewayDesired, gatewayApplied int64
+	if err := database.QueryRowContext(ctx, `SELECT site_id,assigned_subnet,assigned_address,desired_generation,applied_generation FROM gateway_peers WHERE id=?`, fixture.GatewayPeerID).Scan(&gatewaySite, &gatewaySubnet, &gatewayAddress, &gatewayDesired, &gatewayApplied); err != nil || gatewaySite != "site:relay-backup" || gatewaySubnet != "10.82.20.0/30" || gatewayAddress != "10.82.20.2" || gatewayDesired != 7 || gatewayApplied != 6 {
+		t.Fatalf("VPS relay Gateway backup fixture = site=%q subnet=%q address=%q generation=%d/%d, %v", gatewaySite, gatewaySubnet, gatewayAddress, gatewayDesired, gatewayApplied, err)
+	}
+	var trustMode, keyMode, adminAddress, adminState, privateKeyReference string
+	var adminDesired, adminApplied int64
+	if err := database.QueryRowContext(ctx, `SELECT trust_mode,key_mode,assigned_address,state,COALESCE(private_key_secret_ref,''),desired_generation,applied_generation FROM admin_peers WHERE id=?`, fixture.AdminPeerID).Scan(&trustMode, &keyMode, &adminAddress, &adminState, &privateKeyReference, &adminDesired, &adminApplied); err != nil || trustMode != vpsagent.TrustEndToEndRelay || keyMode != "EXTERNAL" || adminAddress != "10.81.0.10" || adminState != expectedAdminState || privateKeyReference != "" || adminDesired != 9 || adminApplied != 8 {
+		t.Fatalf("VPS end-to-end administrator backup fixture = trust=%q keyMode=%q address=%q state=%q privateRef=%q generation=%d/%d, %v", trustMode, keyMode, adminAddress, adminState, privateKeyReference, adminDesired, adminApplied, err)
+	}
+	var gatewayPeerID, endpoint, bindAddress, relayState, relayReason string
+	var publicPort, destinationPort, rate, burst int
+	var relayDesired, relayApplied int64
+	if err := database.QueryRowContext(ctx, `SELECT gateway_peer_id,public_endpoint_host,public_bind_address,public_udp_port,destination_port,rate_limit_per_second,burst_packets,state,desired_generation,applied_generation,status_reason FROM admin_relays WHERE id=?`, fixture.RelayID).Scan(&gatewayPeerID, &endpoint, &bindAddress, &publicPort, &destinationPort, &rate, &burst, &relayState, &relayDesired, &relayApplied, &relayReason); err != nil || gatewayPeerID != fixture.GatewayPeerID || endpoint != "relay.example.net" || bindAddress != "203.0.113.10" || publicPort != 51823 || destinationPort != vpsagent.AdminRelayDestinationPort || rate != 137 || burst != 271 || relayState != expectedRelayState || relayDesired != 11 || relayApplied != 10 || relayReason != expectedRelayReason {
+		t.Fatalf("VPS relay backup fixture = gateway=%q endpoint=%q bind=%q ports=%d/%d rate=%d/%d state=%q generation=%d/%d reason=%q, %v", gatewayPeerID, endpoint, bindAddress, publicPort, destinationPort, rate, burst, relayState, relayDesired, relayApplied, relayReason, err)
 	}
 }
 

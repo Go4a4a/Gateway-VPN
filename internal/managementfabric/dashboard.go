@@ -21,6 +21,9 @@ type Dashboard struct {
 	VPS               []DashboardVPS         `json:"vps"`
 	Links             []DashboardLink        `json:"links"`
 	Admins            []DashboardAdmin       `json:"admins"`
+	AdminContour      *AdminContour          `json:"admin_contour,omitempty"`
+	AdminRelays       []AdminRelay           `json:"admin_relays"`
+	AdminTunnels      []AdminTunnel          `json:"admin_tunnels"`
 	Resources         []DashboardResource    `json:"resources"`
 	Publications      []DashboardPublication `json:"publications"`
 	ACL               []DashboardACL         `json:"acl"`
@@ -71,7 +74,9 @@ type DashboardAdmin struct {
 	Enabled              bool   `json:"enabled"`
 	State                string `json:"state"`
 	VPSID                string `json:"vps_id,omitempty"`
+	PeerID               string `json:"peer_id,omitempty"`
 	AssignedAddress      string `json:"assigned_address,omitempty"`
+	TrustMode            string `json:"trust_mode,omitempty"`
 	PeerState            string `json:"peer_state,omitempty"`
 	PublicKeyFingerprint string `json:"public_key_fingerprint,omitempty"`
 	DesiredGeneration    int64  `json:"desired_generation,omitempty"`
@@ -174,6 +179,17 @@ func (repository *Repository) Dashboard(ctx context.Context) (Dashboard, error) 
 	if err := repository.readDashboardAdmins(ctx, &result); err != nil {
 		return Dashboard{}, err
 	}
+	if contour, err := repository.GetAdminContour(ctx); err == nil {
+		result.AdminContour = &contour
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return Dashboard{}, err
+	}
+	if result.AdminRelays, err = repository.ListAdminRelays(ctx); err != nil {
+		return Dashboard{}, err
+	}
+	if result.AdminTunnels, err = repository.ListAdminTunnels(ctx); err != nil {
+		return Dashboard{}, err
+	}
 	if err := repository.readDashboardResources(ctx, &result); err != nil {
 		return Dashboard{}, err
 	}
@@ -183,7 +199,7 @@ func (repository *Repository) Dashboard(ctx context.Context) (Dashboard, error) 
 func (repository *Repository) readDashboardAdmins(ctx context.Context, result *Dashboard) error {
 	rows, err := repository.Database.QueryContext(ctx, `
 SELECT a.id,a.name,a.identity_kind,a.enabled,a.state,
-       COALESCE(p.vps_id,''),COALESCE(p.assigned_address,''),COALESCE(p.state,''),
+       COALESCE(p.id,''),COALESCE(p.vps_id,''),COALESCE(p.assigned_address,''),COALESCE(p.trust_mode,''),COALESCE(p.state,''),
        COALESCE(p.public_key,''),COALESCE(p.desired_generation,0),COALESCE(p.applied_generation,0)
 FROM management_admins AS a
 LEFT JOIN management_admin_vps_peers AS p ON p.admin_id=a.id
@@ -196,7 +212,7 @@ ORDER BY a.name,a.id,p.vps_id`)
 		var item DashboardAdmin
 		var enabled int
 		var publicKey string
-		if err := rows.Scan(&item.ID, &item.Name, &item.Kind, &enabled, &item.State, &item.VPSID, &item.AssignedAddress, &item.PeerState, &publicKey, &item.DesiredGeneration, &item.AppliedGeneration); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Kind, &enabled, &item.State, &item.PeerID, &item.VPSID, &item.AssignedAddress, &item.TrustMode, &item.PeerState, &publicKey, &item.DesiredGeneration, &item.AppliedGeneration); err != nil {
 			return fmt.Errorf("scan management administrator: %w", err)
 		}
 		item.Enabled = enabled != 0

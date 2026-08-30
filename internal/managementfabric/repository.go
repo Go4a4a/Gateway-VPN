@@ -324,7 +324,7 @@ FROM management_link_endpoints WHERE link_id=? ORDER BY priority, id`, linkID)
 	return items, rows.Err()
 }
 
-func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, transaction *sql.Tx, candidates []namedPrefix, excludedLinkID string) error {
+func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, transaction *sql.Tx, candidates []namedPrefix, excludedLinkID string, excludeAdminContour ...bool) error {
 	if err := rejectOverlaps(candidates); err != nil {
 		return err
 	}
@@ -351,6 +351,14 @@ func (repository *Repository) rejectPrefixCollisionsTx(ctx context.Context, tran
 		{"SELECT management_cidr FROM modems WHERE management_cidr IS NOT NULL AND management_cidr<>'' AND NOT EXISTS (SELECT 1 FROM legacy_modem_uplink_map AS m WHERE m.modem_id=modems.id)", "unmigrated-modem", nil, true},
 		{"SELECT ipv4_cidr FROM uplinks WHERE ipv4_cidr IS NOT NULL AND ipv4_cidr<>''", "uplink-runtime", nil, true},
 		{"SELECT configured_ipv4_cidr FROM uplinks WHERE configured_ipv4_cidr IS NOT NULL AND configured_ipv4_cidr<>''", "uplink-config", nil, true},
+	}
+	if len(excludeAdminContour) == 0 || !excludeAdminContour[0] {
+		queries = append(queries, struct {
+			statement   string
+			owner       string
+			args        []any
+			addressCIDR bool
+		}{"SELECT subnet FROM management_admin_contour", "administrator-contour", nil, false})
 	}
 	for _, query := range queries {
 		rows, err := transaction.QueryContext(ctx, query.statement, query.args...)

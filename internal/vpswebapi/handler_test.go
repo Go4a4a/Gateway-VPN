@@ -186,6 +186,81 @@ func TestVPSHubManagementAPIEndToEndAndDestructiveReauthentication(t *testing.T)
 	if err := json.Unmarshal(adminResponse.Body.Bytes(), &admin); err != nil || admin.ID == "" {
 		t.Fatalf("admin = %+v, %v", admin, err)
 	}
+	relayAdminPair, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayAdminResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
+		"name": "Телефон end-to-end", "public_key": relayAdminPair.Public, "assigned_address": "10.81.0.13",
+		"key_mode": "EXTERNAL", "trust_mode": vpsagent.TrustEndToEndRelay,
+	})
+	if relayAdminResponse.Code != http.StatusCreated {
+		t.Fatalf("create end-to-end admin = %d %s", relayAdminResponse.Code, relayAdminResponse.Body.String())
+	}
+	var relayAdmin vpsagent.AdminPeer
+	if err := json.Unmarshal(relayAdminResponse.Body.Bytes(), &relayAdmin); err != nil || relayAdmin.ID == "" || relayAdmin.TrustMode != vpsagent.TrustEndToEndRelay {
+		t.Fatalf("end-to-end admin = %+v, %v", relayAdmin, err)
+	}
+	managedRelay := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
+		"name": "Managed relay", "assigned_address": "10.81.0.14", "key_mode": "MANAGED",
+		"trust_mode": vpsagent.TrustEndToEndRelay, "password": "administrator password 123",
+		"confirmation": "СОЗДАТЬ УПРАВЛЯЕМЫЙ КЛЮЧ",
+	})
+	if managedRelay.Code != http.StatusBadRequest || !strings.Contains(managedRelay.Body.String(), "MANAGED_ADMIN_TRUST_MODE_INVALID") {
+		t.Fatalf("managed end-to-end admin = %d %s", managedRelay.Code, managedRelay.Body.String())
+	}
+
+	relayResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admin-relays", map[string]any{
+		"gateway_peer_id": paired.Gateway.ID, "public_endpoint_host": "relay.example",
+		"public_bind_address": "203.0.113.10", "public_udp_port": 51830,
+		"destination_port": vpsagent.AdminRelayDestinationPort, "rate_limit_per_second": 120, "burst_packets": 240,
+	})
+	if relayResponse.Code != http.StatusCreated {
+		t.Fatalf("create end-to-end relay = %d %s", relayResponse.Code, relayResponse.Body.String())
+	}
+	var relay vpsagent.AdminRelay
+	if err := json.Unmarshal(relayResponse.Body.Bytes(), &relay); err != nil || relay.ID == "" || !relay.Enabled || relay.GatewayPeerID != paired.Gateway.ID {
+		t.Fatalf("end-to-end relay = %+v, %v", relay, err)
+	}
+	if body := strings.ToLower(relayResponse.Body.String()); strings.Contains(body, "private_key") || strings.Contains(body, "private-key") || strings.Contains(body, "server.key") {
+		t.Fatalf("relay response exposes private key material: %s", relayResponse.Body.String())
+	}
+	relays := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/admin-relays", nil, "")
+	if relays.Code != http.StatusOK || !strings.Contains(relays.Body.String(), relay.ID) || !strings.Contains(relays.Body.String(), `"private_keys_on_vps":false`) || !strings.Contains(relays.Body.String(), `"destination_port":51822`) {
+		t.Fatalf("list end-to-end relays = %d %s", relays.Code, relays.Body.String())
+	}
+	deleteEnabled := authorizedRequest(server, session, http.MethodDelete, "/api/v1/hub/admin-relays/"+relay.ID, nil, "delete-disabled-admin-relay")
+	if deleteEnabled.Code != http.StatusBadRequest {
+		t.Fatalf("delete enabled relay = %d %s", deleteEnabled.Code, deleteEnabled.Body.String())
+	}
+	disableRelay := jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admin-relays/"+relay.ID+"/enabled", map[string]any{"enabled": false})
+	if disableRelay.Code != http.StatusNoContent {
+		t.Fatalf("disable relay = %d %s", disableRelay.Code, disableRelay.Body.String())
+	}
+	enableRelay := jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admin-relays/"+relay.ID+"/enabled", map[string]any{"enabled": true})
+	if enableRelay.Code != http.StatusNoContent {
+		t.Fatalf("enable relay = %d %s", enableRelay.Code, enableRelay.Body.String())
+	}
+	disableRelay = jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admin-relays/"+relay.ID+"/enabled", map[string]any{"enabled": false})
+	if disableRelay.Code != http.StatusNoContent {
+		t.Fatalf("disable relay before delete = %d %s", disableRelay.Code, disableRelay.Body.String())
+	}
+	deleteRelay := authorizedRequest(server, session, http.MethodDelete, "/api/v1/hub/admin-relays/"+relay.ID, nil, "delete-disabled-admin-relay")
+	if deleteRelay.Code != http.StatusNoContent {
+		t.Fatalf("delete disabled relay = %d %s", deleteRelay.Code, deleteRelay.Body.String())
+	}
+	relays = authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/admin-relays", nil, "")
+	if relays.Code != http.StatusOK || strings.Contains(relays.Body.String(), relay.ID) {
+		t.Fatalf("deleted relay survived = %d %s", relays.Code, relays.Body.String())
+	}
+	trustRouted := jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admins/"+relayAdmin.ID+"/trust-mode", map[string]any{"trust_mode": vpsagent.TrustRoutedHub})
+	if trustRouted.Code != http.StatusNoContent {
+		t.Fatalf("change trust mode to routed = %d %s", trustRouted.Code, trustRouted.Body.String())
+	}
+	trustEndToEnd := jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admins/"+relayAdmin.ID+"/trust-mode", map[string]any{"trust_mode": vpsagent.TrustEndToEndRelay})
+	if trustEndToEnd.Code != http.StatusNoContent {
+		t.Fatalf("change trust mode to end-to-end = %d %s", trustEndToEnd.Code, trustEndToEnd.Body.String())
+	}
 	managed := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
 		"name": "Managed", "assigned_address": "10.81.0.11", "key_mode": "MANAGED",
 		"password": "administrator password 123", "confirmation": "СОЗДАТЬ УПРАВЛЯЕМЫЙ КЛЮЧ",
@@ -273,7 +348,7 @@ func TestVPSHubFabricTriggerSchedulesAutomaticAndExplicitApply(t *testing.T) {
 		t.Fatalf("fabric-aware overview = %d %s", overview.Code, overview.Body.String())
 	}
 	watchdog := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/watchdog", nil, "")
-	if watchdog.Code != http.StatusOK || !strings.Contains(watchdog.Body.String(), `"host_fabric":{"available":true`) || !strings.Contains(watchdog.Body.String(), `"reason":"HEALTHY"`) {
+	if watchdog.Code != http.StatusOK || !strings.Contains(watchdog.Body.String(), `"host_fabric":{`) || !strings.Contains(watchdog.Body.String(), `"available":true`) || !strings.Contains(watchdog.Body.String(), `"reason":"HEALTHY"`) || !strings.Contains(watchdog.Body.String(), `"relay_rule_count":0`) {
 		t.Fatalf("fabric-aware watchdog = %d %s", watchdog.Code, watchdog.Body.String())
 	}
 	initial := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
@@ -297,13 +372,26 @@ func TestVPSHubFabricTriggerSchedulesAutomaticAndExplicitApply(t *testing.T) {
 	if completion.Code != http.StatusCreated || fabric.calls != 2 {
 		t.Fatalf("automatic fabric schedule = %d calls=%d %s", completion.Code, fabric.calls, completion.Body.String())
 	}
+	adminPair, _ := wgingress.GenerateKeyPair()
+	adminResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
+		"name": "End-to-end admin", "public_key": adminPair.Public, "assigned_address": "10.81.0.20",
+		"key_mode": "EXTERNAL", "trust_mode": vpsagent.TrustEndToEndRelay,
+	})
+	var admin vpsagent.AdminPeer
+	if adminResponse.Code != http.StatusCreated || json.Unmarshal(adminResponse.Body.Bytes(), &admin) != nil || fabric.calls != 3 {
+		t.Fatalf("trust-mode admin schedule = %d calls=%d %s", adminResponse.Code, fabric.calls, adminResponse.Body.String())
+	}
+	trustMode := jsonRequest(t, server, session, http.MethodPut, "/api/v1/hub/admins/"+admin.ID+"/trust-mode", map[string]any{"trust_mode": vpsagent.TrustRoutedHub})
+	if trustMode.Code != http.StatusNoContent || fabric.calls != 4 {
+		t.Fatalf("trust-mode update schedule = %d calls=%d %s", trustMode.Code, fabric.calls, trustMode.Body.String())
+	}
 	manual := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
-	if manual.Code != http.StatusAccepted || fabric.calls != 3 || !strings.Contains(manual.Body.String(), "APPLY_SCHEDULED") {
+	if manual.Code != http.StatusAccepted || fabric.calls != 5 || !strings.Contains(manual.Body.String(), "APPLY_SCHEDULED") {
 		t.Fatalf("manual fabric schedule = %d calls=%d %s", manual.Code, fabric.calls, manual.Body.String())
 	}
 	fabric.err = errors.New("injected trigger failure")
 	failed := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
-	if failed.Code != http.StatusBadGateway || fabric.calls != 4 {
+	if failed.Code != http.StatusBadGateway || fabric.calls != 6 {
 		t.Fatalf("failed fabric schedule = %d calls=%d %s", failed.Code, fabric.calls, failed.Body.String())
 	}
 }
@@ -312,14 +400,16 @@ func TestVPSHubWebUIExposesFabricApplyAndRootWatchdogStatus(t *testing.T) {
 	server, _ := newVPSAPIFixture(t, &fakeFabricTrigger{})
 	for path, required := range map[string][]string{
 		"/styles.css": {
-			"overflow-wrap:anywhere", "minmax(min(320px,100%),1fr)", ".actions button,form>button{width:100%}",
+			"overflow-wrap:anywhere", "text-wrap:balance", "minmax(min(320px,100%),1fr)", ".mobile-navigation{display:grid}", ".actions button,form>button,.page-heading>button{width:100%}",
 		},
 		"/app.js": {
 			"/api/v1/hub/fabric/apply", "Применить изменения сейчас", "Запустить reconciliation",
 			"host_fabric", "Последняя root-проверка", "Привилегированный reconciler",
+			"/api/v1/hub/admin-relays", "/trust-mode", "private_keys_on_vps", "mobile-navigation-select",
 		},
 		"/": {
 			"последнюю root-проверку Management Fabric", "ownership-scoped root transaction с rollback",
+			"data-page=\"relays\"", "Создать и включить relay", "ключ не хранится на VPS", "id=\"mobile-navigation-select\"",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)

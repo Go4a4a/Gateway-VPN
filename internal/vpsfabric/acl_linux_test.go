@@ -185,7 +185,15 @@ func TestFabricKernelTCPHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	case "client":
-		connection, err := net.DialTimeout("tcp4", address, 3*time.Second)
+		dialer := net.Dialer{Timeout: 3 * time.Second}
+		if source := strings.TrimSpace(os.Getenv("GATEWAY_VPN_VPS_FABRIC_TCP_SOURCE")); source != "" {
+			parsed := net.ParseIP(source)
+			if parsed == nil || parsed.To4() == nil {
+				t.Fatal("invalid fabric TCP helper source")
+			}
+			dialer.LocalAddr = &net.TCPAddr{IP: parsed}
+		}
+		connection, err := dialer.Dial("tcp4", address)
 		if err != nil {
 			t.Fatal(err)
 		}

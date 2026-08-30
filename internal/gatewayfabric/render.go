@@ -32,22 +32,35 @@ func RenderFirewallTransaction(plan managementfabric.GatewayHostPlan) ([]byte, e
 	for _, set := range []string{"management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation"} {
 		fmt.Fprintf(&output, "flush set inet gateway_vpn %s\n", set)
 	}
-	if len(plan.Links) != 0 {
-		interfaces := make([]string, 0, len(plan.Links))
+	if len(plan.Links) != 0 || plan.AdminContour != nil {
+		interfaces := make([]string, 0, len(plan.Links)+1)
 		endpoints := make([]string, 0, len(plan.Links))
 		for _, link := range plan.Links {
 			interfaces = append(interfaces, strconv.Quote(link.InterfaceName))
 			endpoints = append(endpoints, fmt.Sprintf("%s . 0x%08x . %s . %d", strconv.Quote(link.UplinkInterface), uint32(link.UplinkMark), link.EndpointAddress, link.EndpointPort))
 		}
+		if plan.AdminContour != nil {
+			interfaces = append(interfaces, strconv.Quote(plan.AdminContour.InterfaceName))
+		}
 		sort.Strings(interfaces)
 		sort.Strings(endpoints)
 		fmt.Fprintf(&output, "add element inet gateway_vpn management_fabric_interfaces { %s }\n", strings.Join(interfaces, ", "))
-		fmt.Fprintf(&output, "add element inet gateway_vpn management_fabric_endpoints { %s }\n", strings.Join(endpoints, ", "))
+		if len(endpoints) != 0 {
+			fmt.Fprintf(&output, "add element inet gateway_vpn management_fabric_endpoints { %s }\n", strings.Join(endpoints, ", "))
+		}
 	}
 	if plan.Generation > 0 {
 		fmt.Fprintf(&output, "add element inet gateway_vpn management_fabric_generation { %d }\n", plan.Generation)
 	}
 	fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_input counter comment %s\n", strconv.Quote(fmt.Sprintf("gateway-vpn management fabric generation %d plan %s", plan.Generation, planDigest(plan))))
+	if plan.AdminContour != nil {
+		for _, relay := range plan.AdminContour.Relays {
+			comment := strconv.Quote("gateway-vpn administrator relay ingress " + relay.RelayID + " " + planDigest(plan))
+			fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_input iifname %s ip saddr %s ip daddr %s udp dport %d limit rate %d/second burst %d packets counter accept comment %s\n",
+				strconv.Quote(relay.InputInterface), relay.OuterSource, relay.OuterDestination,
+				relay.DestinationPort, relay.RateLimitPerSecond, relay.BurstPackets, comment)
+		}
+	}
 	if len(plan.ACL) != 0 {
 		output.WriteString("add rule inet gateway_vpn management_fabric_forward iifname @management_fabric_interfaces ct state { established, related } counter accept comment \"gateway-vpn management fabric established requests\"\n")
 		output.WriteString("add rule inet gateway_vpn management_fabric_forward oifname @management_fabric_interfaces ct state { established, related } counter accept comment \"gateway-vpn management fabric replies\"\n")

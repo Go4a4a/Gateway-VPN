@@ -103,6 +103,12 @@ func (previewRuntime) SyncManagementFabric(context.Context) error { return nil }
 func (previewRuntime) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
 	return networkapply.ManagementFabricStatus{}, nil
 }
+func (previewRuntime) ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
+	return managementfabric.AdminContour{}, errors.New("preview administrator contour mutation is disabled")
+}
+func (previewRuntime) RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error) {
+	return managementfabric.AdminContour{}, errors.New("preview administrator contour rotation is disabled")
+}
 
 type previewIngressController struct{ backend *wgingress.Backend }
 
@@ -828,6 +834,37 @@ func seedManagementFabric(ctx context.Context, database *sql.DB) error {
 		if _, err := database.ExecContext(ctx, statement.query, statement.args...); err != nil {
 			return err
 		}
+	}
+	contourKeys, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		return err
+	}
+	if _, err := repository.ConfigureAdminContour(ctx, managementfabric.AdminContourRootInput{
+		Enabled: true, InterfaceName: managementfabric.AdminInterfaceName,
+		PrivateKeySecretRef: managementfabric.AdminPrivateKeySecretRef, PublicKey: contourKeys.Public,
+		Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
+	}); err != nil {
+		return err
+	}
+	if _, err := repository.CreateAdminRelay(ctx, managementfabric.AdminRelayInput{
+		ID: "relay:preview", LinkID: "link:preview:1", Enabled: true,
+		PublicEndpointHost: "relay.example.net", PublicBindAddress: "203.0.113.10", PublicUDPPort: 51830,
+		RateLimitPerSecond: 100, BurstPackets: 200,
+	}); err != nil {
+		return err
+	}
+	if _, err := repository.CreateAdminTunnel(ctx, managementfabric.AdminTunnelInput{
+		ID: "tunnel:preview", AdminID: "admin:igor", RelayID: "relay:preview",
+		PublicKey: adminKeys.Public, AssignedAddress: "10.85.0.10",
+	}); err != nil {
+		return err
+	}
+	if _, err := database.ExecContext(ctx, `
+UPDATE management_admin_contour SET applied_generation=desired_generation,state='ACTIVE',last_error_code='';
+UPDATE management_admin_relays SET applied_generation=desired_generation,state='ACTIVE',last_error_code='';
+UPDATE management_admin_tunnels SET applied_generation=desired_generation,state='ACTIVE',latest_handshake_at=?,rx_bytes=524288,tx_bytes=262144,last_error_code=''
+WHERE id='tunnel:preview'`, stamp); err != nil {
+		return err
 	}
 	return nil
 }

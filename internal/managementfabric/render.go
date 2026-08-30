@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+
+	"gateway-vpn/internal/wgingress"
 )
 
 const OwnedRouteProtocol = 186
@@ -13,11 +15,46 @@ const OwnedRouteProtocol = 186
 // later root-only Gateway and VPS reconcilers. It cannot express arbitrary
 // commands, nft syntax, wildcard routes, or foreign ownership.
 type RenderedFabric struct {
-	RouteProtocol int               `json:"route_protocol"`
-	Peers         []RenderedPeer    `json:"peers"`
-	Routes        []RenderedRoute   `json:"routes"`
-	Aliases       []RenderedAlias   `json:"aliases"`
-	ACL           []RenderedACLRule `json:"acl"`
+	RouteProtocol int                   `json:"route_protocol"`
+	Peers         []RenderedPeer        `json:"peers"`
+	Routes        []RenderedRoute       `json:"routes"`
+	Aliases       []RenderedAlias       `json:"aliases"`
+	ACL           []RenderedACLRule     `json:"acl"`
+	AdminContour  *RenderedAdminContour `json:"admin_contour,omitempty"`
+}
+
+type RenderedAdminContour struct {
+	InterfaceName       string                      `json:"interface_name"`
+	PrivateKeySecretRef string                      `json:"private_key_ref"`
+	PublicKey           string                      `json:"public_key"`
+	Subnet              string                      `json:"subnet"`
+	GatewayAddress      string                      `json:"gateway_address"`
+	ListenPort          int                         `json:"listen_port"`
+	Peers               []RenderedAdminPeer         `json:"peers"`
+	Relays              []RenderedAdminRelayIngress `json:"relays"`
+}
+
+type RenderedAdminPeer struct {
+	TunnelID        string `json:"tunnel_id"`
+	AdminID         string `json:"admin_id"`
+	RelayID         string `json:"relay_id"`
+	LinkID          string `json:"link_id"`
+	PublicKey       string `json:"public_key"`
+	AssignedAddress string `json:"assigned_address"`
+}
+
+type RenderedAdminRelayIngress struct {
+	RelayID            string `json:"relay_id"`
+	LinkID             string `json:"link_id"`
+	InputInterface     string `json:"input_interface"`
+	OuterSource        string `json:"outer_source"`
+	OuterDestination   string `json:"outer_destination"`
+	PublicEndpointHost string `json:"public_endpoint_host"`
+	PublicBindAddress  string `json:"public_bind_address"`
+	PublicUDPPort      int    `json:"public_udp_port"`
+	DestinationPort    int    `json:"destination_port"`
+	RateLimitPerSecond int    `json:"rate_limit_per_second"`
+	BurstPackets       int    `json:"burst_packets"`
 }
 
 type RenderedPeer struct {
@@ -65,6 +102,9 @@ type RenderedACLRule struct {
 	Protocol         string `json:"protocol"`
 	PortStart        int    `json:"port_start"`
 	PortEnd          int    `json:"port_end"`
+	TrustMode        string `json:"trust_mode"`
+	TunnelID         string `json:"tunnel_id,omitempty"`
+	RelayID          string `json:"relay_id,omitempty"`
 }
 
 func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
@@ -73,6 +113,9 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 	}
 	links := make(map[string]LinkSpec, len(spec.Links))
 	admins := make(map[string][]AdminSpec, len(spec.Admins))
+	relays := make(map[string]AdminRelaySpec, len(spec.AdminRelays))
+	relaysByLink := make(map[string]AdminRelaySpec, len(spec.AdminRelays))
+	tunnelsByAdmin := make(map[string][]AdminTunnelSpec, len(spec.AdminTunnels))
 	resources := make(map[string]ResourceSpec, len(spec.Resources))
 	publicationsByResource := make(map[string][]PublicationSpec)
 	for _, link := range spec.Links {
@@ -80,6 +123,13 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 	}
 	for _, admin := range spec.Admins {
 		admins[admin.ID] = append(admins[admin.ID], admin)
+	}
+	for _, relay := range spec.AdminRelays {
+		relays[relay.ID] = relay
+		relaysByLink[relay.LinkID] = relay
+	}
+	for _, tunnel := range spec.AdminTunnels {
+		tunnelsByAdmin[tunnel.AdminID] = append(tunnelsByAdmin[tunnel.AdminID], tunnel)
 	}
 	for _, resource := range spec.Resources {
 		resources[resource.ID] = resource
@@ -93,7 +143,7 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 		remote, _ := netip.ParseAddr(link.RemoteAddress)
 		allowed := []string{netip.PrefixFrom(remote, 32).String()}
 		for _, admin := range spec.Admins {
-			if admin.VPSID == link.VPSID {
+			if admin.VPSID == link.VPSID && admin.TrustMode == TrustRoutedHub {
 				address, _ := netip.ParseAddr(admin.AssignedAddress)
 				prefix := netip.PrefixFrom(address, 32).String()
 				allowed = append(allowed, prefix)
@@ -112,6 +162,38 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 		result.Routes = append(result.Routes, RenderedRoute{
 			Owner: "gateway-vpn", LinkID: link.ID, InterfaceName: link.InterfaceName,
 			Destination: link.ManagementSubnet, Purpose: "MANAGEMENT_LINK", Protocol: OwnedRouteProtocol,
+		})
+	}
+	if spec.AdminContour != nil {
+		contour := spec.AdminContour
+		result.AdminContour = &RenderedAdminContour{
+			InterfaceName: contour.InterfaceName, PrivateKeySecretRef: contour.PrivateKeySecretRef,
+			PublicKey: contour.PublicKey, Subnet: contour.Subnet,
+			GatewayAddress: contour.GatewayAddress + "/32", ListenPort: contour.ListenPort,
+		}
+		for _, relay := range spec.AdminRelays {
+			link := links[relay.LinkID]
+			result.AdminContour.Relays = append(result.AdminContour.Relays, RenderedAdminRelayIngress{
+				RelayID: relay.ID, LinkID: relay.LinkID, InputInterface: link.InterfaceName,
+				OuterSource: link.RemoteAddress + "/32", OuterDestination: link.LocalAddress + "/32",
+				PublicEndpointHost: relay.PublicEndpointHost, PublicBindAddress: relay.PublicBindAddress,
+				PublicUDPPort: relay.PublicUDPPort, DestinationPort: relay.DestinationPort,
+				RateLimitPerSecond: relay.RateLimitPerSecond, BurstPackets: relay.BurstPackets,
+			})
+		}
+		for _, tunnel := range spec.AdminTunnels {
+			relay := relays[tunnel.RelayID]
+			result.AdminContour.Peers = append(result.AdminContour.Peers, RenderedAdminPeer{
+				TunnelID: tunnel.ID, AdminID: tunnel.AdminID, RelayID: tunnel.RelayID,
+				LinkID: relay.LinkID, PublicKey: tunnel.PublicKey,
+				AssignedAddress: tunnel.AssignedAddress + "/32",
+			})
+		}
+		sort.Slice(result.AdminContour.Relays, func(i, j int) bool {
+			return result.AdminContour.Relays[i].RelayID < result.AdminContour.Relays[j].RelayID
+		})
+		sort.Slice(result.AdminContour.Peers, func(i, j int) bool {
+			return result.AdminContour.Peers[i].TunnelID < result.AdminContour.Peers[j].TunnelID
 		})
 	}
 	for _, publication := range spec.Publications {
@@ -136,13 +218,34 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 				if link.VPSID != admin.VPSID {
 					continue
 				}
+				if admin.TrustMode == TrustEndToEndRelay {
+					relay, relayExists := relaysByLink[link.ID]
+					if !relayExists || result.AdminContour == nil {
+						continue
+					}
+					for _, tunnel := range tunnelsByAdmin[rule.AdminID] {
+						if tunnel.RelayID != relay.ID {
+							continue
+						}
+						result.ACL = append(result.ACL, RenderedACLRule{
+							RuleID: rule.ID, AdminID: rule.AdminID, ResourceID: rule.ResourceID,
+							PublicationID: publication.ID, LinkID: link.ID, InputInterface: AdminInterfaceName,
+							ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
+							Source: tunnel.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
+							LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
+							PortStart: rule.PortStart, PortEnd: rule.PortEnd, TrustMode: TrustEndToEndRelay,
+							TunnelID: tunnel.ID, RelayID: relay.ID,
+						})
+					}
+					continue
+				}
 				result.ACL = append(result.ACL, RenderedACLRule{
 					RuleID: rule.ID, AdminID: rule.AdminID, ResourceID: rule.ResourceID,
 					PublicationID: publication.ID, LinkID: link.ID, InputInterface: link.InterfaceName,
 					ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
 					Source: admin.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
 					LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
-					PortStart: rule.PortStart, PortEnd: rule.PortEnd,
+					PortStart: rule.PortStart, PortEnd: rule.PortEnd, TrustMode: TrustRoutedHub,
 				})
 			}
 		}
@@ -194,6 +297,17 @@ func validateRenderedFabric(plan RenderedFabric) error {
 		alias, exists := aliases[rule.PublicationID]
 		if !exists || rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile {
 			return errors.New("rendered management ACL resource projection changed")
+		}
+	}
+	if plan.AdminContour != nil {
+		if plan.AdminContour.InterfaceName != AdminInterfaceName || !wgingress.ValidKey(plan.AdminContour.PublicKey) ||
+			!validSecretReference(plan.AdminContour.PrivateKeySecretRef) || plan.AdminContour.ListenPort != AdminListenPort {
+			return errors.New("rendered administrator contour identity is invalid")
+		}
+		gateway, gatewayErr := netip.ParsePrefix(plan.AdminContour.GatewayAddress)
+		subnet, subnetErr := netip.ParsePrefix(plan.AdminContour.Subnet)
+		if gatewayErr != nil || subnetErr != nil || gateway.Bits() != 32 || !subnet.Contains(gateway.Addr()) {
+			return errors.New("rendered administrator contour address is invalid")
 		}
 	}
 	return nil

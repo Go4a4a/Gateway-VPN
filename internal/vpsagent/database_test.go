@@ -2,6 +2,7 @@ package vpsagent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	databasepkg "gateway-vpn/internal/db"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -132,6 +134,76 @@ func TestVPSAgentMigrationRejectsChecksumAndUnsafeIdentity(t *testing.T) {
 		UpdateIdentityRef: "/var/lib/gateway-vpn-vps/agent/secrets/update/key",
 	}, time.Now()); err == nil {
 		t.Fatal("unsafe VPS identity was accepted")
+	}
+}
+
+func TestVPSAgentMigrationThreeToFourPreservesAdminsAndAddsRelay(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open(databasepkg.DriverName, filepath.Join(t.TempDir(), "vps-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	database.SetMaxOpenConns(1)
+	if _, err := database.ExecContext(ctx, `
+PRAGMA foreign_keys=ON;
+CREATE TABLE schema_migrations(
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  checksum_sha256 TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations[:3] {
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transaction.ExecContext(ctx, item.sql); err != nil {
+			transaction.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := transaction.ExecContext(ctx, `
+INSERT INTO schema_migrations(version,name,checksum_sha256,applied_at)
+VALUES(?,?,?,?)`, item.version, item.name, schemaChecksum(item.sql), "2026-08-30T12:00:00Z"); err != nil {
+			transaction.Rollback()
+			t.Fatal(err)
+		}
+		if err := transaction.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adminKey := testVPSPublicKey(t)
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO admin_peers(
+  id,name,public_key,assigned_address,state,desired_generation,applied_generation,
+  created_at,updated_at,key_mode,config_state
+) VALUES('admin:a','Administrator',?,'10.81.0.10','ACTIVE',4,3,'now','now','EXTERNAL','NOT_APPLICABLE')`, adminKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatalf("migrate VPS schema 3 to 4: %v", err)
+	}
+	var version, desired, applied int
+	var trustMode, state string
+	if err := database.QueryRowContext(ctx, `
+SELECT (SELECT MAX(version) FROM schema_migrations),trust_mode,state,desired_generation,applied_generation
+FROM admin_peers WHERE id='admin:a'`).Scan(&version, &trustMode, &state, &desired, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 || trustMode != TrustRoutedHub || state != "ACTIVE" || desired != 4 || applied != 3 {
+		t.Fatalf("VPS migration 4 admin = version:%d trust:%s state:%s generations:%d/%d", version, trustMode, state, desired, applied)
+	}
+	var relayTable int
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='admin_relays'").Scan(&relayTable); err != nil || relayTable != 1 {
+		t.Fatalf("VPS migration 4 relay table count = %d, %v", relayTable, err)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE admin_peers SET trust_mode='UNSAFE' WHERE id='admin:a'"); err == nil {
+		t.Fatal("VPS migration 4 accepted an unknown administrator trust mode")
+	}
+	if err := Verify(ctx, database); err != nil {
+		t.Fatalf("VPS migration 4 verification: %v", err)
 	}
 }
 

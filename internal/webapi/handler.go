@@ -227,6 +227,8 @@ type WireGuardIngressController interface {
 type ManagementFabricController interface {
 	SyncManagementFabric(context.Context) error
 	ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error)
+	ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error)
+	RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error)
 }
 
 type ModemRuntime interface {
@@ -335,6 +337,15 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("PUT /api/v1/management-fabric/vps/priorities", server.protected(http.HandlerFunc(server.reorderManagementVPS)))
 	mux.Handle("PATCH /api/v1/management-fabric/vps/{id}", server.protected(http.HandlerFunc(server.updateManagementVPS)))
 	mux.Handle("PATCH /api/v1/management-fabric/links/{id}", server.protected(http.HandlerFunc(server.updateManagementLink)))
+	mux.Handle("PUT /api/v1/management-fabric/admin-contour", server.protected(http.HandlerFunc(server.configureManagementAdminContour)))
+	mux.Handle("POST /api/v1/management-fabric/admin-contour/rotate", server.protected(http.HandlerFunc(server.rotateManagementAdminContour)))
+	mux.Handle("POST /api/v1/management-fabric/admin-relays", server.protected(http.HandlerFunc(server.createManagementAdminRelay)))
+	mux.Handle("PUT /api/v1/management-fabric/admin-relays/{id}", server.protected(http.HandlerFunc(server.updateManagementAdminRelay)))
+	mux.Handle("DELETE /api/v1/management-fabric/admin-relays/{id}", server.protected(http.HandlerFunc(server.deleteManagementAdminRelay)))
+	mux.Handle("POST /api/v1/management-fabric/admin-tunnels", server.protected(http.HandlerFunc(server.createManagementAdminTunnel)))
+	mux.Handle("POST /api/v1/management-fabric/admin-tunnels/{id}/revoke", server.protected(http.HandlerFunc(server.revokeManagementAdminTunnel)))
+	mux.Handle("DELETE /api/v1/management-fabric/admin-tunnels/{id}", server.protected(http.HandlerFunc(server.deleteManagementAdminTunnel)))
+	mux.Handle("PUT /api/v1/management-fabric/admins/{admin_id}/vps/{vps_id}/trust-mode", server.protected(http.HandlerFunc(server.updateManagementAdminTrustMode)))
 	mux.Handle("POST /api/v1/management-fabric/sync", server.protected(http.HandlerFunc(server.syncManagementFabric)))
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
@@ -889,6 +900,178 @@ func (server *Server) updateManagementLink(writer http.ResponseWriter, request *
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"id": item.ID, "updated": true, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) configureManagementAdminContour(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabricAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_APPLY_NOT_AVAILABLE", "Root-контроллер wg-admin не подключён")
+		return
+	}
+	var input managementfabric.AdminContourRequest
+	if err := decodeJSON(request, &input); err != nil || managementfabric.ValidateAdminContourRequest(input) != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_CONTOUR_REQUEST_INVALID", "Укажите непересекающуюся private IPv4-подсеть и адрес Gateway внутри неё")
+		return
+	}
+	item, err := server.dependencies.ManagementFabricAdmin.ConfigureAdminContour(request.Context(), input)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, item)
+}
+
+func (server *Server) rotateManagementAdminContour(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabricAdmin == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_APPLY_NOT_AVAILABLE", "Root-контроллер wg-admin не подключён")
+		return
+	}
+	var input struct {
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Confirmation != "ЗАМЕНИТЬ КЛЮЧ WG-ADMIN" {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "ADMIN_CONTOUR_ROTATION_CONFIRMATION_INVALID", "Контрольная фраза для замены ключа не совпадает")
+		return
+	}
+	principal, ok := request.Context().Value(principalKey).(auth.Principal)
+	if !ok {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
+		return
+	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		input.Password, input.Confirmation = "", ""
+		switch {
+		case errors.Is(err, auth.ErrRateLimited):
+			writer.Header().Set("Retry-After", "2")
+			writeError(writer, http.StatusTooManyRequests, "REAUTH_RATE_LIMITED", "Слишком много неверных попыток; повторите позже")
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(writer, http.StatusUnauthorized, "REAUTH_FAILED", "Текущий пароль указан неверно")
+		default:
+			writeInternalError(writer, err)
+		}
+		return
+	}
+	input.Password, input.Confirmation = "", ""
+	item, err := server.dependencies.ManagementFabricAdmin.RotateAdminContourIdentity(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "ADMIN_CONTOUR_ROTATION_FAILED", "Ключ wg-admin не заменён; прежняя identity сохранена или восстановлена")
+		return
+	}
+	writeJSON(writer, http.StatusOK, item)
+}
+
+func (server *Server) createManagementAdminRelay(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Management Fabric не подключён")
+		return
+	}
+	var input managementfabric.AdminRelayInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_RELAY_REQUEST_INVALID", "Некорректные параметры UDP relay")
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.CreateAdminRelay(request.Context(), input)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"relay": item, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) updateManagementAdminRelay(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Management Fabric не подключён")
+		return
+	}
+	var input managementfabric.AdminRelayInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_RELAY_REQUEST_INVALID", "Некорректные параметры UDP relay")
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.UpdateAdminRelay(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"relay": item, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) deleteManagementAdminRelay(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil || request.Header.Get("X-Confirm-Destructive") != "delete-disabled-admin-relay" {
+		writeError(writer, http.StatusConflict, "ADMIN_RELAY_DELETE_CONFIRMATION_REQUIRED", "Сначала отключите relay и подтвердите удаление")
+		return
+	}
+	if err := server.dependencies.ManagementFabric.DeleteAdminRelay(request.Context(), request.PathValue("id")); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	_ = server.requestManagementFabricSync(request.Context())
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) createManagementAdminTunnel(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Management Fabric не подключён")
+		return
+	}
+	var input managementfabric.AdminTunnelInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_TUNNEL_REQUEST_INVALID", "Некорректные параметры inner WireGuard peer")
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.CreateAdminTunnel(request.Context(), input)
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"tunnel": item, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) revokeManagementAdminTunnel(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil || request.Header.Get("X-Confirm-Destructive") != "revoke-admin-tunnel" {
+		writeError(writer, http.StatusConflict, "ADMIN_TUNNEL_REVOKE_CONFIRMATION_REQUIRED", "Отзыв inner tunnel требует подтверждения")
+		return
+	}
+	item, err := server.dependencies.ManagementFabric.RevokeAdminTunnel(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"tunnel": item, "sync_state": server.requestManagementFabricSync(request.Context())})
+}
+
+func (server *Server) deleteManagementAdminTunnel(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil || request.Header.Get("X-Confirm-Destructive") != "delete-revoked-admin-tunnel" {
+		writeError(writer, http.StatusConflict, "ADMIN_TUNNEL_DELETE_CONFIRMATION_REQUIRED", "Удалить можно только отозванный inner tunnel после подтверждения")
+		return
+	}
+	if err := server.dependencies.ManagementFabric.DeleteAdminTunnel(request.Context(), request.PathValue("id")); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	_ = server.requestManagementFabricSync(request.Context())
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) updateManagementAdminTrustMode(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.ManagementFabric == nil {
+		writeError(writer, http.StatusNotImplemented, "MANAGEMENT_FABRIC_NOT_AVAILABLE", "Management Fabric не подключён")
+		return
+	}
+	var input struct {
+		TrustMode string `json:"trust_mode"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "ADMIN_TRUST_MODE_REQUEST_INVALID", "Некорректный trust mode")
+		return
+	}
+	if err := server.dependencies.ManagementFabric.SetAdminTrustMode(request.Context(), request.PathValue("admin_id"), request.PathValue("vps_id"), input.TrustMode); err != nil {
+		writeDomainError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"updated": true, "sync_state": server.requestManagementFabricSync(request.Context())})
 }
 
 func (server *Server) syncManagementFabric(writer http.ResponseWriter, request *http.Request) {

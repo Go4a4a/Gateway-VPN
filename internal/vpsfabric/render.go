@@ -56,8 +56,17 @@ func RenderFirewall(plan vpsagent.VPSHostPlan) ([]byte, error) {
 		}
 	}
 	output.WriteString("        iifname \"wg-mgmt\" counter reject with icmpx type admin-prohibited comment \"gateway-vpn deny non-admin hub access\"\n")
+	output.WriteString("    }\n\n    chain prerouting {\n        type nat hook prerouting priority dstnat; policy accept;\n")
+	for _, relay := range plan.AdminRelays {
+		fmt.Fprintf(&output, "        ip daddr %s udp dport %d limit rate over %d/second burst %d packets counter drop comment \"gateway-vpn administrator relay rate limit %s\"\n", relay.PublicBindAddress, relay.PublicUDPPort, relay.RateLimitPerSecond, relay.BurstPackets, relay.ID)
+		fmt.Fprintf(&output, "        ip daddr %s udp dport %d counter dnat ip to %s:%d comment \"gateway-vpn administrator relay dnat %s\"\n", relay.PublicBindAddress, relay.PublicUDPPort, relay.GatewayAddress, relay.DestinationPort, relay.ID)
+	}
 	output.WriteString("    }\n\n    chain forward {\n        type filter hook forward priority filter; policy accept;\n")
 	output.WriteString("        iifname \"wg-mgmt\" oifname \"wg-mgmt\" ct state established,related counter accept comment \"gateway-vpn fabric replies\"\n")
+	for _, relay := range plan.AdminRelays {
+		fmt.Fprintf(&output, "        oifname \"wg-mgmt\" ip daddr %s ct state { new, established } udp dport %d counter accept comment \"gateway-vpn administrator relay ingress %s\"\n", relay.GatewayAddress, relay.DestinationPort, relay.ID)
+		fmt.Fprintf(&output, "        iifname \"wg-mgmt\" ip saddr %s ct state established,related udp sport %d counter accept comment \"gateway-vpn administrator relay return %s\"\n", relay.GatewayAddress, relay.DestinationPort, relay.ID)
+	}
 	gatewayAddresses := make([]string, 0)
 	for _, peer := range plan.Peers {
 		if peer.Kind == "GATEWAY" {
@@ -99,6 +108,10 @@ func RenderFirewall(plan vpsagent.VPSHostPlan) ([]byte, error) {
 	}
 	output.WriteString("        iifname \"wg-mgmt\" counter reject with icmpx type admin-prohibited comment \"gateway-vpn deny other fabric ingress forwarding\"\n")
 	output.WriteString("        oifname \"wg-mgmt\" counter reject with icmpx type admin-prohibited comment \"gateway-vpn deny other fabric egress forwarding\"\n")
+	output.WriteString("    }\n\n    chain postrouting {\n        type nat hook postrouting priority srcnat; policy accept;\n")
+	for _, relay := range plan.AdminRelays {
+		fmt.Fprintf(&output, "        oifname \"wg-mgmt\" ip daddr %s udp dport %d counter snat ip to %s comment \"gateway-vpn administrator relay snat %s\"\n", relay.GatewayAddress, relay.DestinationPort, relay.VPSSourceAddress, relay.ID)
+	}
 	output.WriteString("    }\n}\n")
 	return []byte(output.String()), nil
 }

@@ -49,6 +49,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "restored.secret"),
 		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-restored.key"),
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "wg-admin.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"),
@@ -63,6 +64,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 	}
 	for filename, expected := range map[string]string{
 		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-restored.key"):                 "restored-management-fabric-private-key",
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "wg-admin.key"):                      "restored-gateway-admin-private-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"):     "restored-wireguard-ingress-server-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.key"): "restored-wireguard-ingress-peer-key",
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-restored.psk"): "restored-wireguard-ingress-peer-psk",
@@ -99,6 +101,7 @@ func TestRestoreApplyCreatesSnapshotMigratesRevokesSessionsAndCommitsFailClosed(
 		t.Fatalf("restore applied audits = %d, %v", appliedAudits, err)
 	}
 	assertManagementFabricBackupFixture(t, fixture.ctx, database, "restored", "/var/lib/gateway-vpn/secrets/management/link-restored.key", 7, 6)
+	assertAdministratorRelayBackupFixture(t, fixture.ctx, database, "restored")
 	var oldManagementLinks int
 	if err := database.QueryRowContext(fixture.ctx, "SELECT COUNT(*) FROM management_links WHERE id='link:old'").Scan(&oldManagementLinks); err != nil || oldManagementLinks != 0 {
 		t.Fatalf("old management fabric row survived restore = %d, %v", oldManagementLinks, err)
@@ -378,6 +381,7 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	sourceState := filepath.Dir(snapshots.DatabasePath)
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "restored.secret"), "restored-secret")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "management", "link-restored.key"), "restored-management-fabric-private-key")
+	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "management", "wg-admin.key"), "restored-gateway-admin-private-key")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "mihomo-api-secret"), "restored-mihomo-api-secret")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "servers", "default.key"), "restored-wireguard-ingress-server-key")
 	writeFixtureFile(t, filepath.Join(sourceState, "secrets", "wireguard-ingress", "peers", "peer-restored.key"), "restored-wireguard-ingress-peer-key")
@@ -388,6 +392,7 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 	writeFixtureFile(t, filepath.Join(sourceState, "mihomo", "generations", "gen-restored", "config.yaml"), "mixed-port: 7890")
 	writeFixtureFile(t, filepath.Join(sourceState, "mihomo", "state", "active.json"), `{"generation":"gen-restored"}`)
 	seedManagementFabricBackupFixture(t, ctx, sourceDatabase, "restored", "/var/lib/gateway-vpn/secrets/management/link-restored.key", 7, 6)
+	seedAdministratorRelayBackupFixture(t, ctx, sourceDatabase, "restored")
 	sourceConfiguration := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(sourceConfiguration, []byte(validRestoreConfig()), 0o600); err != nil {
 		t.Fatal(err)
@@ -421,11 +426,13 @@ func newRestoreApplyFixture(t *testing.T) restoreApplyFixture {
 		t.Fatal(err)
 	}
 	seedManagementFabricBackupFixture(t, ctx, liveDatabase, "old", "/var/lib/gateway-vpn/secrets/management/link-old.key", 3, 2)
+	seedAdministratorRelayBackupFixture(t, ctx, liveDatabase, "old")
 	if err := liveDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "old.secret"), "old-secret")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "management", "link-old.key"), "old-management-fabric-private-key")
+	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "management", "wg-admin.key"), "old-gateway-admin-private-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"), "old-wireguard-ingress-server-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"), "old-wireguard-ingress-peer-key")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "subscriptions", "old.yaml"), "old")
@@ -479,6 +486,7 @@ func assertOldRestoreFixtureLive(t *testing.T, fixture restoreApplyFixture) {
 	for _, filename := range []string{
 		filepath.Join(fixture.stateDirectory, "secrets", "old.secret"),
 		filepath.Join(fixture.stateDirectory, "secrets", "management", "link-old.key"),
+		filepath.Join(fixture.stateDirectory, "secrets", "management", "wg-admin.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "servers", "default.key"),
 		filepath.Join(fixture.stateDirectory, "secrets", "wireguard-ingress", "peers", "peer-old.key"),
 		filepath.Join(fixture.stateDirectory, "subscriptions", "old.yaml"),
@@ -501,6 +509,7 @@ func assertOldRestoreFixtureLive(t *testing.T, fixture restoreApplyFixture) {
 		t.Fatalf("rolled-back database marker = %q, %v", marker, err)
 	}
 	assertManagementFabricBackupFixture(t, fixture.ctx, database, "old", "/var/lib/gateway-vpn/secrets/management/link-old.key", 3, 2)
+	assertAdministratorRelayBackupFixture(t, fixture.ctx, database, "old")
 	runtimeState, err := state.NewRepository(database).Get(fixture.ctx)
 	if err != nil || runtimeState.GatewayState != state.GatewayBlocked || runtimeState.PathState != state.PathBlocked {
 		t.Fatalf("rolled-back runtime is not safely blocked = %+v, %v", runtimeState, err)

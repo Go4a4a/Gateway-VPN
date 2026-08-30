@@ -20,12 +20,7 @@ import (
 func TestVPSRestoreApplySameIdentitySnapshotsQuarantinesAndCommits(t *testing.T) {
 	ctx := context.Background()
 	backupManager, database, stateDirectory := vpsBackupFixture(t)
-	peerKey := testPeerKey(t)
-	if _, err := database.ExecContext(ctx, `
-INSERT INTO gateway_peers(id,site_id,display_name,public_key,assigned_subnet,assigned_address,remote_address,state,created_at,updated_at)
-VALUES('peer:one','site:one','Gateway One',?,'10.88.0.0/30','10.88.0.1','10.88.0.2','ACTIVE','now','now')`, peerKey); err != nil {
-		t.Fatal(err)
-	}
+	relayFixture := seedVPSRelayBackupFixture(t, backupManager, database)
 	artifact, err := backupManager.Build(ctx, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
@@ -62,8 +57,12 @@ VALUES('peer:one','site:one','Gateway One',?,'10.88.0.0/30','10.88.0.1','10.88.0
 	}
 	defer liveDatabase.Close()
 	var peerState string
-	if err := liveDatabase.QueryRowContext(ctx, "SELECT state FROM gateway_peers WHERE id='peer:one'").Scan(&peerState); err != nil || peerState != "QUARANTINED" {
+	if err := liveDatabase.QueryRowContext(ctx, "SELECT state FROM gateway_peers WHERE id=?", relayFixture.GatewayPeerID).Scan(&peerState); err != nil || peerState != "QUARANTINED" {
 		t.Fatalf("restored peer state = %q, %v", peerState, err)
+	}
+	assertVPSRelayBackupFixture(t, ctx, liveDatabase, relayFixture, "CONFIGURED", "CONFIGURED", "RESTORE_REQUIRES_HOST_APPLY")
+	if _, err := os.Stat(filepath.Join(stateDirectory, "secrets", "management", "wg-admin.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("same-VPS restore created forbidden inner administrator private key: %v", err)
 	}
 	var sessionCount int
 	if err := liveDatabase.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&sessionCount); err != nil || sessionCount != 0 {

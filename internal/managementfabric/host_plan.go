@@ -18,11 +18,12 @@ import (
 // reference below the Gateway VPN secret root and gives that path directly to
 // wg(8)'s private-key option.
 type GatewayHostPlan struct {
-	Generation    int64             `json:"generation"`
-	RouteProtocol int               `json:"route_protocol"`
-	Links         []GatewayHostLink `json:"links"`
-	Aliases       []RenderedAlias   `json:"aliases"`
-	ACL           []RenderedACLRule `json:"acl"`
+	Generation    int64                 `json:"generation"`
+	RouteProtocol int                   `json:"route_protocol"`
+	Links         []GatewayHostLink     `json:"links"`
+	AdminContour  *RenderedAdminContour `json:"admin_contour,omitempty"`
+	Aliases       []RenderedAlias       `json:"aliases"`
+	ACL           []RenderedACLRule     `json:"acl"`
 }
 
 type GatewayHostLink struct {
@@ -94,7 +95,7 @@ func (repository *Repository) BuildGatewayHostPlan(ctx context.Context) (Gateway
 		peersByLink[peer.LinkID] = peer
 	}
 
-	plan := GatewayHostPlan{Generation: generation, RouteProtocol: OwnedRouteProtocol, Aliases: rendered.Aliases, ACL: rendered.ACL}
+	plan := GatewayHostPlan{Generation: generation, RouteProtocol: OwnedRouteProtocol, AdminContour: rendered.AdminContour, Aliases: rendered.Aliases, ACL: rendered.ACL}
 	for _, link := range linkRows {
 		peer, exists := peersByLink[link.ID]
 		if !exists {
@@ -174,7 +175,7 @@ ORDER BY slot,id`)
 	}
 
 	adminRows, err := tx.QueryContext(ctx, `
-SELECT a.id,p.vps_id,p.assigned_address
+SELECT a.id,p.vps_id,p.assigned_address,p.trust_mode
 FROM management_admin_vps_peers AS p
 JOIN management_admins AS a ON a.id=p.admin_id
 JOIN vps_nodes AS v ON v.id=p.vps_id
@@ -186,7 +187,7 @@ ORDER BY p.id`)
 	}
 	for adminRows.Next() {
 		var item AdminSpec
-		if err := adminRows.Scan(&item.ID, &item.VPSID, &item.AssignedAddress); err != nil {
+		if err := adminRows.Scan(&item.ID, &item.VPSID, &item.AssignedAddress, &item.TrustMode); err != nil {
 			adminRows.Close()
 			return FabricSpec{}, nil, fmt.Errorf("scan management administrator: %w", err)
 		}
@@ -194,6 +195,74 @@ ORDER BY p.id`)
 	}
 	if err := adminRows.Close(); err != nil {
 		return FabricSpec{}, nil, err
+	}
+
+	var contour AdminContourSpec
+	contourErr := tx.QueryRowContext(ctx, `
+SELECT interface_name,private_key_secret_ref,public_key,subnet,gateway_address,listen_port
+FROM management_admin_contour
+WHERE singleton_id=1 AND enabled=1 AND state!='DISABLED'`).Scan(
+		&contour.InterfaceName, &contour.PrivateKeySecretRef, &contour.PublicKey,
+		&contour.Subnet, &contour.GatewayAddress, &contour.ListenPort,
+	)
+	if contourErr != nil && !errors.Is(contourErr, sql.ErrNoRows) {
+		return FabricSpec{}, nil, fmt.Errorf("read administrator contour: %w", contourErr)
+	}
+	if contourErr == nil {
+		spec.AdminContour = &contour
+		relayRows, relayErr := tx.QueryContext(ctx, `
+SELECT relay.id,relay.link_id,relay.public_endpoint_host,relay.public_bind_address,
+       relay.public_udp_port,relay.destination_port,relay.rate_limit_per_second,relay.burst_packets
+FROM management_admin_relays AS relay
+JOIN management_links AS link ON link.id=relay.link_id
+JOIN vps_nodes AS vps ON vps.id=link.vps_id
+WHERE relay.enabled=1 AND relay.state NOT IN ('DISABLED','CONFLICT','FAILED')
+  AND link.enabled=1 AND link.state NOT IN ('DISABLED','REVOKED')
+  AND vps.enabled=1 AND vps.state!='REVOKED'
+ORDER BY relay.id`)
+		if relayErr != nil {
+			return FabricSpec{}, nil, fmt.Errorf("read administrator relays: %w", relayErr)
+		}
+		for relayRows.Next() {
+			var item AdminRelaySpec
+			if err := relayRows.Scan(&item.ID, &item.LinkID, &item.PublicEndpointHost, &item.PublicBindAddress,
+				&item.PublicUDPPort, &item.DestinationPort, &item.RateLimitPerSecond, &item.BurstPackets); err != nil {
+				relayRows.Close()
+				return FabricSpec{}, nil, fmt.Errorf("scan administrator relay: %w", err)
+			}
+			spec.AdminRelays = append(spec.AdminRelays, item)
+		}
+		if err := relayRows.Close(); err != nil {
+			return FabricSpec{}, nil, err
+		}
+
+		tunnelRows, tunnelErr := tx.QueryContext(ctx, `
+SELECT tunnel.id,tunnel.admin_id,tunnel.relay_id,tunnel.public_key,tunnel.assigned_address
+FROM management_admin_tunnels AS tunnel
+JOIN management_admin_relays AS relay ON relay.id=tunnel.relay_id
+JOIN management_links AS link ON link.id=relay.link_id
+JOIN management_admin_vps_peers AS peer
+  ON peer.admin_id=tunnel.admin_id AND peer.vps_id=link.vps_id
+JOIN management_admins AS admin ON admin.id=tunnel.admin_id
+WHERE tunnel.state IN ('CONFIGURED','ACTIVE')
+  AND relay.enabled=1 AND relay.state NOT IN ('DISABLED','CONFLICT','FAILED')
+  AND peer.state IN ('CONFIGURED','ACTIVE') AND peer.trust_mode='END_TO_END_RELAY'
+  AND admin.enabled=1 AND admin.state='ACTIVE'
+ORDER BY tunnel.id`)
+		if tunnelErr != nil {
+			return FabricSpec{}, nil, fmt.Errorf("read administrator tunnels: %w", tunnelErr)
+		}
+		for tunnelRows.Next() {
+			var item AdminTunnelSpec
+			if err := tunnelRows.Scan(&item.ID, &item.AdminID, &item.RelayID, &item.PublicKey, &item.AssignedAddress); err != nil {
+				tunnelRows.Close()
+				return FabricSpec{}, nil, fmt.Errorf("scan administrator tunnel: %w", err)
+			}
+			spec.AdminTunnels = append(spec.AdminTunnels, item)
+		}
+		if err := tunnelRows.Close(); err != nil {
+			return FabricSpec{}, nil, err
+		}
 	}
 
 	resourceRows, err := tx.QueryContext(ctx, `
@@ -440,6 +509,66 @@ func ValidateGatewayHostPlan(plan GatewayHostPlan) error {
 			}
 		}
 	}
+	adminPeers := make(map[string]RenderedAdminPeer)
+	adminRelays := make(map[string]RenderedAdminRelayIngress)
+	if plan.AdminContour != nil {
+		contour := plan.AdminContour
+		if contour.InterfaceName != AdminInterfaceName || !validSecretReference(contour.PrivateKeySecretRef) ||
+			!wgingress.ValidKey(contour.PublicKey) || contour.ListenPort != AdminListenPort {
+			return errors.New("Gateway administrator contour identity is invalid")
+		}
+		if _, exists := seenInterfaces[contour.InterfaceName]; exists {
+			return errors.New("Gateway administrator contour interface is duplicated")
+		}
+		seenInterfaces[contour.InterfaceName] = struct{}{}
+		subnet, subnetErr := netip.ParsePrefix(contour.Subnet)
+		gateway, gatewayErr := netip.ParsePrefix(contour.GatewayAddress)
+		if subnetErr != nil || gatewayErr != nil || !subnet.Addr().Is4() || !subnet.Addr().IsPrivate() ||
+			subnet.Bits() < 16 || subnet.Bits() > 30 || gateway.Bits() != 32 || !subnet.Contains(gateway.Addr()) {
+			return errors.New("Gateway administrator contour address is invalid")
+		}
+		for _, relay := range contour.Relays {
+			link, exists := seenLinks[relay.LinkID]
+			_ = link
+			outerSource, sourceErr := netip.ParsePrefix(relay.OuterSource)
+			outerDestination, destinationErr := netip.ParsePrefix(relay.OuterDestination)
+			bind, bindErr := netip.ParseAddr(relay.PublicBindAddress)
+			if !exists || !safeIdentifier.MatchString(relay.RelayID) || relay.InputInterface == "" ||
+				sourceErr != nil || destinationErr != nil || outerSource.Bits() != 32 || outerDestination.Bits() != 32 ||
+				bindErr != nil || !bind.Is4() || !bind.IsGlobalUnicast() || relay.PublicUDPPort < 1 || relay.PublicUDPPort > 65535 ||
+				relay.DestinationPort != contour.ListenPort || relay.RateLimitPerSecond < 1 || relay.RateLimitPerSecond > 10000 ||
+				relay.BurstPackets < 1 || relay.BurstPackets > 10000 || !validEndpointHost(relay.PublicEndpointHost) {
+				return errors.New("Gateway administrator relay projection is invalid")
+			}
+			var hostLink *GatewayHostLink
+			for index := range plan.Links {
+				if plan.Links[index].LinkID == relay.LinkID {
+					hostLink = &plan.Links[index]
+					break
+				}
+			}
+			if hostLink == nil || relay.InputInterface != hostLink.InterfaceName || relay.OuterSource != hostLink.RemoteAddress || relay.OuterDestination != hostLink.LocalAddress {
+				return errors.New("Gateway administrator relay escaped its outer link")
+			}
+			if _, exists := adminRelays[relay.RelayID]; exists {
+				return errors.New("Gateway administrator relay is duplicated")
+			}
+			adminRelays[relay.RelayID] = relay
+		}
+		for _, peer := range contour.Peers {
+			address, addressErr := netip.ParsePrefix(peer.AssignedAddress)
+			relay, relayExists := adminRelays[peer.RelayID]
+			if !safeIdentifier.MatchString(peer.TunnelID) || !safeIdentifier.MatchString(peer.AdminID) || !relayExists ||
+				peer.LinkID != relay.LinkID || !wgingress.ValidKey(peer.PublicKey) || addressErr != nil || address.Bits() != 32 ||
+				!subnet.Contains(address.Addr()) || address.Addr() == gateway.Addr() {
+				return errors.New("Gateway administrator peer projection is invalid")
+			}
+			if _, exists := adminPeers[peer.TunnelID]; exists {
+				return errors.New("Gateway administrator tunnel is duplicated")
+			}
+			adminPeers[peer.TunnelID] = peer
+		}
+	}
 	aliases := make(map[string]RenderedAlias, len(plan.Aliases))
 	for _, alias := range plan.Aliases {
 		if !safeIdentifier.MatchString(alias.PublicationID) || !safeIdentifier.MatchString(alias.ResourceID) ||
@@ -469,12 +598,26 @@ func ValidateGatewayHostPlan(plan GatewayHostPlan) error {
 		alias, exists := aliases[rule.PublicationID]
 		source, sourceErr := netip.ParsePrefix(rule.Source)
 		if !exists || !safeIdentifier.MatchString(rule.RuleID) || !safeIdentifier.MatchString(rule.AdminID) ||
-			rule.LinkID != alias.LinkID || rule.InputInterface != alias.InterfaceName ||
+			rule.LinkID != alias.LinkID ||
 			rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile ||
 			rule.PublishedAlias != alias.PublishedAlias || rule.LocalDestination != alias.LocalDestination ||
 			sourceErr != nil || !source.Addr().Is4() || source.Bits() != 32 || source.Addr().IsUnspecified() ||
 			validateProtocolPorts(rule.Protocol, rule.PortStart, rule.PortEnd) != nil {
 			return errors.New("Gateway host ACL rule is invalid")
+		}
+		switch rule.TrustMode {
+		case TrustRoutedHub:
+			if rule.InputInterface != alias.InterfaceName || rule.TunnelID != "" || rule.RelayID != "" {
+				return errors.New("Gateway routed-hub ACL binding is invalid")
+			}
+		case TrustEndToEndRelay:
+			peer, peerExists := adminPeers[rule.TunnelID]
+			if plan.AdminContour == nil || !peerExists || rule.InputInterface != AdminInterfaceName ||
+				rule.RelayID != peer.RelayID || rule.LinkID != peer.LinkID || rule.AdminID != peer.AdminID || rule.Source != peer.AssignedAddress {
+				return errors.New("Gateway end-to-end ACL binding is invalid")
+			}
+		default:
+			return errors.New("Gateway host ACL trust mode is invalid")
 		}
 	}
 	return nil

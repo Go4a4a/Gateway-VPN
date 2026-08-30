@@ -255,6 +255,26 @@ func TestFabricWatchdogDistinguishesHealthyDriftAndReceiptMismatch(t *testing.T)
 	}
 }
 
+func TestRelayWatchdogTelemetryRequiresEveryOwnedRuleAndAggregatesCounters(t *testing.T) {
+	output := strings.Join([]string{
+		`counter packets 1 bytes 100 drop comment "gateway-vpn administrator relay rate limit relay:a"`,
+		`counter packets 2 bytes 200 dnat comment "gateway-vpn administrator relay dnat relay:a"`,
+		`counter packets 3 bytes 300 accept comment "gateway-vpn administrator relay ingress relay:a"`,
+		`counter packets 4 bytes 400 accept comment "gateway-vpn administrator relay return relay:a"`,
+		`counter packets 5 bytes 500 snat comment "gateway-vpn administrator relay snat relay:a"`,
+	}, "\n")
+	rules, packets, bytes, err := parseRelayCounters(output, []string{"relay:a"})
+	if err != nil || rules != 5 || packets != 15 || bytes != 1500 {
+		t.Fatalf("relay telemetry = rules:%d packets:%d bytes:%d error:%v", rules, packets, bytes, err)
+	}
+	if _, _, _, err := parseRelayCounters(strings.Replace(output, "\n"+strings.Split(output, "\n")[4], "", 1), []string{"relay:a"}); err == nil {
+		t.Fatal("incomplete relay rule inventory was accepted")
+	}
+	if _, _, _, err := parseRelayCounters(output, []string{"relay:other"}); err == nil {
+		t.Fatal("foreign relay counters were accepted")
+	}
+}
+
 func TestOwnedRouteProtocolAcceptsOnlyNumericOrCanonicalIPRouteRepresentation(t *testing.T) {
 	for _, value := range []any{nil, float64(vpsagent.VPSOwnedRouteProtocol), "186", "bgp"} {
 		if !ownedProtocol(value) {

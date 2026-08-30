@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -24,7 +25,8 @@ import (
 )
 
 type gatewayInterface struct {
-	address, publicKey, peer, fwmark string
+	address, publicKey, fwmark, listenPort string
+	peers                                  map[string]string
 }
 
 type gatewayRoute struct {
@@ -36,6 +38,8 @@ type gatewayExecutor struct {
 	routes            map[string]gatewayRoute
 	firewall          string
 	failACLLoad       bool
+	failAdminIdentity bool
+	failedAdminPublic string
 	keepRouteOnDelete bool
 	keepLinkOnDelete  bool
 	requests          []platformexec.Request
@@ -79,7 +83,7 @@ func (executor *gatewayExecutor) Run(_ context.Context, request platformexec.Req
 		if _, exists := executor.interfaces[name]; exists {
 			return platformexec.Result{}, errors.New("link exists")
 		}
-		executor.interfaces[name] = &gatewayInterface{}
+		executor.interfaces[name] = &gatewayInterface{peers: map[string]string{}}
 		return platformexec.Result{}, nil
 	case command == "ip" && strings.HasPrefix(args, "-4 address replace "):
 		name := request.Arguments[5]
@@ -156,13 +160,41 @@ func (executor *gatewayExecutor) Run(_ context.Context, request platformexec.Req
 		if item == nil {
 			return platformexec.Result{}, errors.New("link missing")
 		}
-		private, err := os.ReadFile(request.Arguments[3])
-		if err != nil {
-			return platformexec.Result{}, err
+		if item.peers == nil {
+			item.peers = map[string]string{}
 		}
-		item.publicKey, _ = wgingress.PublicKey(strings.TrimSpace(string(private)))
-		item.fwmark = request.Arguments[5]
-		item.peer = request.Arguments[7]
+		for index := 2; index < len(request.Arguments); index++ {
+			switch request.Arguments[index] {
+			case "private-key":
+				private, err := os.ReadFile(request.Arguments[index+1])
+				if err != nil {
+					return platformexec.Result{}, err
+				}
+				publicKey, _ := wgingress.PublicKey(strings.TrimSpace(string(private)))
+				if name == managementfabric.AdminInterfaceName && executor.failAdminIdentity && publicKey != item.publicKey {
+					executor.failAdminIdentity = false
+					executor.failedAdminPublic = publicKey
+					return platformexec.Result{}, errors.New("injected administrator identity apply failure")
+				}
+				item.publicKey = publicKey
+				index++
+			case "fwmark":
+				item.fwmark = request.Arguments[index+1]
+				index++
+			case "listen-port":
+				item.listenPort = request.Arguments[index+1]
+				index++
+			case "peer":
+				key := request.Arguments[index+1]
+				index++
+				if index+1 < len(request.Arguments) && request.Arguments[index+1] == "remove" {
+					delete(item.peers, key)
+					index++
+				} else {
+					item.peers[key] = ""
+				}
+			}
+		}
 		return platformexec.Result{}, nil
 	case command == "wg" && strings.HasPrefix(args, "show "):
 		item := executor.interfaces[request.Arguments[1]]
@@ -173,10 +205,17 @@ func (executor *gatewayExecutor) Run(_ context.Context, request platformexec.Req
 		case "public-key":
 			return platformexec.Result{Stdout: item.publicKey + "\n"}, nil
 		case "peers":
-			return platformexec.Result{Stdout: item.peer + "\n"}, nil
+			peers := make([]string, 0, len(item.peers))
+			for peer := range item.peers {
+				peers = append(peers, peer)
+			}
+			sort.Strings(peers)
+			return platformexec.Result{Stdout: strings.Join(peers, "\n") + "\n"}, nil
 		case "fwmark":
 			value, _ := strconv.ParseInt(item.fwmark, 10, 64)
 			return platformexec.Result{Stdout: fmt.Sprintf("0x%x\n", value)}, nil
+		case "listen-port":
+			return platformexec.Result{Stdout: item.listenPort + "\n"}, nil
 		}
 	}
 	return platformexec.Result{}, fmt.Errorf("unexpected command: %s %s", request.Executable, args)
@@ -229,7 +268,7 @@ UPDATE management_fabric_generations SET desired_generation=desired_generation+1
 		t.Fatalf("rollback generations = %d/%d %s %s, %v", applied, desired, state, code, err)
 	}
 	current := fixture.executor.interfaces["gvm1"]
-	if current == nil || *current != oldInterface || fixture.executor.firewall != oldFirewall || exists(fixture.applier.journalPath()) {
+	if current == nil || !reflect.DeepEqual(*current, oldInterface) || fixture.executor.firewall != oldFirewall || exists(fixture.applier.journalPath()) {
 		t.Fatalf("previous runtime was not restored: interface=%+v firewall=%q journal=%t", current, fixture.executor.firewall, exists(fixture.applier.journalPath()))
 	}
 	if current != oldInterfacePointer {
@@ -269,6 +308,143 @@ func TestGatewayRuntimeLinkDeltaPreservesUnchangedLinks(t *testing.T) {
 	remove, apply = runtimeLinkDelta(newPlan, managementfabric.GatewayHostPlan{Generation: 9, RouteProtocol: managementfabric.OwnedRouteProtocol, Links: []managementfabric.GatewayHostLink{changed}})
 	if len(remove.Links) != 1 || remove.Links[0].InterfaceName != "gvm2" || len(apply.Links) != 1 || apply.Links[0].EndpointPort != changed.EndpointPort {
 		t.Fatalf("changed-link delta remove=%+v apply=%+v", remove.Links, apply.Links)
+	}
+}
+
+func TestGatewayApplierUpdatesAdminPeerWithoutRecreatingContour(t *testing.T) {
+	fixture := newGatewayApplierFixture(t)
+	ctx := context.Background()
+	innerGateway, _ := wgingress.GenerateKeyPair()
+	innerAdmin, _ := wgingress.GenerateKeyPair()
+	stamp := "2026-08-30T16:05:00Z"
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE management_admin_vps_peers
+SET trust_mode='END_TO_END_RELAY',desired_generation=desired_generation+1,updated_at=? WHERE id='peer:a'`, []any{stamp}},
+		{`INSERT INTO management_admin_contour(
+  singleton_id,enabled,interface_name,private_key_secret_ref,public_key,subnet,gateway_address,
+  listen_port,desired_generation,applied_generation,state,last_error_code,created_at,updated_at
+) VALUES(1,1,'wg-admin','/var/lib/gateway-vpn/secrets/management/wg-admin.key',?,'10.83.0.0/24','10.83.0.1',51822,1,0,'CONFIGURED','',?,?)`, []any{innerGateway.Public, stamp, stamp}},
+		{`INSERT INTO management_admin_relays(
+  id,link_id,enabled,public_endpoint_host,public_bind_address,public_udp_port,destination_port,
+  rate_limit_per_second,burst_packets,desired_generation,applied_generation,state,last_error_code,created_at,updated_at
+) VALUES('relay:a','link:a',1,'vps-a.example.net','203.0.113.10',51823,51822,100,200,1,0,'CONFIGURED','',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_admin_tunnels(
+  id,admin_id,relay_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at
+) VALUES('tunnel:a','admin:a','relay:a',?,'10.83.0.10','CONFIGURED',1,0,?,?)`, []any{innerAdmin.Public, stamp, stamp}},
+		{`UPDATE management_fabric_generations
+SET desired_generation=desired_generation+1,state='PENDING',updated_at=? WHERE singleton_id=1`, []any{stamp}},
+	}
+	for _, statement := range statements {
+		if _, err := fixture.database.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(fixture.applier.Paths.SecretRoot, "wg-admin.key"), []byte(innerGateway.Private+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.applier.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	contour := fixture.executor.interfaces[managementfabric.AdminInterfaceName]
+	if contour == nil || len(contour.peers) != 1 {
+		t.Fatalf("initial administrator contour = %+v", contour)
+	}
+	requestOffset := len(fixture.executor.requests)
+	replacement, _ := wgingress.GenerateKeyPair()
+	if _, err := fixture.database.ExecContext(ctx, `
+UPDATE management_admin_tunnels
+SET public_key=?,desired_generation=desired_generation+1,updated_at=? WHERE id='tunnel:a';
+UPDATE management_fabric_generations
+SET desired_generation=desired_generation+1,state='PENDING',updated_at=? WHERE singleton_id=1`, replacement.Public, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.applier.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.executor.interfaces[managementfabric.AdminInterfaceName] != contour {
+		t.Fatal("peer-only update recreated the wg-admin interface")
+	}
+	if len(contour.peers) != 1 {
+		t.Fatalf("peer-only update left stale peers: %+v", contour.peers)
+	}
+	if _, exists := contour.peers[replacement.Public]; !exists {
+		t.Fatalf("replacement administrator peer missing: %+v", contour.peers)
+	}
+	for _, request := range fixture.executor.requests[requestOffset:] {
+		joined := strings.Join(request.Arguments, " ")
+		if strings.Contains(joined, "link del dev wg-admin") || strings.Contains(joined, "link add name wg-admin") {
+			t.Fatalf("peer-only update reset wg-admin: %s", joined)
+		}
+	}
+}
+
+func TestGatewayAdminIdentityRotationFailureRestoresPreviousIdentityAndRuntime(t *testing.T) {
+	fixture := newGatewayApplierFixture(t)
+	ctx := context.Background()
+	before, err := fixture.applier.ConfigureAdminContour(ctx, managementfabric.AdminContourRequest{
+		Enabled: true, Subnet: "10.83.0.0/24", GatewayAddress: "10.83.0.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(fixture.applier.Paths.SecretRoot, "wg-admin.key")
+	oldPrivateBytes, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPrivate := strings.TrimSpace(string(oldPrivateBytes))
+	oldReceipt, found, err := fixture.applier.readReceipt()
+	if err != nil || !found {
+		t.Fatalf("read previous receipt = %t %v", found, err)
+	}
+	oldRuntime := *fixture.executor.interfaces[managementfabric.AdminInterfaceName]
+	oldRuntime.peers = make(map[string]string, len(fixture.executor.interfaces[managementfabric.AdminInterfaceName].peers))
+	for key, value := range fixture.executor.interfaces[managementfabric.AdminInterfaceName].peers {
+		oldRuntime.peers[key] = value
+	}
+	oldFirewall := fixture.executor.firewall
+
+	fixture.executor.failAdminIdentity = true
+	_, err = fixture.applier.RotateAdminContourIdentity(ctx)
+	if err == nil || !strings.Contains(err.Error(), "identity rotation failed and rollback was requested") {
+		t.Fatalf("rotation failure = %v", err)
+	}
+	rotationErr := err
+	failedPublic := fixture.executor.failedAdminPublic
+	if failedPublic == "" || failedPublic == before.PublicKey {
+		t.Fatalf("injected candidate public identity = %q", failedPublic)
+	}
+	for _, forbidden := range []string{oldPrivate, failedPublic, secretPath, managementfabric.AdminPrivateKeySecretRef} {
+		if forbidden != "" && strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("rotation failure exposes identity material or path %q: %v", forbidden, err)
+		}
+	}
+
+	privateBytes, err := os.ReadFile(secretPath)
+	if err != nil || strings.TrimSpace(string(privateBytes)) != oldPrivate {
+		t.Fatalf("previous private identity was not restored: err=%v", err)
+	}
+	after, err := fixture.repository.GetAdminContour(ctx)
+	if err != nil || after.PublicKey != before.PublicKey {
+		t.Fatalf("durable public identity was not restored: before=%+v after=%+v err=%v", before, after, err)
+	}
+	receipt, found, err := fixture.applier.readReceipt()
+	if err != nil || !found || receipt.Generation != oldReceipt.Generation {
+		t.Fatalf("previous runtime generation was not restored: before=%d after=%d found=%t err=%v", oldReceipt.Generation, receipt.Generation, found, err)
+	}
+	runtimeContour := fixture.executor.interfaces[managementfabric.AdminInterfaceName]
+	if runtimeContour == nil || !reflect.DeepEqual(*runtimeContour, oldRuntime) || fixture.executor.firewall != oldFirewall {
+		t.Fatalf("previous administrator runtime was not restored: contour=%+v firewall_changed=%t rotation_error=%v", runtimeContour, fixture.executor.firewall != oldFirewall, rotationErr)
+	}
+	if runtimeContour.publicKey == failedPublic || after.PublicKey == failedPublic {
+		t.Fatalf("failed candidate identity remained active: runtime=%q durable=%q", runtimeContour.publicKey, after.PublicKey)
+	}
+	needed, reason, err := fixture.applier.NeedsApply(ctx)
+	if err != nil || needed || reason != "HEALTHY" {
+		t.Fatalf("restored administrator contour is not healthy: needed=%t reason=%s err=%v", needed, reason, err)
 	}
 }
 

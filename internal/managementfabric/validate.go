@@ -45,6 +45,17 @@ func ValidateVPSInput(input CreateVPSInput) error {
 	return nil
 }
 
+func ValidateAdminContourRequest(input AdminContourRequest) error {
+	prefix, err := canonicalPrivatePrefix(input.Subnet, 16, 30)
+	if err != nil || prefix.String() != strings.TrimSpace(input.Subnet) {
+		return errors.New("administrator contour requires a canonical private IPv4 subnet")
+	}
+	if _, err := canonicalHostAddress(input.GatewayAddress, prefix); err != nil {
+		return errors.New("administrator contour requires a usable Gateway address inside its subnet")
+	}
+	return nil
+}
+
 func ValidateLinkInput(input CreateLinkInput, slot int64, interfaceName string) error {
 	if !safeIdentifier.MatchString(input.ID) || !safeIdentifier.MatchString(input.SiteID) || !safeIdentifier.MatchString(input.VPSID) {
 		return errors.New("safe link, site, and VPS ids are required")
@@ -162,6 +173,61 @@ func ValidateFabric(spec FabricSpec) error {
 		prefixes = append(prefixes, namedPrefix{owner: "link:" + link.ID, prefix: prefix})
 	}
 
+	relays := make(map[string]AdminRelaySpec, len(spec.AdminRelays))
+	relaysByLink := make(map[string]string, len(spec.AdminRelays))
+	relayPorts := make(map[string]string, len(spec.AdminRelays))
+	var adminSubnet netip.Prefix
+	var adminGateway netip.Addr
+	if spec.AdminContour == nil {
+		if len(spec.AdminRelays) != 0 || len(spec.AdminTunnels) != 0 {
+			return errors.New("administrator relays or tunnels require an enabled wg-admin contour")
+		}
+	} else {
+		contour := spec.AdminContour
+		var err error
+		adminSubnet, err = canonicalPrivatePrefix(contour.Subnet, 16, 30)
+		if err != nil {
+			return errors.New("administrator wg-admin contour subnet is invalid")
+		}
+		if contour.InterfaceName != AdminInterfaceName || contour.ListenPort != AdminListenPort {
+			return errors.New("administrator wg-admin contour interface identity is invalid")
+		}
+		if !validSecretReference(contour.PrivateKeySecretRef) {
+			return errors.New("administrator wg-admin contour private-key reference is invalid")
+		}
+		if !wgingress.ValidKey(contour.PublicKey) {
+			return errors.New("administrator wg-admin contour public key is invalid")
+		}
+		adminGateway, err = canonicalHostAddress(contour.GatewayAddress, adminSubnet)
+		if err != nil {
+			return errors.New("administrator wg-admin Gateway address is invalid")
+		}
+		prefixes = append(prefixes, namedPrefix{owner: "administrator-contour", prefix: adminSubnet})
+	}
+	for _, relay := range spec.AdminRelays {
+		link, linkExists := links[relay.LinkID]
+		bind, bindErr := netip.ParseAddr(strings.TrimSpace(relay.PublicBindAddress))
+		endpointHost := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(relay.PublicEndpointHost), "."))
+		if !safeIdentifier.MatchString(relay.ID) || !linkExists || !validEndpointHost(endpointHost) ||
+			bindErr != nil || !bind.Is4() || !bind.IsGlobalUnicast() || bind.IsUnspecified() || bind.IsLoopback() || bind.IsLinkLocalUnicast() || bind.String() != relay.PublicBindAddress ||
+			relay.PublicUDPPort < 1 || relay.PublicUDPPort > 65535 || relayPortConflictsLink(relay.PublicUDPPort, link.Endpoints) ||
+			spec.AdminContour == nil || relay.DestinationPort != spec.AdminContour.ListenPort ||
+			relay.RateLimitPerSecond < 1 || relay.RateLimitPerSecond > 10000 || relay.BurstPackets < 1 || relay.BurstPackets > 10000 {
+			return fmt.Errorf("administrator relay %s is invalid", relay.ID)
+		}
+		if _, exists := relays[relay.ID]; exists {
+			return fmt.Errorf("administrator relay %s is duplicated", relay.ID)
+		}
+		if previous, exists := relaysByLink[relay.LinkID]; exists {
+			return fmt.Errorf("administrator relays %s and %s reuse link %s", previous, relay.ID, relay.LinkID)
+		}
+		portKey := relay.PublicBindAddress + "\x00" + fmt.Sprint(relay.PublicUDPPort)
+		if previous, exists := relayPorts[portKey]; exists {
+			return fmt.Errorf("administrator relays %s and %s reuse a public UDP port", previous, relay.ID)
+		}
+		relays[relay.ID], relaysByLink[relay.LinkID], relayPorts[portKey] = relay, relay.ID, relay.ID
+	}
+
 	admins := make(map[string][]AdminSpec, len(spec.Admins))
 	adminAddresses := make(map[string]string, len(spec.Admins))
 	adminPeers := make(map[string]struct{}, len(spec.Admins))
@@ -171,7 +237,7 @@ func ValidateFabric(spec FabricSpec) error {
 		linkAddresses[link.RemoteAddress] = link.ID
 	}
 	for _, admin := range spec.Admins {
-		if !safeIdentifier.MatchString(admin.ID) || !safeIdentifier.MatchString(admin.VPSID) {
+		if !safeIdentifier.MatchString(admin.ID) || !safeIdentifier.MatchString(admin.VPSID) || admin.TrustMode != TrustRoutedHub && admin.TrustMode != TrustEndToEndRelay {
 			return errors.New("fabric administrator reference is invalid")
 		}
 		address, err := netip.ParseAddr(strings.TrimSpace(admin.AssignedAddress))
@@ -192,6 +258,43 @@ func ValidateFabric(spec FabricSpec) error {
 		admins[admin.ID] = append(admins[admin.ID], admin)
 		adminPeers[peerKey] = struct{}{}
 		adminAddresses[addressKey] = admin.ID
+	}
+
+	tunnelIDs := make(map[string]struct{}, len(spec.AdminTunnels))
+	tunnelKeys := make(map[string]string, len(spec.AdminTunnels))
+	tunnelAddresses := make(map[string]string, len(spec.AdminTunnels))
+	tunnelBindings := make(map[string]string, len(spec.AdminTunnels))
+	for _, tunnel := range spec.AdminTunnels {
+		relay, relayExists := relays[tunnel.RelayID]
+		address, addressErr := netip.ParseAddr(strings.TrimSpace(tunnel.AssignedAddress))
+		if !safeIdentifier.MatchString(tunnel.ID) || !safeIdentifier.MatchString(tunnel.AdminID) || !relayExists ||
+			!wgingress.ValidKey(tunnel.PublicKey) || addressErr != nil || !address.Is4() || address.String() != tunnel.AssignedAddress ||
+			spec.AdminContour == nil || !adminSubnet.Contains(address) || address == adminGateway {
+			return fmt.Errorf("administrator tunnel %s is invalid", tunnel.ID)
+		}
+		if _, exists := tunnelIDs[tunnel.ID]; exists {
+			return fmt.Errorf("administrator tunnel %s is duplicated", tunnel.ID)
+		}
+		if previous, exists := tunnelKeys[tunnel.PublicKey]; exists {
+			return fmt.Errorf("administrator tunnels %s and %s reuse a public key", previous, tunnel.ID)
+		}
+		if previous, exists := tunnelAddresses[tunnel.AssignedAddress]; exists {
+			return fmt.Errorf("administrator tunnels %s and %s reuse an address", previous, tunnel.ID)
+		}
+		binding := tunnel.AdminID + "\x00" + tunnel.RelayID
+		if previous, exists := tunnelBindings[binding]; exists {
+			return fmt.Errorf("administrator tunnels %s and %s reuse an admin relay binding", previous, tunnel.ID)
+		}
+		link := links[relay.LinkID]
+		trusted := false
+		for _, admin := range admins[tunnel.AdminID] {
+			trusted = trusted || admin.VPSID == link.VPSID && admin.TrustMode == TrustEndToEndRelay
+		}
+		if !trusted {
+			return fmt.Errorf("administrator tunnel %s has no END_TO_END_RELAY peer on its VPS", tunnel.ID)
+		}
+		tunnelIDs[tunnel.ID] = struct{}{}
+		tunnelKeys[tunnel.PublicKey], tunnelAddresses[tunnel.AssignedAddress], tunnelBindings[binding] = tunnel.ID, tunnel.ID, tunnel.ID
 	}
 
 	resources := make(map[string]ResourceSpec, len(spec.Resources))
@@ -358,6 +461,15 @@ func validateEndpoints(endpoints []EndpointSpec) error {
 		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+func relayPortConflictsLink(port int, endpoints []EndpointSpec) bool {
+	for _, endpoint := range endpoints {
+		if endpoint.Port == port {
+			return true
+		}
+	}
+	return false
 }
 
 func validEndpointHost(value string) bool {

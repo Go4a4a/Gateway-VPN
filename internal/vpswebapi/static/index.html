@@ -34,11 +34,26 @@
         </form>
       </section>
 
+      <label id="mobile-navigation" class="mobile-navigation" for="mobile-navigation-select">
+        <span>Раздел VPS Hub</span>
+        <select id="mobile-navigation-select">
+          <option value="overview">Обзор</option>
+          <option value="gateways">Gateway</option>
+          <option value="channels">Каналы</option>
+          <option value="admins">Администраторы</option>
+          <option value="relays">End-to-end relay</option>
+          <option value="resources">Локальные ресурсы</option>
+          <option value="matrix">Матрица доступа</option>
+          <option value="watchdog">Watchdog</option>
+          <option value="backup">Backup / восстановление</option>
+        </select>
+      </label>
       <nav id="navigation" aria-label="Разделы VPS Hub">
         <button data-page="overview" class="active">Обзор</button>
         <button data-page="gateways">Gateway</button>
         <button data-page="channels">Каналы</button>
         <button data-page="admins">Администраторы</button>
+        <button data-page="relays">End-to-end relay</button>
         <button data-page="resources">Локальные ресурсы</button>
         <button data-page="matrix">Матрица доступа</button>
         <button data-page="watchdog">Watchdog</button>
@@ -87,6 +102,7 @@
             <label>Название устройства<input name="name" maxlength="128" required></label>
             <label title="Приватный ключ остаётся на устройстве администратора.">WireGuard public key<input name="public_key" required></label>
             <label title="Уникальный адрес администратора на этом VPS; он не должен входить в подсети каналов.">Private IPv4<input name="assigned_address" placeholder="10.81.0.10" required></label>
+            <label title="ROUTED_HUB завершает WireGuard администратора на VPS. END_TO_END_RELAY оставляет внутренний приватный ключ только на устройстве администратора и Gateway.">Режим доверия<select name="trust_mode"><option value="ROUTED_HUB">ROUTED_HUB — через VPS Hub</option><option value="END_TO_END_RELAY">END_TO_END_RELAY — ключ не хранится на VPS</option></select></label>
             <button>Добавить администратора</button>
           </form></article>
           <article class="card" id="managed-admin-card"><h3>Создать готовый конфиг</h3><form id="managed-admin-form">
@@ -95,9 +111,26 @@
             <label title="Повторная проверка защищает создание нового приватного ключа.">Текущий пароль VPS Hub<input name="password" type="password" autocomplete="current-password" required></label>
             <label>Введите: СОЗДАТЬ УПРАВЛЯЕМЫЙ КЛЮЧ<input name="confirmation" autocomplete="off" required></label>
             <button>Создать отдельный ключ</button>
-          </form><p class="muted">Приватный ключ сохраняется в закрытом state только до первого скачивания. После выдачи `.conf` он удаляется с VPS; повторное скачивание невозможно.</p></article>
+          </form><p class="muted">Приватный ключ сохраняется в закрытом state только до первого скачивания. После выдачи `.conf` он удаляется с VPS; повторное скачивание невозможно. Такой ключ работает только в режиме ROUTED_HUB и не может использоваться для end-to-end relay.</p></article>
         </div>
         <div id="admin-list" class="stack"></div>
+      </section>
+
+      <section data-page-panel="relays" hidden>
+        <div class="page-heading"><div><h2>End-to-end relay</h2><p>VPS пересылает только ограниченный UDP-поток к выбранному Gateway. Внутренний <code>wg-admin</code> завершается на Gateway, поэтому его приватного ключа на VPS нет.</p></div><button class="secondary" data-refresh="relays">Обновить</button></div>
+        <div class="grid">
+          <article class="card"><h3>Добавить публичный UDP relay</h3><form id="relay-form">
+            <label title="Gateway, на котором завершается внутренний защищённый туннель администратора.">Gateway<select name="gateway_peer_id" required></select></label>
+            <label title="Публичное DNS-имя или IPv4, которое администратор укажет как endpoint. Порт вводится отдельно.">Публичное имя или IPv4<input name="public_endpoint_host" placeholder="vps.example" required></label>
+            <label title="Конкретный публичный IPv4 этого VPS, на котором разрешается только выбранный UDP-порт.">Bind IPv4 VPS<input name="public_bind_address" placeholder="203.0.113.10" required></label>
+            <label title="Отдельный внешний UDP-порт relay. Не должен совпадать с портом основного management WireGuard.">Публичный UDP-порт<input name="public_udp_port" type="number" min="1" max="65535" value="51830" required></label>
+            <label title="Верхняя средняя частота входящих UDP-пакетов для защиты relay от злоупотребления.">Лимит пакетов в секунду<input name="rate_limit_per_second" type="number" min="1" max="10000" value="100" required></label>
+            <label title="Кратковременный допустимый всплеск сверх среднего rate limit.">Допустимый всплеск, пакетов<input name="burst_packets" type="number" min="1" max="10000" value="200" required></label>
+            <button>Создать и включить relay</button>
+          </form></article>
+          <article class="card"><h3>Граница доверия</h3><p>Relay выполняет только bounded UDP DNAT/SNAT к фиксированному порту <code>51822</code> выбранного Gateway. VPS не получает внутренний private key, не расшифровывает сессию администратора и не создаёт произвольные firewall-правила.</p><p class="warning">Сначала создайте внешний ключ администратора в режиме END_TO_END_RELAY, затем настройте соответствующий <code>wg-admin</code> peer на Gateway.</p></article>
+        </div>
+        <div id="relay-list" class="stack"></div>
       </section>
 
       <section data-page-panel="resources" hidden>
