@@ -418,11 +418,16 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 		"packaging/vps/systemd/gateway-vpn-vps-restore.service":             []byte("[Service]\nType=oneshot\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-restore.path":                []byte("[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/restore.trigger\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service":    []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-fabric.service":              []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-fabric.path":                 []byte("[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/fabric.trigger\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-recovery.service":     []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.service":     []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer":       []byte("[Timer]\nOnUnitActiveSec=60s\n"),
 		"packaging/vps/config/config.yaml":                                  []byte("version: 1\n"),
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": []byte("[Unit]\nAfter=gateway-vpn-vps-firewall.service\n"),
-		"manifest.sha256":                                                   []byte(strings.Repeat("0", 64) + "  placeholder\n"),
-		"share/supply-chain/sbom.spdx.json":                                 []byte("{}\n"),
-		"share/supply-chain/provenance.intoto.json":                         []byte("{}\n"),
+		"manifest.sha256":                           []byte(strings.Repeat("0", 64) + "  placeholder\n"),
+		"share/supply-chain/sbom.spdx.json":         []byte("{}\n"),
+		"share/supply-chain/provenance.intoto.json": []byte("{}\n"),
 	} {
 		writeFixtureFile(t, releaseRoot, relative, content)
 	}

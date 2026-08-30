@@ -97,11 +97,16 @@ func writeValidVPSRelease(t *testing.T) string {
 		"packaging/vps/systemd/gateway-vpn-vps-restore.service":             "[Service]\nType=oneshot\n",
 		"packaging/vps/systemd/gateway-vpn-vps-restore.path":                "[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/restore.trigger\n",
 		"packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service":    "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-fabric.service":              "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-fabric.path":                 "[Path]\nPathExists=/var/lib/gateway-vpn-vps/agent/fabric.trigger\n",
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-recovery.service":     "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.service":     "[Service]\nType=oneshot\n",
+		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer":       "[Timer]\nOnUnitActiveSec=60s\n",
 		"packaging/vps/config/config.yaml":                                  "version: 1\n",
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": "[Unit]\nAfter=gateway-vpn-vps-firewall.service\n",
-		LegacyHashFilename:                                                  strings.Repeat("0", 64) + "  placeholder\n",
-		"share/supply-chain/sbom.spdx.json":                                 "{}\n",
-		"share/supply-chain/provenance.intoto.json":                         "{}\n",
+		LegacyHashFilename:                          strings.Repeat("0", 64) + "  placeholder\n",
+		"share/supply-chain/sbom.spdx.json":         "{}\n",
+		"share/supply-chain/provenance.intoto.json": "{}\n",
 	}
 	for relative, content := range files {
 		path := filepath.Join(root, filepath.FromSlash(relative))

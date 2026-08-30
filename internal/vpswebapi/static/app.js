@@ -54,12 +54,19 @@ async function loadPage(page){
 
 async function loadOverview(){
   const item=await api('/api/v1/hub/overview');const root=$('overview-content');clear(root);
+  const hostPending=item.desired_generation!==item.applied_generation,hostActions=[];
+  if(item.host_apply_available&&hostPending)hostActions.push(actionButton('Применить изменения сейчас',()=>applyFabricNow('overview')));
   root.append(
     objectCard(item.identity.display_name,[['VPS ID',item.identity.vps_id],['Fingerprint',item.identity.identity_fingerprint],['Schema',item.schema_version]],'ACTIVE'),
     objectCard('Gateway',[['Состояния',countStates(item.gateways)],['Открытых приглашений',item.open_invitations]],item.open_invitations?'PENDING':'HEALTHY'),
     objectCard('Доступ',[['Администраторы',countStates(item.administrators)],['Ресурсы',countStates(item.resources)],['ACL правил',item.acl_grants]],item.fabric_state),
-    objectCard('Применение на host',[['Desired generation',item.desired_generation],['Applied generation',item.applied_generation],['Root apply доступен',item.host_apply_available?'Да':'Нет, следующий этап']],item.host_apply_available?'HEALTHY':'PENDING')
+    objectCard('Применение на host',[['Desired generation',item.desired_generation],['Applied generation',item.applied_generation],['Привилегированный reconciler',item.host_apply_available?'Доступен':'Недоступен']],item.host_apply_available?(hostPending?'PENDING':'HEALTHY'):'FAILED',hostActions)
   );
+}
+
+async function applyFabricNow(refreshPage=ui.page){
+  if(!confirm('Поставить безопасное применение Management Fabric в очередь? При ошибке предыдущая конфигурация будет восстановлена.'))return;
+  try{const result=await api('/api/v1/hub/fabric/apply',{method:'POST',body:'{}'});notice(result.state==='ALREADY_APPLIED'?'Management Fabric уже соответствует настройкам.':`Применение generation ${result.generation} поставлено в очередь.`);setTimeout(()=>loadPage(refreshPage).catch(error=>notice(error.message)),1000)}catch(error){notice(error.message)}
 }
 
 async function loadGateways(){
@@ -113,14 +120,15 @@ async function loadResources(){
 async function loadMatrix(){
   const matrix=await api('/api/v1/hub/access-matrix');ui.admins=(matrix.administrators||[]).filter(item=>item.state!=='REVOKED');ui.resources=(matrix.resources||[]).filter(item=>item.enabled&&item.state!=='DISABLED');
   setOptions($('acl-form').elements.admin_peer_id,ui.admins,item=>`${item.name} — ${item.assigned_address}`);setOptions($('acl-form').elements.publication_id,ui.resources,item=>`${item.display_name} — ${item.published_alias}`);
-  const generation=$('matrix-generation');clear(generation);for(const [label,value] of [['Состояние',matrix.state],['Desired',matrix.desired_generation],['Applied',matrix.applied_generation],['Host apply',matrix.host_apply_available?'Доступен':'Ещё не подключён']])generation.append(textElement('dt',label),textElement('dd',value));
+  const generation=$('matrix-generation');clear(generation);for(const [label,value] of [['Состояние',matrix.state],['Desired',matrix.desired_generation],['Applied',matrix.applied_generation],['Host apply',matrix.host_apply_available?'Доступен':'Недоступен']])generation.append(textElement('dt',label),textElement('dd',value));const generationCard=generation.closest('.card');generationCard.querySelector('.fabric-apply-action')?.remove();if(matrix.host_apply_available&&matrix.desired_generation!==matrix.applied_generation){const apply=actionButton('Применить generation',()=>applyFabricNow('matrix'));apply.classList.add('fabric-apply-action');generationCard.append(apply)}
   const root=$('acl-list'),grants=matrix.grants||[];if(!grants.length){empty(root,'Явных разрешений пока нет — действует default deny.');return}clear(root);
   const admins=new Map((matrix.administrators||[]).map(item=>[item.id,item]));const resources=new Map((matrix.resources||[]).map(item=>[item.id,item]));
   for(const item of grants){const admin=admins.get(item.admin_peer_id),resource=resources.get(item.publication_id);const ports=item.protocol==='ICMP'?'ICMP':`${item.port_start}–${item.port_end}`;const remove=actionButton('Удалить правило',async()=>{if(!confirm('Удалить это разрешение?'))return;try{await api(`/api/v1/hub/acl/${encodeURIComponent(item.id)}`,{method:'DELETE',headers:{'X-Confirm-Destructive':'delete-acl-grant'}});notice('ACL удалён; новая generation ожидает применения');await loadMatrix()}catch(error){notice(error.message)}},true);root.append(objectCard(`${admin?.name||item.admin_peer_id} → ${resource?.display_name||item.publication_id}`,[['Протокол / порты',`${item.protocol} ${ports}`],['Alias',resource?.published_alias||'—'],['Generation',item.generation],['ACL ID',item.id]],'PENDING',[remove]))}
 }
 
 async function loadWatchdog(){
-  const report=await api('/api/v1/hub/watchdog');const root=$('watchdog-content');clear(root);root.append(objectCard('Общее состояние',[['Проверено',report.checked_at],['Граница', 'Только owned Gateway VPN objects']],report.state));
+  const [report,overview]=await Promise.all([api('/api/v1/hub/watchdog'),api('/api/v1/hub/overview')]);const root=$('watchdog-content');clear(root);root.append(objectCard('Общее состояние',[['Проверено',report.checked_at],['Граница', 'Только owned Gateway VPN objects']],report.state));
+  const host=report.host_fabric||{},hostActions=[];if(overview.host_apply_available&&(overview.desired_generation!==overview.applied_generation||host.state!=='HEALTHY'))hostActions.push(actionButton('Запустить reconciliation',()=>applyFabricNow('watchdog')));root.append(objectCard('Management Fabric host watchdog',[['Статус получен',host.available?'Да':'Нет'],['Последняя root-проверка',host.checked_at||'ещё не выполнялась'],['Причина',host.reason||'STATUS_UNAVAILABLE'],['Reconciliation поставлен',host.reconcile_scheduled?'Да':'Нет'],['Generation',`${overview.applied_generation} / ${overview.desired_generation}`]],host.state||'UNKNOWN',hostActions));
   for(const item of report.components||[])root.append(objectCard(item.name,[['Причина',item.reason],['Owned only',item.owned_only?'Да':'Нет']],item.state));
 }
 

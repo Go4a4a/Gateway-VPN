@@ -277,6 +277,9 @@ func (manager AdminKeyManager) allowedIPs(ctx context.Context) ([]string, error)
 		values[prefix.String()] = prefix
 		return nil
 	}
+	if err := add(VPSHubAddress + "/32"); err != nil {
+		return nil, err
+	}
 	rows, err := manager.Repository.Database.QueryContext(ctx, `
 SELECT assigned_address,remote_address FROM gateway_peers WHERE state!='REVOKED' ORDER BY id`)
 	if err != nil {

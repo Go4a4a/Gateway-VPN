@@ -25,9 +25,11 @@ import (
 
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/buildinfo"
+	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
 	"gateway-vpn/internal/vpsconfig"
+	"gateway-vpn/internal/vpsfabric"
 	"gateway-vpn/internal/vpswebapi"
 	"gateway-vpn/internal/wgingress"
 )
@@ -51,6 +53,18 @@ func run(args []string) int {
 			return runRestoreApply(args[1:], false)
 		case "restore-recover":
 			return runRestoreApply(args[1:], true)
+		case "legacy-adopt":
+			return runLegacyAdopt(args[1:])
+		case "fabric-apply":
+			return runFabricApply(args[1:], false)
+		case "fabric-recover":
+			return runFabricApply(args[1:], true)
+		case "fabric-restore-prepare":
+			return runFabricRestore(args[1:], true)
+		case "fabric-restore-reset":
+			return runFabricRestore(args[1:], false)
+		case "fabric-watchdog":
+			return runFabricWatchdog(args[1:])
 		}
 	}
 	flags := flag.NewFlagSet("gateway-vpn-vps-agent", flag.ContinueOnError)
@@ -82,7 +96,7 @@ func run(args []string) int {
 		fmt.Println("VPS Hub password file is valid")
 		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog]")
 		return 2
 	}
 }
@@ -130,8 +144,10 @@ func runServe(args []string) int {
 	}
 	web, err := vpswebapi.New(vpswebapi.Dependencies{
 		Database: database, Auth: authService, Backups: backups, Restores: restores,
-		AdminKeys:    &adminKeys,
-		RestoreApply: systemdRestoreTrigger{path: filepath.Join(configuration.System.StateDirectory, "restore.trigger")},
+		AdminKeys:        &adminKeys,
+		RestoreApply:     systemdRestoreTrigger{path: filepath.Join(configuration.System.StateDirectory, "restore.trigger")},
+		FabricApply:      systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")},
+		FabricStatusPath: filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initialize VPS Hub WebUI failed: %v\n", err)
@@ -180,6 +196,224 @@ func runServe(args []string) int {
 		_ = server.Shutdown(shutdown)
 	}
 	return 0
+}
+
+func runLegacyAdopt(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent legacy-adopt", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	gatewayKey := flags.String("gateway-public-key", "", "legacy Gateway public key")
+	adminKey := flags.String("admin-public-key", "", "legacy administrator public key")
+	endpoint := flags.String("endpoint", "", "legacy VPS endpoint")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	_, database, err := openConfigured(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open VPS Agent state failed: %v\n", err)
+		return 1
+	}
+	defer database.Close()
+	result, err := (vpsagent.HubRepository{Database: database}).AdoptLegacyInstallerPeers(context.Background(), vpsagent.LegacyAdoptionInput{
+		GatewayPublicKey: *gatewayKey, AdminPublicKey: *adminKey, Endpoint: *endpoint,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adopt exact legacy VPS peers failed: %v\n", err)
+		return 1
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(result)
+	return 0
+}
+
+func runFabricApply(args []string, recover bool) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent fabric-apply", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	agentUser := flags.String("agent-user", "gateway-vpn-vps", "VPS Agent service account")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, database, err := openConfigured(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open VPS Agent state failed: %v\n", err)
+		return 1
+	}
+	uid, gid, err := resolveAccount(*agentUser)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "resolve VPS Agent ownership failed: %v\n", err)
+		return 1
+	}
+	identity, err := vpsagent.ReadIdentity(context.Background(), database)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "read VPS identity failed: %v\n", err)
+		return 1
+	}
+	paths := vpsfabric.DefaultPaths(identity.PrivateKeySecretRef)
+	paths.TransactionRoot = filepath.Join(filepath.Dir(configuration.System.TransactionRoot), "fabric")
+	applier := &vpsfabric.Applier{
+		Repository: vpsagent.HubRepository{Database: database, HostApplyAvailable: true},
+		Executor:   platformexec.OSExecutor{}, Paths: paths,
+	}
+	if recover {
+		recovered, applyErr := applier.Recover(context.Background())
+		reset, resetErr := applier.ResetAfterRestore(context.Background())
+		pending, pendingErr := applier.RestoreReconciliationPending()
+		triggerErr := error(nil)
+		if pending {
+			triggerErr = (systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")}).ApplyVPSFabric(context.Background())
+		}
+		closeErr := database.Close()
+		ownershipErr := restoreDatabaseOwnership(configuration.System.Database, uid, gid)
+		if err := errors.Join(applyErr, resetErr, pendingErr, triggerErr, closeErr, ownershipErr); err != nil {
+			fmt.Fprintf(os.Stderr, "recover interrupted VPS fabric failed: %v\n", err)
+			return 1
+		}
+		fmt.Printf("VPS fabric recovery checked; recovered=%t restore_reset=%t\n", recovered, reset)
+		return 0
+	}
+	applyErr := applier.Apply(context.Background())
+	closeErr := database.Close()
+	ownershipErr := restoreDatabaseOwnership(configuration.System.Database, uid, gid)
+	if err := errors.Join(applyErr, closeErr, ownershipErr); err != nil {
+		fmt.Fprintf(os.Stderr, "apply VPS fabric failed: %v\n", err)
+		return 1
+	}
+	fmt.Println("VPS fabric applied")
+	return 0
+}
+
+func runFabricRestore(args []string, prepare bool) int {
+	name := "fabric-restore-reset"
+	if prepare {
+		name = "fabric-restore-prepare"
+	}
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent "+name, flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	agentUser := flags.String("agent-user", "gateway-vpn-vps", "VPS Agent service account")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, database, err := openConfigured(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open VPS fabric restore state failed: %v\n", err)
+		return 1
+	}
+	uid, gid, err := resolveAccount(*agentUser)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "resolve VPS Agent ownership failed: %v\n", err)
+		return 1
+	}
+	identity, err := vpsagent.ReadIdentity(context.Background(), database)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "read VPS identity failed: %v\n", err)
+		return 1
+	}
+	paths := vpsfabric.DefaultPaths(identity.PrivateKeySecretRef)
+	paths.TransactionRoot = filepath.Join(filepath.Dir(configuration.System.TransactionRoot), "fabric")
+	applier := &vpsfabric.Applier{Repository: vpsagent.HubRepository{Database: database, HostApplyAvailable: true}, Executor: platformexec.OSExecutor{}, Paths: paths}
+	operationErr := error(nil)
+	changed := false
+	if prepare {
+		restores, managerErr := vpsbackup.NewRestoreManager(database, configuration.System.StateDirectory, configuration.System.Database, *configPath)
+		if managerErr != nil {
+			operationErr = managerErr
+		} else if operation, exists, statusErr := restores.Status(); statusErr != nil {
+			operationErr = statusErr
+		} else if !exists || operation.State != vpsbackup.RestoreStateApplyRequested || operation.ApplyAuthorization == "" {
+			operationErr = errors.New("explicitly authorized VPS restore is required")
+		} else {
+			operationErr = applier.PrepareRestore(context.Background(), operation.RestoreID)
+			changed = operationErr == nil
+		}
+	} else {
+		changed, operationErr = applier.ResetAfterRestore(context.Background())
+		if operationErr == nil && changed {
+			operationErr = (systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")}).ApplyVPSFabric(context.Background())
+		}
+	}
+	closeErr := database.Close()
+	ownershipErr := restoreDatabaseOwnership(configuration.System.Database, uid, gid)
+	if err := errors.Join(operationErr, closeErr, ownershipErr); err != nil {
+		fmt.Fprintf(os.Stderr, "%s failed: %v\n", name, err)
+		return 1
+	}
+	fmt.Printf("VPS fabric restore transition complete; operation=%s changed=%t\n", name, changed)
+	return 0
+}
+
+func runFabricWatchdog(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent fabric-watchdog", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	agentUser := flags.String("agent-user", "gateway-vpn-vps", "VPS Agent service account")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, database, err := openConfigured(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open VPS fabric watchdog state failed: %v\n", err)
+		return 1
+	}
+	uid, gid, err := resolveAccount(*agentUser)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "resolve VPS Agent ownership failed: %v\n", err)
+		return 1
+	}
+	identity, err := vpsagent.ReadIdentity(context.Background(), database)
+	if err != nil {
+		database.Close()
+		fmt.Fprintf(os.Stderr, "read VPS identity failed: %v\n", err)
+		return 1
+	}
+	paths := vpsfabric.DefaultPaths(identity.PrivateKeySecretRef)
+	paths.TransactionRoot = filepath.Join(filepath.Dir(configuration.System.TransactionRoot), "fabric")
+	applier := &vpsfabric.Applier{Repository: vpsagent.HubRepository{Database: database, HostApplyAvailable: true}, Executor: platformexec.OSExecutor{}, Paths: paths}
+	needed, reason, checkErr := applier.NeedsApply(context.Background())
+	triggerErr := error(nil)
+	if checkErr == nil && needed {
+		triggerErr = (systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")}).ApplyVPSFabric(context.Background())
+	}
+	closeErr := database.Close()
+	ownershipErr := restoreDatabaseOwnership(configuration.System.Database, uid, gid)
+	state, healthy, scheduled, statusReason := "HEALTHY", true, false, reason
+	operationErr := errors.Join(checkErr, triggerErr, closeErr, ownershipErr)
+	if checkErr != nil {
+		state, healthy = "FAILED", false
+	} else if triggerErr != nil {
+		state, healthy, statusReason = "FAILED", false, "RECONCILE_SCHEDULE_FAILED"
+	} else if closeErr != nil || ownershipErr != nil {
+		state, healthy, statusReason = "FAILED", false, "WATCHDOG_MAINTENANCE_FAILED"
+	} else if needed {
+		state, healthy, scheduled = "PENDING", false, true
+	}
+	status := vpsfabric.NewWatchdogStatus(state, statusReason, healthy, scheduled, time.Now().UTC())
+	statusErr := vpsfabric.WriteWatchdogStatus(filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename), status, uid, gid)
+	if err := errors.Join(operationErr, statusErr); err != nil {
+		fmt.Fprintf(os.Stderr, "VPS fabric watchdog failed (%s): %v\n", reason, err)
+		return 1
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(status)
+	return 0
+}
+
+func restoreDatabaseOwnership(databasePath string, uid, gid int) error {
+	var failures []error
+	for _, path := range []string{databasePath, databasePath + "-wal", databasePath + "-shm"} {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		failures = append(failures, os.Chown(path, uid, gid))
+	}
+	return errors.Join(failures...)
 }
 
 func runIdentityInit(args []string) int {
@@ -414,19 +648,29 @@ func readProtectedSecret(path string, maximum int64) (string, error) {
 
 type systemdRestoreTrigger struct{ path string }
 
+type systemdFabricTrigger struct{ path string }
+
+func (trigger systemdFabricTrigger) ApplyVPSFabric(ctx context.Context) error {
+	return createSystemdTrigger(ctx, trigger.path, "fabric.trigger")
+}
+
 func (trigger systemdRestoreTrigger) ApplyPendingVPSRestore(ctx context.Context) error {
+	return createSystemdTrigger(ctx, trigger.path, "restore.trigger")
+}
+
+func createSystemdTrigger(ctx context.Context, path, expectedBase string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(trigger.path) || filepath.Base(trigger.path) != "restore.trigger" {
-		return errors.New("VPS restore trigger path is invalid")
+	if !filepath.IsAbs(path) || filepath.Base(path) != expectedBase || expectedBase != "restore.trigger" && expectedBase != "fabric.trigger" {
+		return errors.New("VPS systemd trigger path is invalid")
 	}
-	file, err := os.OpenFile(trigger.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		info, statErr := os.Lstat(trigger.path)
-		content, readErr := os.ReadFile(trigger.path)
+		info, statErr := os.Lstat(path)
+		content, readErr := os.ReadFile(path)
 		if statErr != nil || readErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || string(content) != "apply\n" || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-			return errors.New("existing VPS restore trigger is unsafe")
+			return errors.New("existing VPS systemd trigger is unsafe")
 		}
 		return nil
 	}
@@ -436,13 +680,13 @@ func (trigger systemdRestoreTrigger) ApplyPendingVPSRestore(ctx context.Context)
 	written, writeErr := file.WriteString("apply\n")
 	syncErr, closeErr := file.Sync(), file.Close()
 	if writeErr != nil || syncErr != nil || closeErr != nil || written != len("apply\n") {
-		_ = os.Remove(trigger.path)
-		return errors.Join(errors.New("durably create VPS restore trigger failed"), writeErr, syncErr, closeErr)
+		_ = os.Remove(path)
+		return errors.Join(errors.New("durably create VPS systemd trigger failed"), writeErr, syncErr, closeErr)
 	}
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	directory, err := os.Open(filepath.Dir(trigger.path))
+	directory, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}

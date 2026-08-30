@@ -28,12 +28,17 @@ exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN VPS install/recovery/uninstall transaction is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-vps/install-transactions/active && ! -L /var/lib/gateway-vpn-vps/install-transactions/active ]] || { echo "Recover the interrupted VPS install before uninstall" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-vps/agent/restore.trigger && ! -L /var/lib/gateway-vpn-vps/agent/restore.trigger ]] || { echo "Finish or discard the pending VPS restore before uninstall" >&2; exit 1; }
+[[ ! -e /var/lib/gateway-vpn-vps/agent/fabric.trigger && ! -L /var/lib/gateway-vpn-vps/agent/fabric.trigger ]] || { echo "Finish the pending VPS Management Fabric apply before uninstall" >&2; exit 1; }
 if [[ -d /var/lib/gateway-vpn-vps-privileged/restore-transactions ]] && find /var/lib/gateway-vpn-vps-privileged/restore-transactions -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
   echo "Recover the interrupted VPS restore before uninstall" >&2
   exit 1
 fi
+if [[ -d /var/lib/gateway-vpn-vps-privileged/fabric ]] && find /var/lib/gateway-vpn-vps-privileged/fabric -maxdepth 1 -type f \( -name 'transaction.json' -o -name 'restore-reconcile.json' \) -print -quit | grep -q .; then
+  echo "Recover the pending VPS Management Fabric transaction before uninstall" >&2
+  exit 1
+fi
 
-systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-restore-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-install-recovery.service >/dev/null 2>&1 || true
 if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
   /usr/sbin/nft delete table inet gateway_vpn_vps
 fi
@@ -56,6 +61,11 @@ rm -f /etc/systemd/system/gateway-vpn-vps-agent.service
 rm -f /etc/systemd/system/gateway-vpn-vps-restore.service
 rm -f /etc/systemd/system/gateway-vpn-vps-restore.path
 rm -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric.service
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric.path
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer
 rm -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d
 rm -rf /etc/gateway-vpn-vps

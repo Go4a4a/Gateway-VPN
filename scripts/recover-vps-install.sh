@@ -43,9 +43,10 @@ record_failure() {
   FAILED=1
 }
 
-systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-restore-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
 systemctl is-active --quiet gateway-vpn-vps-agent.service && record_failure "VPS Agent remained active"
 systemctl is-active --quiet gateway-vpn-vps-restore.path && record_failure "VPS restore watcher remained active"
+systemctl is-active --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained active"
 systemctl is-active --quiet wg-quick@wg-mgmt.service && record_failure "wg-mgmt remained active"
 systemctl is-active --quiet gateway-vpn-vps-firewall.service && record_failure "owned firewall remained active"
 if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
@@ -71,6 +72,11 @@ rm -f /etc/systemd/system/gateway-vpn-vps-agent.service || record_failure "remov
 rm -f /etc/systemd/system/gateway-vpn-vps-restore.service || record_failure "remove owned restore unit"
 rm -f /etc/systemd/system/gateway-vpn-vps-restore.path || record_failure "remove owned restore watcher"
 rm -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service || record_failure "remove owned restore recovery unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric.service || record_failure "remove owned fabric apply unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric.path || record_failure "remove owned fabric watcher"
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service || record_failure "remove owned fabric recovery unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service || record_failure "remove owned fabric watchdog unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer || record_failure "remove owned fabric watchdog timer"
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d || record_failure "remove owned WireGuard drop-in"
 rm -rf /etc/gateway-vpn-vps || record_failure "remove owned VPS config"
 rm -f /opt/gateway-vpn-vps/current /opt/gateway-vpn-vps/.current.new || record_failure "remove release pointers"
@@ -101,6 +107,8 @@ systemctl is-enabled --quiet wg-quick@wg-mgmt.service && record_failure "wg-mgmt
 systemctl is-enabled --quiet gateway-vpn-vps-firewall.service && record_failure "owned firewall remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-agent.service && record_failure "VPS Agent remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-restore.path && record_failure "VPS restore watcher remained enabled"
+systemctl is-enabled --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained enabled"
+systemctl is-enabled --quiet gateway-vpn-vps-fabric-watchdog.timer && record_failure "VPS fabric watchdog remained enabled"
 if ((FAILED)); then
   echo "Gateway VPN VPS recovery is incomplete; active marker retained for retry" >&2
   exit 1

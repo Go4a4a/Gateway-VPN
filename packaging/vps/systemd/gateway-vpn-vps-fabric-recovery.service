@@ -1,0 +1,42 @@
+[Unit]
+Description=Recover interrupted Gateway VPN VPS Management Fabric transaction
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+DefaultDependencies=no
+After=local-fs.target gateway-vpn-vps-install-recovery.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service
+Before=gateway-vpn-vps-fabric.path gateway-vpn-vps-agent.service
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent fabric-recover --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+ReadOnlyPaths=/opt/gateway-vpn-vps/current /etc/gateway-vpn-vps/config.yaml
+ReadWritePaths=/etc/gateway-vpn-vps /etc/wireguard /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -76,7 +76,7 @@
       </section>
 
       <section data-page-panel="channels" hidden>
-        <div class="page-heading"><div><h2>Каналы</h2><p>На этом VPS один Gateway peer является отдельным management-каналом. Host apply появится отдельной root transaction.</p></div><button class="secondary" data-refresh="channels">Обновить</button></div>
+        <div class="page-heading"><div><h2>Каналы</h2><p>На этом VPS каждый Gateway peer является отдельным management-каналом. Изменения применяются ownership-scoped root transaction с rollback.</p></div><button class="secondary" data-refresh="channels">Обновить</button></div>
         <div id="channel-list" class="stack"></div>
       </section>
 
@@ -137,7 +137,7 @@
       </section>
 
       <section data-page-panel="watchdog" hidden>
-        <div class="page-heading"><div><h2>Watchdog VPS Hub</h2><p>Проверяет только owned state Gateway VPN. AmneziaVPN, Docker, UFW и чужие WireGuard-интерфейсы исключены.</p></div><button class="secondary" data-refresh="watchdog">Проверить сейчас</button></div>
+        <div class="page-heading"><div><h2>Watchdog VPS Hub</h2><p>Показывает control-plane и последнюю root-проверку Management Fabric. AmneziaVPN, Docker, UFW и чужие WireGuard-интерфейсы исключены.</p></div><button class="secondary" data-refresh="watchdog">Обновить статус</button></div>
         <div id="watchdog-content" class="stack"></div>
       </section>
 

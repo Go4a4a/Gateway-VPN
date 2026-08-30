@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
+	"gateway-vpn/internal/vpsfabric"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -25,6 +27,16 @@ type fakeRestoreTrigger struct{ calls int }
 func (trigger *fakeRestoreTrigger) ApplyPendingVPSRestore(context.Context) error {
 	trigger.calls++
 	return nil
+}
+
+type fakeFabricTrigger struct {
+	calls int
+	err   error
+}
+
+func (trigger *fakeFabricTrigger) ApplyVPSFabric(context.Context) error {
+	trigger.calls++
+	return trigger.err
 }
 
 type apiSession struct {
@@ -252,7 +264,83 @@ func TestVPSHubManagementAPIEndToEndAndDestructiveReauthentication(t *testing.T)
 	}
 }
 
+func TestVPSHubFabricTriggerSchedulesAutomaticAndExplicitApply(t *testing.T) {
+	fabric := &fakeFabricTrigger{}
+	server, _ := newVPSAPIFixture(t, fabric)
+	session := loginVPSHub(t, server, "administrator password 123")
+	overview := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/overview", nil, "")
+	if overview.Code != http.StatusOK || !strings.Contains(overview.Body.String(), `"host_apply_available":true`) {
+		t.Fatalf("fabric-aware overview = %d %s", overview.Code, overview.Body.String())
+	}
+	watchdog := authorizedRequest(server, session, http.MethodGet, "/api/v1/hub/watchdog", nil, "")
+	if watchdog.Code != http.StatusOK || !strings.Contains(watchdog.Body.String(), `"host_fabric":{"available":true`) || !strings.Contains(watchdog.Body.String(), `"reason":"HEALTHY"`) {
+		t.Fatalf("fabric-aware watchdog = %d %s", watchdog.Code, watchdog.Body.String())
+	}
+	initial := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
+	if initial.Code != http.StatusAccepted || fabric.calls != 1 || !strings.Contains(initial.Body.String(), "APPLY_SCHEDULED") {
+		t.Fatalf("initial fabric apply = %d calls=%d %s", initial.Code, fabric.calls, initial.Body.String())
+	}
+	invitationResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/pairing-invitations", map[string]any{
+		"gateway_name": "Дом", "endpoint": "vps.example:51820", "assigned_subnet": "10.82.0.0/30", "expiry_seconds": 900,
+	})
+	var invitation struct {
+		Invitation vpsagent.PairingBundle `json:"invitation"`
+	}
+	if invitationResponse.Code != http.StatusCreated || json.Unmarshal(invitationResponse.Body.Bytes(), &invitation) != nil {
+		t.Fatalf("fabric pairing invitation = %d %s", invitationResponse.Code, invitationResponse.Body.String())
+	}
+	pair, _ := wgingress.GenerateKeyPair()
+	completion := jsonRequest(t, server, apiSession{}, http.MethodPost, "/api/v1/pairing/complete", map[string]any{
+		"invitation_id": invitation.Invitation.InvitationID, "token": invitation.Invitation.Token,
+		"site_id": "site:trigger", "display_name": "Дом", "public_key": pair.Public, "webui_url": "https://10.82.0.2:9444/",
+	})
+	if completion.Code != http.StatusCreated || fabric.calls != 2 {
+		t.Fatalf("automatic fabric schedule = %d calls=%d %s", completion.Code, fabric.calls, completion.Body.String())
+	}
+	manual := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
+	if manual.Code != http.StatusAccepted || fabric.calls != 3 || !strings.Contains(manual.Body.String(), "APPLY_SCHEDULED") {
+		t.Fatalf("manual fabric schedule = %d calls=%d %s", manual.Code, fabric.calls, manual.Body.String())
+	}
+	fabric.err = errors.New("injected trigger failure")
+	failed := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/fabric/apply", map[string]any{})
+	if failed.Code != http.StatusBadGateway || fabric.calls != 4 {
+		t.Fatalf("failed fabric schedule = %d calls=%d %s", failed.Code, fabric.calls, failed.Body.String())
+	}
+}
+
+func TestVPSHubWebUIExposesFabricApplyAndRootWatchdogStatus(t *testing.T) {
+	server, _ := newVPSAPIFixture(t, &fakeFabricTrigger{})
+	for path, required := range map[string][]string{
+		"/app.js": {
+			"/api/v1/hub/fabric/apply", "Применить изменения сейчас", "Запустить reconciliation",
+			"host_fabric", "Последняя root-проверка", "Привилегированный reconciler",
+		},
+		"/": {
+			"последнюю root-проверку Management Fabric", "ownership-scoped root transaction с rollback",
+		},
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d", path, recorder.Code)
+		}
+		for _, value := range required {
+			if !strings.Contains(recorder.Body.String(), value) {
+				t.Fatalf("GET %s missing %q", path, value)
+			}
+		}
+		if strings.Contains(recorder.Body.String(), "Нет, следующий этап") || strings.Contains(recorder.Body.String(), "Ещё не подключён") {
+			t.Fatalf("GET %s still contains obsolete host-apply placeholder", path)
+		}
+	}
+}
+
 func vpsAPIFixture(t *testing.T) (*Server, *fakeRestoreTrigger) {
+	return newVPSAPIFixture(t, nil)
+}
+
+func newVPSAPIFixture(t *testing.T, fabric FabricApplyTrigger) (*Server, *fakeRestoreTrigger) {
 	t.Helper()
 	ctx := context.Background()
 	stateDirectory := filepath.Join(t.TempDir(), "state")
@@ -309,7 +397,20 @@ func vpsAPIFixture(t *testing.T) (*Server, *fakeRestoreTrigger) {
 		t.Fatal(err)
 	}
 	trigger := &fakeRestoreTrigger{}
-	server, err := New(Dependencies{Database: database, Auth: authService, Backups: backupManager, Restores: restoreManager, AdminKeys: &adminKeys, RestoreApply: trigger})
+	now := time.Now().UTC()
+	fabricStatusPath := ""
+	if fabric != nil {
+		fabricStatusPath = filepath.Join(stateDirectory, vpsfabric.WatchdogStatusFilename)
+		status := vpsfabric.NewWatchdogStatus("HEALTHY", "HEALTHY", true, false, now)
+		if err := vpsfabric.WriteWatchdogStatus(fabricStatusPath, status, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := New(Dependencies{
+		Database: database, Auth: authService, Backups: backupManager, Restores: restoreManager,
+		AdminKeys: &adminKeys, RestoreApply: trigger, FabricApply: fabric, FabricStatusPath: fabricStatusPath,
+		Now: func() time.Time { return now },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

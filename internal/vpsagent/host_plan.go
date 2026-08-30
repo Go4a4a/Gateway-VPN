@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gateway-vpn/internal/wgingress"
@@ -15,6 +17,9 @@ const (
 	VPSManagementInterface = "wg-mgmt"
 	VPSManagementPort      = 51821
 	VPSOwnedRouteProtocol  = 186
+	VPSHubAddressPrefix    = "10.80.0.1/24"
+	VPSHubAddress          = "10.80.0.1"
+	VPSDefaultWebUIPort    = 8443
 )
 
 // VPSHostPlan is a mutation-free, typed projection for the later privileged
@@ -36,6 +41,8 @@ type VPSHostPeer struct {
 	ID         string   `json:"id"`
 	Kind       string   `json:"kind"`
 	PublicKey  string   `json:"public_key"`
+	Address    string   `json:"address"`
+	WebUIPort  int      `json:"webui_port,omitempty"`
 	AllowedIPs []string `json:"allowed_ips"`
 }
 
@@ -71,31 +78,32 @@ func (repository HubRepository) RenderHostPlan(ctx context.Context) (VPSHostPlan
 	}
 	plan := VPSHostPlan{
 		Generation: generation, InterfaceName: VPSManagementInterface, ListenPort: VPSManagementPort,
-		RouteProtocol: VPSOwnedRouteProtocol,
+		RouteProtocol: VPSOwnedRouteProtocol, InterfaceAddresses: []string{VPSHubAddressPrefix},
 	}
 	gatewayRows, err := repository.Database.QueryContext(ctx, `
-SELECT id,public_key,assigned_subnet,assigned_address,remote_address
+SELECT id,public_key,assigned_subnet,assigned_address,remote_address,webui_url
 FROM gateway_peers WHERE state!='REVOKED' ORDER BY id`)
 	if err != nil {
 		return VPSHostPlan{}, err
 	}
 	gatewayPrefixes := map[string][]string{}
 	for gatewayRows.Next() {
-		var id, publicKey, subnetText, gatewayText, vpsText string
-		if err := gatewayRows.Scan(&id, &publicKey, &subnetText, &gatewayText, &vpsText); err != nil {
+		var id, publicKey, subnetText, gatewayText, vpsText, webUIURL string
+		if err := gatewayRows.Scan(&id, &publicKey, &subnetText, &gatewayText, &vpsText, &webUIURL); err != nil {
 			gatewayRows.Close()
 			return VPSHostPlan{}, err
 		}
 		subnet, subnetErr := netip.ParsePrefix(subnetText)
 		gatewayAddress, gatewayErr := netip.ParseAddr(gatewayText)
 		vpsAddress, vpsErr := netip.ParseAddr(vpsText)
-		if subnetErr != nil || gatewayErr != nil || vpsErr != nil || !wgingress.ValidKey(publicKey) || subnet.Bits() < 16 || subnet.Bits() > 30 || !subnet.Contains(gatewayAddress) || !subnet.Contains(vpsAddress) || gatewayAddress == vpsAddress {
+		webUIPort, portErr := gatewayWebUIPort(webUIURL)
+		if subnetErr != nil || gatewayErr != nil || vpsErr != nil || portErr != nil || !wgingress.ValidKey(publicKey) || subnet.Bits() < 16 || subnet.Bits() > 30 || !subnet.Contains(gatewayAddress) || !subnet.Contains(vpsAddress) || gatewayAddress == vpsAddress {
 			gatewayRows.Close()
 			return VPSHostPlan{}, errors.New("stored Gateway host projection is invalid")
 		}
 		plan.InterfaceAddresses = append(plan.InterfaceAddresses, netip.PrefixFrom(vpsAddress, subnet.Bits()).String())
 		gatewayPrefixes[id] = []string{netip.PrefixFrom(gatewayAddress, 32).String()}
-		plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "GATEWAY", PublicKey: publicKey})
+		plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "GATEWAY", PublicKey: publicKey, Address: netip.PrefixFrom(gatewayAddress, 32).String(), WebUIPort: webUIPort})
 	}
 	if err := gatewayRows.Close(); err != nil {
 		return VPSHostPlan{}, err
@@ -149,7 +157,7 @@ SELECT id,public_key,assigned_address FROM admin_peers WHERE state!='REVOKED' OR
 			return VPSHostPlan{}, errors.New("stored administrator host projection is invalid")
 		}
 		prefix := netip.PrefixFrom(address, 32).String()
-		plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "ADMIN", PublicKey: publicKey, AllowedIPs: []string{prefix}})
+		plan.Peers = append(plan.Peers, VPSHostPeer{ID: id, Kind: "ADMIN", PublicKey: publicKey, Address: prefix, AllowedIPs: []string{prefix}})
 		plan.HubAdminSources = append(plan.HubAdminSources, prefix)
 	}
 	if err := adminRows.Close(); err != nil {
@@ -240,40 +248,91 @@ func validateVPSHostPlan(plan VPSHostPlan) error {
 	if plan.Generation < 1 || plan.InterfaceName != VPSManagementInterface || plan.ListenPort != VPSManagementPort || plan.RouteProtocol != VPSOwnedRouteProtocol {
 		return errors.New("VPS host-plan ownership contract is invalid")
 	}
+	if len(plan.InterfaceAddresses) == 0 || len(plan.InterfaceAddresses) > maximumGateways+1 || !containsString(plan.InterfaceAddresses, VPSHubAddressPrefix) {
+		return errors.New("VPS host-plan interface addresses are invalid")
+	}
+	interfaceNetworks := make([]netip.Prefix, 0, len(plan.InterfaceAddresses))
+	previousInterface := ""
+	for _, raw := range plan.InterfaceAddresses {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil || !prefix.Addr().Is4() || !prefix.Addr().IsPrivate() || prefix.Bits() < 16 || prefix.Bits() > 30 || prefix.Addr().IsUnspecified() || prefix.String() != raw || raw <= previousInterface {
+			return errors.New("VPS host-plan contains an unsafe interface address")
+		}
+		previousInterface = raw
+		network := prefix.Masked()
+		for _, current := range interfaceNetworks {
+			if current.Overlaps(network) {
+				return errors.New("VPS host-plan interface subnets overlap")
+			}
+		}
+		interfaceNetworks = append(interfaceNetworks, network)
+	}
 	keys := map[string]struct{}{}
 	peerIDs := map[string]struct{}{}
+	peerKinds := map[string]string{}
+	adminAddresses := map[string]struct{}{}
+	previousPeer := ""
 	for _, peer := range plan.Peers {
-		if !hubIdentifierPattern.MatchString(peer.ID) || peer.Kind != "GATEWAY" && peer.Kind != "ADMIN" || !wgingress.ValidKey(peer.PublicKey) || len(peer.AllowedIPs) == 0 {
+		peerOrder := peer.Kind + "\x00" + peer.ID
+		address, addressErr := hostPlanPrefix(peer.Address)
+		validPort := peer.Kind == "GATEWAY" && peer.WebUIPort >= 1 && peer.WebUIPort <= 65535 || peer.Kind == "ADMIN" && peer.WebUIPort == 0
+		if !hubIdentifierPattern.MatchString(peer.ID) || peer.Kind != "GATEWAY" && peer.Kind != "ADMIN" || !wgingress.ValidKey(peer.PublicKey) || len(peer.AllowedIPs) == 0 || addressErr != nil || address.Bits() != 32 || !validPort || peerOrder <= previousPeer {
 			return errors.New("VPS host-plan peer is invalid")
 		}
+		previousPeer = peerOrder
 		if _, exists := keys[peer.PublicKey]; exists {
 			return errors.New("VPS host-plan peer public key is duplicated")
 		}
+		if _, exists := peerIDs[peer.ID]; exists {
+			return errors.New("VPS host-plan peer id is duplicated")
+		}
 		keys[peer.PublicKey] = struct{}{}
 		peerIDs[peer.ID] = struct{}{}
-		for _, raw := range peer.AllowedIPs {
-			prefix, err := hostPlanPrefix(raw)
-			if err != nil || prefix.Bits() == 0 {
-				return errors.New("VPS host-plan peer contains an unsafe AllowedIPs value")
+		peerKinds[peer.ID] = peer.Kind
+		if peer.Kind == "ADMIN" {
+			adminAddresses[address.String()] = struct{}{}
+		}
+		if peer.Kind == "GATEWAY" {
+			contained := false
+			for _, network := range interfaceNetworks {
+				contained = contained || network.Contains(address.Addr())
+			}
+			if !contained {
+				return errors.New("VPS Gateway peer is outside every owned interface subnet")
 			}
 		}
+		previousAllowed := ""
+		for _, raw := range peer.AllowedIPs {
+			prefix, err := hostPlanPrefix(raw)
+			if err != nil || prefix.Bits() == 0 || raw <= previousAllowed {
+				return errors.New("VPS host-plan peer contains an unsafe AllowedIPs value")
+			}
+			previousAllowed = raw
+		}
+		if !containsString(peer.AllowedIPs, address.String()) {
+			return errors.New("VPS host-plan peer address is missing from AllowedIPs")
+		}
 	}
+	previousRoute := ""
 	for _, route := range plan.ResourceRoutes {
 		if route.Protocol != VPSOwnedRouteProtocol {
 			return errors.New("VPS host-plan route ownership changed")
 		}
-		if _, exists := peerIDs[route.GatewayPeerID]; !exists {
+		if peerKinds[route.GatewayPeerID] != "GATEWAY" || route.PublicationID <= previousRoute {
 			return errors.New("VPS host-plan route has no peer")
 		}
+		previousRoute = route.PublicationID
 		if _, err := hostPlanPrefix(route.Destination); err != nil {
 			return err
 		}
 	}
+	previousACL := ""
 	for _, rule := range plan.ACL {
-		if _, exists := peerIDs[rule.AdminPeerID]; !exists {
+		if peerKinds[rule.AdminPeerID] != "ADMIN" || rule.ID <= previousACL {
 			return errors.New("VPS host-plan ACL has no administrator peer")
 		}
-		if _, exists := peerIDs[rule.GatewayPeerID]; !exists {
+		previousACL = rule.ID
+		if peerKinds[rule.GatewayPeerID] != "GATEWAY" {
 			return errors.New("VPS host-plan ACL has no Gateway peer")
 		}
 		if _, err := hostPlanPrefix(rule.Source); err != nil {
@@ -283,8 +342,42 @@ func validateVPSHostPlan(plan VPSHostPlan) error {
 			return errors.New("VPS host-plan ACL is invalid")
 		}
 	}
+	previousSource := ""
+	for _, source := range plan.HubAdminSources {
+		if _, exists := adminAddresses[source]; !exists || source <= previousSource {
+			return errors.New("VPS host-plan Hub administrator source is invalid")
+		}
+		previousSource = source
+	}
 	return nil
 }
+
+func gatewayWebUIPort(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return VPSDefaultWebUIPort, nil
+	}
+	canonical, err := canonicalWebUIURL(value)
+	if err != nil {
+		return 0, err
+	}
+	parsed, err := url.Parse(canonical)
+	if err != nil {
+		return 0, errors.New("stored Gateway WebUI URL is invalid")
+	}
+	if parsed.Port() == "" {
+		return 443, nil
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return 0, errors.New("stored Gateway WebUI port is invalid")
+	}
+	return port, nil
+}
+
+// ValidateHostPlan exposes the same strict validation to the privileged VPS
+// reconciler without expanding the plan into a generic command surface.
+func ValidateHostPlan(plan VPSHostPlan) error { return validateVPSHostPlan(plan) }
 
 func uniqueSorted(values []string) []string {
 	seen := map[string]struct{}{}
@@ -298,4 +391,13 @@ func uniqueSorted(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func containsString(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }

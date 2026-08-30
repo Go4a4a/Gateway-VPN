@@ -40,9 +40,10 @@ var (
 )
 
 type HubRepository struct {
-	Database *sql.DB
-	Now      func() time.Time
-	Random   io.Reader
+	Database           *sql.DB
+	Now                func() time.Time
+	Random             io.Reader
+	HostApplyAvailable bool
 }
 
 type PairingCreateInput struct {
@@ -925,7 +926,7 @@ func (repository HubRepository) Overview(ctx context.Context) (HubOverview, erro
 	if err != nil {
 		return HubOverview{}, err
 	}
-	result := HubOverview{Identity: identity, SchemaVersion: SchemaVersion, HostApplyAvailable: false}
+	result := HubOverview{Identity: identity, SchemaVersion: SchemaVersion, HostApplyAvailable: repository.HostApplyAvailable}
 	result.Gateways, err = groupedCounts(ctx, repository.Database, "gateway_peers", "state")
 	if err != nil {
 		return HubOverview{}, err
@@ -986,7 +987,11 @@ func (repository HubRepository) ControllerHealth(ctx context.Context) Controller
 		if err := repository.Database.QueryRowContext(ctx, query).Scan(&pending); err != nil {
 			appendComponent(item.name, "FAILED", "STATE_QUERY_FAILED")
 		} else if pending > 0 {
-			appendComponent(item.name, "PENDING", "HOST_APPLY_NOT_IMPLEMENTED")
+			reason := "HOST_APPLY_PENDING"
+			if !repository.HostApplyAvailable {
+				reason = "HOST_APPLY_NOT_IMPLEMENTED"
+			}
+			appendComponent(item.name, "PENDING", reason)
 		} else {
 			appendComponent(item.name, "HEALTHY", "DESIRED_EQUALS_APPLIED")
 		}
@@ -1172,6 +1177,10 @@ func validPorts(protocol string, start, end int) bool {
 }
 
 func ensurePrefixAvailable(ctx context.Context, transaction *sql.Tx, candidate netip.Prefix, ownerID string) error {
+	reserved, err := netip.ParsePrefix("10.80.0.0/24")
+	if err != nil || candidate.Overlaps(reserved) {
+		return fmt.Errorf("%w: prefix overlaps the VPS Hub system subnet", ErrHubConflict)
+	}
 	rows, err := transaction.QueryContext(ctx, "SELECT owner_id,prefix FROM prefix_allocations")
 	if err != nil {
 		return err

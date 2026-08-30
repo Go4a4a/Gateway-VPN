@@ -45,3 +45,19 @@ func TestRestoreTriggerIsDurableAndRejectsUnsafeExistingPath(t *testing.T) {
 		t.Fatal("unsafe existing restore trigger was accepted")
 	}
 }
+
+func TestFabricTriggerUsesSeparateFixedPath(t *testing.T) {
+	directory := t.TempDir()
+	trigger := systemdFabricTrigger{path: filepath.Join(directory, "fabric.trigger")}
+	if err := trigger.ApplyVPSFabric(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(trigger.path)
+	if err != nil || string(content) != "apply\n" {
+		t.Fatalf("fabric trigger = %q, %v", content, err)
+	}
+	wrong := systemdFabricTrigger{path: filepath.Join(directory, "restore.trigger")}
+	if err := wrong.ApplyVPSFabric(t.Context()); err == nil {
+		t.Fatal("fabric trigger accepted restore path")
+	}
+}

@@ -23,13 +23,17 @@ mkdir -p \
   /opt/gateway-vpn/current/bin \
   /opt/gateway-vpn/current/libexec \
   /opt/gateway-vpn/recovery/bin \
+  /opt/gateway-vpn-vps/current/bin \
+  /etc/gateway-vpn-vps \
   /usr/libexec
 
 for unit in \
   "$ROOT"/packaging/systemd/*.service \
   "$ROOT"/packaging/systemd/*.socket \
   "$ROOT"/packaging/systemd/*.timer \
-  "$ROOT"/packaging/vps/systemd/*.service; do
+  "$ROOT"/packaging/vps/systemd/*.service \
+  "$ROOT"/packaging/vps/systemd/*.path \
+  "$ROOT"/packaging/vps/systemd/*.timer; do
   install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
 install -m 0644 \
@@ -46,17 +50,20 @@ for executable in \
   /opt/gateway-vpn/current/bin/gateway-vpn \
   /opt/gateway-vpn/current/libexec/mihomo \
   /opt/gateway-vpn/recovery/bin/gateway-vpn \
+  /opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent \
   /usr/libexec/gateway-vpn-install-recovery \
   /usr/libexec/gateway-vpn-host-upgrade-recovery \
   /usr/libexec/gateway-vpn-uninstall-job \
   /usr/libexec/gateway-vpn-vps-install-recovery; do
   install -m 0755 /usr/bin/true "$executable"
 done
+install -m 0644 /dev/null /etc/gateway-vpn-vps/config.yaml
 
 systemd-analyze verify \
   /etc/systemd/system/gateway-vpn*.service \
   /etc/systemd/system/gateway-vpn*.socket \
   /etc/systemd/system/gateway-vpn*.timer \
+  /etc/systemd/system/gateway-vpn*.path \
 	/lib/systemd/system/systemd-networkd-wait-online.service \
   /lib/systemd/system/wg-quick@.service
 

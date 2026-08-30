@@ -271,15 +271,16 @@ validate_preserved_wg_config() {
   [[ $(stat -c '%u:%g:%a' "$filename") == "0:0:600" ]] || { echo "Preserved wg-mgmt config must be root:root mode 0600" >&2; return 1; }
   local bytes
   bytes=$(stat -c '%s' "$filename")
-  [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 && "$bytes" -le 4096 ]] || { echo "Preserved wg-mgmt config size is invalid" >&2; return 1; }
-  python3 - "$filename" "$GATEWAY_PUBLIC_KEY" "$ADMIN_PUBLIC_KEY" <<'PY'
+  [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 && "$bytes" -le 1048576 ]] || { echo "Preserved wg-mgmt config size is invalid" >&2; return 1; }
+  python3 - "$filename" "$GATEWAY_PUBLIC_KEY" "$ADMIN_PUBLIC_KEY" "$PRESERVE_AGENT_USER" <<'PY'
 import base64
 import binascii
+import ipaddress
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-gateway_key, admin_key = sys.argv[2:]
+gateway_key, admin_key, managed = sys.argv[2], sys.argv[3], sys.argv[4] == "1"
 tokens = []
 for raw in path.read_text(encoding="utf-8").splitlines():
     line = raw.strip()
@@ -293,28 +294,77 @@ for raw in path.read_text(encoding="utf-8").splitlines():
         raise SystemExit("preserved wg-mgmt config syntax is invalid")
     tokens.append((key, value))
 
-expected = [
-    ("[Interface]", ""),
-    ("Address", "10.80.0.1/24"),
-    ("ListenPort", "51821"),
-    ("PrivateKey", None),
-    ("[Peer]", ""),
-    ("PublicKey", gateway_key),
-    ("AllowedIPs", "10.80.0.2/32"),
-    ("[Peer]", ""),
-    ("PublicKey", admin_key),
-    ("AllowedIPs", "10.80.0.10/32"),
-]
-if len(tokens) != len(expected):
-    raise SystemExit("preserved wg-mgmt config has unexpected fields")
-for actual, wanted in zip(tokens, expected):
-    if actual[0] != wanted[0] or (wanted[1] is not None and actual[1] != wanted[1]):
-        raise SystemExit("preserved wg-mgmt config differs from the requested peer contract")
+if not managed:
+    expected = [
+        ("[Interface]", ""),
+        ("Address", "10.80.0.1/24"),
+        ("ListenPort", "51821"),
+        ("PrivateKey", None),
+        ("[Peer]", ""),
+        ("PublicKey", gateway_key),
+        ("AllowedIPs", "10.80.0.2/32"),
+        ("[Peer]", ""),
+        ("PublicKey", admin_key),
+        ("AllowedIPs", "10.80.0.10/32"),
+    ]
+    if len(tokens) != len(expected):
+        raise SystemExit("preserved wg-mgmt config has unexpected legacy fields")
+    for actual, wanted in zip(tokens, expected):
+        if actual[0] != wanted[0] or (wanted[1] is not None and actual[1] != wanted[1]):
+            raise SystemExit("preserved wg-mgmt config differs from the requested legacy peer contract")
+else:
+    if not tokens or tokens[0] != ("[Interface]", ""):
+        raise SystemExit("managed wg-mgmt config has no Interface section")
+    sections = []
+    current = None
+    for key, value in tokens:
+        if key in ("[Interface]", "[Peer]"):
+            current = {"kind": key}
+            sections.append(current)
+            continue
+        if current is None or key in current:
+            raise SystemExit("managed wg-mgmt config has duplicate or misplaced fields")
+        current[key] = value
+    interface = sections[0]
+    if interface["kind"] != "[Interface]" or set(interface) not in ({"kind", "Address", "ListenPort", "PrivateKey"}, {"kind", "Address", "ListenPort", "PrivateKey", "Table"}):
+        raise SystemExit("managed wg-mgmt Interface fields are invalid")
+    if interface["ListenPort"] != "51821" or interface.get("Table", "off") != "off":
+        raise SystemExit("managed wg-mgmt ownership fields changed")
+    addresses = [item.strip() for item in interface["Address"].split(",")]
+    if "10.80.0.1/24" not in addresses or not 1 <= len(addresses) <= 65 or len(addresses) != len(set(addresses)):
+        raise SystemExit("managed wg-mgmt interface addresses are invalid")
+    for value in addresses:
+        address = ipaddress.ip_interface(value)
+        if address.version != 4 or not address.ip.is_private or not 16 <= address.network.prefixlen <= 30 or str(address) != value:
+            raise SystemExit("managed wg-mgmt contains an unsafe interface address")
+    if len(sections) > 129:
+        raise SystemExit("managed wg-mgmt peer count exceeds its bound")
+    peer_keys = set()
+    for peer in sections[1:]:
+        if peer["kind"] != "[Peer]" or set(peer) != {"kind", "PublicKey", "AllowedIPs"}:
+            raise SystemExit("managed wg-mgmt peer fields are invalid")
+        if peer["PublicKey"] in peer_keys:
+            raise SystemExit("managed wg-mgmt peer key is duplicated")
+        try:
+            decoded_peer_key = base64.b64decode(peer["PublicKey"], validate=True)
+        except (binascii.Error, ValueError):
+            raise SystemExit("managed wg-mgmt peer key is invalid")
+        if len(decoded_peer_key) != 32 or base64.b64encode(decoded_peer_key).decode("ascii") != peer["PublicKey"]:
+            raise SystemExit("managed wg-mgmt peer key is non-canonical")
+        peer_keys.add(peer["PublicKey"])
+        allowed = [item.strip() for item in peer["AllowedIPs"].split(",")]
+        if not allowed or len(allowed) > 1024 or len(allowed) != len(set(allowed)):
+            raise SystemExit("managed wg-mgmt AllowedIPs are invalid")
+        for value in allowed:
+            prefix = ipaddress.ip_network(value)
+            if prefix.version != 4 or not prefix.is_private or prefix.prefixlen < 16 or str(prefix) != value:
+                raise SystemExit("managed wg-mgmt contains an unsafe AllowedIPs value")
 try:
-    private_key = base64.b64decode(tokens[3][1], validate=True)
+    private_value = next(value for key, value in tokens if key == "PrivateKey")
+    private_key = base64.b64decode(private_value, validate=True)
 except (binascii.Error, ValueError):
     raise SystemExit("preserved wg-mgmt private key is invalid")
-if len(private_key) != 32 or base64.b64encode(private_key).decode("ascii") != tokens[3][1]:
+if len(private_key) != 32 or base64.b64encode(private_key).decode("ascii") != private_value:
     raise SystemExit("preserved wg-mgmt private key is non-canonical")
 PY
 }
@@ -348,7 +398,7 @@ DEST="/opt/gateway-vpn-vps/releases/v$RELEASE_VERSION"
 EXISTING=0
 PRESERVED_WG_CONFIG=0
 if [[ -e "$DEST" || -L /opt/gateway-vpn-vps/current || -e /etc/gateway-vpn-vps || -e /etc/sysctl.d/90-gateway-vpn-vps.conf || -e /etc/systemd/system/gateway-vpn-vps-firewall.service || -e /etc/systemd/system/gateway-vpn-vps-agent.service || -e /etc/systemd/system/wg-quick@wg-mgmt.service.d ]]; then
-  [[ $PRESERVE_AGENT_USER == 1 && -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/gateway-vpn-vps/config.yaml && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/gateway-vpn-vps-agent.service && -f /etc/systemd/system/gateway-vpn-vps-restore.service && -f /etc/systemd/system/gateway-vpn-vps-restore.path && -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f "$AGENT_STATE/vps-agent.db" && -f "$AGENT_STATE/tls/cert.pem" && -f "$AGENT_STATE/tls/key.pem" && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
+  [[ $PRESERVE_AGENT_USER == 1 && -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn-vps/current && $(readlink /opt/gateway-vpn-vps/current) == "releases/v$RELEASE_VERSION" && -f /etc/gateway-vpn-vps/update-signing.pub && -f /etc/gateway-vpn-vps/firewall.nft && -f /etc/gateway-vpn-vps/config.yaml && -f /etc/sysctl.d/90-gateway-vpn-vps.conf && -f /etc/systemd/system/gateway-vpn-vps-firewall.service && -f /etc/systemd/system/gateway-vpn-vps-agent.service && -f /etc/systemd/system/gateway-vpn-vps-restore.service && -f /etc/systemd/system/gateway-vpn-vps-restore.path && -f /etc/systemd/system/gateway-vpn-vps-restore-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.service && -f /etc/systemd/system/gateway-vpn-vps-fabric.path && -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service && -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer && -f /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf && -f /etc/systemd/system/gateway-vpn-vps-install-recovery.service && -x /usr/libexec/gateway-vpn-vps-install-recovery && -f /etc/wireguard/wg-mgmt.conf && -f "$AGENT_STATE/vps-agent.db" && -f "$AGENT_STATE/tls/cert.pem" && -f "$AGENT_STATE/tls/key.pem" && -f /var/lib/gateway-vpn-vps/install-report.json ]] || { echo "Partial or conflicting Gateway VPN VPS installation exists" >&2; exit 1; }
   "$DEST/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST" --public-key /etc/gateway-vpn-vps/update-signing.pub --release-version "$RELEASE_VERSION" --profile "$PROFILE"
   validate_preserved_wg_config /etc/wireguard/wg-mgmt.conf
   "$DEST/bin/gateway-vpn-vps-agent" --check-config /etc/gateway-vpn-vps/config.yaml
@@ -360,12 +410,11 @@ elif [[ -e /etc/wireguard/wg-mgmt.conf || -L /etc/wireguard/wg-mgmt.conf ]]; the
 fi
 
 if ((EXISTING == 0)); then
-  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-agent.service /etc/systemd/system/gateway-vpn-vps-restore.service /etc/systemd/system/gateway-vpn-vps-restore.path /etc/systemd/system/gateway-vpn-vps-restore-recovery.service /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new; do
+  for conflict in /etc/sysctl.d/90-gateway-vpn-vps.conf /etc/systemd/system/gateway-vpn-vps-firewall.service /etc/systemd/system/gateway-vpn-vps-agent.service /etc/systemd/system/gateway-vpn-vps-restore.service /etc/systemd/system/gateway-vpn-vps-restore.path /etc/systemd/system/gateway-vpn-vps-restore-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric.service /etc/systemd/system/gateway-vpn-vps-fabric.path /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer /etc/systemd/system/gateway-vpn-vps-install-recovery.service /usr/libexec/gateway-vpn-vps-install-recovery /etc/systemd/system/wg-quick@wg-mgmt.service.d /etc/wireguard/.gateway-vpn-wg-mgmt.conf.tmp /opt/gateway-vpn-vps/.current.new; do
     [[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting VPS managed path exists: $conflict" >&2; exit 1; }
   done
   if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
-    echo "Active UFW/firewalld conflicts with the owned Gateway VPN VPS firewall" >&2
-    exit 1
+    echo "Detected active host firewall; Gateway VPN will preserve it and manage only table inet gateway_vpn_vps"
   fi
   if /usr/sbin/nft list table inet gateway_vpn_vps >/dev/null 2>&1; then
     echo "Unmanaged table inet gateway_vpn_vps already exists" >&2
@@ -389,8 +438,6 @@ PORTS=8443
 ((ALLOW_GATEWAY_SSH)) && PORTS="22, 8443"
 if ((EXISTING)); then
   grep -Fq "\"public_endpoint\": \"$PUBLIC_ENDPOINT\"" /var/lib/gateway-vpn-vps/install-report.json || { echo "Existing VPS public endpoint differs; explicit reconfiguration is required" >&2; exit 1; }
-  grep -Fq "tcp dport { $PORTS }" /etc/gateway-vpn-vps/firewall.nft || { echo "Existing VPS management-port policy differs; explicit reconfiguration is required" >&2; exit 1; }
-  grep -Fq 'ip saddr 10.80.0.10 ip daddr 10.80.0.1 ct state new tcp dport 9443' /etc/gateway-vpn-vps/firewall.nft || { echo "Existing VPS Hub firewall policy differs; explicit reconfiguration is required" >&2; exit 1; }
 fi
 PREFLIGHT_RULESET=$(mktemp)
 sed "s|__GATEWAY_TCP_PORTS__|$PORTS|g" "$ROOT_DIR/packaging/vps/nftables/gateway-vpn-vps.nft.in" >"$PREFLIGHT_RULESET"
@@ -421,23 +468,14 @@ if ((EXISTING)); then
   systemctl is-active --quiet wg-quick@wg-mgmt.service
   systemctl is-active --quiet gateway-vpn-vps-agent.service
   systemctl is-active --quiet gateway-vpn-vps-restore.path
+  systemctl is-active --quiet gateway-vpn-vps-fabric.path
   systemctl is-enabled --quiet gateway-vpn-vps-agent.service
   systemctl is-enabled --quiet gateway-vpn-vps-restore.path
   systemctl is-enabled --quiet gateway-vpn-vps-restore-recovery.service
+  systemctl is-enabled --quiet gateway-vpn-vps-fabric-recovery.service
+  systemctl is-enabled --quiet gateway-vpn-vps-fabric-watchdog.timer
   [[ $(wg show wg-mgmt listen-port) == 51821 ]]
   [[ $(wg show wg-mgmt public-key) == "$VPS_PUBLIC_KEY" ]]
-  [[ $(wg show wg-mgmt peers | wc -l) == 2 ]]
-  wg show wg-mgmt allowed-ips | awk -v gateway="$GATEWAY_PUBLIC_KEY" -v admin="$ADMIN_PUBLIC_KEY" '
-BEGIN { gateway_ok=0; admin_ok=0; rows=0 }
-{
-  rows++
-  if ($1 == gateway && $2 == "10.80.0.2/32") gateway_ok++
-  if ($1 == admin && $2 == "10.80.0.10/32") admin_ok++
-}
-END { exit !(rows == 2 && gateway_ok == 1 && admin_ok == 1) }
-'
-  ip -4 route get 10.80.0.2 | grep -Eq 'dev wg-mgmt'
-  ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
   nft list table inet gateway_vpn_vps >/dev/null
   ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
   ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
@@ -517,7 +555,7 @@ chmod 0710 /var/lib/gateway-vpn-vps
 chown root:root /var/lib/gateway-vpn-vps/install-transactions
 chmod 0700 /var/lib/gateway-vpn-vps/install-transactions
 install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$AGENT_STATE" "$AGENT_STATE/backups" "$AGENT_STATE/secrets" "$AGENT_STATE/secrets/wireguard" "$AGENT_STATE/secrets/update" "$AGENT_STATE/tls"
-install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps-privileged /var/lib/gateway-vpn-vps-privileged/restore-transactions
+install -d -o root -g root -m 0700 /var/lib/gateway-vpn-vps-privileged /var/lib/gateway-vpn-vps-privileged/restore-transactions /var/lib/gateway-vpn-vps-privileged/fabric
 
 install -d -m 0755 "$DEST"
 while IFS= read -r -d '' source; do
@@ -565,6 +603,11 @@ install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-agent.servic
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore.service" /etc/systemd/system/gateway-vpn-vps-restore.service
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore.path" /etc/systemd/system/gateway-vpn-vps-restore.path
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-restore-recovery.service" /etc/systemd/system/gateway-vpn-vps-restore-recovery.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric.service" /etc/systemd/system/gateway-vpn-vps-fabric.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric.path" /etc/systemd/system/gateway-vpn-vps-fabric.path
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric-recovery.service" /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.service" /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service
+install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer" /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer
 install -D -m 0644 "$ROOT_DIR/packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf" /etc/systemd/system/wg-quick@wg-mgmt.service.d/gateway-vpn.conf
 install -d -o root -g "$AGENT_USER" -m 0750 /etc/gateway-vpn-vps
 install -o root -g "$AGENT_USER" -m 0640 "$ROOT_DIR/packaging/vps/config/config.yaml" /etc/gateway-vpn-vps/config.yaml
@@ -589,24 +632,30 @@ if ((PRESERVE_AGENT_USER == 0)); then
   find "$AGENT_STATE" -type f -exec chmod 0600 {} +
   sync
 else
-  [[ ! -e "$AGENT_STATE/restore.trigger" && ! -L "$AGENT_STATE/restore.trigger" ]] || { echo "A pending preserved VPS restore must finish before reinstall" >&2; false; }
+  [[ ! -e "$AGENT_STATE/restore.trigger" && ! -L "$AGENT_STATE/restore.trigger" && ! -e "$AGENT_STATE/fabric.trigger" && ! -L "$AGENT_STATE/fabric.trigger" ]] || { echo "A pending preserved VPS transaction must finish before reinstall" >&2; false; }
 fi
+"$DEST/bin/gateway-vpn-vps-agent" legacy-adopt --config /etc/gateway-vpn-vps/config.yaml --gateway-public-key "$GATEWAY_PUBLIC_KEY" --admin-public-key "$ADMIN_PUBLIC_KEY" --endpoint "$PUBLIC_ENDPOINT" >/dev/null
 systemctl daemon-reload
 (set -o noclobber; : >/run/gateway-vpn-vps-install-authorized) || { echo "Cannot create ephemeral VPS service-start authorization safely" >&2; exit 1; }
 chmod 0600 /run/gateway-vpn-vps-install-authorized
 [[ -f /run/gateway-vpn-vps-install-authorized && ! -L /run/gateway-vpn-vps-install-authorized && $(stat -c '%u:%g:%a' /run/gateway-vpn-vps-install-authorized) == "0:0:600" ]] || { echo "Ephemeral VPS service-start authorization is unsafe" >&2; exit 1; }
-systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-agent.service
+systemctl enable gateway-vpn-vps-firewall.service wg-quick@wg-mgmt.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-agent.service
 systemctl restart gateway-vpn-vps-firewall.service
 systemctl restart wg-quick@wg-mgmt.service
 systemctl restart gateway-vpn-vps-restore-recovery.service
+systemctl restart gateway-vpn-vps-fabric-recovery.service
+"$DEST/bin/gateway-vpn-vps-agent" fabric-apply --config /etc/gateway-vpn-vps/config.yaml --agent-user "$AGENT_USER"
 systemctl restart gateway-vpn-vps-restore.path
+systemctl restart gateway-vpn-vps-fabric.path
+systemctl restart gateway-vpn-vps-fabric-watchdog.timer
 systemctl restart gateway-vpn-vps-agent.service
 [[ $(wg show wg-mgmt listen-port) == 51821 ]]
-ip -4 route get 10.80.0.2 | grep -Eq 'dev wg-mgmt'
-ip -4 route get 10.80.0.10 | grep -Eq 'dev wg-mgmt'
+ip -4 -o address show dev wg-mgmt | grep -Fq '10.80.0.1/24'
+[[ -f /var/lib/gateway-vpn-vps-privileged/fabric/applied.json && ! -L /var/lib/gateway-vpn-vps-privileged/fabric/applied.json ]]
 nft list table inet gateway_vpn_vps >/dev/null
 systemctl is-active --quiet gateway-vpn-vps-agent.service
 systemctl is-active --quiet gateway-vpn-vps-restore.path
+systemctl is-active --quiet gateway-vpn-vps-fabric.path
 ss -H -ltn 'sport = :9443' | grep -Fq '127.0.0.1:9443'
 ss -H -ltn 'sport = :9443' | grep -Fq '10.80.0.1:9443'
 

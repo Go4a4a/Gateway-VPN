@@ -42,7 +42,7 @@ func TestVPSHostPlanIsDeterministicTypedAndDefaultDenyReady(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(first, second) {
 		t.Fatalf("host plan is not deterministic: equal=%t error=%v", reflect.DeepEqual(first, second), err)
 	}
-	if first.InterfaceName != "wg-mgmt" || first.ListenPort != 51821 || first.RouteProtocol != 186 || len(first.InterfaceAddresses) != 1 || first.InterfaceAddresses[0] != "10.82.0.1/30" {
+	if first.InterfaceName != "wg-mgmt" || first.ListenPort != 51821 || first.RouteProtocol != 186 || !reflect.DeepEqual(first.InterfaceAddresses, []string{"10.80.0.1/24", "10.82.0.1/30"}) {
 		t.Fatalf("host plan ownership/address = %+v", first)
 	}
 	if len(first.Peers) != 2 || len(first.ResourceRoutes) != 1 || len(first.ACL) != 1 || len(first.HubAdminSources) != 1 {
@@ -60,6 +60,9 @@ func TestVPSHostPlanIsDeterministicTypedAndDefaultDenyReady(t *testing.T) {
 	if !reflect.DeepEqual(peers[admin.ID].AllowedIPs, []string{"10.81.0.10/32"}) || !reflect.DeepEqual(peers[gateway.ID].AllowedIPs, []string{"10.82.0.2/32", "10.96.0.2/32"}) {
 		t.Fatalf("host plan peer AllowedIPs = %+v", peers)
 	}
+	if peers[gateway.ID].WebUIPort != 8443 || peers[admin.ID].WebUIPort != 0 {
+		t.Fatalf("host plan WebUI ports = %+v", peers)
+	}
 	rule := first.ACL[0]
 	if rule.ID != grant.ID || rule.Source != "10.81.0.10/32" || rule.Destination != "10.96.0.2/32" || rule.Protocol != "TCP" || rule.PortStart != 443 || rule.PortEnd != 443 {
 		t.Fatalf("host plan ACL = %+v", rule)
@@ -76,6 +79,14 @@ func TestVPSHostPlanIsDeterministicTypedAndDefaultDenyReady(t *testing.T) {
 	withoutAdmin, err := repository.RenderHostPlan(ctx)
 	if err != nil || len(withoutAdmin.HubAdminSources) != 0 || len(withoutAdmin.ACL) != 0 || len(withoutAdmin.Peers) != 1 {
 		t.Fatalf("revoked administrator survived host plan: %+v, %v", withoutAdmin, err)
+	}
+}
+
+func TestVPSHostPlanRetainsHubAddressWithoutGateway(t *testing.T) {
+	repository := testHubRepository(t)
+	plan, err := repository.RenderHostPlan(context.Background())
+	if err != nil || !reflect.DeepEqual(plan.InterfaceAddresses, []string{VPSHubAddressPrefix}) || len(plan.Peers) != 0 {
+		t.Fatalf("empty topology plan = %+v, %v", plan, err)
 	}
 }
 

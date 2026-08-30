@@ -1,0 +1,43 @@
+[Unit]
+Description=Apply Gateway VPN VPS owned Management Fabric projection
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+After=gateway-vpn-vps-agent.service gateway-vpn-vps-fabric-recovery.service
+Requires=gateway-vpn-vps-fabric-recovery.service
+Conflicts=gateway-vpn-vps-restore.service
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/usr/bin/systemctl stop gateway-vpn-vps-agent.service
+ExecStartPre=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent fabric-recover --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent fabric-apply --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+ExecStopPost=/usr/bin/rm -f /var/lib/gateway-vpn-vps/agent/fabric.trigger
+ExecStopPost=/usr/bin/systemctl start --no-block gateway-vpn-vps-agent.service
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+ReadOnlyPaths=/opt/gateway-vpn-vps/current /etc/gateway-vpn-vps/config.yaml
+ReadWritePaths=/etc/gateway-vpn-vps /etc/wireguard /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd
+SystemCallArchitectures=native

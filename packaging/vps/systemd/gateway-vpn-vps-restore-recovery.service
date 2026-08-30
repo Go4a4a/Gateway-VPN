@@ -14,6 +14,7 @@ Type=oneshot
 User=root
 Group=root
 ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent restore-recover --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+ExecStartPost=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent fabric-restore-reset --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes

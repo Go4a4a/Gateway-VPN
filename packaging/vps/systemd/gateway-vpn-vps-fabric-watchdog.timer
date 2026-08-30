@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically verify Gateway VPN VPS Management Fabric
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+RandomizedDelaySec=15s
+AccuracySec=5s
+Persistent=true
+Unit=gateway-vpn-vps-fabric-watchdog.service
+
+[Install]
+WantedBy=timers.target

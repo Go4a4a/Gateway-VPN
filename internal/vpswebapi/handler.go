@@ -22,6 +22,7 @@ import (
 	"gateway-vpn/internal/backup"
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
+	"gateway-vpn/internal/vpsfabric"
 )
 
 const sessionCookieName = "gateway_vpn_vps_session"
@@ -37,6 +38,10 @@ type RestoreApplyTrigger interface {
 	ApplyPendingVPSRestore(context.Context) error
 }
 
+type FabricApplyTrigger interface {
+	ApplyVPSFabric(context.Context) error
+}
+
 type Dependencies struct {
 	Database     *sql.DB
 	Auth         auth.Service
@@ -45,7 +50,11 @@ type Dependencies struct {
 	Hub          vpsagent.HubRepository
 	AdminKeys    *vpsagent.AdminKeyManager
 	RestoreApply RestoreApplyTrigger
-	Now          func() time.Time
+	FabricApply  FabricApplyTrigger
+	// FabricStatusPath contains display-only telemetry written by the root
+	// watchdog. It is never used to authorize a privileged host mutation.
+	FabricStatusPath string
+	Now              func() time.Time
 }
 
 type Server struct {
@@ -63,6 +72,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	if dependencies.Hub.Now == nil && dependencies.Now != nil {
 		dependencies.Hub.Now = dependencies.Now
 	}
+	dependencies.Hub.HostApplyAvailable = dependencies.FabricApply != nil
 	server := &Server{dependencies: dependencies}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", server.login)
@@ -89,6 +99,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/hub/acl", server.protected(http.HandlerFunc(server.createACL)))
 	mux.Handle("DELETE /api/v1/hub/acl/{id}", server.protected(http.HandlerFunc(server.deleteACL)))
 	mux.Handle("GET /api/v1/hub/watchdog", server.protected(http.HandlerFunc(server.hubWatchdog)))
+	mux.Handle("POST /api/v1/hub/fabric/apply", server.protected(http.HandlerFunc(server.applyFabric)))
 	mux.Handle("GET /api/v1/vps/backup/status", server.protected(http.HandlerFunc(server.backupStatus)))
 	mux.Handle("POST /api/v1/vps/backup/download", server.protected(http.HandlerFunc(server.downloadBackup)))
 	mux.Handle("POST /api/v1/vps/restore/stage", server.protected(http.HandlerFunc(server.stageRestore)))
@@ -207,6 +218,7 @@ func (server *Server) completePairing(writer http.ResponseWriter, request *http.
 		return
 	}
 	_ = server.audit(request.Context(), "WARNING", "VPS_GATEWAY_PAIRING_COMPLETED", map[string]any{"gateway_peer_id": peer.ID, "site_id": peer.SiteID})
+	server.scheduleFabric(request.Context(), "GATEWAY_PAIRING_COMPLETED")
 	writeJSON(writer, http.StatusCreated, map[string]any{"gateway": peer, "state": "AWAITING_HOST_APPLY"})
 }
 
@@ -286,6 +298,7 @@ func (server *Server) revokeGateway(writer http.ResponseWriter, request *http.Re
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "CRITICAL", "VPS_GATEWAY_REVOKED", map[string]any{"user_id": principal.UserID, "gateway_peer_id": id})
+	server.scheduleFabric(request.Context(), "GATEWAY_REVOKED")
 	writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -343,6 +356,7 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_PEER_CREATED", map[string]any{"user_id": principal.UserID, "admin_peer_id": item.ID, "assigned_address": item.AssignedAddress, "key_mode": item.KeyMode})
+	server.scheduleFabric(request.Context(), "ADMIN_CREATED")
 	writeJSON(writer, http.StatusCreated, item)
 }
 
@@ -412,6 +426,7 @@ func (server *Server) rotateAdmin(writer http.ResponseWriter, request *http.Requ
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_KEY_ROTATION_STARTED", map[string]any{"user_id": principal.UserID, "source_admin_peer_id": id, "replacement_admin_peer_id": replacement.ID})
+	server.scheduleFabric(request.Context(), "ADMIN_ROTATION_STARTED")
 	writeJSON(writer, http.StatusCreated, replacement)
 }
 
@@ -432,6 +447,7 @@ func (server *Server) revokeAdmin(writer http.ResponseWriter, request *http.Requ
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "CRITICAL", "VPS_ADMIN_PEER_REVOKED", map[string]any{"user_id": principal.UserID, "admin_peer_id": id})
+	server.scheduleFabric(request.Context(), "ADMIN_REVOKED")
 	writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -457,6 +473,7 @@ func (server *Server) createResource(writer http.ResponseWriter, request *http.R
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_CREATED", map[string]any{"user_id": principal.UserID, "publication_id": item.ID, "gateway_peer_id": item.GatewayPeerID, "resource_kind": item.ResourceKind})
+	server.scheduleFabric(request.Context(), "RESOURCE_CREATED")
 	writeJSON(writer, http.StatusCreated, item)
 }
 
@@ -478,6 +495,7 @@ func (server *Server) updateResource(writer http.ResponseWriter, request *http.R
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_UPDATED", map[string]any{"user_id": principal.UserID, "publication_id": item.ID, "desired_generation": item.DesiredGeneration})
+	server.scheduleFabric(request.Context(), "RESOURCE_UPDATED")
 	writeJSON(writer, http.StatusOK, item)
 }
 
@@ -493,6 +511,7 @@ func (server *Server) deleteResource(writer http.ResponseWriter, request *http.R
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_RESOURCE_DELETED", map[string]any{"user_id": principal.UserID, "publication_id": id})
+	server.scheduleFabric(request.Context(), "RESOURCE_DELETED")
 	writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -526,6 +545,7 @@ func (server *Server) createACL(writer http.ResponseWriter, request *http.Reques
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_ACL_GRANT_CREATED", map[string]any{"user_id": principal.UserID, "acl_id": item.ID, "generation": item.Generation})
+	server.scheduleFabric(request.Context(), "ACL_CREATED")
 	writeJSON(writer, http.StatusCreated, item)
 }
 
@@ -541,11 +561,68 @@ func (server *Server) deleteACL(writer http.ResponseWriter, request *http.Reques
 	}
 	principal := request.Context().Value(principalKey).(auth.Principal)
 	_ = server.audit(request.Context(), "WARNING", "VPS_ACL_GRANT_DELETED", map[string]any{"user_id": principal.UserID, "acl_id": id})
+	server.scheduleFabric(request.Context(), "ACL_DELETED")
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func (server *Server) applyFabric(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.FabricApply == nil {
+		writeError(writer, http.StatusNotImplemented, "FABRIC_APPLY_UNAVAILABLE", "Привилегированный reconciler Management Fabric не подключён")
+		return
+	}
+	overview, err := server.dependencies.Hub.Overview(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "FABRIC_STATE_UNAVAILABLE", "Состояние Management Fabric недоступно")
+		return
+	}
+	if overview.AppliedGeneration == overview.DesiredGeneration {
+		writeJSON(writer, http.StatusOK, map[string]any{"state": "ALREADY_APPLIED", "generation": overview.AppliedGeneration})
+		return
+	}
+	if err := server.dependencies.FabricApply.ApplyVPSFabric(request.Context()); err != nil {
+		writeError(writer, http.StatusBadGateway, "FABRIC_APPLY_START_FAILED", "Не удалось поставить безопасное применение Management Fabric в очередь")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_FABRIC_APPLY_REQUESTED", map[string]any{"user_id": principal.UserID, "desired_generation": overview.DesiredGeneration})
+	writeJSON(writer, http.StatusAccepted, map[string]any{"state": "APPLY_SCHEDULED", "generation": overview.DesiredGeneration})
+}
+
+func (server *Server) scheduleFabric(ctx context.Context, reason string) {
+	if server.dependencies.FabricApply == nil {
+		return
+	}
+	if err := server.dependencies.FabricApply.ApplyVPSFabric(ctx); err != nil {
+		_ = server.audit(ctx, "ERROR", "VPS_FABRIC_APPLY_SCHEDULE_FAILED", map[string]any{"reason": reason})
+	}
+}
+
 func (server *Server) hubWatchdog(writer http.ResponseWriter, request *http.Request) {
-	writeJSON(writer, http.StatusOK, server.dependencies.Hub.ControllerHealth(request.Context()))
+	report := server.dependencies.Hub.ControllerHealth(request.Context())
+	host := map[string]any{
+		"available": false, "state": "UNKNOWN", "healthy": false,
+		"reconcile_scheduled": false, "reason": "STATUS_UNAVAILABLE", "checked_at": "",
+	}
+	if server.dependencies.FabricStatusPath != "" {
+		status, err := vpsfabric.ReadWatchdogStatus(server.dependencies.FabricStatusPath, server.now(), 3*time.Minute)
+		if err == nil {
+			host = map[string]any{
+				"available": true, "state": status.State, "healthy": status.Healthy,
+				"reconcile_scheduled": status.ReconcileScheduled, "reason": status.Reason, "checked_at": status.CheckedAt,
+			}
+			if status.State == "FAILED" {
+				report.State = "FAILED"
+			} else if status.State == "PENDING" && report.State == "HEALTHY" {
+				report.State = "PENDING"
+			}
+		} else if server.dependencies.FabricApply != nil && report.State == "HEALTHY" {
+			report.State = "PENDING"
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"state": report.State, "checked_at": report.CheckedAt, "components": report.Components,
+		"host_fabric": host,
+	})
 }
 
 func (server *Server) requireReauthenticatedPhrase(writer http.ResponseWriter, request *http.Request, expected string) bool {
