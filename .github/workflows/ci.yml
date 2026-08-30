@@ -61,6 +61,7 @@ jobs:
           node --check internal/webapi/static/logging-ui.js
           node --check internal/webapi/static/wireguard-ingress.js
           node --check internal/webapi/static/contextual-help.js
+          node --check internal/vpswebapi/static/app.js
           bash -n scripts/*.sh test/netns/*.sh test/systemd/*.sh test/release-gate/*.sh
 
   netns:
@@ -93,6 +94,7 @@ jobs:
           go test -c -o /tmp/gateway-vpn-app-test ./internal/app
           go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
           go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
+          go build -trimpath -o /tmp/gateway-vpn-vps-agent ./cmd/gateway-vpn-vps-agent
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
       - name: Prove startup policy across boot and process boundaries
@@ -103,6 +105,8 @@ jobs:
         run: sudo ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
       - name: Prove topology rollback and peer-scoped one-arm firewall
         run: sudo ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
+      - name: Prove VPS operations read-only ownership boundary
+        run: sudo ./test/netns/vps_operations_boundary.sh /tmp/gateway-vpn-vps-agent
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04
         shell: bash
         run: |

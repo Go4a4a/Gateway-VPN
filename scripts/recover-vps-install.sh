@@ -43,7 +43,7 @@ record_failure() {
   FAILED=1
 }
 
-systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
+systemctl disable --now gateway-vpn-vps-restore.path gateway-vpn-vps-fabric.path gateway-vpn-vps-fabric-watchdog.timer gateway-vpn-vps-fabric-watchdog.service gateway-vpn-vps-operations.timer gateway-vpn-vps-operations.service gateway-vpn-vps-agent.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service >/dev/null 2>&1 || true
 systemctl is-active --quiet gateway-vpn-vps-agent.service && record_failure "VPS Agent remained active"
 systemctl is-active --quiet gateway-vpn-vps-restore.path && record_failure "VPS restore watcher remained active"
 systemctl is-active --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained active"
@@ -77,6 +77,8 @@ rm -f /etc/systemd/system/gateway-vpn-vps-fabric.path || record_failure "remove 
 rm -f /etc/systemd/system/gateway-vpn-vps-fabric-recovery.service || record_failure "remove owned fabric recovery unit"
 rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.service || record_failure "remove owned fabric watchdog unit"
 rm -f /etc/systemd/system/gateway-vpn-vps-fabric-watchdog.timer || record_failure "remove owned fabric watchdog timer"
+rm -f /etc/systemd/system/gateway-vpn-vps-operations.service || record_failure "remove owned operations collector unit"
+rm -f /etc/systemd/system/gateway-vpn-vps-operations.timer || record_failure "remove owned operations collector timer"
 rm -rf /etc/systemd/system/wg-quick@wg-mgmt.service.d || record_failure "remove owned WireGuard drop-in"
 rm -rf /etc/gateway-vpn-vps || record_failure "remove owned VPS config"
 rm -f /opt/gateway-vpn-vps/current /opt/gateway-vpn-vps/.current.new || record_failure "remove release pointers"
@@ -109,6 +111,7 @@ systemctl is-enabled --quiet gateway-vpn-vps-agent.service && record_failure "VP
 systemctl is-enabled --quiet gateway-vpn-vps-restore.path && record_failure "VPS restore watcher remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-fabric.path && record_failure "VPS fabric watcher remained enabled"
 systemctl is-enabled --quiet gateway-vpn-vps-fabric-watchdog.timer && record_failure "VPS fabric watchdog remained enabled"
+systemctl is-enabled --quiet gateway-vpn-vps-operations.timer && record_failure "VPS operations collector remained enabled"
 if ((FAILED)); then
   echo "Gateway VPN VPS recovery is incomplete; active marker retained for retry" >&2
   exit 1

@@ -1,0 +1,40 @@
+[Unit]
+Description=Collect bounded Gateway VPN VPS operational telemetry
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+After=network-online.target gateway-vpn-vps-fabric-recovery.service
+Wants=network-online.target
+Requires=gateway-vpn-vps-fabric-recovery.service
+ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
+ConditionPathIsSymbolicLink=!/var/lib/gateway-vpn-vps/install-transactions/active
+ConditionPathIsSymbolicLink=!/run/gateway-vpn-vps-install-authorized
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent operations-collect --config /etc/gateway-vpn-vps/config.yaml --agent-user gateway-vpn-vps
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+ReadOnlyPaths=/opt/gateway-vpn-vps/current /etc/gateway-vpn-vps /etc/wireguard /var/lib/gateway-vpn-vps/agent
+ReadWritePaths=/var/lib/gateway-vpn-vps-privileged/operations
+SystemCallArchitectures=native
+

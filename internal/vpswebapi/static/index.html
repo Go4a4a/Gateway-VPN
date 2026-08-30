@@ -45,7 +45,9 @@
           <option value="resources">Локальные ресурсы</option>
           <option value="matrix">Матрица доступа</option>
           <option value="watchdog">Watchdog</option>
+          <option value="logs">Журналы</option>
           <option value="backup">Backup / восстановление</option>
+          <option value="diagnostics">Диагностика</option>
         </select>
       </label>
       <nav id="navigation" aria-label="Разделы VPS Hub">
@@ -57,9 +59,9 @@
         <button data-page="resources">Локальные ресурсы</button>
         <button data-page="matrix">Матрица доступа</button>
         <button data-page="watchdog">Watchdog</button>
-        <button disabled title="Будет подключено к allowlisted journald reader VPS Agent">Журналы</button>
+        <button data-page="logs">Журналы</button>
         <button data-page="backup">Backup / восстановление</button>
-        <button disabled title="Диагностический bundle подключается после ownership-scoped host observer">Диагностика</button>
+        <button data-page="diagnostics">Диагностика</button>
       </nav>
       <p id="notice" role="status" aria-live="polite"></p>
 
@@ -174,6 +176,20 @@
         <div id="watchdog-content" class="stack"></div>
       </section>
 
+      <section data-page-panel="logs" hidden>
+        <div class="page-heading"><div><h2>Журналы VPS Hub</h2><p>Разделённые эксплуатационные записи Gateway VPN. Команды host из WebUI не запускаются: root-снимок собирается отдельным ограниченным таймером.</p></div><button class="secondary" data-refresh="logs">Обновить</button></div>
+        <article class="card">
+          <div id="log-categories" class="log-tabs" role="tablist" aria-label="Категории журнала"></div>
+          <form id="log-filter" class="inline-filter">
+            <label title="Поиск выполняется только по уже очищенным сообщениям, имени unit и источнику.">Поиск<input name="search" maxlength="128" placeholder="событие, unit или причина"></label>
+            <label title="Максимум 200 последних совпадений; это ограничивает память и размер ответа.">Количество<select name="limit"><option>50</option><option selected>100</option><option>200</option></select></label>
+            <button>Показать</button><button id="clear-log-view" class="secondary" type="button" title="Очищает только окно в браузере; системный журнал и audit trail не удаляются.">Очистить окно</button>
+          </form>
+          <dl id="log-state" class="summary"></dl>
+          <div id="log-window" class="log-window" tabindex="0" aria-live="polite"></div>
+        </article>
+      </section>
+
       <section data-page-panel="backup" hidden>
         <div class="page-heading"><div><h2>Backup и восстановление</h2><p>Gateway и VPS используют разные несовместимые форматы.</p></div></div>
         <div id="backup-grid" class="grid">
@@ -197,6 +213,14 @@
             </form>
             <div id="restore-preview"></div>
           </article>
+        </div>
+      </section>
+
+      <section data-page-panel="diagnostics" hidden>
+        <div class="page-heading"><div><h2>Диагностика VPS Hub</h2><p>Один ограниченный ZIP для разбора неисправностей. Приватные ключи, пароли, токены и содержимое backup в архив не включаются.</p></div><button class="secondary" data-refresh="diagnostics">Обновить статус</button></div>
+        <div class="grid">
+          <article class="card"><h3>Состав архива</h3><div id="diagnostic-status"></div></article>
+          <article class="card"><h3>Скачать для поддержки</h3><p>Архив содержит очищенную конфигурационную сводку, состояние schema/SQLite, последние журналы, root-снимок только принадлежащих Gateway VPN объектов и telemetry Management Fabric.</p><button id="download-diagnostics">Собрать и скачать ZIP</button><p class="muted">SHA-256 возвращается вместе с архивом и записывается в security audit.</p></article>
         </div>
       </section>
     </section>

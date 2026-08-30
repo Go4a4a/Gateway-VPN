@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh bounded Gateway VPN VPS operational telemetry
+Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+RandomizedDelaySec=10s
+AccuracySec=5s
+Persistent=true
+Unit=gateway-vpn-vps-operations.service
+
+[Install]
+WantedBy=timers.target

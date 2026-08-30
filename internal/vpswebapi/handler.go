@@ -23,6 +23,7 @@ import (
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
 	"gateway-vpn/internal/vpsfabric"
+	"gateway-vpn/internal/vpsops"
 )
 
 const sessionCookieName = "gateway_vpn_vps_session"
@@ -54,7 +55,10 @@ type Dependencies struct {
 	// FabricStatusPath contains display-only telemetry written by the root
 	// watchdog. It is never used to authorize a privileged host mutation.
 	FabricStatusPath string
-	Now              func() time.Time
+	// Operations reads only a root-produced, bounded snapshot plus sanitized
+	// database events. It cannot execute host commands or mutate the host.
+	Operations *vpsops.Service
+	Now        func() time.Time
 }
 
 type Server struct {
@@ -110,6 +114,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/vps/restore/stage", server.protected(http.HandlerFunc(server.stageRestore)))
 	mux.Handle("POST /api/v1/vps/restore/apply", server.protected(http.HandlerFunc(server.applyRestore)))
 	mux.Handle("DELETE /api/v1/vps/restore", server.protected(http.HandlerFunc(server.discardRestore)))
+	mux.Handle("GET /api/v1/vps/logs", server.protected(http.HandlerFunc(server.vpsLogs)))
+	mux.Handle("GET /api/v1/vps/diagnostics/status", server.protected(http.HandlerFunc(server.diagnosticStatus)))
+	mux.Handle("POST /api/v1/vps/diagnostics/download", server.protected(http.HandlerFunc(server.downloadDiagnostics)))
 	staticRoot, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return nil, err
@@ -766,6 +773,69 @@ func (server *Server) backupStatus(writer http.ResponseWriter, _ *http.Request) 
 		"operation": operation, "apply_available": server.dependencies.RestoreApply != nil,
 		"confirmation_phrases": confirmationPhrases(operation),
 	})
+}
+
+func (server *Server) vpsLogs(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Operations == nil {
+		writeError(writer, http.StatusServiceUnavailable, "VPS_LOGS_UNAVAILABLE", "Эксплуатационные журналы VPS ещё недоступны")
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "VPS_LOG_QUERY_INVALID", "Некорректный размер страницы журнала")
+			return
+		}
+		limit = value
+	}
+	page, err := server.dependencies.Operations.Logs(request.Context(), vpsops.LogQuery{
+		Category: request.URL.Query().Get("category"), Search: request.URL.Query().Get("search"), Limit: limit,
+	})
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "VPS_LOG_QUERY_INVALID", "Некорректный запрос журнала VPS")
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
+func (server *Server) diagnosticStatus(writer http.ResponseWriter, _ *http.Request) {
+	if server.dependencies.Operations == nil {
+		writeJSON(writer, http.StatusOK, map[string]any{"available": false, "reason": "OPERATIONS_SERVICE_UNAVAILABLE"})
+		return
+	}
+	snapshot, err := server.dependencies.Operations.Snapshot()
+	response := map[string]any{
+		"available": true, "format": "zip", "secrets_included": false,
+		"maximum_archive_bytes": vpsops.MaximumBundleBytes,
+		"sections":              []string{"configuration summary", "database report", "root operations snapshot", "recent logs", "Management Fabric watchdog"},
+	}
+	if err != nil {
+		response["snapshot_state"], response["snapshot_reason"] = "UNAVAILABLE", "ROOT_SNAPSHOT_UNAVAILABLE"
+	} else {
+		response["snapshot_state"], response["snapshot_collected_at"], response["snapshot_section_errors"] = snapshot.State, snapshot.CollectedAt, snapshot.SectionErrors
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) downloadDiagnostics(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.Operations == nil {
+		writeError(writer, http.StatusServiceUnavailable, "VPS_DIAGNOSTICS_UNAVAILABLE", "Диагностика VPS недоступна")
+		return
+	}
+	bundle, err := server.dependencies.Operations.BuildBundle(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "VPS_DIAGNOSTICS_FAILED", "Не удалось собрать ограниченный диагностический архив VPS")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_DIAGNOSTIC_BUNDLE_CREATED", map[string]any{"user_id": principal.UserID, "sha256": bundle.SHA256, "bytes": bundle.Bytes, "complete": bundle.Manifest.Complete})
+	writer.Header().Set("Content-Type", "application/zip")
+	writer.Header().Set("Content-Disposition", `attachment; filename="`+bundle.Filename+`"`)
+	writer.Header().Set("X-Content-SHA256", bundle.SHA256)
+	writer.Header().Set("Content-Length", strconv.Itoa(len(bundle.Content)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(bundle.Content)
 }
 
 func (server *Server) downloadBackup(writer http.ResponseWriter, request *http.Request) {

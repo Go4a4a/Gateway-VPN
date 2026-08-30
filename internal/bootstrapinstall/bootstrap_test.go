@@ -423,6 +423,8 @@ func newVPSBootstrapFixture(t *testing.T) *vpsBootstrapFixture {
 		"packaging/vps/systemd/gateway-vpn-vps-fabric-recovery.service":     []byte("[Service]\nType=oneshot\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.service":     []byte("[Service]\nType=oneshot\n"),
 		"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer":       []byte("[Timer]\nOnUnitActiveSec=60s\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-operations.service":          []byte("[Service]\nType=oneshot\n"),
+		"packaging/vps/systemd/gateway-vpn-vps-operations.timer":            []byte("[Timer]\nOnUnitActiveSec=60s\n"),
 		"packaging/vps/config/config.yaml":                                  []byte("version: 1\n"),
 		"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf": []byte("[Unit]\nAfter=gateway-vpn-vps-firewall.service\n"),
 		"manifest.sha256":                           []byte(strings.Repeat("0", 64) + "  placeholder\n"),

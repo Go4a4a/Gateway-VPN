@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"gateway-vpn/internal/auth"
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
+	"gateway-vpn/internal/vpsops"
 	"gateway-vpn/internal/vpswebapi"
 	"gateway-vpn/internal/wgingress"
 )
@@ -128,7 +130,27 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	web, err := vpswebapi.New(vpswebapi.Dependencies{Database: database, Auth: authService, Backups: backups, Restores: restores, AdminKeys: &adminKeys})
+	now := time.Now().UTC()
+	operationsDirectory := filepath.Join(state, "operations")
+	if err := os.MkdirAll(operationsDirectory, 0o700); err != nil {
+		return err
+	}
+	operationsPath := filepath.Join(operationsDirectory, "snapshot.json")
+	snapshot := vpsops.Snapshot{
+		SchemaVersion: vpsops.SnapshotSchemaVersion, CollectedAt: now.Format(time.RFC3339Nano), State: "HEALTHY",
+		Units:        []vpsops.UnitStatus{{Unit: "gateway-vpn-vps-agent.service", LoadState: "loaded", ActiveState: "active", SubState: "running"}},
+		Host:         vpsops.HostStatus{Interfaces: []vpsops.InterfaceStatus{{Name: "wg-mgmt", State: "UP", Addresses: []string{"10.80.0.1/24"}}}, OwnedRoutes: json.RawMessage("[]"), OwnedNFT: json.RawMessage(`{"nftables":[]}`), WireGuard: vpsops.WireGuardStatus{Available: true, ListenPort: 51821, Peers: 2}},
+		FabricStatus: json.RawMessage(`{"state":"HEALTHY"}`), Entries: []vpsops.LogEntry{{Cursor: "s=preview-1", OccurredAt: now.Format(time.RFC3339Nano), Severity: "info", Category: vpsops.CategoryAgent, Source: "systemd-journald", Unit: "gateway-vpn-vps-agent.service", Message: "VPS Hub preview is ready"}}, SectionErrors: []string{},
+	}
+	content, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(operationsPath, append(content, '\n'), 0o600); err != nil {
+		return err
+	}
+	operations := &vpsops.Service{Database: database, SnapshotPath: operationsPath, FabricStatusPath: operationsPath, Config: vpsops.ConfigSummary{Listen: []string{"127.0.0.1:9443"}, AdminPrefixes: []string{"10.80.0.0/24"}, StateDirectory: state}, AgentVersion: "vps-agent browser preview"}
+	web, err := vpswebapi.New(vpswebapi.Dependencies{Database: database, Auth: authService, Backups: backups, Restores: restores, AdminKeys: &adminKeys, Operations: operations})
 	if err != nil {
 		return err
 	}

@@ -1,7 +1,7 @@
 'use strict';
 
 const $=id=>document.getElementById(id);
-const ui={csrf:'',page:'overview',invitation:null,gateways:[],admins:[],resources:[]};
+const ui={csrf:'',page:'overview',invitation:null,gateways:[],admins:[],resources:[],logCategory:'all'};
 
 async function api(path,options={}){
   const headers={...(options.headers||{})};
@@ -51,7 +51,9 @@ async function loadPage(page){
   if(page==='resources')return loadResources();
   if(page==='matrix')return loadMatrix();
   if(page==='watchdog')return loadWatchdog();
+  if(page==='logs')return loadLogs();
   if(page==='backup')return refreshBackupStatus();
+  if(page==='diagnostics')return loadDiagnostics();
 }
 
 async function loadOverview(){
@@ -145,12 +147,36 @@ async function loadWatchdog(){
   for(const item of report.components||[])root.append(objectCard(item.name,[['Причина',item.reason],['Owned only',item.owned_only?'Да':'Нет']],item.state));
 }
 
+const logCategoryLabels={
+  'all':'Общий лог','agent-control':'Agent / управление','pairing-gateways':'Pairing / Gateway',
+  'administrators-relays':'Администраторы / relay','resources-acl':'Ресурсы / ACL',
+  'management-fabric':'Management Fabric','watchdog-recovery':'Watchdog / recovery',
+  'backup-restore-update':'Backup / restore / update','security-audit':'Безопасность / audit'
+};
+async function loadLogs(){
+  const form=$('log-filter'),search=form.elements.search.value.trim(),limit=Number(form.elements.limit.value)||100;
+  const query=new URLSearchParams({category:ui.logCategory,limit:String(limit)});if(search)query.set('search',search);
+  const page=await api(`/api/v1/vps/logs?${query}`);renderLogCategories(page.categories||[]);const state=$('log-state');clear(state);
+  for(const [label,value] of [['Состояние',page.state],['Снимок root',page.snapshot_at||'ещё не получен'],['Возраст снимка',page.snapshot_at?`${page.snapshot_age_seconds} сек.`:'—'],['Причина',page.reason||'—'],['Показано',(page.items||[]).length]])state.append(textElement('dt',label),textElement('dd',value));
+  const root=$('log-window');clear(root);if(!(page.items||[]).length){root.append(textElement('div','Для выбранной категории записей нет.','empty'));return}
+  for(const item of page.items){const row=document.createElement('article');row.className='log-entry';const head=document.createElement('div');head.className='log-entry-head';head.append(textElement('time',item.occurred_at),status(String(item.severity||'info').toUpperCase()),textElement('span',logCategoryLabels[item.category]||item.category,'muted'));const source=textElement('div',[item.source,item.unit].filter(Boolean).join(' · '),'muted');const message=textElement('pre',item.message);row.append(head,source,message);root.append(row)}
+}
+function renderLogCategories(categories){const root=$('log-categories');clear(root);for(const category of categories){const button=actionButton(logCategoryLabels[category]||category,async()=>{ui.logCategory=category;await loadLogs()});button.classList.toggle('active',category===ui.logCategory);button.setAttribute('role','tab');button.setAttribute('aria-selected',String(category===ui.logCategory));root.append(button)}}
+
+async function loadDiagnostics(){
+  const item=await api('/api/v1/vps/diagnostics/status'),root=$('diagnostic-status');clear(root);
+  root.append(summary([['Доступно',item.available?'Да':'Нет'],['Формат',item.format||'—'],['Приватные данные',item.secrets_included?'ОШИБКА: включены':'Не включаются'],['Root-снимок',item.snapshot_state||item.reason||'—'],['Собран',item.snapshot_collected_at||'—'],['Лимит архива',item.maximum_archive_bytes?`${Math.round(item.maximum_archive_bytes/1048576)} МиБ`:'—'],['Разделы',(item.sections||[]).join(', ')||'—'],['Неполные секции',(item.snapshot_section_errors||[]).join(', ')||'нет']]))
+}
+
 $('login-form').addEventListener('submit',async event=>{event.preventDefault();const data=new FormData(event.target);try{showApp(await api('/api/v1/auth/login',{method:'POST',body:JSON.stringify({username:data.get('username'),password:data.get('password')})}))}catch(error){$('login-error').textContent=error.message}});
 $('logout').addEventListener('click',async()=>{try{await api('/api/v1/auth/logout',{method:'POST'})}finally{ui.csrf='';showLogin()}});
 $('password-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,data=new FormData(form);if(data.get('new_password')!==data.get('password_confirmation')){notice('Новый пароль и подтверждение не совпадают');return}try{await api('/api/v1/auth/password',{method:'PUT',body:JSON.stringify({current_password:data.get('current_password'),new_password:data.get('new_password'),password_confirmation:data.get('password_confirmation')})});form.reset();showApp(await api('/api/v1/auth/session'));notice('Пароль VPS Hub изменён')}catch(error){notice(error.message)}});
 document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>navigate(button.dataset.page)));
 $('mobile-navigation-select').addEventListener('change',event=>navigate(event.target.value));
 document.querySelectorAll('[data-refresh]').forEach(button=>button.addEventListener('click',()=>loadPage(button.dataset.refresh).catch(error=>notice(error.message))));
+$('log-filter').addEventListener('submit',event=>{event.preventDefault();loadLogs().catch(error=>notice(error.message))});
+$('clear-log-view').addEventListener('click',()=>{empty($('log-window'),'Окно очищено только в этом браузере. Системный журнал и audit trail сохранены.');notice('Отображение очищено; записи на VPS не удалялись.')});
+$('download-diagnostics').addEventListener('click',async event=>{const button=event.currentTarget;button.disabled=true;try{const response=await fetch('/api/v1/vps/diagnostics/download',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':ui.csrf}});if(!response.ok){const body=await response.json();throw new Error(body.error.message)}const blob=await response.blob(),name=(response.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/)?.[1]||'gateway-vpn-vps-diagnostics.zip',digest=response.headers.get('X-Content-SHA256')||'не указан',link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);notice(`Диагностика ${name} скачана; SHA-256 ${digest}`)}catch(error){notice(error.message)}finally{button.disabled=false}});
 
 $('pairing-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.target,data=new FormData(form);try{const result=await api('/api/v1/hub/pairing-invitations',{method:'POST',body:JSON.stringify({gateway_name:data.get('gateway_name'),endpoint:data.get('endpoint'),assigned_subnet:data.get('assigned_subnet'),expiry_seconds:Number(data.get('expiry_minutes'))*60})});ui.invitation=result.invitation;$('pairing-bundle').textContent=JSON.stringify(result.invitation,null,2);$('pairing-once').hidden=false;notice('Приглашение создано. Токен больше не будет показан после ухода со страницы.');await loadGateways()}catch(error){notice(error.message)}});
 $('download-pairing').addEventListener('click',()=>{if(!ui.invitation)return;const blob=new Blob([JSON.stringify(ui.invitation,null,2)+'\n'],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`gateway-vpn-pairing-${ui.invitation.invitation_id}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000)});

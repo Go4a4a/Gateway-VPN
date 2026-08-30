@@ -220,6 +220,8 @@ func validateRequiredFiles(files []FileRecord) error {
 		{"packaging/vps/systemd/gateway-vpn-vps-fabric-recovery.service", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.service", false},
 		{"packaging/vps/systemd/gateway-vpn-vps-fabric-watchdog.timer", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-operations.service", false},
+		{"packaging/vps/systemd/gateway-vpn-vps-operations.timer", false},
 		{"packaging/vps/config/config.yaml", false},
 		{"packaging/vps/systemd/wg-quick@wg-mgmt.service.d/gateway-vpn.conf", false},
 		{ReleaseFilename, false},

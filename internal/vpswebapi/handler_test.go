@@ -19,6 +19,7 @@ import (
 	"gateway-vpn/internal/vpsagent"
 	"gateway-vpn/internal/vpsbackup"
 	"gateway-vpn/internal/vpsfabric"
+	"gateway-vpn/internal/vpsops"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -135,6 +136,31 @@ func TestVPSHubRejectsMissingCSRFBadReauthenticationAndCanDiscardStage(t *testin
 	status := authorizedRequest(server, session, http.MethodGet, "/api/v1/vps/backup/status", nil, "")
 	if !bytes.Contains(status.Body.Bytes(), []byte(`"pending":false`)) {
 		t.Fatalf("discarded status = %d %s", status.Code, status.Body.String())
+	}
+}
+
+func TestVPSOperationalLogsAndDiagnosticDownloadUseDisplayOnlySnapshot(t *testing.T) {
+	server, _ := vpsAPIFixture(t)
+	session := loginVPSHub(t, server, "administrator password 123")
+	logs := authorizedRequest(server, session, http.MethodGet, "/api/v1/vps/logs?category=agent-control&limit=50", nil, "")
+	if logs.Code != http.StatusOK || !strings.Contains(logs.Body.String(), "root snapshot fixture") || strings.Contains(logs.Body.String(), "fixture-secret") {
+		t.Fatalf("operational logs = %d %s", logs.Code, logs.Body.String())
+	}
+	bad := authorizedRequest(server, session, http.MethodGet, "/api/v1/vps/logs?category=../../etc&limit=50", nil, "")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe category = %d %s", bad.Code, bad.Body.String())
+	}
+	status := authorizedRequest(server, session, http.MethodGet, "/api/v1/vps/diagnostics/status", nil, "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"secrets_included":false`) {
+		t.Fatalf("diagnostic status = %d %s", status.Code, status.Body.String())
+	}
+	download := authorizedRequest(server, session, http.MethodPost, "/api/v1/vps/diagnostics/download", nil, "")
+	if download.Code != http.StatusOK || download.Header().Get("Content-Type") != "application/zip" || download.Header().Get("X-Content-SHA256") == "" {
+		t.Fatalf("diagnostic download = %d %v %s", download.Code, download.Header(), download.Body.String())
+	}
+	manifest, err := vpsops.VerifyBundle(download.Body.Bytes())
+	if err != nil || !manifest.Complete || manifest.SecretsIncluded {
+		t.Fatalf("diagnostic verification = %+v %v", manifest, err)
 	}
 }
 
@@ -400,16 +426,18 @@ func TestVPSHubWebUIExposesFabricApplyAndRootWatchdogStatus(t *testing.T) {
 	server, _ := newVPSAPIFixture(t, &fakeFabricTrigger{})
 	for path, required := range map[string][]string{
 		"/styles.css": {
-			"overflow-wrap:anywhere", "text-wrap:balance", "minmax(min(320px,100%),1fr)", ".mobile-navigation{display:grid}", ".actions button,form>button,.page-heading>button{width:100%}",
+			"overflow-wrap:anywhere", "text-wrap:balance", "minmax(min(320px,100%),1fr)", ".mobile-navigation{display:grid}", ".actions button,form>button,.page-heading>button{width:100%}", ".log-tabs", ".log-window", ".inline-filter",
 		},
 		"/app.js": {
 			"/api/v1/hub/fabric/apply", "Применить изменения сейчас", "Запустить reconciliation",
 			"host_fabric", "Последняя root-проверка", "Привилегированный reconciler",
 			"/api/v1/hub/admin-relays", "/trust-mode", "private_keys_on_vps", "mobile-navigation-select",
+			"/api/v1/vps/logs", "/api/v1/vps/diagnostics/status", "/api/v1/vps/diagnostics/download", "Отображение очищено",
 		},
 		"/": {
 			"последнюю root-проверку Management Fabric", "ownership-scoped root transaction с rollback",
 			"data-page=\"relays\"", "Создать и включить relay", "ключ не хранится на VPS", "id=\"mobile-navigation-select\"",
+			"data-page=\"logs\"", "Журналы VPS Hub", "Очистить окно", "data-page=\"diagnostics\"", "Собрать и скачать ZIP",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -499,10 +527,31 @@ func newVPSAPIFixture(t *testing.T, fabric FabricApplyTrigger) (*Server, *fakeRe
 			t.Fatal(err)
 		}
 	}
+	operationsDirectory := filepath.Join(stateDirectory, "operations")
+	if err := os.MkdirAll(operationsDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operationsPath := filepath.Join(operationsDirectory, "snapshot.json")
+	snapshot := vpsops.Snapshot{
+		SchemaVersion: vpsops.SnapshotSchemaVersion, CollectedAt: now.Format(time.RFC3339Nano), State: "HEALTHY",
+		Units: []vpsops.UnitStatus{}, Host: vpsops.HostStatus{Interfaces: []vpsops.InterfaceStatus{}, OwnedRoutes: json.RawMessage("[]"), OwnedNFT: json.RawMessage("{}")}, FabricStatus: json.RawMessage("{}"),
+		Entries: []vpsops.LogEntry{{Cursor: "s=fixture-1", OccurredAt: now.Format(time.RFC3339Nano), Severity: "info", Category: vpsops.CategoryAgent, Source: "systemd-journald", Unit: "gateway-vpn-vps-agent.service", Message: "root snapshot fixture"}}, SectionErrors: []string{},
+	}
+	content, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(operationsPath, append(content, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO audit_events(occurred_at,severity,event_type,details_json) VALUES(?,?,?,?)`, now.Format(time.RFC3339Nano), "WARNING", "VPS_ADMIN_PEER_CREATED", `{"password":"fixture-secret"}`); err != nil {
+		t.Fatal(err)
+	}
 	server, err := New(Dependencies{
 		Database: database, Auth: authService, Backups: backupManager, Restores: restoreManager,
 		AdminKeys: &adminKeys, RestoreApply: trigger, FabricApply: fabric, FabricStatusPath: fabricStatusPath,
-		Now: func() time.Time { return now },
+		Operations: &vpsops.Service{Database: database, SnapshotPath: operationsPath, FabricStatusPath: operationsPath, Config: vpsops.ConfigSummary{Listen: []string{"127.0.0.1:9443"}, AdminPrefixes: []string{"10.80.0.0/24"}, StateDirectory: stateDirectory}, AgentVersion: "test"},
+		Now:        func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatal(err)

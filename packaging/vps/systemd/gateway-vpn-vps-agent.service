@@ -2,7 +2,7 @@
 Description=Gateway VPN restricted VPS Hub Agent
 Documentation=file:///opt/gateway-vpn-vps/current/share/doc/OPERATIONS.md
 After=network-online.target gateway-vpn-vps-install-recovery.service wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service
-Wants=network-online.target
+Wants=network-online.target gateway-vpn-vps-operations.timer
 Requires=wg-quick@wg-mgmt.service gateway-vpn-vps-firewall.service gateway-vpn-vps-restore-recovery.service gateway-vpn-vps-fabric-recovery.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
@@ -39,6 +39,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET
 CapabilityBoundingSet=
 AmbientCapabilities=
 ReadOnlyPaths=/etc/gateway-vpn-vps/config.yaml
+ReadOnlyPaths=/var/lib/gateway-vpn-vps-privileged/operations
 ReadWritePaths=/var/lib/gateway-vpn-vps/agent
 SystemCallArchitectures=native
 

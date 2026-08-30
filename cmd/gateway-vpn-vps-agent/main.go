@@ -30,6 +30,7 @@ import (
 	"gateway-vpn/internal/vpsbackup"
 	"gateway-vpn/internal/vpsconfig"
 	"gateway-vpn/internal/vpsfabric"
+	"gateway-vpn/internal/vpsops"
 	"gateway-vpn/internal/vpswebapi"
 	"gateway-vpn/internal/wgingress"
 )
@@ -65,6 +66,8 @@ func run(args []string) int {
 			return runFabricRestore(args[1:], false)
 		case "fabric-watchdog":
 			return runFabricWatchdog(args[1:])
+		case "operations-collect":
+			return runOperationsCollect(args[1:])
 		}
 	}
 	flags := flag.NewFlagSet("gateway-vpn-vps-agent", flag.ContinueOnError)
@@ -96,7 +99,7 @@ func run(args []string) int {
 		fmt.Println("VPS Hub password file is valid")
 		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog|operations-collect]")
 		return 2
 	}
 }
@@ -148,6 +151,12 @@ func runServe(args []string) int {
 		RestoreApply:     systemdRestoreTrigger{path: filepath.Join(configuration.System.StateDirectory, "restore.trigger")},
 		FabricApply:      systemdFabricTrigger{path: filepath.Join(configuration.System.StateDirectory, "fabric.trigger")},
 		FabricStatusPath: filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename),
+		Operations: &vpsops.Service{
+			Database: database, SnapshotPath: vpsops.DefaultPaths().Output,
+			FabricStatusPath: filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename),
+			Config:           vpsops.ConfigSummary{Listen: append([]string(nil), configuration.Listen...), AdminPrefixes: append([]string(nil), configuration.AdminPrefixes...), StateDirectory: configuration.System.StateDirectory},
+			AgentVersion:     buildinfo.String("gateway-vpn-vps-agent"),
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initialize VPS Hub WebUI failed: %v\n", err)
@@ -281,6 +290,38 @@ func runFabricApply(args []string, recover bool) int {
 		return 1
 	}
 	fmt.Println("VPS fabric applied")
+	return 0
+}
+
+// runOperationsCollect is called only by the fixed root-owned systemd unit.
+// HTTP never supplies paths, executables, units, or command arguments.
+func runOperationsCollect(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn-vps-agent operations-collect", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", defaultConfigPath, "absolute VPS Agent YAML config")
+	agentUser := flags.String("agent-user", "gateway-vpn-vps", "VPS Agent service account")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, err := vpsconfig.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load VPS Agent config for operations snapshot failed: %v\n", err)
+		return 1
+	}
+	_, gid, err := resolveAccount(*agentUser)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve VPS Agent ownership failed: %v\n", err)
+		return 1
+	}
+	paths := vpsops.DefaultPaths()
+	paths.FabricStatus = filepath.Join(configuration.System.StateDirectory, vpsfabric.WatchdogStatusFilename)
+	collector := vpsops.Collector{Executor: platformexec.OSExecutor{}, Paths: paths, AgentGID: gid}
+	snapshot, err := collector.CollectAndWrite(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "collect bounded VPS operations snapshot failed: %v\n", err)
+		return 1
+	}
+	fmt.Printf("VPS operations snapshot %s: %s (%d log entries)\n", snapshot.CollectedAt, snapshot.State, len(snapshot.Entries))
 	return 0
 }
 

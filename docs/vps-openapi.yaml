@@ -24,6 +24,8 @@ tags:
   - name: Resources
   - name: Access
   - name: Watchdog
+  - name: Logs
+  - name: Diagnostics
   - name: Backup
 paths:
   /api/v1/auth/login:
@@ -286,6 +288,29 @@ paths:
       summary: Удалить verified staging без изменения live state
       parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DestructiveConfirmation'}]
       responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/logs:
+    get:
+      tags: [Logs]
+      operationId: getVPSOperationalLogs
+      summary: Получить bounded объединение root-collected journald и security audit
+      parameters:
+        - {name: category, in: query, schema: {type: string, maxLength: 64, default: all}}
+        - {name: search, in: query, schema: {type: string, maxLength: 128}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 100}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/diagnostics/status:
+    get:
+      tags: [Diagnostics]
+      operationId: getVPSDiagnosticStatus
+      summary: Описать secret-free диагностический архив и свежесть root snapshot
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/vps/diagnostics/download:
+    post:
+      tags: [Diagnostics]
+      operationId: downloadVPSDiagnostics
+      summary: Собрать в памяти bounded ZIP без секретов и host mutation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/VPSDiagnostics'}, default: {$ref: '#/components/responses/Error'}}
 components:
   securitySchemes:
     cookieAuth:
@@ -435,6 +460,13 @@ components:
         X-Content-SHA256: {schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
       content:
         application/vnd.gateway-vpn.vps-backup:
+          schema: {type: string, format: binary}
+    VPSDiagnostics:
+      description: Bounded secret-free VPS operational diagnostic archive.
+      headers:
+        X-Content-SHA256: {schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+      content:
+        application/zip:
           schema: {type: string, format: binary}
   schemas:
     GenericObject: {type: object, additionalProperties: true}

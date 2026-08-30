@@ -9,6 +9,6 @@ RUN apt-get update \
         nftables \
         passwd \
         procps \
-        python3-minimal \
+        python3 \
         wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
