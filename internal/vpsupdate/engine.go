@@ -189,7 +189,7 @@ func (engine *Engine) Apply(ctx context.Context) (ApplyResult, error) {
 	if err := removeSidecars(engine.DatabasePath); err != nil {
 		return fail("DATABASE_SIDECAR_REMOVE_FAILED", err)
 	}
-	if err := replacePath(candidateDB, engine.DatabasePath); err != nil {
+	if err := engine.replaceDatabase(candidateDB, journal.CandidateDBSHA256, journal.UpdateID, "candidate"); err != nil {
 		return fail("DATABASE_REPLACE_FAILED", err)
 	}
 	if err := engine.setDatabaseOwnership(); err != nil {
@@ -315,7 +315,7 @@ func (engine *Engine) rollback(ctx context.Context, journal *Journal, code strin
 		if err := removeSidecars(engine.DatabasePath); err != nil {
 			return failed("ROLLBACK_SIDECAR_REMOVE_FAILED", err)
 		}
-		if err := replacePath(rollback, engine.DatabasePath); err != nil {
+		if err := engine.replaceDatabase(rollback, journal.SnapshotSHA256, journal.UpdateID, "rollback"); err != nil {
 			return failed("ROLLBACK_DATABASE_REPLACE_FAILED", err)
 		}
 		if err := engine.setDatabaseOwnership(); err != nil {
@@ -526,7 +526,8 @@ func (engine *Engine) validate(withStager bool) error {
 	validTransactionRoot := filepath.IsAbs(transactionRoot) &&
 		filepath.Base(transactionRoot) == "update-transactions" &&
 		filepath.Base(filepath.Dir(transactionRoot)) == "gateway-vpn-vps-privileged"
-	if engine.Runtime == nil || !filepath.IsAbs(engine.ReleaseRoot) || !filepath.IsAbs(engine.StateDirectory) || !filepath.IsAbs(engine.DatabasePath) || !filepath.IsAbs(engine.ConfigPath) || !filepath.IsAbs(engine.TrustedKeyPath) || updatepkg.ValidateGatewayVersion(engine.RunningVersion) != nil || engine.RunningSchema < 1 || engine.AgentUID < 0 || engine.AgentGID < 0 || engine.Status.UID != engine.AgentUID || engine.Status.GID != engine.AgentGID || !contains(vpsrelease.SupportedProfiles(), engine.Profile) || !validTransactionRoot || filepath.Clean(engine.Status.Path) != filepath.Join(filepath.Clean(engine.StateDirectory), "update-status.json") {
+	validDatabasePath := filepath.Clean(engine.DatabasePath) == filepath.Join(filepath.Clean(engine.StateDirectory), "vps-agent.db")
+	if engine.Runtime == nil || !filepath.IsAbs(engine.ReleaseRoot) || !filepath.IsAbs(engine.StateDirectory) || !filepath.IsAbs(engine.DatabasePath) || !filepath.IsAbs(engine.ConfigPath) || !filepath.IsAbs(engine.TrustedKeyPath) || updatepkg.ValidateGatewayVersion(engine.RunningVersion) != nil || engine.RunningSchema < 1 || engine.AgentUID < 0 || engine.AgentGID < 0 || engine.Status.UID != engine.AgentUID || engine.Status.GID != engine.AgentGID || !contains(vpsrelease.SupportedProfiles(), engine.Profile) || !validTransactionRoot || !validDatabasePath || filepath.Clean(engine.Status.Path) != filepath.Join(filepath.Clean(engine.StateDirectory), "update-status.json") {
 		return errors.New("complete fixed VPS update engine configuration is required")
 	}
 	if withStager && engine.Stager == nil {
@@ -555,6 +556,42 @@ func (engine *Engine) setDatabaseOwnership() error {
 		return err
 	}
 	return os.Chmod(engine.DatabasePath, 0o600)
+}
+
+func (engine *Engine) replaceDatabase(source, expectedSHA256, updateID, phase string) error {
+	directory := filepath.Dir(engine.DatabasePath)
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
+		return errors.New("VPS Agent database directory is unsafe")
+	}
+	destinationInfo, err := os.Lstat(engine.DatabasePath)
+	if err != nil || destinationInfo.Mode()&os.ModeSymlink != 0 || !destinationInfo.Mode().IsRegular() {
+		return errors.New("VPS Agent database destination is unsafe")
+	}
+	temporary := filepath.Join(directory, "."+filepath.Base(engine.DatabasePath)+"-"+sanitizeSuffix(updateID+"-"+phase)+".tmp")
+	if info, statErr := os.Lstat(temporary); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("VPS Agent database replacement artifact is unsafe")
+		}
+		if removeErr := os.Remove(temporary); removeErr != nil {
+			return removeErr
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := copyExclusive(source, temporary, 0o600, vpsbackup.MaximumFileBytes); err != nil {
+		return err
+	}
+	defer os.Remove(temporary)
+	digest, _, err := hashRegular(temporary, vpsbackup.MaximumFileBytes)
+	if err != nil || !digestPattern.MatchString(expectedSHA256) || digest != expectedSHA256 {
+		return errors.New("VPS Agent database replacement digest differs")
+	}
+	// systemd exposes Agent state and the privileged transaction root as
+	// separate bind mounts, so a direct rename between them returns EXDEV.
+	// The verified copy is created beside the live database, keeping this
+	// final rename atomic on the Linux runtime.
+	return replacePath(temporary, engine.DatabasePath)
 }
 
 func validOffline(value OfflineResult, version string, schema int64) bool {

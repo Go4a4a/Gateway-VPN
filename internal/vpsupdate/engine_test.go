@@ -73,6 +73,24 @@ func TestEngineHealthFailureRestoresOldReleaseAndDatabase(t *testing.T) {
 	}
 }
 
+func TestDatabaseReplacementRejectsUnsafeSameDirectoryArtifact(t *testing.T) {
+	fixture := newEngineFixture(t)
+	source := filepath.Join(t.TempDir(), "replacement.db")
+	writeFile(t, source, "verified replacement database\n", 0o600)
+	digest, _, err := hashRegular(source, vpsbackup.MaximumFileBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := filepath.Join(filepath.Dir(fixture.databasePath), "."+filepath.Base(fixture.databasePath)+"-"+sanitizeSuffix(fixture.operation.UpdateID+"-candidate")+".tmp")
+	if err := os.Mkdir(temporary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.engine.replaceDatabase(source, digest, fixture.operation.UpdateID, "candidate"); err == nil || !strings.Contains(err.Error(), "replacement artifact is unsafe") {
+		t.Fatalf("unsafe replacement artifact error = %v", err)
+	}
+	assertProbeTable(t, fixture.databasePath, false)
+}
+
 func TestEngineBootRecoveryAfterDatabaseSwitch(t *testing.T) {
 	fixture := newEngineFixture(t)
 	fixture.runtime.mutateCandidate = true
