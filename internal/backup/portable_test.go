@@ -112,7 +112,7 @@ func TestPortableBackupEncryptsSecretsAuthenticatesChunksAndContainsVerifiedMani
 		}
 	}
 	var manifest PortableManifest
-	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 25 || len(manifest.Files) != len(contents)-1 {
+	if err := json.Unmarshal(contents["manifest.json"], &manifest); err != nil || !manifest.SecretsIncluded || manifest.SnapshotID != artifact.SnapshotID || manifest.SchemaVersion != 26 || len(manifest.Files) != len(contents)-1 {
 		t.Fatalf("portable manifest = %+v, %v", manifest, err)
 	}
 	extractedDatabase := filepath.Join(t.TempDir(), "state.db")

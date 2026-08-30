@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 25 {
+	if err != nil || version != 26 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 25 {
+	if err != nil || latest != 26 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -223,6 +223,21 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 		"modem_recovery_runtime",
 		"modem_recovery_attempts",
 		"log_export_policy",
+		"management_sites",
+		"management_fabric_counters",
+		"vps_nodes",
+		"management_links",
+		"management_link_endpoints",
+		"management_pairing_invitations",
+		"management_link_key_rotations",
+		"management_admins",
+		"management_admin_vps_peers",
+		"management_resources",
+		"management_resource_ports",
+		"management_resource_publications",
+		"management_resource_acl",
+		"management_fabric_generations",
+		"management_fabric_operations",
 	}
 	for _, table := range wantTables {
 		var count int
@@ -238,8 +253,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 25 {
-		t.Fatalf("SchemaVersion() = %d, want 25", version)
+	if version != 26 {
+		t.Fatalf("SchemaVersion() = %d, want 26", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -283,8 +298,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 25 {
-		t.Fatalf("migration count = %d, want 25", count)
+	if count != 26 {
+		t.Fatalf("migration count = %d, want 26", count)
 	}
 }
 
@@ -414,7 +429,7 @@ FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode); er
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 25 || interval != 42 || loggingMode != "RESTART" || modeCount != 17 {
+	if version != 26 || interval != 42 || loggingMode != "RESTART" || modeCount != 17 {
 		t.Fatalf("migration 24 = version:%d interval:%d mode:%s count:%d", version, interval, loggingMode, modeCount)
 	}
 }
