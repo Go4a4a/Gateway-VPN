@@ -625,6 +625,7 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		"ip -4 -o address show dev wg-mgmt", "fabric/applied.json", "INSTALLED_NOT_READY",
 		"-g \"$AGENT_USER\" -m 0710 /var/lib/gateway-vpn-vps-privileged", "-g root -m 0700 /var/lib/gateway-vpn-vps-privileged/restore-transactions", "-m 0750 /var/lib/gateway-vpn-vps-privileged/operations", "root:gateway-vpn-vps:640",
 		"--hub-admin-password-file", "--check-password-file", "preserve_agent_user=%s", "$AGENT_STATE/vps-agent.db",
+		"install -d -o root -g \"$AGENT_USER\" -m 0710 /var/lib/gateway-vpn-vps",
 		"gateway-vpn-vps-agent.service", "gateway-vpn-vps-restore.service", "gateway-vpn-vps-restore.path", "gateway-vpn-vps-restore-recovery.service",
 		"gateway-vpn-vps-fabric.service", "gateway-vpn-vps-fabric.path", "gateway-vpn-vps-fabric-recovery.service", "gateway-vpn-vps-fabric-watchdog.service", "gateway-vpn-vps-fabric-watchdog.timer", "gateway-vpn-vps-operations.service", "gateway-vpn-vps-operations.timer", "legacy-adopt", "fabric-apply",
 		"gateway-vpn-vps-update.service", "gateway-vpn-vps-update.path", "gateway-vpn-vps-update-recovery.service", "gateway-vpn-vps-update-finalize.service", "gateway-vpn-vps-update-finalize.timer", "/opt/gateway-vpn-vps/recovery", "update-transactions",

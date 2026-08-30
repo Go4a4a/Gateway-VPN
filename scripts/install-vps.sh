@@ -703,7 +703,7 @@ systemctl is-active --quiet gateway-vpn-vps-update-finalize.timer
 [[ -f /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && ! -L /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json && $(stat -c '%U:%G:%a' /var/lib/gateway-vpn-vps-privileged/operations/snapshot.json) == "root:gateway-vpn-vps:640" ]]
 wait_for_vps_agent_listeners
 
-install -d -m 0700 /var/lib/gateway-vpn-vps
+install -d -o root -g "$AGENT_USER" -m 0710 /var/lib/gateway-vpn-vps
 printf '{\n  "version": "%s",\n  "profile": "%s",\n  "public_endpoint": "%s",\n  "interface": "wg-mgmt",\n  "vps_address": "10.80.0.1/24",\n  "gateway_address": "10.80.0.2/32",\n  "admin_address": "10.80.0.10/32",\n  "vps_public_key": "%s",\n  "state": "INSTALLED_NOT_READY"\n}\n' "$RELEASE_VERSION" "$PROFILE" "$PUBLIC_ENDPOINT" "$VPS_PUBLIC_KEY" >/var/lib/gateway-vpn-vps/install-report.json
 chmod 0600 /var/lib/gateway-vpn-vps/install-report.json
 sync
