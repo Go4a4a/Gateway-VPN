@@ -198,7 +198,7 @@ func TestHubResourceUpdateDeleteAndPairingAttemptBudget(t *testing.T) {
 	}
 }
 
-func TestVPSAgentMigratesExactV1PrefixToV2(t *testing.T) {
+func TestVPSAgentMigratesExactV1PrefixToCurrent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	database, err := sql.Open("sqlite", path)
@@ -218,12 +218,15 @@ func TestVPSAgentMigratesExactV1PrefixToV2(t *testing.T) {
 	if err := Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
-	if version, err := Schema(ctx, database); err != nil || version != 2 {
+	if version, err := Schema(ctx, database); err != nil || version != SchemaVersion {
 		t.Fatalf("migrated schema = %d, %v", version, err)
 	}
 	var count int
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('pairing_invitations') WHERE name='payload_json'").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("payload_json column count = %d, %v", count, err)
+	}
+	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('admin_peers') WHERE name='config_state'").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("config_state column count = %d, %v", count, err)
 	}
 }
 

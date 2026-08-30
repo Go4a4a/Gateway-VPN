@@ -308,6 +308,13 @@ func (applier *RestoreApplier) prepareCandidates(ctx context.Context, verified V
 		}
 		identity, err = vpsagent.ImportPortableAsNew(ctx, database, generated.Input, applier.now())
 		if err == nil {
+			// Imported administrator identities and peers are deleted from the
+			// candidate database. Their not-yet-delivered private keys must be
+			// deleted from the candidate tree as well, otherwise the new VPS
+			// would retain orphaned credentials owned by the source VPS.
+			err = removeSafePath(filepath.Join(candidateFor(items, "secrets"), "administrators"))
+		}
+		if err == nil {
 			err = installGeneratedIdentity(candidateFor(items, "secrets"), candidateFor(items, "tls"), generated)
 			if err == nil {
 				err = applyOwnershipTree(candidateFor(items, "secrets"), applier.AgentUID, applier.AgentGID)

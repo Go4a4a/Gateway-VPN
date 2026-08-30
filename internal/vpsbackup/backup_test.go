@@ -174,6 +174,76 @@ func TestVPSBackupRejectsWrongPassphraseTamperingTruncationAndUnsafeSources(t *t
 	}
 }
 
+func TestVPSBackupIncludesOnlyUndeliveredManagedAdministratorKeys(t *testing.T) {
+	ctx := context.Background()
+	manager, database, stateDirectory := vpsBackupFixture(t)
+	repository := vpsagent.HubRepository{Database: database, Now: manager.Now}
+	pairGatewayForBackup(t, repository)
+	adminKeys, err := vpsagent.NewAdminKeyManager(database, stateDirectory, manager.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := adminKeys.Create(ctx, "Ноутбук", "10.81.0.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference string
+	if err := database.QueryRowContext(ctx, "SELECT private_key_secret_ref FROM admin_peers WHERE id=?", admin.ID).Scan(&reference); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := "state/" + strings.TrimPrefix(reference, "/var/lib/gateway-vpn-vps/agent/")
+	artifact, err := manager.Build(ctx, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted := filepath.Join(t.TempDir(), "before-download.zip")
+	if _, err := backup.DecryptVPSBackupToZIP(ctx, artifact.Path, decrypted, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := readVPSArchive(t, decrypted)[archivePath]; !exists {
+		t.Fatalf("undelivered managed administrator key %s is missing", archivePath)
+	}
+	if _, err := adminKeys.Export(ctx, admin.ID, "vps.example:51820"); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(stateDirectory, "secrets", "administrators", "peers", "managed-admin-orphan.key")
+	if err := os.MkdirAll(filepath.Dir(orphan), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orphanPair, _ := wgingress.GenerateKeyPair()
+	if err := os.WriteFile(orphan, []byte(orphanPair.Private+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err = manager.Build(ctx, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted = filepath.Join(t.TempDir(), "after-download.zip")
+	if _, err := backup.DecryptVPSBackupToZIP(ctx, artifact.Path, decrypted, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	for path := range readVPSArchive(t, decrypted) {
+		if strings.HasPrefix(path, "state/secrets/administrators/") {
+			t.Fatalf("consumed or orphaned managed administrator key survived backup: %s", path)
+		}
+	}
+}
+
+func pairGatewayForBackup(t *testing.T, repository vpsagent.HubRepository) {
+	t.Helper()
+	bundle, err := repository.CreatePairing(context.Background(), vpsagent.PairingCreateInput{GatewayName: "Gateway", Endpoint: "vps.example:51820", Subnet: "10.82.0.0/30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := wgingress.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CompletePairing(context.Background(), vpsagent.PairingCompletion{InvitationID: bundle.InvitationID, Token: bundle.Token, SiteID: "site:backup", DisplayName: "Gateway", PublicKey: pair.Public}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func vpsBackupFixture(t *testing.T) (*Manager, *sql.DB, string) {
 	t.Helper()
 	ctx := context.Background()

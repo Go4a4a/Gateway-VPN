@@ -84,6 +84,14 @@ VALUES('peer:one','site:one','Gateway One',?,'10.88.0.0/30','10.88.0.1','10.88.0
 func TestVPSRestoreImportAsNewRegeneratesIdentityKeysTLSAndClearsTopology(t *testing.T) {
 	ctx := context.Background()
 	backupManager, database, stateDirectory := vpsBackupFixture(t)
+	adminKeys, err := vpsagent.NewAdminKeyManager(database, stateDirectory, backupManager.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedAdmin, err := adminKeys.Create(ctx, "Source administrator", "10.81.0.50")
+	if err != nil || managedAdmin.ConfigState != "AVAILABLE" {
+		t.Fatalf("create source managed administrator = %+v, %v", managedAdmin, err)
+	}
 	if _, err := database.ExecContext(ctx, `
 INSERT INTO gateway_peers(id,site_id,display_name,public_key,assigned_subnet,assigned_address,remote_address,state,created_at,updated_at)
 VALUES('peer:source','site:source','Source Gateway',?,'10.89.0.0/30','10.89.0.1','10.89.0.2','ACTIVE','now','now')`, testPeerKey(t)); err != nil {
@@ -151,6 +159,9 @@ VALUES('peer:source','site:source','Source Gateway',?,'10.89.0.0/30','10.89.0.1'
 		if err := liveDatabase.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("imported VPS table %s count = %d, %v", table, count, err)
 		}
+	}
+	if _, err := os.Lstat(filepath.Join(stateDirectory, "secrets", "administrators")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("import-as-new retained source administrator private keys: %v", err)
 	}
 }
 

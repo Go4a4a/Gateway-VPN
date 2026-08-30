@@ -119,8 +119,18 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "initialize VPS restore failed: %v\n", err)
 		return 1
 	}
+	adminKeys, err := vpsagent.NewAdminKeyManager(database, configuration.System.StateDirectory, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize managed VPS administrator keys failed: %v\n", err)
+		return 1
+	}
+	if err := adminKeys.CleanupConsumed(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "clean consumed VPS administrator keys failed: %v\n", err)
+		return 1
+	}
 	web, err := vpswebapi.New(vpswebapi.Dependencies{
 		Database: database, Auth: authService, Backups: backups, Restores: restores,
+		AdminKeys:    &adminKeys,
 		RestoreApply: systemdRestoreTrigger{path: filepath.Join(configuration.System.StateDirectory, "restore.trigger")},
 	})
 	if err != nil {

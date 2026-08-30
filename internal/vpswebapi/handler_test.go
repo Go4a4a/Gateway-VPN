@@ -176,9 +176,35 @@ func TestVPSHubManagementAPIEndToEndAndDestructiveReauthentication(t *testing.T)
 	}
 	managed := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins", map[string]any{
 		"name": "Managed", "assigned_address": "10.81.0.11", "key_mode": "MANAGED",
+		"password": "administrator password 123", "confirmation": "СОЗДАТЬ УПРАВЛЯЕМЫЙ КЛЮЧ",
 	})
-	if managed.Code != http.StatusNotImplemented {
-		t.Fatalf("managed admin without key service = %d %s", managed.Code, managed.Body.String())
+	if managed.Code != http.StatusCreated || strings.Contains(managed.Body.String(), "PrivateKey") || strings.Contains(managed.Body.String(), "private_key") {
+		t.Fatalf("managed admin creation = %d %s", managed.Code, managed.Body.String())
+	}
+	var managedAdmin vpsagent.AdminPeer
+	if err := json.Unmarshal(managed.Body.Bytes(), &managedAdmin); err != nil || managedAdmin.KeyMode != "MANAGED" || managedAdmin.ConfigState != "AVAILABLE" {
+		t.Fatalf("managed admin = %+v, %v", managedAdmin, err)
+	}
+	config := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins/"+managedAdmin.ID+"/config", map[string]any{
+		"endpoint": "vps.example:51820", "password": "administrator password 123",
+		"confirmation": "СКАЧАТЬ КОНФИГУРАЦИЮ " + managedAdmin.ID,
+	})
+	if config.Code != http.StatusOK || !strings.Contains(config.Body.String(), "PrivateKey = ") || !strings.Contains(config.Body.String(), "Endpoint = vps.example:51820") || strings.Contains(config.Body.String(), "10.81.0.10") {
+		t.Fatalf("managed admin one-use config = %d %s", config.Code, config.Body.String())
+	}
+	repeated := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins/"+managedAdmin.ID+"/config", map[string]any{
+		"endpoint": "vps.example:51820", "password": "administrator password 123",
+		"confirmation": "СКАЧАТЬ КОНФИГУРАЦИЮ " + managedAdmin.ID,
+	})
+	if repeated.Code != http.StatusConflict {
+		t.Fatalf("repeated managed config = %d %s", repeated.Code, repeated.Body.String())
+	}
+	rotation := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/admins/"+managedAdmin.ID+"/rotate", map[string]any{
+		"assigned_address": "10.81.0.12", "password": "administrator password 123",
+		"confirmation": "НАЧАТЬ СМЕНУ КЛЮЧА " + managedAdmin.ID,
+	})
+	if rotation.Code != http.StatusCreated || !strings.Contains(rotation.Body.String(), `"rotation_source_id":"`+managedAdmin.ID+`"`) {
+		t.Fatalf("managed admin rotation = %d %s", rotation.Code, rotation.Body.String())
 	}
 
 	resourceResponse := jsonRequest(t, server, session, http.MethodPost, "/api/v1/hub/resources", map[string]any{
@@ -278,8 +304,12 @@ func vpsAPIFixture(t *testing.T) (*Server, *fakeRestoreTrigger) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	adminKeys, err := vpsagent.NewAdminKeyManager(database, stateDirectory, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	trigger := &fakeRestoreTrigger{}
-	server, err := New(Dependencies{Database: database, Auth: authService, Backups: backupManager, Restores: restoreManager, RestoreApply: trigger})
+	server, err := New(Dependencies{Database: database, Auth: authService, Backups: backupManager, Restores: restoreManager, AdminKeys: &adminKeys, RestoreApply: trigger})
 	if err != nil {
 		t.Fatal(err)
 	}

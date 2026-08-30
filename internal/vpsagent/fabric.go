@@ -108,23 +108,27 @@ type AdminCreateInput struct {
 	AssignedAddress     string `json:"assigned_address"`
 	KeyMode             string `json:"key_mode"`
 	PrivateKeySecretRef string `json:"-"`
+	RotationSourceID    string `json:"-"`
 }
 
 type AdminPeer struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	PublicKey         string `json:"public_key"`
-	AssignedAddress   string `json:"assigned_address"`
-	KeyMode           string `json:"key_mode"`
-	State             string `json:"state"`
-	DesiredGeneration int64  `json:"desired_generation"`
-	AppliedGeneration int64  `json:"applied_generation"`
-	LatestHandshakeAt string `json:"latest_handshake_at,omitempty"`
-	RXBytes           int64  `json:"rx_bytes"`
-	TXBytes           int64  `json:"tx_bytes"`
-	StatusReason      string `json:"status_reason"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	PublicKey          string `json:"public_key"`
+	AssignedAddress    string `json:"assigned_address"`
+	KeyMode            string `json:"key_mode"`
+	State              string `json:"state"`
+	DesiredGeneration  int64  `json:"desired_generation"`
+	AppliedGeneration  int64  `json:"applied_generation"`
+	LatestHandshakeAt  string `json:"latest_handshake_at,omitempty"`
+	RXBytes            int64  `json:"rx_bytes"`
+	TXBytes            int64  `json:"tx_bytes"`
+	StatusReason       string `json:"status_reason"`
+	ConfigState        string `json:"config_state"`
+	ConfigDownloadedAt string `json:"config_downloaded_at,omitempty"`
+	RotationSourceID   string `json:"rotation_source_id,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 type ResourceInput struct {
@@ -519,6 +523,7 @@ func (repository HubRepository) RevokeGateway(ctx context.Context, id string) er
 func (repository HubRepository) CreateAdmin(ctx context.Context, input AdminCreateInput) (AdminPeer, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.KeyMode = strings.ToUpper(strings.TrimSpace(input.KeyMode))
+	input.RotationSourceID = strings.TrimSpace(input.RotationSourceID)
 	if input.Name == "" || len(input.Name) > 128 || !wgingress.ValidKey(input.PublicKey) || input.KeyMode != "MANAGED" && input.KeyMode != "EXTERNAL" {
 		return AdminPeer{}, errors.New("valid administrator name, key and key mode are required")
 	}
@@ -548,18 +553,38 @@ func (repository HubRepository) CreateAdmin(ctx context.Context, input AdminCrea
 	if err := ensurePeerKeyAvailable(ctx, transaction, input.PublicKey); err != nil {
 		return AdminPeer{}, err
 	}
+	if input.RotationSourceID != "" {
+		var sourceState, sourceMode string
+		if !hubIdentifierPattern.MatchString(input.RotationSourceID) {
+			return AdminPeer{}, errors.New("administrator rotation source id is invalid")
+		}
+		if err := transaction.QueryRowContext(ctx, "SELECT state,key_mode FROM admin_peers WHERE id=?", input.RotationSourceID).Scan(&sourceState, &sourceMode); errors.Is(err, sql.ErrNoRows) {
+			return AdminPeer{}, ErrHubNotFound
+		} else if err != nil {
+			return AdminPeer{}, err
+		} else if sourceState == "REVOKED" || sourceMode != "MANAGED" || input.KeyMode != "MANAGED" {
+			return AdminPeer{}, errors.New("administrator rotation requires an active managed source and replacement")
+		}
+	}
 	prefix := netip.PrefixFrom(address, 32)
 	if err := ensurePrefixAvailable(ctx, transaction, prefix, ""); err != nil {
 		return AdminPeer{}, err
 	}
 	stamp := formatTime(repository.now())
+	configState := "NOT_APPLICABLE"
+	if input.KeyMode == "MANAGED" {
+		configState = "AVAILABLE"
+	}
 	var privateRef any
 	if input.PrivateKeySecretRef != "" {
 		privateRef = input.PrivateKeySecretRef
 	}
 	if _, err := transaction.ExecContext(ctx, `
-INSERT INTO admin_peers(id,name,public_key,private_key_secret_ref,assigned_address,state,desired_generation,applied_generation,created_at,updated_at,key_mode,status_reason)
-VALUES(?,?,?,?,?,'CONFIGURED',1,0,?,?,?,'AWAITING_HOST_APPLY')`, id, input.Name, input.PublicKey, privateRef, address.String(), stamp, stamp, input.KeyMode); err != nil {
+INSERT INTO admin_peers(
+ id,name,public_key,private_key_secret_ref,assigned_address,state,desired_generation,applied_generation,
+ created_at,updated_at,key_mode,status_reason,config_state,rotation_source_id
+)
+VALUES(?,?,?,?,?,'CONFIGURED',1,0,?,?,?,'AWAITING_HOST_APPLY',?,?)`, id, input.Name, input.PublicKey, privateRef, address.String(), stamp, stamp, input.KeyMode, configState, input.RotationSourceID); err != nil {
 		return AdminPeer{}, fmt.Errorf("create administrator peer: %w", err)
 	}
 	if _, err := transaction.ExecContext(ctx, `
@@ -620,7 +645,12 @@ func (repository HubRepository) RevokeAdmin(ctx context.Context, id string) erro
 	if _, err := transaction.ExecContext(ctx, "DELETE FROM acl_grants WHERE admin_peer_id=?", id); err != nil {
 		return err
 	}
-	if _, err := transaction.ExecContext(ctx, "UPDATE admin_peers SET state='REVOKED',desired_generation=desired_generation+1,status_reason='REVOKED_BY_ADMIN',updated_at=? WHERE id=?", stamp, id); err != nil {
+	if _, err := transaction.ExecContext(ctx, `
+UPDATE admin_peers
+SET state='REVOKED',desired_generation=desired_generation+1,status_reason='REVOKED_BY_ADMIN',
+    config_state=CASE WHEN key_mode='MANAGED' AND config_state='AVAILABLE' THEN 'CLEANUP_REQUIRED' ELSE config_state END,
+    updated_at=?
+WHERE id=?`, stamp, id); err != nil {
 		return err
 	}
 	if _, err := transaction.ExecContext(ctx, "UPDATE prefix_allocations SET state='RELEASED',updated_at=? WHERE owner_kind='ADMIN_PEER' AND owner_id=?", stamp, id); err != nil {
@@ -973,7 +1003,8 @@ FROM gateway_peers`
 
 const adminSelect = `
 SELECT id,name,public_key,assigned_address,key_mode,state,desired_generation,applied_generation,
-       latest_handshake_at,rx_bytes,tx_bytes,status_reason,created_at,updated_at
+       latest_handshake_at,rx_bytes,tx_bytes,status_reason,config_state,config_downloaded_at,
+       rotation_source_id,created_at,updated_at
 FROM admin_peers`
 
 const resourceSelect = `
@@ -1006,12 +1037,16 @@ func scanGateway(scanner interface{ Scan(...any) error }) (GatewayPeer, error) {
 
 func scanAdmin(scanner interface{ Scan(...any) error }) (AdminPeer, error) {
 	var item AdminPeer
-	var handshake sql.NullString
+	var handshake, downloaded sql.NullString
 	err := scanner.Scan(&item.ID, &item.Name, &item.PublicKey, &item.AssignedAddress, &item.KeyMode,
 		&item.State, &item.DesiredGeneration, &item.AppliedGeneration, &handshake, &item.RXBytes,
-		&item.TXBytes, &item.StatusReason, &item.CreatedAt, &item.UpdatedAt)
+		&item.TXBytes, &item.StatusReason, &item.ConfigState, &downloaded, &item.RotationSourceID,
+		&item.CreatedAt, &item.UpdatedAt)
 	if handshake.Valid {
 		item.LatestHandshakeAt = handshake.String
+	}
+	if downloaded.Valid {
+		item.ConfigDownloadedAt = downloaded.String
 	}
 	return item, err
 }

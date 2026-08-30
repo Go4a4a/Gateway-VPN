@@ -1308,7 +1308,8 @@ Gateway не требует внешнего IP или port forwarding: кажд
 - VPS создаёт одноразовый bounded pairing bundle/token с endpoint, VPS public key, назначенными addresses/prefixes, expiry и fingerprint; Gateway показывает fingerprint до подтверждения и возвращает только свой public key;
 - повторное использование, истёкший token, subnet collision или несовпадающий fingerprint отклоняются без частично активного peer;
 - rotation выполняется make-before-break: новый peer/link обязан получить handshake и пройти management probe до отзыва старого;
-- один admin device получает отдельный key/address на каждом VPS, shared administrator configs запрещены; revoke удаляет peer и ACL generation до успешного ответа.
+- один admin device получает отдельный key/address на каждом VPS, shared administrator configs запрещены; revoke удаляет peer и ACL generation до успешного ответа;
+- в `EXTERNAL` режиме VPS получает только public key. В `MANAGED` режиме VPS создаёт private key в отдельном `0600` secret file, показывает готовый `.conf` только одной re-authenticated операцией и до отправки ответа переводит grant в `CONSUMED` и удаляет файл. Повторная выдача невозможна; rotation создаёт отдельный replacement peer/address, не отзывая прежний до fresh handshake и явного завершения.
 
 Restore на заменяющее железо имеет два разных режима. **«Восстановить тот же Gateway»** сохраняет `site_id`, но требует отозвать/заменить прежние link keys до снятия quarantine; одновременно active старый и восстановленный экземпляры с одной identity запрещены и обнаруживаются как endpoint flap. **«Создать новый Gateway из настроек»** всегда генерирует новый `site_id`, все management/admin keys и pairing, не копируя сетевую identity исходного site.
 
@@ -1766,9 +1767,9 @@ WireGuard private keys/PSK, reusable pairing secrets и downloadable admin priva
 
 Файловый backup и restore являются обязательной функцией WebUI обеих ролей и не требуют CLI: на Gateway пользователь скачивает encrypted `.gvpn`, а в VPS Hub — отдельный encrypted `.gvpn-vps`; для восстановления выбирает соответствующий файл, вводит passphrase, проверяет preview и явно подтверждает Apply. Файлы можно перенести и хранить на компьютере администратора либо внешнем носителе. Cross-role restore отклоняется. Оба формата versioned, имеют authenticated role/schema/source identity, bounded manifest и per-file SHA-256, шифруются chunked AES-256-GCM с ключом Argon2id из введённой пользователем passphrase. Passphrase, plaintext archive и upload после staging не сохраняются; logs, sessions, login attempts, diagnostic archives и временные/использованные pairing invitations не входят в portable backup.
 
-Gateway file содержит DB/config/TLS/Mihomo/subscription и локальные management/ingress secrets, VPS file — VPS Agent DB/config/TLS, собственные outer/relay/admin private keys, public peer inventory, prefix allocations, ACL/resources и update identity. Один backup никогда не содержит private keys другой роли. WebUI до Apply показывает role/version/schema/site-or-vps identity, состав, конфликты и режим восстановления; требует password re-authentication, passphrase и typed confirmation, создаёт verified pre-restore backup, а root transaction имеет durable journal, reboot recovery и rollback.
+Gateway file содержит DB/config/TLS/Mihomo/subscription и локальные management/ingress secrets, VPS file — VPS Agent DB/config/TLS, собственные outer/relay private keys, ещё не выданные `MANAGED` admin keys, public peer inventory, prefix allocations, ACL/resources и update identity. Уже выданные/отозванные либо orphan admin keys не входят в новый backup. Один backup никогда не содержит private keys другой роли. WebUI до Apply показывает role/version/schema/site-or-vps identity, состав, конфликты и режим восстановления; требует password re-authentication, passphrase и typed confirmation, создаёт verified pre-restore backup, а root transaction имеет durable journal, reboot recovery и rollback.
 
-Для обеих ролей доступны режимы **«восстановить то же устройство»** и **«импортировать настройки как новое»**. Первый сохраняет `site_id`/`vps_id` и keys только после explicit replacement/quarantine проверки, запрещая одновременно active clone. Второй импортирует безопасные policy/settings, но генерирует новые identity, keys, addresses/pairing и требует fresh handshakes/ACL acknowledgement. Gateway после restore остаётся `PATH_BLOCKED`, VPS — с default-deny fabric projection, пока reconciler заново не докажет links/routes/ACL.
+Для обеих ролей доступны режимы **«восстановить то же устройство»** и **«импортировать настройки как новое»**. Первый сохраняет `site_id`/`vps_id` и ещё не выданные managed keys только после explicit replacement/quarantine проверки, запрещая одновременно active clone. Второй импортирует безопасные policy/settings, физически удаляет source administrator secrets и генерирует новые identity, keys, addresses/pairing, требуя fresh handshakes/ACL acknowledgement. Gateway после restore остаётся `PATH_BLOCKED`, VPS — с default-deny fabric projection, пока reconciler заново не докажет links/routes/ACL.
 
 ---
 
@@ -1929,6 +1930,8 @@ POST   /api/v1/management/vps/{id}/rotate
 DELETE /api/v1/management/vps/{id}
 GET    /api/v1/management/admins
 POST   /api/v1/management/admins
+POST   /api/v1/management/admins/{id}/config
+POST   /api/v1/management/admins/{id}/rotate
 POST   /api/v1/management/admins/{id}/revoke
 GET    /api/v1/management/resources
 POST   /api/v1/management/resources
@@ -2484,6 +2487,7 @@ Linux network namespaces моделируют:
 - один VPS одновременно маршрутизирует нескольких Gateway peers с уникальными `/32`/site prefixes и запрещает Gateway↔Gateway forwarding;
 - один Gateway одновременно удерживает handshakes с двумя VPS через независимые interfaces/keys/subnets; остановка одного VPS не меняет второй link и data plane;
 - pairing token одноразов, fingerprint/subnet проверяются, а make-before-break key rotation сохраняет хотя бы один проверенный management path;
+- managed administrator private config выдаётся ровно один раз после re-auth, отсутствует в DB/list/log и после ответа удаляется с VPS; concurrent second download, consumed/orphan backup и import-as-new source-key retention отклоняются;
 - `END_TO_END_RELAY` доставляет реальный nested WireGuard handshake admin→Gateway через VPS UDP relay; packet capture на VPS не содержит inner plaintext, а пакет, сгенерированный только VPS без admin private key, не проходит `wg-admin`/resource ACL;
 - restore-as-same-site требует key replacement и не допускает одновременно active cloned identity; restore-as-new-site получает новые `site_id`/keys/prefixes;
 - одинаковые `192.168.50.0/24` за двумя Gateway доступны только через разные published alias prefixes; попытка overlapping alias/AllowedIPs отклоняется до mutation;

@@ -43,6 +43,7 @@ type Dependencies struct {
 	Backups      *vpsbackup.Manager
 	Restores     *vpsbackup.RestoreManager
 	Hub          vpsagent.HubRepository
+	AdminKeys    *vpsagent.AdminKeyManager
 	RestoreApply RestoreApplyTrigger
 	Now          func() time.Time
 }
@@ -77,6 +78,8 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/hub/gateways/{id}/revoke", server.protected(http.HandlerFunc(server.revokeGateway)))
 	mux.Handle("GET /api/v1/hub/admins", server.protected(http.HandlerFunc(server.listAdmins)))
 	mux.Handle("POST /api/v1/hub/admins", server.protected(http.HandlerFunc(server.createAdmin)))
+	mux.Handle("POST /api/v1/hub/admins/{id}/config", server.protected(http.HandlerFunc(server.downloadAdminConfig)))
+	mux.Handle("POST /api/v1/hub/admins/{id}/rotate", server.protected(http.HandlerFunc(server.rotateAdmin)))
 	mux.Handle("POST /api/v1/hub/admins/{id}/revoke", server.protected(http.HandlerFunc(server.revokeAdmin)))
 	mux.Handle("GET /api/v1/hub/resources", server.protected(http.HandlerFunc(server.listResources)))
 	mux.Handle("POST /api/v1/hub/resources", server.protected(http.HandlerFunc(server.createResource)))
@@ -292,7 +295,7 @@ func (server *Server) listAdmins(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusServiceUnavailable, "ADMIN_LIST_UNAVAILABLE", "Список администраторов недоступен")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": items, "managed_key_creation_available": false})
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items, "managed_key_creation_available": server.dependencies.AdminKeys != nil && server.dependencies.AdminKeys.Available()})
 }
 
 func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Request) {
@@ -301,6 +304,8 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 		PublicKey       string `json:"public_key"`
 		AssignedAddress string `json:"assigned_address"`
 		KeyMode         string `json:"key_mode"`
+		Password        string `json:"password"`
+		Confirmation    string `json:"confirmation"`
 	}
 	if err := decodeJSON(request, &input, 8192); err != nil {
 		writeError(writer, http.StatusBadRequest, "ADMIN_REQUEST_INVALID", "Некорректные параметры администратора")
@@ -309,11 +314,29 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 	if input.KeyMode == "" {
 		input.KeyMode = "EXTERNAL"
 	}
-	if strings.ToUpper(input.KeyMode) != "EXTERNAL" {
-		writeError(writer, http.StatusNotImplemented, "MANAGED_ADMIN_KEY_PENDING", "На этом этапе поддерживается безопасное добавление внешнего public key; выдача managed-конфига будет подключена к root apply отдельно")
+	mode := strings.ToUpper(strings.TrimSpace(input.KeyMode))
+	var item vpsagent.AdminPeer
+	var err error
+	if mode == "MANAGED" {
+		if server.dependencies.AdminKeys == nil || !server.dependencies.AdminKeys.Available() {
+			writeError(writer, http.StatusServiceUnavailable, "MANAGED_ADMIN_KEYS_UNAVAILABLE", "Управляемая выдача конфигурации на этом VPS недоступна")
+			return
+		}
+		if input.Confirmation != "СОЗДАТЬ УПРАВЛЯЕМЫЙ КЛЮЧ" {
+			writeError(writer, http.StatusConflict, "MANAGED_ADMIN_CONFIRMATION_INVALID", "Контрольная фраза для создания ключа не совпадает")
+			return
+		}
+		if !server.reauthenticate(writer, request, input.Password) {
+			return
+		}
+		item, err = server.dependencies.AdminKeys.Create(request.Context(), input.Name, input.AssignedAddress)
+	} else if mode == "EXTERNAL" {
+		item, err = server.dependencies.Hub.CreateAdmin(request.Context(), vpsagent.AdminCreateInput{Name: input.Name, PublicKey: input.PublicKey, AssignedAddress: input.AssignedAddress, KeyMode: "EXTERNAL"})
+	} else {
+		writeError(writer, http.StatusBadRequest, "ADMIN_KEY_MODE_INVALID", "Выберите внешний или управляемый режим ключа")
 		return
 	}
-	item, err := server.dependencies.Hub.CreateAdmin(request.Context(), vpsagent.AdminCreateInput{Name: input.Name, PublicKey: input.PublicKey, AssignedAddress: input.AssignedAddress, KeyMode: "EXTERNAL"})
+	input.Password, input.Confirmation = "", ""
 	if err != nil {
 		writeHubError(writer, err, "Администратор не добавлен")
 		return
@@ -323,12 +346,87 @@ func (server *Server) createAdmin(writer http.ResponseWriter, request *http.Requ
 	writeJSON(writer, http.StatusCreated, item)
 }
 
+func (server *Server) downloadAdminConfig(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || server.dependencies.AdminKeys == nil || !server.dependencies.AdminKeys.Available() {
+		writeError(writer, http.StatusServiceUnavailable, "MANAGED_ADMIN_KEYS_UNAVAILABLE", "Управляемая конфигурация администратора недоступна")
+		return
+	}
+	var input struct {
+		Endpoint     string `json:"endpoint"`
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input, 4096); err != nil || input.Confirmation != "СКАЧАТЬ КОНФИГУРАЦИЮ "+id {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "ADMIN_CONFIG_CONFIRMATION_INVALID", "Контрольная фраза для одноразовой выдачи не совпадает")
+		return
+	}
+	if !server.reauthenticate(writer, request, input.Password) {
+		input.Password, input.Confirmation = "", ""
+		return
+	}
+	input.Password, input.Confirmation = "", ""
+	artifact, err := server.dependencies.AdminKeys.Export(request.Context(), id, input.Endpoint)
+	input.Endpoint = ""
+	if err != nil {
+		writeHubError(writer, err, "Готовая конфигурация не выдана; она могла быть уже скачана")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "CRITICAL", "VPS_ADMIN_PRIVATE_CONFIG_CONSUMED", map[string]any{"user_id": principal.UserID, "admin_peer_id": id})
+	writer.Header().Set("Content-Type", "application/x-wireguard-profile")
+	writer.Header().Set("Content-Disposition", `attachment; filename="`+artifact.Filename+`"`)
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(artifact.Content)
+}
+
+func (server *Server) rotateAdmin(writer http.ResponseWriter, request *http.Request) {
+	id, ok := boundedPathID(request.PathValue("id"))
+	if !ok || server.dependencies.AdminKeys == nil || !server.dependencies.AdminKeys.Available() {
+		writeError(writer, http.StatusServiceUnavailable, "MANAGED_ADMIN_KEYS_UNAVAILABLE", "Смена управляемого ключа недоступна")
+		return
+	}
+	var input struct {
+		Name            string `json:"name"`
+		AssignedAddress string `json:"assigned_address"`
+		Password        string `json:"password"`
+		Confirmation    string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input, 8192); err != nil || input.Confirmation != "НАЧАТЬ СМЕНУ КЛЮЧА "+id {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "ADMIN_ROTATION_CONFIRMATION_INVALID", "Контрольная фраза для смены ключа не совпадает")
+		return
+	}
+	if !server.reauthenticate(writer, request, input.Password) {
+		input.Password, input.Confirmation = "", ""
+		return
+	}
+	input.Password, input.Confirmation = "", ""
+	replacement, err := server.dependencies.AdminKeys.Rotate(request.Context(), id, input.Name, input.AssignedAddress)
+	if err != nil {
+		writeHubError(writer, err, "Сменный ключ администратора не создан")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	_ = server.audit(request.Context(), "WARNING", "VPS_ADMIN_KEY_ROTATION_STARTED", map[string]any{"user_id": principal.UserID, "source_admin_peer_id": id, "replacement_admin_peer_id": replacement.ID})
+	writeJSON(writer, http.StatusCreated, replacement)
+}
+
 func (server *Server) revokeAdmin(writer http.ResponseWriter, request *http.Request) {
 	id, ok := boundedPathID(request.PathValue("id"))
 	if !ok || !server.requireReauthenticatedPhrase(writer, request, "ОТОЗВАТЬ АДМИНИСТРАТОРА "+id) {
 		return
 	}
-	if err := server.dependencies.Hub.RevokeAdmin(request.Context(), id); err != nil {
+	var err error
+	if server.dependencies.AdminKeys != nil && server.dependencies.AdminKeys.Available() {
+		err = server.dependencies.AdminKeys.Revoke(request.Context(), id)
+	} else {
+		err = server.dependencies.Hub.RevokeAdmin(request.Context(), id)
+	}
+	if err != nil {
 		writeHubError(writer, err, "Администратор не отозван")
 		return
 	}
@@ -451,7 +549,6 @@ func (server *Server) hubWatchdog(writer http.ResponseWriter, request *http.Requ
 }
 
 func (server *Server) requireReauthenticatedPhrase(writer http.ResponseWriter, request *http.Request, expected string) bool {
-	principal := request.Context().Value(principalKey).(auth.Principal)
 	var input struct {
 		Password     string `json:"password"`
 		Confirmation string `json:"confirmation"`
@@ -461,12 +558,20 @@ func (server *Server) requireReauthenticatedPhrase(writer http.ResponseWriter, r
 		writeError(writer, http.StatusConflict, "DESTRUCTIVE_CONFIRMATION_INVALID", "Контрольная фраза не совпадает")
 		return false
 	}
-	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+	if !server.reauthenticate(writer, request, input.Password) {
 		input.Password, input.Confirmation = "", ""
-		writeError(writer, http.StatusUnauthorized, "REAUTHENTICATION_FAILED", "Текущий пароль VPS Hub указан неверно")
 		return false
 	}
 	input.Password, input.Confirmation = "", ""
+	return true
+}
+
+func (server *Server) reauthenticate(writer http.ResponseWriter, request *http.Request, password string) bool {
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, password); err != nil {
+		writeError(writer, http.StatusUnauthorized, "REAUTHENTICATION_FAILED", "Текущий пароль VPS Hub указан неверно")
+		return false
+	}
 	return true
 }
 

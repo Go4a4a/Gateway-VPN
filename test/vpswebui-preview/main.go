@@ -124,7 +124,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	web, err := vpswebapi.New(vpswebapi.Dependencies{Database: database, Auth: authService, Backups: backups, Restores: restores})
+	adminKeys, err := vpsagent.NewAdminKeyManager(database, state, nil)
+	if err != nil {
+		return err
+	}
+	web, err := vpswebapi.New(vpswebapi.Dependencies{Database: database, Auth: authService, Backups: backups, Restores: restores, AdminKeys: &adminKeys})
 	if err != nil {
 		return err
 	}

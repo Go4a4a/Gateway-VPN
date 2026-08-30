@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion int64 = 2
+const SchemaVersion int64 = 3
 
 type migration struct {
 	version int64
@@ -33,6 +33,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, name: "initial_vps_hub", sql: schemaV1},
 	{version: 2, name: "management_control_plane", sql: schemaV2},
+	{version: 3, name: "managed_administrator_config_lifecycle", sql: schemaV3},
 }
 
 var (
@@ -242,6 +243,19 @@ func Verify(ctx context.Context, database *sql.DB) error {
 	}
 	if err := databasepkg.IntegrityCheck(ctx, database); err != nil {
 		return err
+	}
+	var invalidAdminLifecycle int64
+	if err := database.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM admin_peers AS peer
+LEFT JOIN admin_peers AS source ON source.id=peer.rotation_source_id
+WHERE (peer.key_mode='EXTERNAL' AND (peer.private_key_secret_ref IS NOT NULL OR peer.config_state!='NOT_APPLICABLE'))
+   OR (peer.key_mode='MANAGED' AND (peer.private_key_secret_ref IS NULL OR peer.config_state='NOT_APPLICABLE'))
+   OR (peer.rotation_source_id!='' AND (source.id IS NULL OR source.id=peer.id OR source.key_mode!='MANAGED'))`).Scan(&invalidAdminLifecycle); err != nil {
+		return err
+	}
+	if invalidAdminLifecycle != 0 {
+		return errors.New("VPS Agent administrator key lifecycle is invalid")
 	}
 	return databasepkg.ForeignKeyCheck(ctx, database)
 }

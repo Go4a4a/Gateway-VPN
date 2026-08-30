@@ -218,3 +218,19 @@ CREATE INDEX admin_peers_state_updated ON admin_peers(state,updated_at DESC);
 CREATE INDEX resource_publications_gateway_state ON resource_publications(gateway_peer_id,state);
 CREATE INDEX acl_grants_publication_admin ON acl_grants(publication_id,admin_peer_id);
 `
+
+// schemaV3 records only the lifecycle of a managed administrator config. The
+// private key itself remains in a protected file and is deleted before the
+// one-use download response is returned. A rotation is a second peer so the
+// previous proven peer remains available until it is explicitly revoked.
+const schemaV3 = `
+ALTER TABLE admin_peers ADD COLUMN config_state TEXT NOT NULL DEFAULT 'NOT_APPLICABLE'
+    CHECK(config_state IN ('NOT_APPLICABLE','AVAILABLE','CONSUMED','CLEANUP_REQUIRED'));
+ALTER TABLE admin_peers ADD COLUMN config_downloaded_at TEXT;
+ALTER TABLE admin_peers ADD COLUMN rotation_source_id TEXT NOT NULL DEFAULT '';
+
+UPDATE admin_peers
+SET config_state=CASE WHEN key_mode='MANAGED' THEN 'AVAILABLE' ELSE 'NOT_APPLICABLE' END;
+
+CREATE INDEX admin_peers_rotation_source ON admin_peers(rotation_source_id,state);
+`

@@ -284,6 +284,30 @@ func openVerifiedArtifact(artifact Artifact) (*os.File, error) {
 func (manager *Manager) collectSources(ctx context.Context, databaseCopy string, identity vpsagent.Identity) ([]sourceFile, int64, error) {
 	sources := make([]sourceFile, 0, 32)
 	seen := make(map[string]struct{})
+	managedAdministratorFiles := make(map[string]struct{})
+	rows, err := manager.Database.QueryContext(ctx, `
+SELECT private_key_secret_ref FROM admin_peers
+WHERE key_mode='MANAGED' AND state!='REVOKED' AND config_state='AVAILABLE'
+ORDER BY id`)
+	if err != nil {
+		return nil, 0, err
+	}
+	for rows.Next() {
+		var reference string
+		if err := rows.Scan(&reference); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		archivePath, err := archivePathForSecretRef(reference)
+		if err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		managedAdministratorFiles[archivePath] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
 	var total int64
 	add := func(archivePath, sourcePath string) error {
 		if !safePath(archivePath) {
@@ -338,7 +362,13 @@ func (manager *Manager) collectSources(ctx context.Context, databaseCopy string,
 			if err != nil {
 				return err
 			}
-			return add("state/"+filepath.ToSlash(relative), current)
+			archivePath := "state/" + filepath.ToSlash(relative)
+			if strings.HasPrefix(archivePath, "state/secrets/administrators/") {
+				if _, allowed := managedAdministratorFiles[archivePath]; !allowed {
+					return nil
+				}
+			}
+			return add(archivePath, current)
 		}); err != nil {
 			return nil, 0, err
 		}
@@ -349,6 +379,9 @@ func (manager *Manager) collectSources(ctx context.Context, databaseCopy string,
 		if err != nil {
 			return nil, 0, err
 		}
+		required = append(required, archivePath)
+	}
+	for archivePath := range managedAdministratorFiles {
 		required = append(required, archivePath)
 	}
 	for _, path := range required {
