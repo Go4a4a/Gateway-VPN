@@ -1146,6 +1146,12 @@ paths:
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/automation:
+    get:
+      tags: [System]
+      operationId: getSoftwareUpdateAutomationStatus
+      summary: Получить redacted durable состояние автоматической проверки, staging и применения подписанных обновлений
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/settings/software-update:
     get:
       tags: [System]

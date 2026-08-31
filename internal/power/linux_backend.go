@@ -123,6 +123,19 @@ func (backend *LinuxBackend) Execute(ctx context.Context, command Command) error
 	return nil
 }
 
+func (backend *LinuxBackend) MaintenanceStatus(ctx context.Context) (MaintenanceStatus, error) {
+	if err := backend.validate(); err != nil {
+		return MaintenanceStatus{}, err
+	}
+	backend.mutex.Lock()
+	defer backend.mutex.Unlock()
+	if backend.dispatched {
+		return MaintenanceStatus{Active: true, ReasonCode: "POWER_ACTION_PENDING"}, nil
+	}
+	active, code := backend.maintenance(ctx)
+	return MaintenanceStatus{Active: active, ReasonCode: code}, nil
+}
+
 func (backend *LinuxBackend) maintenance(ctx context.Context) (bool, string) {
 	if backend.pathExists(backend.InstallMarker) || backend.pathExists(backend.InstallRunMarker) || backend.pathExists(backend.UninstallMarker) {
 		return true, "INSTALL_ACTIVE"

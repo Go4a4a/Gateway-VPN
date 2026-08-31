@@ -49,6 +49,26 @@ func TestStagerAcceptsVerifiedArchiveAndDiscardIsExact(t *testing.T) {
 	}
 }
 
+func TestStagerPersistsAutomaticChannelOwnership(t *testing.T) {
+	releaseRoot, publicKey, _ := signedReleaseFixture(t, "1.2.0", 1, 32)
+	stateDir := t.TempDir()
+	keyPath := writePublicKeyFixture(t, stateDir, publicKey)
+	stager, err := NewStager(stateDir, keyPath, fixturePolicy(publicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := stager.StageWithSource(context.Background(), bytes.NewReader(releaseArchive(t, releaseRoot, nil)), Source{
+		Kind: SourceAutomaticGitHub, Channel: "stable", Reference: "Go4a4a/Gateway-VPN#v1.2.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, pending, err := stager.Status()
+	if err != nil || !pending || status != operation || status.SourceKind != SourceAutomaticGitHub || status.SourceChannel != "stable" {
+		t.Fatalf("automatic source status = %+v,%t,%v", status, pending, err)
+	}
+}
+
 func TestStagerRejectsArchiveTraversalLinksDuplicatesAndTamper(t *testing.T) {
 	releaseRoot, publicKey, privateKey := signedReleaseFixture(t, "1.2.0", 11, 12)
 	cases := []struct {

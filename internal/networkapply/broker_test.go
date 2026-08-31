@@ -109,6 +109,7 @@ type fakeModemRecoveryAdmin struct {
 type fakePowerAdmin struct {
 	capabilities power.Capabilities
 	commands     []power.Command
+	maintenance  power.MaintenanceStatus
 	err          error
 }
 
@@ -121,13 +122,17 @@ type fakeRemovalAdmin struct {
 type fakeManagementFabricAdmin struct {
 	applyCalls     int
 	statusCalls    int
+	observeCalls   int
 	configureCalls int
 	rotateCalls    int
 	needed         bool
 	reason         string
+	generation     int64
+	observations   []managementfabric.LinkRuntimeObservation
 	contour        managementfabric.AdminContour
 	request        managementfabric.AdminContourRequest
 	err            error
+	observeErr     error
 }
 
 type fakePortableBackupAdmin struct {
@@ -214,6 +219,11 @@ func (admin *fakeManagementFabricAdmin) NeedsApply(context.Context) (bool, strin
 	return admin.needed, admin.reason, admin.err
 }
 
+func (admin *fakeManagementFabricAdmin) ObserveManagementLinks(context.Context) (int64, []managementfabric.LinkRuntimeObservation, error) {
+	admin.observeCalls++
+	return admin.generation, append([]managementfabric.LinkRuntimeObservation(nil), admin.observations...), admin.observeErr
+}
+
 func (admin *fakeManagementFabricAdmin) ConfigureAdminContour(_ context.Context, input managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
 	admin.configureCalls++
 	admin.request = input
@@ -228,10 +238,11 @@ func (admin *fakeManagementFabricAdmin) RotateAdminContourIdentity(context.Conte
 func TestBrokerManagementFabricIsParameterFreeAndRedactsRootErrors(t *testing.T) {
 	ctx, database := networkApplyDatabase(t)
 	engine, _, _ := testEngine(t, database)
-	admin := &fakeManagementFabricAdmin{needed: true, reason: "DESIRED_GENERATION_PENDING", contour: managementfabric.AdminContour{
-		Enabled: true, InterfaceName: managementfabric.AdminInterfaceName, PublicKey: "public-redacted-by-fixture",
-		Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
-	}}
+	admin := &fakeManagementFabricAdmin{needed: true, reason: "DESIRED_GENERATION_PENDING", generation: 7,
+		observations: []managementfabric.LinkRuntimeObservation{{LinkID: "link:a", State: managementfabric.RuntimeLinkReachable, LastHandshakeAt: "2026-08-30T15:59:30Z"}}, contour: managementfabric.AdminContour{
+			Enabled: true, InterfaceName: managementfabric.AdminInterfaceName, PublicKey: "public-redacted-by-fixture",
+			Subnet: "10.85.0.0/24", GatewayAddress: "10.85.0.1", ListenPort: managementfabric.AdminListenPort,
+		}}
 	server, err := NewBrokerServer(engine)
 	if err != nil {
 		t.Fatal(err)
@@ -242,9 +253,21 @@ func TestBrokerManagementFabricIsParameterFreeAndRedactsRootErrors(t *testing.T)
 	client := newBrokerClientForHTTP(httpServer.Client())
 	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
 	status, err := client.ManagementFabricStatus(ctx)
-	if err != nil || !status.NeedsApply || status.Reason != admin.reason || admin.statusCalls != 1 {
+	if err != nil || !status.NeedsApply || status.Reason != admin.reason || status.ObservationState != "DEFERRED" || admin.statusCalls != 1 || admin.observeCalls != 0 {
 		t.Fatalf("ManagementFabricStatus() = %+v calls=%d error=%v", status, admin.statusCalls, err)
 	}
+	admin.needed = false
+	admin.reason = "HEALTHY"
+	status, err = client.ManagementFabricStatus(ctx)
+	if err != nil || status.NeedsApply || status.ObservationState != "AVAILABLE" || status.ObservationGeneration != 7 || len(status.Links) != 1 || admin.observeCalls != 1 {
+		t.Fatalf("observed ManagementFabricStatus() = %+v calls=%d error=%v", status, admin.observeCalls, err)
+	}
+	admin.observeErr = errors.New("private key /var/lib/gateway-vpn/secrets/management/link-a.key")
+	status, err = client.ManagementFabricStatus(ctx)
+	if err != nil || status.ObservationState != "UNAVAILABLE" || status.ObservationErrorCode != "MANAGEMENT_LINK_OBSERVATION_FAILED" || len(status.Links) != 0 {
+		t.Fatalf("failed observation projection = %+v error=%v", status, err)
+	}
+	admin.observeErr = nil
 	if err := client.SyncManagementFabric(ctx); err != nil || admin.applyCalls != 1 {
 		t.Fatalf("SyncManagementFabric() calls=%d error=%v", admin.applyCalls, err)
 	}
@@ -307,6 +330,43 @@ func (admin *fakePowerAdmin) Capabilities(context.Context) (power.Capabilities, 
 func (admin *fakePowerAdmin) Execute(_ context.Context, command power.Command) error {
 	admin.commands = append(admin.commands, command)
 	return admin.err
+}
+
+func (admin *fakePowerAdmin) MaintenanceStatus(context.Context) (power.MaintenanceStatus, error) {
+	return admin.maintenance, admin.err
+}
+
+func TestBrokerMaintenanceStatusIsParameterFreeAndRedacted(t *testing.T) {
+	_, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakePowerAdmin{maintenance: power.MaintenanceStatus{Active: true, ReasonCode: "UPDATE_ACTIVE"}}
+	server.Power = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	client := newBrokerClientForHTTP(httpServer.Client())
+	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
+	status, err := client.MaintenanceStatus(context.Background())
+	if err != nil || !status.Active || status.ReasonCode != "UPDATE_ACTIVE" {
+		t.Fatalf("MaintenanceStatus() = %+v,%v", status, err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/maintenance/status", strings.NewReader(`{"unit":"arbitrary.service"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("parameterized maintenance status = %d", response.StatusCode)
+	}
+	admin.err = errors.New("private systemd path and unit output")
+	if _, err := client.MaintenanceStatus(context.Background()); err == nil || strings.Contains(err.Error(), "private systemd") {
+		t.Fatalf("redacted maintenance error = %v", err)
+	}
 }
 
 func (admin *fakeModemRecoveryAdmin) Execute(_ context.Context, command modemrecovery.Command) error {

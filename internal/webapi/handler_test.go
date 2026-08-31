@@ -46,6 +46,7 @@ import (
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateautomation"
 	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
@@ -1648,6 +1649,58 @@ func TestSoftwareUpdatePolicyAndRestorePointAPIAreTypedAuditedAndProtected(t *te
 	var audits int
 	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type IN ('SOFTWARE_UPDATE_POLICY_CHANGED','UPDATE_RESTORE_POINT_ROLLBACK_REQUESTED','UPDATE_RESTORE_POINT_DELETED','UPDATE_RESTORE_POINTS_PRUNED')").Scan(&audits); err != nil || audits != 4 {
 		t.Fatalf("software update audit count = %d,%v", audits, err)
+	}
+}
+
+type fakeUpdateAutomationStatusReader struct {
+	status updateautomation.Status
+	err    error
+}
+
+func (reader fakeUpdateAutomationStatusReader) Status(context.Context) (updateautomation.Status, error) {
+	return reader.status, reader.err
+}
+
+func TestSoftwareUpdateAutomationStatusIsAuthenticatedRedactedAndFailSafe(t *testing.T) {
+	server, _ := testServer(t)
+	unauthenticated := httptest.NewRecorder()
+	server.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/v1/system/update/automation", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated update automation status = %d", unauthenticated.Code)
+	}
+
+	cookie, _ := login(t, server)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/system/update/automation", nil)
+	request.AddCookie(cookie)
+	unavailable := httptest.NewRecorder()
+	server.ServeHTTP(unavailable, request)
+	if unavailable.Code != http.StatusOK || unavailable.Body.String() != "{\"runtime_state\":\"UNAVAILABLE\",\"status\":null}\n" {
+		t.Fatalf("unconfigured update automation status = %d %s", unavailable.Code, unavailable.Body.String())
+	}
+
+	server.dependencies.UpdateAutomation = fakeUpdateAutomationStatusReader{status: updateautomation.Status{
+		Phase: "WAITING_WINDOW", Channel: "stable", JitterOffsetMinutes: 17,
+		NextCheckAt: "2026-09-01T03:00:00Z", NextApplyAt: "2026-09-01T04:00:00Z",
+		CandidateVersion: "1.2.0", CandidateReference: "github:v1.2.0",
+		StagedUpdateID: "update-20260901T010203Z-0123456789abcdef01234567", StagedVersion: "1.2.0",
+		LastResultCode: "STAGED", ConsecutiveFailures: 0, UpdatedAt: "2026-09-01T01:02:03Z",
+	}}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/system/update/automation", nil)
+	request.AddCookie(cookie)
+	available := httptest.NewRecorder()
+	server.ServeHTTP(available, request)
+	body := available.Body.String()
+	if available.Code != http.StatusOK || !strings.Contains(body, `"runtime_state":"AVAILABLE"`) || !strings.Contains(body, `"phase":"WAITING_WINDOW"`) || !strings.Contains(body, `"candidate_version":"1.2.0"`) || strings.Contains(body, "lease_owner") || strings.Contains(body, "lease_expires_at") {
+		t.Fatalf("available update automation status = %d %s", available.Code, body)
+	}
+
+	server.dependencies.UpdateAutomation = fakeUpdateAutomationStatusReader{err: errors.New("database /var/lib/gateway-vpn/state.db unavailable; token=secret")}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/system/update/automation", nil)
+	request.AddCookie(cookie)
+	failed := httptest.NewRecorder()
+	server.ServeHTTP(failed, request)
+	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), `"runtime_state":"UNAVAILABLE"`) || strings.Contains(failed.Body.String(), "/var/lib") || strings.Contains(failed.Body.String(), "secret") {
+		t.Fatalf("failed update automation status leaks backend detail = %d %s", failed.Code, failed.Body.String())
 	}
 }
 

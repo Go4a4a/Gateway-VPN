@@ -10,7 +10,7 @@ import (
 
 func TestRestorePointControllerProtectsReleasePointersAndSerializesDeletion(t *testing.T) {
 	store, databasePath, _ := restorePointFixture(t)
-	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 31, databasePath)
+	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 32, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestRestorePointControllerRejectsIncompatiblePointBeforeStaging(t *testing.
 func rollbackControllerFixture(t *testing.T) (*RestorePointController, RestorePoint) {
 	t.Helper()
 	store, databasePath, _ := restorePointFixture(t)
-	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 31, databasePath)
+	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 32, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}

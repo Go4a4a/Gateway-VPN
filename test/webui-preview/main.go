@@ -47,6 +47,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateautomation"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
@@ -377,6 +378,14 @@ type previewUpdate struct {
 	mutex     sync.Mutex
 	operation updatepkg.Operation
 	pending   bool
+}
+
+type previewUpdateAutomation struct {
+	status updateautomation.Status
+}
+
+func (automation previewUpdateAutomation) Status(context.Context) (updateautomation.Status, error) {
+	return automation.status, nil
 }
 
 func (update *previewUpdate) Stage(_ context.Context, reader io.Reader) (updatepkg.Operation, error) {
@@ -770,7 +779,7 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 		{
 			Manifest: updatepkg.RestorePointManifest{
 				FormatVersion: updatepkg.RestorePointFormatVersion, PointID: "point-20260830T030000Z-0123456789abcdef01234567", Kind: updatepkg.RestorePointKindPreUpdate,
-				CreatedAt: previewNow.Add(-30 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.1.0", SchemaVersion: 31, TotalBytes: 780 << 20, Verification: "PASS",
+				CreatedAt: previewNow.Add(-30 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.1.0", SchemaVersion: 32, TotalBytes: 780 << 20, Verification: "PASS",
 			},
 			Protected: true, Roles: []string{"CURRENT", "RECOVERY"}, Compatible: true,
 		},
@@ -815,7 +824,16 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 			StartedAt: previewNow.Add(-48 * time.Hour).Format(time.RFC3339Nano), UpdatedAt: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 			OldVersion: "1.0.0", NewVersion: "1.1.0", StabilityDeadline: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 		}},
-		UpdatePolicy: &updatepkg.AutomationPolicyRepository{Database: database, Now: func() time.Time { return previewNow }}, UpdateRestorePoints: updateRestorePoints,
+		UpdatePolicy: &updatepkg.AutomationPolicyRepository{Database: database, Now: func() time.Time { return previewNow }},
+		UpdateAutomation: previewUpdateAutomation{status: updateautomation.Status{
+			Phase: updateautomation.PhaseWaitingWindow, Channel: "stable", JitterOffsetMinutes: 17,
+			NextCheckAt: previewNow.Add(6 * time.Hour).Format(time.RFC3339Nano), NextApplyAt: previewNow.Add(10 * time.Hour).Format(time.RFC3339Nano),
+			CandidateVersion: "1.2.0", CandidateReference: "Go4a4a/Gateway-VPN#v1.2.0-" + strings.Repeat("signed-channel-reference-", 8),
+			StagedUpdateID: "update-20260831T030000Z-0123456789abcdef01234567", StagedVersion: "1.2.0",
+			LastAttemptAt: previewNow.Add(-10 * time.Minute).Format(time.RFC3339Nano), LastResultCode: "STAGED",
+			ConsecutiveFailures: 0, UpdatedAt: previewNow.Format(time.RFC3339Nano),
+		}},
+		UpdateRestorePoints: updateRestorePoints,
 	})
 	if err != nil {
 		return err

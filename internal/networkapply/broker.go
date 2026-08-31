@@ -170,6 +170,10 @@ type PowerAdmin interface {
 	Execute(context.Context, power.Command) error
 }
 
+type MaintenanceAdmin interface {
+	MaintenanceStatus(context.Context) (power.MaintenanceStatus, error)
+}
+
 // RemovalAdmin exposes only an impact snapshot and one typed dispatch. The
 // root implementation creates a durable marker and starts one fixed guardian;
 // paths, unit names, commands and package-removal choices never cross HTTP.
@@ -188,6 +192,13 @@ type ManagementFabricAdmin interface {
 	RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error)
 }
 
+// ManagementFabricRuntimeObserver is optional so older test/admin
+// implementations remain compatible. The production root applier implements
+// it without accepting any caller-controlled interface or peer identity.
+type ManagementFabricRuntimeObserver interface {
+	ObserveManagementLinks(context.Context) (int64, []managementfabric.LinkRuntimeObservation, error)
+}
+
 // PortableBackupAdmin is implemented only by the root broker. It reads the
 // fixed Gateway state/config trees, including root-owned Management Fabric
 // keys, and exposes only the final encrypted .gvpn stream to the control plane.
@@ -198,8 +209,12 @@ type PortableBackupAdmin interface {
 }
 
 type ManagementFabricStatus struct {
-	NeedsApply bool   `json:"needs_apply"`
-	Reason     string `json:"reason"`
+	NeedsApply            bool                                      `json:"needs_apply"`
+	Reason                string                                    `json:"reason"`
+	ObservationState      string                                    `json:"observation_state"`
+	ObservationErrorCode  string                                    `json:"observation_error_code,omitempty"`
+	ObservationGeneration int64                                     `json:"observation_generation,omitempty"`
+	Links                 []managementfabric.LinkRuntimeObservation `json:"links,omitempty"`
 }
 
 // UpdateTransactionStatus is the only update-journal information exposed to
@@ -352,6 +367,7 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	}
 	mux.HandleFunc("POST /v1/power/capabilities", server.powerCapabilities)
 	mux.HandleFunc("POST /v1/power/execute", server.executePower)
+	mux.HandleFunc("POST /v1/maintenance/status", server.maintenanceStatus)
 	mux.HandleFunc("POST /v1/uninstall/impact", server.uninstallImpact)
 	mux.HandleFunc("POST /v1/uninstall/dispatch", server.dispatchUninstall)
 	mux.HandleFunc("POST /v1/management-fabric/sync", server.syncManagementFabric)
@@ -456,7 +472,31 @@ func (server *BrokerServer) managementFabricStatus(writer http.ResponseWriter, r
 		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_STATUS_FAILED")
 		return
 	}
-	writeBrokerJSON(writer, http.StatusOK, ManagementFabricStatus{NeedsApply: needed, Reason: reason})
+	status := ManagementFabricStatus{NeedsApply: needed, Reason: reason}
+	if needed {
+		status.ObservationState = "DEFERRED"
+		writeBrokerJSON(writer, http.StatusOK, status)
+		return
+	}
+	observer, available := server.ManagementFabric.(ManagementFabricRuntimeObserver)
+	if !available {
+		status.ObservationState = "UNAVAILABLE"
+		status.ObservationErrorCode = "MANAGEMENT_LINK_OBSERVER_UNAVAILABLE"
+		writeBrokerJSON(writer, http.StatusOK, status)
+		return
+	}
+	generation, links, observeErr := observer.ObserveManagementLinks(request.Context())
+	if observeErr != nil {
+		server.logPrivilegedFailure("management_fabric_observation", observeErr)
+		status.ObservationState = "UNAVAILABLE"
+		status.ObservationErrorCode = "MANAGEMENT_LINK_OBSERVATION_FAILED"
+		writeBrokerJSON(writer, http.StatusOK, status)
+		return
+	}
+	status.ObservationState = "AVAILABLE"
+	status.ObservationGeneration = generation
+	status.Links = links
+	writeBrokerJSON(writer, http.StatusOK, status)
 }
 
 func (server *BrokerServer) configureAdminContour(writer http.ResponseWriter, request *http.Request) {
@@ -655,6 +695,25 @@ func (server *BrokerServer) applyPendingUpdate(writer http.ResponseWriter, reque
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *BrokerServer) maintenanceStatus(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	admin, ok := server.Power.(MaintenanceAdmin)
+	if !ok || admin == nil {
+		writeBrokerError(writer, http.StatusNotImplemented, "MAINTENANCE_STATUS_UNAVAILABLE")
+		return
+	}
+	status, err := admin.MaintenanceStatus(request.Context())
+	if err != nil {
+		writeBrokerError(writer, http.StatusInternalServerError, "MAINTENANCE_STATUS_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, status)
 }
 
 func (server *BrokerServer) updateTransactionStatus(writer http.ResponseWriter, request *http.Request) {
@@ -1445,6 +1504,12 @@ func (client *BrokerClient) ApplyPendingUpdate(ctx context.Context) error {
 func (client *BrokerClient) UpdateStatus(ctx context.Context) (UpdateTransactionStatus, error) {
 	var status UpdateTransactionStatus
 	err := client.call(ctx, "/v1/update/status", struct{}{}, http.StatusOK, &status)
+	return status, err
+}
+
+func (client *BrokerClient) MaintenanceStatus(ctx context.Context) (power.MaintenanceStatus, error) {
+	var status power.MaintenanceStatus
+	err := client.call(ctx, "/v1/maintenance/status", struct{}{}, http.StatusOK, &status)
 	return status, err
 }
 

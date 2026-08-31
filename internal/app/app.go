@@ -32,6 +32,7 @@ import (
 	"gateway-vpn/internal/hostboot"
 	loggingpkg "gateway-vpn/internal/logging"
 	"gateway-vpn/internal/managementfabric"
+	"gateway-vpn/internal/managementruntime"
 	"gateway-vpn/internal/mihomo"
 	"gateway-vpn/internal/modem"
 	"gateway-vpn/internal/modemrecovery"
@@ -47,6 +48,7 @@ import (
 	"gateway-vpn/internal/tlsbootstrap"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateautomation"
 	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
@@ -79,6 +81,8 @@ type Runtime struct {
 	Retention             *retentionpkg.Cleaner
 	TrafficRunner         *traffic.Runner
 	Updates               *updatepkg.Stager
+	UpdateScheduler       *updateautomation.Scheduler
+	ManagementObserver    *managementruntime.Runner
 	States                *state.Repository
 	logger                *slog.Logger
 	routingLogger         *slog.Logger
@@ -171,6 +175,10 @@ func workerWatchdogSpec(name string) (time.Duration, bool) {
 		return 20 * time.Minute, false
 	case watchdog.WorkerTrafficAccounting:
 		return 2 * time.Minute, false
+	case watchdog.WorkerSoftwareUpdate:
+		return 3 * time.Minute, false
+	case watchdog.WorkerManagementRuntime:
+		return time.Minute, true
 	default:
 		return 0, false
 	}
@@ -237,6 +245,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	nodes := subscription.NewNodeRepository(database)
 	paths := pathmatrix.NewRepository(database)
 	targets := bypass.NewRepository(database)
+	managementRepository := managementfabric.NewRepository(database, nil)
 	networkBroker, err := networkapply.NewBrokerClient("/run/gateway-vpn/network-broker.sock")
 	if err != nil {
 		return fail(err)
@@ -262,6 +271,13 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	wireGuardLogger := logger.With("component", loggingpkg.ComponentWireGuard)
 	trafficLogger := logger.With("component", loggingpkg.ComponentTraffic)
 	workerProgress := newWorkerProgressTracker()
+	managementObserver := &managementruntime.Runner{Source: networkBroker, Repository: managementRepository}
+	managementObserver.OnCycle = func(managementruntime.Result) {
+		workerProgress.mark(watchdog.WorkerManagementRuntime)
+	}
+	managementObserver.OnError = func(err error) {
+		wireGuardLogger.Warn("Management Fabric runtime observation failed", "error", err)
+	}
 	dataPlane.RefreshWorker.OnError = func(subscriptionID string, err error) {
 		subscriptionLogger.Warn("scheduled subscription refresh failed", "subscription_id", subscriptionID, "error", err)
 	}
@@ -337,6 +353,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	restores.ExpectedTLSKeyPath = configuration.API.TLSKey
 	var updates *updatepkg.Stager
 	var remoteUpdates *updateremote.Manager
+	var updateScheduler *updateautomation.Scheduler
+	updatePolicy := &updatepkg.AutomationPolicyRepository{Database: database}
 	trustedUpdateKey := "/etc/gateway-vpn/update-signing.pub"
 	if info, keyErr := os.Lstat(trustedUpdateKey); keyErr == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() {
 		schema, schemaErr := databasepkg.ReadSchemaVersion(ctx, database)
@@ -364,6 +382,18 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	} else if keyErr == nil || !errors.Is(keyErr, os.ErrNotExist) {
 		systemLogger.Error("signed update trust key is unsafe or unavailable")
 	}
+	if updates != nil && remoteUpdates != nil {
+		updateScheduler, err = updateautomation.New(database, updatePolicy, remoteUpdates, updates, networkBroker, networkBroker, states)
+		if err != nil {
+			return fail(fmt.Errorf("initialize automatic signed update scheduler: %w", err))
+		}
+		updateScheduler.OnError = func(err error) {
+			systemLogger.Warn("automatic signed update cycle failed", "error", err)
+		}
+		updateScheduler.OnProgress = func(updateautomation.Status) {
+			workerProgress.mark(watchdog.WorkerSoftwareUpdate)
+		}
+	}
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: states,
 		Modems: modems, Uplinks: dataPlane.Uplinks, Subscriptions: subscriptions, Nodes: nodes,
@@ -378,7 +408,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 			SecretRoot: filepath.Join(configuration.System.StateDir, "secrets", "wireguard-ingress"),
 		},
 		WireGuardIngressAdmin: networkBroker,
-		ManagementFabric:      managementfabric.NewRepository(database, nil),
+		ManagementFabric:      managementRepository,
 		ManagementFabricAdmin: networkBroker,
 		ModemRuntime:          networkBroker,
 		ModemRecovery:         recoveryController,
@@ -415,7 +445,8 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		Updates:              updates,
 		RemoteUpdates:        remoteUpdates,
 		UpdateApply:          networkBroker,
-		UpdatePolicy:         &updatepkg.AutomationPolicyRepository{Database: database},
+		UpdatePolicy:         updatePolicy,
+		UpdateAutomation:     updateScheduler,
 		UpdateRestorePoints:  networkBroker,
 		Watchdog:             &watchdog.Repository{Database: database},
 		WatchdogStatus:       watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
@@ -428,7 +459,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	if err != nil {
 		return fail(err)
 	}
-	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, WireGuardIngress: networkBroker, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC(), workerProgress: workerProgress}, nil
+	return &Runtime{Config: configuration, Database: database, API: api, Admin: admin, TLS: tlsResult, Refresh: dataPlane.Refresh, RefreshWorker: dataPlane.RefreshWorker, RefreshDispatch: dataPlane.RefreshDispatch, Mihomo: dataPlane.Transactions, Reconciler: dataPlane.Reconciler, Routing: dataPlane.Routing, WireGuard: dataPlane.WireGuard, WireGuardIngress: networkBroker, ModemRunner: dataPlane.ModemRunner, EthernetRunner: dataPlane.EthernetRunner, ModemRecovery: recoveryRunner, HealthRunner: dataPlane.HealthRunner, DirectRunner: dataPlane.DirectRunner, Logging: loggingController, LoggingSync: networkBroker, Backups: managedDatabase.Backups, Retention: &retentionpkg.Cleaner{Database: database, PayloadRoot: filepath.Join(configuration.System.StateDir, "subscriptions"), Policy: retentionpkg.DefaultPolicy()}, TrafficRunner: trafficRunner, Updates: updates, UpdateScheduler: updateScheduler, ManagementObserver: managementObserver, States: states, logger: systemLogger, routingLogger: routingLogger, wireGuardLogger: wireGuardLogger, trafficLogger: trafficLogger, reconcileNow: make(chan struct{}, 1), processStartedAt: time.Now().UTC(), workerProgress: workerProgress}, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -565,6 +596,12 @@ func (application *Runtime) Serve(ctx context.Context) error {
 	}
 	if application.TrafficRunner != nil {
 		startWorker("traffic-accounting", application.TrafficRunner.Run)
+	}
+	if application.UpdateScheduler != nil {
+		startWorker(watchdog.WorkerSoftwareUpdate, application.UpdateScheduler.Run)
+	}
+	if application.ManagementObserver != nil {
+		startWorker(watchdog.WorkerManagementRuntime, application.ManagementObserver.Run)
 	}
 	startWorker("control-heartbeat", application.runWatchdogHeartbeatLoop)
 	serveDone := make(chan error, 1)

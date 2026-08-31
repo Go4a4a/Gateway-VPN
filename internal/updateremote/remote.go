@@ -104,6 +104,18 @@ func (manager *Manager) Check(ctx context.Context, channel string) (Available, e
 }
 
 func (manager *Manager) StageChannel(ctx context.Context, channel string) (updatepkg.Operation, error) {
+	return manager.stageChannel(ctx, channel, updatepkg.SourceGitHubChannel)
+}
+
+// StageAutomaticChannel uses the exact same signed discovery, download and
+// staging path as a manual channel download, but records scheduler ownership.
+// This durable distinction prevents a restart from adopting a user-staged
+// release for unattended apply.
+func (manager *Manager) StageAutomaticChannel(ctx context.Context, channel string) (updatepkg.Operation, error) {
+	return manager.stageChannel(ctx, channel, updatepkg.SourceAutomaticGitHub)
+}
+
+func (manager *Manager) stageChannel(ctx context.Context, channel, sourceKind string) (updatepkg.Operation, error) {
 	if _, pending, err := manager.Stager.Status(); err != nil {
 		return updatepkg.Operation{}, err
 	} else if pending {
@@ -116,7 +128,7 @@ func (manager *Manager) StageChannel(ctx context.Context, channel string) (updat
 	if !resolved.Available.Available {
 		return updatepkg.Operation{}, errors.New("the selected signed channel has no newer Gateway release")
 	}
-	source := updatepkg.Source{Kind: updatepkg.SourceGitHubChannel, Channel: channel, Reference: resolved.SourceReference}
+	source := updatepkg.Source{Kind: sourceKind, Channel: channel, Reference: resolved.SourceReference}
 	return manager.downloadAndStage(ctx, resolved.artifactURL, resolved.ArtifactBytes, resolved.ArtifactSHA256, source)
 }
 

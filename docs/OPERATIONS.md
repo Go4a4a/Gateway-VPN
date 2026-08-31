@@ -787,7 +787,28 @@ WebUI требует свежую password re-authentication и введённу
 
 До изменения live-системы staging ограничивает archive/entry/path/depth/size, запрещает symlink, hardlink, device, sparse и concatenated/trailing gzip data, проверяет signature, signer SHA-256, полный file manifest, SHA-256 каждого файла, строгий SemVer, Git commit/build date, OS/arch, DB/config и Gateway/Mihomo API contracts. Дополнительно candidate `host_contract_sha256`, вычисленный по всем packaged systemd unit/socket/timer files, обязан совпасть с текущим release: WebUI pointer-update не оставляет на host несовместимые старые units. Несовпадение безопасно отклоняется до mutation и означает, что нужен отдельный signed installer-upgrade artifact. Один verified staging не доказывает установку и может быть безопасно удалён.
 
-Карточка **Версии и восстановление** хранит отдельно channel, автоматическую проверку, автоматическую загрузку, автоматическое применение и ежедневное окно обслуживания в UTC. В текущем source manual `Проверить наличие`, download-to-verified-staging и Apply работают независимо; durable automatic check/download/apply worker остаётся отдельным незавершённым блоком и не должен считаться действующим только потому, что policy уже сохраняется в schema 31.
+Карточка **Версии и восстановление** хранит отдельно channel, автоматическую проверку, автоматическую загрузку, автоматическое применение и ежедневное окно обслуживания в UTC. Durable automatic check/download/apply worker сохраняет restart-safe состояние в schema 32 и использует только подписанный channel staging и fixed root apply; ручной staged release никогда не присваивается автоматике.
+
+По умолчанию включена только автоматическая проверка. Загрузка включается отдельно, а автоматическое применение дополнительно требует включённого UTC maintenance window. Состояние worker отображается после перезагрузки WebUI и не зависит от живого HTTP-запроса: `IDLE/DISABLED`, `CHECKING`, `CANDIDATE`, `DOWNLOADING`, `STAGED/WAITING_WINDOW`, `APPLY_INTENT/APPLY_DISPATCHED`, `SUCCEEDED/FAILED/SUPPRESSED`, `MANUAL_PENDING` либо `OUTCOME_UNKNOWN`. Lease owner и его expiry являются внутренними полями SQLite и не возвращаются API.
+
+Перед unattended Apply worker повторно читает последнюю policy generation и требует одновременно:
+
+- отсутствие install/update/restore/network/uninstall/power maintenance operation либо неизвестного root maintenance state;
+- активный fresh `FULL` пользовательский путь со всеми обязательными targets;
+- хотя бы один fresh `REACHABLE` Management Fabric/WireGuard management handshake;
+- попадание в заданное окно обслуживания UTC.
+
+После этих проверок control plane сначала закрывает пользовательский путь, атомарно сохраняет `APPLY_INTENT` и лишь затем вызывает parameter-free root Apply. Потеря ответа после intent не приводит к повторному запуску: состояние становится `OUTCOME_UNKNOWN` до появления authoritative root journal. После restart automatic worker может принять только собственный `AUTOMATIC_GITHUB_CHANNEL` staging с тем же update ID/channel; ручная загрузка, manual GitHub staging и exact HTTPS остаются `MANUAL_PENDING`. Изменение policy до Apply не наследует прежнее автоматическое разрешение.
+
+Состояние можно проверить без доступа к secret/root paths:
+
+```bash
+curl --cacert /var/lib/gateway-vpn/tls/cert.pem \
+  https://127.0.0.1:8443/api/v1/system/update/automation
+sudo journalctl --namespace=gateway-vpn --since=-30min | grep -i 'automatic signed update'
+```
+
+API требует обычную authenticated WebUI session; пример `curl` показывает только адрес endpoint и без session ожидаемо вернёт `401`. Если root broker или observation недоступны, worker сохраняет фиксированный sanitized reason code, ничего не применяет и повторяет проверку позже. Ручной verified staging и Apply продолжают работать независимо от automatic worker.
 
 После typed `ОБНОВИТЬ` и отдельного confirmation Web/API сначала закрывает data path, сохраняет blocked state и вызывает parameter-free root broker. `gateway-vpn-update.service` повторно загружает fixed `PATH_BLOCKED` firewall, повторно проверяет staging и выполняет одну root transaction:
 

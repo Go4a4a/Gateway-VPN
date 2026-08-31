@@ -148,6 +148,9 @@ INSERT INTO network_apply_transactions(
 	if err := backend.Execute(ctx, Command{Action: ActionReboot}); !errors.Is(err, ErrMaintenanceActive) {
 		t.Fatalf("network apply maintenance = %v", err)
 	}
+	if status, err := backend.MaintenanceStatus(ctx); err != nil || !status.Active || status.ReasonCode != "NETWORK_APPLY_ACTIVE" {
+		t.Fatalf("network apply status = %+v,%v", status, err)
+	}
 	if _, err := database.ExecContext(ctx, "UPDATE network_apply_transactions SET state='CONFIRMED'"); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +159,9 @@ INSERT INTO network_apply_transactions(
 	executor.active["gateway-vpn-update-recovery.service"] = "active"
 	if err := backend.Execute(ctx, Command{Action: ActionShutdown}); err != nil {
 		t.Fatalf("completed recovery unit blocked power: %v", err)
+	}
+	if status, err := backend.MaintenanceStatus(ctx); err != nil || !status.Active || status.ReasonCode != "POWER_ACTION_PENDING" {
+		t.Fatalf("dispatched power status = %+v,%v", status, err)
 	}
 
 	// Use a fresh backend because a successful dispatch intentionally prevents

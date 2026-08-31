@@ -27,7 +27,7 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	go func() { done <- runContext(ctx, address, false, false, false) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	var networkBody, topologyBody, updatePolicyBody, restorePointsBody []byte
+	var networkBody, topologyBody, updatePolicyBody, updateAutomationBody, restorePointsBody []byte
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		networkBody, err = getPreview(client, "http://"+address+"/api/v1/settings/network")
@@ -36,9 +36,12 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 			if err == nil {
 				updatePolicyBody, err = getPreview(client, "http://"+address+"/api/v1/settings/software-update")
 				if err == nil {
-					restorePointsBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/restore-points")
+					updateAutomationBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/automation")
 					if err == nil {
-						break
+						restorePointsBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/restore-points")
+						if err == nil {
+							break
+						}
 					}
 				}
 			}
@@ -68,6 +71,20 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	}
 	if updatePolicy["channel"] != "stable" || updatePolicy["maintenance_start_minute_utc"] != float64(180) {
 		t.Fatalf("software update policy = %s", updatePolicyBody)
+	}
+	var updateAutomation struct {
+		RuntimeState string `json:"runtime_state"`
+		Status       struct {
+			Phase              string `json:"phase"`
+			StagedVersion      string `json:"staged_version"`
+			CandidateReference string `json:"candidate_reference"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(updateAutomationBody, &updateAutomation); err != nil {
+		t.Fatal(err)
+	}
+	if updateAutomation.RuntimeState != "AVAILABLE" || updateAutomation.Status.Phase != "WAITING_WINDOW" || updateAutomation.Status.StagedVersion != "1.2.0" || len(updateAutomation.Status.CandidateReference) < 160 {
+		t.Fatalf("software update automation = %s", updateAutomationBody)
 	}
 	var restorePoints struct {
 		Items []map[string]any `json:"items"`

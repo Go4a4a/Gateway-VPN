@@ -64,6 +64,15 @@ type Capabilities struct {
 	DefaultRTCDelaySeconds int        `json:"default_rtc_delay_seconds"`
 }
 
+// MaintenanceStatus is a fixed, path-free projection used to suppress
+// unattended work while a privileged lifecycle mutation is active. ReasonCode
+// is an allowlisted machine code; no unit output or filesystem path crosses
+// the root boundary.
+type MaintenanceStatus struct {
+	Active     bool   `json:"active"`
+	ReasonCode string `json:"reason_code,omitempty"`
+}
+
 func ExpectedConfirmation(action Action) string {
 	switch action {
 	case ActionReboot:

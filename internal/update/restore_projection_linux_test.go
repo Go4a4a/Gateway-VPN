@@ -42,7 +42,7 @@ func TestRestorePointRejectsMismatchedMihomoActiveMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(store.StateDir, "mihomo", "state", "active-generation"), []byte("generation-b\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreatePreUpdate(context.Background(), "1.2.0", 31, databasePath); err == nil {
+	if _, err := store.CreatePreUpdate(context.Background(), "1.2.0", 32, databasePath); err == nil {
 		t.Fatal("mismatched Mihomo link and durable marker were accepted")
 	}
 }

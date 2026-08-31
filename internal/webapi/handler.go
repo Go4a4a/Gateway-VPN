@@ -55,6 +55,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateautomation"
 	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
@@ -123,6 +124,7 @@ type Dependencies struct {
 	RemoteUpdates           RemoteUpdateSource
 	UpdateApply             UpdateApplyTrigger
 	UpdatePolicy            *updatepkg.AutomationPolicyRepository
+	UpdateAutomation        UpdateAutomationStatusReader
 	UpdateRestorePoints     UpdateRestorePointController
 	Watchdog                *watchdog.Repository
 	WatchdogStatus          WatchdogStatusReader
@@ -194,6 +196,10 @@ type UpdateStager interface {
 type UpdateApplyTrigger interface {
 	ApplyPendingUpdate(context.Context) error
 	UpdateStatus(context.Context) (networkapply.UpdateTransactionStatus, error)
+}
+
+type UpdateAutomationStatusReader interface {
+	Status(context.Context) (updateautomation.Status, error)
 }
 
 type UpdateRestorePointController interface {
@@ -482,6 +488,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/system/update/apply", server.protected(http.HandlerFunc(server.applyUpdate)))
 	mux.Handle("GET /api/v1/system/update/available", server.protected(http.HandlerFunc(server.availableUpdate)))
 	mux.Handle("POST /api/v1/system/update/remote", server.protected(http.HandlerFunc(server.stageRemoteUpdate)))
+	mux.Handle("GET /api/v1/system/update/automation", server.protected(http.HandlerFunc(server.updateAutomationStatus)))
 	mux.Handle("GET /api/v1/settings/software-update", server.protected(http.HandlerFunc(server.softwareUpdatePolicy)))
 	mux.Handle("PUT /api/v1/settings/software-update", server.protected(http.HandlerFunc(server.updateSoftwareUpdatePolicy)))
 	mux.Handle("GET /api/v1/system/update/restore-points", server.protected(http.HandlerFunc(server.updateRestorePoints)))
@@ -4372,6 +4379,22 @@ func (server *Server) softwareUpdatePolicy(writer http.ResponseWriter, request *
 		return
 	}
 	writeJSON(writer, http.StatusOK, policy)
+}
+
+func (server *Server) updateAutomationStatus(writer http.ResponseWriter, request *http.Request) {
+	response := map[string]any{"runtime_state": "UNAVAILABLE", "status": nil}
+	if server.dependencies.UpdateAutomation == nil {
+		writeJSON(writer, http.StatusOK, response)
+		return
+	}
+	status, err := server.dependencies.UpdateAutomation.Status(request.Context())
+	if err != nil {
+		writeJSON(writer, http.StatusOK, response)
+		return
+	}
+	response["runtime_state"] = "AVAILABLE"
+	response["status"] = status
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (server *Server) updateSoftwareUpdatePolicy(writer http.ResponseWriter, request *http.Request) {

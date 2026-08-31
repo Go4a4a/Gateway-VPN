@@ -20,13 +20,15 @@ const (
 	WorkerDatabaseBackup      = "database-backup"
 	WorkerRetention           = "retention"
 	WorkerTrafficAccounting   = "traffic-accounting"
+	WorkerSoftwareUpdate      = "software-update"
+	WorkerManagementRuntime   = "management-fabric-runtime"
 )
 
 var fixedWorkerIDs = map[string]struct{}{
 	WorkerSubscriptionRefresh: {}, WorkerDataPlaneReconcile: {},
 	WorkerModemReconcile: {}, WorkerEthernetReconcile: {},
 	WorkerPathHealth: {}, WorkerDirectHealth: {}, WorkerLoggingSync: {},
-	WorkerDatabaseBackup: {}, WorkerRetention: {}, WorkerTrafficAccounting: {},
+	WorkerDatabaseBackup: {}, WorkerRetention: {}, WorkerTrafficAccounting: {}, WorkerSoftwareUpdate: {}, WorkerManagementRuntime: {},
 }
 
 type WorkerProgress struct {

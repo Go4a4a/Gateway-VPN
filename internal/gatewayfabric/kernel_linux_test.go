@@ -109,6 +109,15 @@ func TestGatewayFabricKernelManyToManyACLAndSelectiveRemoval(t *testing.T) {
 		t.Fatalf("apply real two-link Gateway projection: %v\n%s", err, gatewayKernelDiagnostics(links))
 	}
 	waitGatewayKernelHandshakes(t, "gvm1", "gvm2")
+	observedGeneration, observations, err := applier.ObserveManagementLinks(ctx)
+	if err != nil || observedGeneration != plan.Generation || len(observations) != 2 {
+		t.Fatalf("observe real two-link Gateway runtime generation=%d links=%+v err=%v", observedGeneration, observations, err)
+	}
+	for _, observation := range observations {
+		if observation.State != managementfabric.RuntimeLinkReachable || observation.LastHandshakeAt == "" || observation.ErrorCode != "" {
+			t.Fatalf("real Gateway runtime observation is not reachable: %+v", observation)
+		}
+	}
 	assertGatewayKernelProjection(t, plan)
 
 	resourceServer := startGatewayKernelTCPServer(t, resourceNamespace, "192.168.50.10:8443")
@@ -139,6 +148,10 @@ UPDATE management_fabric_generations SET desired_generation=desired_generation+1
 		t.Fatalf("surviving link endpoint route = %s", rows)
 	}
 	waitGatewayKernelHandshakes(t, "gvm2")
+	observedGeneration, observations, err = applier.ObserveManagementLinks(ctx)
+	if err != nil || observedGeneration <= plan.Generation || len(observations) != 1 || observations[0].LinkID != "link:kernel:2" || observations[0].State != managementfabric.RuntimeLinkReachable {
+		t.Fatalf("observe surviving Gateway runtime generation=%d links=%+v err=%v", observedGeneration, observations, err)
+	}
 	expectGatewayKernelTCP(t, links[1].namespace, links[1].adminAddress, "10.97.1.10:8443", true)
 	expectGatewayKernelTCP(t, links[0].namespace, links[0].adminAddress, "10.96.1.10:8443", false)
 	endpoints := gatewayKernelOutput(t, "/usr/sbin/nft", "list", "set", "inet", "gateway_vpn", "management_fabric_endpoints")

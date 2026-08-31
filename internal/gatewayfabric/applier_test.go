@@ -27,6 +27,7 @@ import (
 type gatewayInterface struct {
 	address, publicKey, fwmark, listenPort string
 	peers                                  map[string]string
+	latestHandshakes                       map[string]int64
 }
 
 type gatewayRoute struct {
@@ -83,7 +84,7 @@ func (executor *gatewayExecutor) Run(_ context.Context, request platformexec.Req
 		if _, exists := executor.interfaces[name]; exists {
 			return platformexec.Result{}, errors.New("link exists")
 		}
-		executor.interfaces[name] = &gatewayInterface{peers: map[string]string{}}
+		executor.interfaces[name] = &gatewayInterface{peers: map[string]string{}, latestHandshakes: map[string]int64{}}
 		return platformexec.Result{}, nil
 	case command == "ip" && strings.HasPrefix(args, "-4 address replace "):
 		name := request.Arguments[5]
@@ -216,6 +217,17 @@ func (executor *gatewayExecutor) Run(_ context.Context, request platformexec.Req
 			return platformexec.Result{Stdout: fmt.Sprintf("0x%x\n", value)}, nil
 		case "listen-port":
 			return platformexec.Result{Stdout: item.listenPort + "\n"}, nil
+		case "latest-handshakes":
+			peers := make([]string, 0, len(item.peers))
+			for peer := range item.peers {
+				peers = append(peers, peer)
+			}
+			sort.Strings(peers)
+			lines := make([]string, 0, len(peers))
+			for _, peer := range peers {
+				lines = append(lines, peer+"\t"+strconv.FormatInt(item.latestHandshakes[peer], 10))
+			}
+			return platformexec.Result{Stdout: strings.Join(lines, "\n") + "\n"}, nil
 		}
 	}
 	return platformexec.Result{}, fmt.Errorf("unexpected command: %s %s", request.Executable, args)
@@ -281,6 +293,51 @@ UPDATE management_fabric_generations SET desired_generation=desired_generation+1
 				t.Fatalf("foreign mutation token %q in %s", forbidden, joined)
 			}
 		}
+	}
+}
+
+func TestGatewayApplierObservesOnlyAppliedExpectedManagementPeer(t *testing.T) {
+	fixture := newGatewayApplierFixture(t)
+	ctx := context.Background()
+	if err := fixture.applier.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	link, err := fixture.repository.GetLink(ctx, "link:a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.applier.now()
+	fixture.executor.interfaces[link.InterfaceName].latestHandshakes[link.RemotePublicKey] = now.Add(-45 * time.Second).Unix()
+	generation, observations, err := fixture.applier.ObserveManagementLinks(ctx)
+	if err != nil || generation <= 0 || len(observations) != 1 {
+		t.Fatalf("ObserveManagementLinks() = generation %d observations %+v error %v", generation, observations, err)
+	}
+	observed := observations[0]
+	if observed.LinkID != link.ID || observed.State != managementfabric.RuntimeLinkReachable || observed.ErrorCode != "" || observed.LastHandshakeAt != now.Add(-45*time.Second).Format(time.RFC3339Nano) {
+		t.Fatalf("reachable observation = %+v", observed)
+	}
+	fixture.executor.interfaces[link.InterfaceName].latestHandshakes[link.RemotePublicKey] = now.Add(-10 * time.Minute).Unix()
+	_, observations, err = fixture.applier.ObserveManagementLinks(ctx)
+	if err != nil || observations[0].State != managementfabric.RuntimeLinkStale || observations[0].ErrorCode != "HANDSHAKE_STALE" {
+		t.Fatalf("stale observation = %+v error %v", observations, err)
+	}
+	if _, err := fixture.database.ExecContext(ctx, `UPDATE management_fabric_generations SET desired_generation=desired_generation+1,state='PENDING' WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.applier.ObserveManagementLinks(ctx); err == nil {
+		t.Fatal("unapplied fabric generation was observed")
+	}
+}
+
+func TestParseLinkHandshakeRejectsUnexpectedOrFutureOutput(t *testing.T) {
+	now := time.Date(2026, 8, 30, 16, 0, 0, 0, time.UTC)
+	unexpected := parseLinkHandshake("link:a", "expected", "other\t123\n", now)
+	if unexpected.State != managementfabric.RuntimeLinkDegraded || unexpected.ErrorCode != "HANDSHAKE_OUTPUT_INVALID" {
+		t.Fatalf("unexpected peer observation = %+v", unexpected)
+	}
+	future := parseLinkHandshake("link:a", "expected", "expected\t"+strconv.FormatInt(now.Add(time.Minute).Unix(), 10)+"\n", now)
+	if future.State != managementfabric.RuntimeLinkDegraded || future.ErrorCode != "HANDSHAKE_TIME_INVALID" || future.LastHandshakeAt != "" {
+		t.Fatalf("future handshake observation = %+v", future)
 	}
 }
 
