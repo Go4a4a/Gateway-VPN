@@ -41,6 +41,44 @@ func TestSystemdUpdateAdminStartsOnlyFixedNoBlockUnit(t *testing.T) {
 	}
 }
 
+func TestSystemdUpdateAdminStagesRollbackAndStartsOnlyFixedHelper(t *testing.T) {
+	const pointID = "point-20260831T010000Z-0123456789abcdef01234567"
+	controller := &fakeUpdateRestorePointController{}
+	executor := &recordingExecutor{}
+	admin := SystemdUpdateAdmin{
+		Executor: executor, Systemctl: filepath.Join(t.TempDir(), "systemctl"), RestorePoints: controller,
+	}
+	if err := admin.RollbackToRestorePoint(context.Background(), pointID); err != nil {
+		t.Fatal(err)
+	}
+	if controller.staged != pointID || controller.discarded != "" {
+		t.Fatalf("rollback controller staged=%q discarded=%q", controller.staged, controller.discarded)
+	}
+	if len(executor.requests) != 1 || strings.Join(executor.requests[0].Arguments, " ") != "start --no-block gateway-vpn-update-rollback.service" {
+		t.Fatalf("rollback systemctl requests = %+v", executor.requests)
+	}
+	for _, argument := range executor.requests[0].Arguments {
+		if strings.Contains(argument, pointID) || strings.Contains(argument, "update-restore-points") {
+			t.Fatalf("rollback identity or path crossed systemctl boundary: %+v", executor.requests[0])
+		}
+	}
+}
+
+func TestSystemdUpdateAdminDiscardsRequestWhenHelperStartFails(t *testing.T) {
+	const pointID = "point-20260831T010000Z-0123456789abcdef01234567"
+	controller := &fakeUpdateRestorePointController{}
+	executor := &recordingExecutor{err: errors.New("systemd unavailable")}
+	admin := SystemdUpdateAdmin{
+		Executor: executor, Systemctl: filepath.Join(t.TempDir(), "systemctl"), RestorePoints: controller,
+	}
+	if err := admin.RollbackToRestorePoint(context.Background(), pointID); err == nil {
+		t.Fatal("systemctl start failure was hidden")
+	}
+	if controller.staged != pointID || controller.discarded != pointID {
+		t.Fatalf("failed dispatch staged=%q discarded=%q", controller.staged, controller.discarded)
+	}
+}
+
 func TestSystemdUpdateAdminReturnsOnlySanitizedRootJournalStatus(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "update-transactions")
 	now := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
@@ -67,4 +105,29 @@ func TestSystemdUpdateAdminReturnsOnlySanitizedRootJournalStatus(t *testing.T) {
 	if _, err := (SystemdUpdateAdmin{JournalRoot: t.TempDir()}).UpdateStatus(context.Background()); err == nil {
 		t.Fatal("unsafe update journal root was accepted")
 	}
+}
+
+type fakeUpdateRestorePointController struct {
+	staged    string
+	discarded string
+}
+
+func (controller *fakeUpdateRestorePointController) Inventory(context.Context) ([]updatepkg.RestorePoint, error) {
+	return nil, nil
+}
+
+func (controller *fakeUpdateRestorePointController) Delete(context.Context, string) error { return nil }
+
+func (controller *fakeUpdateRestorePointController) Prune(context.Context, updatepkg.RestorePointPolicy) ([]string, error) {
+	return nil, nil
+}
+
+func (controller *fakeUpdateRestorePointController) StageRollback(_ context.Context, pointID string) (updatepkg.RollbackRequest, error) {
+	controller.staged = pointID
+	return updatepkg.RollbackRequest{PointID: pointID}, nil
+}
+
+func (controller *fakeUpdateRestorePointController) DiscardRollback(pointID string) error {
+	controller.discarded = pointID
+	return nil
 }

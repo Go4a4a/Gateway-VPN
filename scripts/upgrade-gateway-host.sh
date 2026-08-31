@@ -189,11 +189,16 @@ TRANSACTIONS_DIR=/var/lib/gateway-vpn-privileged/install-transactions
 ORIGINAL_INSTALL_MARKER=$(find "$TRANSACTIONS_DIR" -maxdepth 1 -type f -name 'completed-*' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {sub(/^[^ ]+ /, ""); print}')
 [[ -n $ORIGINAL_INSTALL_MARKER ]] && validate_completed_install_marker "$ORIGINAL_INSTALL_MARKER" "$OLD_VERSION" || { echo "Installed Gateway completion marker is unavailable or invalid" >&2; exit 1; }
 
-for pending in /var/lib/gateway-vpn-privileged/install-transactions/active /var/lib/gateway-vpn/update-staging/pending-update.json /var/lib/gateway-vpn-privileged/update-transactions/active.json /var/lib/gateway-vpn/recovery/pending-restore.json; do
-  [[ ! -e $pending && ! -L $pending ]] || { echo "Finish the existing Gateway transaction before host upgrade" >&2; exit 1; }
-done
-[[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted host upgrade before retrying" >&2; exit 1; }
-[[ ! -e /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active ]] || { echo "Complete the durable Gateway uninstall before host upgrade" >&2; exit 1; }
+assert_no_conflicting_lifecycle() {
+  local pending
+  for pending in /var/lib/gateway-vpn-privileged/install-transactions/active /var/lib/gateway-vpn/update-staging/pending-update.json /var/lib/gateway-vpn-privileged/update-rollback/pending.json /var/lib/gateway-vpn/recovery/pending-restore.json; do
+    [[ ! -e $pending && ! -L $pending ]] || { echo "Finish the existing Gateway transaction before host upgrade" >&2; return 1; }
+  done
+  "$RELEASE_DIR/bin/gateway-vpn" update-lifecycle-check >/dev/null || { echo "Finish or recover the active Gateway update before host upgrade" >&2; return 1; }
+  [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted host upgrade before retrying" >&2; return 1; }
+  [[ ! -e /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active ]] || { echo "Complete the durable Gateway uninstall before host upgrade" >&2; return 1; }
+}
+assert_no_conflicting_lifecycle
 
 if ((APPLY == 0)); then
   echo "Signed host-contract upgrade dry-run PASS: $OLD_VERSION (schema $OLD_SCHEMA, host ${OLD_HOST_CONTRACT:0:12}…) -> $RELEASE_VERSION (schema $NEW_SCHEMA, host ${NEW_HOST_CONTRACT:0:12}…)."
@@ -209,6 +214,7 @@ fi
 [[ -f $LOCK_FILE && ! -L $LOCK_FILE && $(stat -c '%u:%g:%a' "$LOCK_FILE") == 0:0:600 ]] || { echo "Gateway transaction lock ownership or mode is invalid" >&2; exit 1; }
 exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
+assert_no_conflicting_lifecycle
 
 ROOT=/var/lib/gateway-vpn-host-upgrade
 install -d -m 0700 "$ROOT" "$ROOT/transactions"
@@ -259,7 +265,7 @@ trap 'resume_old_runtime_before_marker 143' TERM
 
 "$OLD_RELEASE/bin/gateway-vpn" firewall-boot --config /etc/gateway-vpn/config.yaml --apply
 systemctl stop \
-  gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service \
+  gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update-rollback.service \
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service \
   gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
   gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service \
@@ -268,6 +274,7 @@ systemctl stop \
 systemctl stop 'gateway-vpn-power-cycle@*.service' 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
 RUNTIME_QUIESCED=1
 nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+assert_no_conflicting_lifecycle
 "$RELEASE_DIR/bin/gateway-vpnctl" database-verify --database /var/lib/gateway-vpn/state.db --expected-schema "$OLD_SCHEMA" --json >/dev/null
 
 snapshot_item() {

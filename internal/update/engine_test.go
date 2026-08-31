@@ -20,7 +20,7 @@ func TestUpdateEngineAppliesSignedCandidateAndFinalizesAfterWindow(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.OldVersion != "1.1.0" || result.NewVersion != "1.2.0" || result.State != string(StateStabilizing) || result.PreUpdateSnapshot == "" || !result.StagingCleaned {
+	if result.OldVersion != "1.1.0" || result.NewVersion != "1.2.0" || result.State != string(StateStabilizing) || result.PreUpdateSnapshot == "" || result.RestorePoint == "" || !result.StagingCleaned {
 		t.Fatalf("Apply() = %+v", result)
 	}
 	if target := readCurrentTarget(t, fixture.releaseRoot); target != "releases/v1.2.0" {
@@ -30,7 +30,7 @@ func TestUpdateEngineAppliesSignedCandidateAndFinalizesAfterWindow(t *testing.T)
 		t.Fatalf("recovery target = %q", target)
 	}
 	journal, exists, err := fixture.engine.Store.LoadActive()
-	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 30 || journal.NewSchemaVersion != 30 || journal.CandidateDBSHA256 == "" {
+	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 31 || journal.NewSchemaVersion != 31 || journal.CandidateDBSHA256 == "" || journal.RestorePointID != result.RestorePoint {
 		t.Fatalf("active journal = %+v,%v,%v", journal, exists, err)
 	}
 	if _, exists, err := fixture.stager.Status(); err != nil || exists {
@@ -72,7 +72,7 @@ func TestUpdateEngineHealthFailureRestoresOldBinaryAndSnapshot(t *testing.T) {
 
 func TestUpdateEngineRejectsDifferentExistingArtifactWithSameVersion(t *testing.T) {
 	fixture := newEngineFixture(t)
-	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 30)
+	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 31)
 	if err := os.WriteFile(filepath.Join(otherRoot, "bin", "gateway-vpn"), []byte("different signed candidate"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -303,6 +303,182 @@ func TestUpdateEngineRejectsConcurrentTransactionProcess(t *testing.T) {
 	}
 }
 
+func TestManualRestorePointRollbackRestoresCompletePairAndFinalizes(t *testing.T) {
+	fixture := newEngineFixture(t)
+	targetPoint := prepareManualRollbackFixture(t, fixture)
+	result, err := fixture.engine.RollbackToRestorePoint(context.Background(), targetPoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RestorePointID != targetPoint || result.SafetyPointID == "" || result.OldVersion != "1.2.0" || result.TargetVersion != "1.1.0" || result.State != string(StateStabilizing) {
+		t.Fatalf("RollbackToRestorePoint() = %+v", result)
+	}
+	if target := readCurrentTarget(t, fixture.releaseRoot); target != "releases/v1.1.0" {
+		t.Fatalf("current after manual rollback = %q", target)
+	}
+	if target := readReleaseTarget(t, fixture.releaseRoot, "recovery"); target != "releases/v1.2.0" {
+		t.Fatalf("recovery advanced before stability window = %q", target)
+	}
+	assertManualRollbackState(t, fixture, false)
+	journal, exists, err := fixture.engine.Store.LoadActive()
+	if err != nil || !exists || journal.transactionKind() != TransactionRestorePointRollback || journal.TargetRestorePointID != targetPoint || journal.RestorePointID != result.SafetyPointID {
+		t.Fatalf("manual rollback journal = %+v,%v,%v", journal, exists, err)
+	}
+	fixture.clock = fixture.clock.Add(2 * time.Hour)
+	finalized, err := fixture.engine.Finalize(context.Background())
+	if err != nil || finalized.State != StateFinalized {
+		t.Fatalf("Finalize() = %+v,%v", finalized, err)
+	}
+	if target := readReleaseTarget(t, fixture.releaseRoot, "recovery"); target != "releases/v1.1.0" {
+		t.Fatalf("recovery after manual rollback finalization = %q", target)
+	}
+}
+
+func TestManualRestorePointRollbackPowerLossRestoresSafetyPoint(t *testing.T) {
+	fixture := newEngineFixture(t)
+	targetPoint := prepareManualRollbackFixture(t, fixture)
+	fixture.engine.AfterState = func(state TransactionState) error {
+		if state == StateDatabaseSwitched {
+			return errors.New("simulated power loss")
+		}
+		return nil
+	}
+	if _, err := fixture.engine.RollbackToRestorePoint(context.Background(), targetPoint); !errors.Is(err, errInjectedInterruption) {
+		t.Fatalf("interrupted RollbackToRestorePoint() = %v", err)
+	}
+	assertManualRollbackState(t, fixture, false)
+	fixture.engine.AfterState = nil
+	recovered, err := fixture.engine.Recover(context.Background())
+	if err != nil || !recovered {
+		t.Fatalf("Recover() = %v,%v", recovered, err)
+	}
+	if target := readCurrentTarget(t, fixture.releaseRoot); target != "releases/v1.2.0" {
+		t.Fatalf("current after safety recovery = %q", target)
+	}
+	assertManualRollbackState(t, fixture, true)
+	journal, _, _ := fixture.engine.Store.LoadActive()
+	if journal.State != StateRolledBack || journal.ErrorCode != "BOOT_OR_PROCESS_RECOVERY" {
+		t.Fatalf("recovered manual rollback journal = %+v", journal)
+	}
+}
+
+func TestManualRestorePointRollbackRejectsUnhealthyTargetAndRestoresSafetyPoint(t *testing.T) {
+	fixture := newEngineFixture(t)
+	targetPoint := prepareManualRollbackFixture(t, fixture)
+	fixture.runtime.failVersion = "1.1.0"
+	if _, err := fixture.engine.RollbackToRestorePoint(context.Background(), targetPoint); err == nil {
+		t.Fatal("unhealthy historical pair unexpectedly remained active")
+	}
+	if target := readCurrentTarget(t, fixture.releaseRoot); target != "releases/v1.2.0" {
+		t.Fatalf("current after rejected manual rollback = %q", target)
+	}
+	assertManualRollbackState(t, fixture, true)
+}
+
+func TestJournalAllowsOlderSchemaOnlyForCompleteRestorePointRollback(t *testing.T) {
+	journal := Journal{
+		FormatVersion: JournalFormatVersion, OperationKind: TransactionRestorePointRollback,
+		UpdateID: "update-20260831T120000Z-0123456789abcdef01234567", State: StateCandidateReady,
+		StartedAt: "2026-08-31T12:00:00Z", UpdatedAt: "2026-08-31T12:00:01Z",
+		OldVersion: "1.2.0", NewVersion: "1.1.0",
+		OldCurrentTarget: "releases/v1.2.0", NewCurrentTarget: "releases/v1.1.0",
+		PreUpdateSnapshotID:  "20260831T120000.000000000Z-0123456789abcdef01234567",
+		RestorePointID:       "point-20260831T120000Z-0123456789abcdef01234567",
+		TargetRestorePointID: "point-20260830T120000Z-fedcba9876543210fedcba98",
+		OldSchemaVersion:     31, NewSchemaVersion: 29,
+		CandidateDBSHA256: strings.Repeat("a", 64), DatabaseReplacementStarted: true,
+	}
+	if !validJournal(journal) {
+		t.Fatal("complete restore-point rollback to an older exact schema was rejected")
+	}
+	journal.OperationKind = TransactionSignedUpdate
+	journal.TargetRestorePointID = ""
+	if validJournal(journal) {
+		t.Fatal("ordinary signed update was allowed to lower the database schema")
+	}
+}
+
+func prepareManualRollbackFixture(t *testing.T, fixture *engineFixture) string {
+	t.Helper()
+	secretPath := filepath.Join(fixture.stateDir, "secrets", "mihomo-api-secret")
+	if err := os.MkdirAll(filepath.Dir(secretPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secretPath, []byte("historical-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.engine.Apply(context.Background(), fixture.operation.UpdateID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.clock = fixture.clock.Add(2 * time.Hour)
+	if _, err := fixture.engine.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.engine.CurrentVersion = "1.2.0"
+	if err := os.WriteFile(secretPath, []byte("newer-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.configPath, []byte(testBootstrapConfig+"# newer configuration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database, err := databasepkg.Open(context.Background(), databasepkg.OpenOptions{Path: fixture.databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO events(occurred_at,severity,type,details_json) VALUES('2026-08-25T00:01:00Z','INFO','NEWER_ONLY','{}')`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDatabaseSidecars(fixture.databasePath); err != nil {
+		t.Fatal(err)
+	}
+	return result.RestorePoint
+}
+
+func assertManualRollbackState(t *testing.T, fixture *engineFixture, newer bool) {
+	t.Helper()
+	for _, relative := range []string{
+		"secrets/subscriptions", "secrets/management", "secrets/wireguard-ingress",
+		"subscriptions", "tls", "mihomo/generations", "mihomo/state",
+	} {
+		info, err := os.Lstat(filepath.Join(fixture.stateDir, filepath.FromSlash(relative)))
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			t.Fatalf("restored fixed state directory %q is unsafe: %v", relative, err)
+		}
+	}
+	secret, err := os.ReadFile(filepath.Join(fixture.stateDir, "secrets", "mihomo-api-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecret := "historical-secret\n"
+	if newer {
+		wantSecret = "newer-secret\n"
+	}
+	if string(secret) != wantSecret {
+		t.Fatalf("restored secret = %q, want %q", secret, wantSecret)
+	}
+	configuration, err := os.ReadFile(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configuration), "newer configuration") != newer {
+		t.Fatalf("restored configuration newer=%t: %q", newer, configuration)
+	}
+	expected := 0
+	if newer {
+		expected = 1
+	}
+	assertEventCount(t, fixture.databasePath, "NEWER_ONLY", expected)
+}
+
 type engineFixture struct {
 	engine       *Engine
 	stager       *Stager
@@ -343,10 +519,10 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	if err := os.WriteFile(configPath, []byte(testBootstrapConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 30)
+	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 31)
 	keyPath := writePublicKeyFixture(t, stateDir, publicKey)
 	policy := fixturePolicy(publicKey)
-	policy.CurrentSchemaVersion = 30
+	policy.CurrentSchemaVersion = 31
 	newReleaseMetadata, err := ReadReleaseMetadata(newRelease)
 	if err != nil {
 		t.Fatal(err)
@@ -363,23 +539,12 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		t.Fatal(err)
 	}
 	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn")
-	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 30)
+	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 31)
+	if _, err := SignRelease(oldFixture, signingKey); err != nil {
+		t.Fatal(err)
+	}
 	oldRoot := filepath.Join(releaseRoot, "releases", "v1.1.0")
-	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyExclusiveFile(filepath.Join(oldFixture, ReleaseFilename), filepath.Join(oldRoot, ReleaseFilename), 0o644, MaximumReleaseBytes); err != nil {
-		t.Fatal(err)
-	}
-	for _, relative := range requiredHostContractFiles {
-		destination := filepath.Join(oldRoot, filepath.FromSlash(relative))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := copyExclusiveFile(filepath.Join(oldFixture, filepath.FromSlash(relative)), destination, 0o644, MaximumReleaseBytes); err != nil {
-			t.Fatal(err)
-		}
-	}
+	copyRestorePointReleaseFixture(t, oldFixture, oldRoot)
 	if err := createCurrentLink(filepath.Join(releaseRoot, "current"), filepath.FromSlash("releases/v1.1.0")); err != nil {
 		t.Fatalf("create current release symlink: %v", err)
 	}
@@ -388,12 +553,17 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		stager: stager, runtime: runtime, operation: operation, releaseRoot: releaseRoot,
 		stateDir: stateDir, databasePath: databasePath, configPath: configPath, clock: clock, signingKey: signingKey,
 	}
+	transactionRoot := filepath.Join(t.TempDir(), "gateway-vpn-privileged", "update-transactions")
 	fixture.engine = &Engine{
-		Stager: stager, Store: JournalStore{Root: filepath.Join(t.TempDir(), "gateway-vpn-privileged", "update-transactions")}, Runtime: runtime,
+		Stager: stager, Store: JournalStore{Root: transactionRoot}, Runtime: runtime,
 		ReleaseRoot: releaseRoot, StateDir: stateDir, DatabasePath: databasePath, ConfigPath: configPath,
 		CurrentVersion: "1.1.0", StateUID: 0, StateGID: 0, StabilityWindow: time.Hour,
 		Now:          func() time.Time { return fixture.clock },
 		setOwnership: func(string, int, int) error { return nil },
+	}
+	fixture.engine.RestorePoints = &RestorePointStore{
+		Root: filepath.Join(filepath.Dir(transactionRoot), "update-restore-points"), ReleaseRoot: releaseRoot,
+		StateDir: stateDir, Configuration: configPath, Verification: policy, Now: func() time.Time { return fixture.clock },
 	}
 	return fixture
 }

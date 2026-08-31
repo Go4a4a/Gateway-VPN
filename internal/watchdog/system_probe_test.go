@@ -110,6 +110,33 @@ func TestSystemProbeRejectsUnknownComponentAndMutablePrivilegedPath(t *testing.T
 	}
 }
 
+func TestSystemProbeSuppressesRecoveryForDurableHostLifecycleMarkers(t *testing.T) {
+	root := t.TempDir()
+	probe := fixedTestSystemProbe(&recordingExecutor{})
+	probe.InstallMarkerPath = filepath.Join(root, "install-active")
+	probe.HostUpgradeMarker = filepath.Join(root, "host-upgrade-active")
+	probe.UninstallMarker = filepath.Join(root, "uninstall-active")
+
+	for _, item := range []struct {
+		path string
+		code string
+	}{
+		{probe.HostUpgradeMarker, "HOST_UPGRADE_ACTIVE"},
+		{probe.UninstallMarker, "UNINSTALL_ACTIVE"},
+	} {
+		if err := os.WriteFile(item.path, []byte("active\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		active, code := probe.maintenance(context.Background())
+		if !active || code != item.code {
+			t.Fatalf("marker %q maintenance = %t,%q", item.path, active, code)
+		}
+		if err := os.Remove(item.path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestSystemProbeRestartMatrixIsFixedAndComplete(t *testing.T) {
 	want := map[string][]string{
 		ComponentControl:          {"gateway-vpn.service"},
@@ -160,6 +187,7 @@ func TestMaintenanceUnitAllowlistCoversDestructiveLifecycle(t *testing.T) {
 		"gateway-vpn-host-upgrade-recovery.service":     false,
 		"gateway-vpn-uninstall.service":                 false,
 		"gateway-vpn-update.service":                    false,
+		"gateway-vpn-update-rollback.service":           false,
 		"gateway-vpn-update-recovery.service":           false,
 		"gateway-vpn-update-finalize.service":           false,
 		"gateway-vpn-update-resume.service":             false,
@@ -239,6 +267,8 @@ func fixedTestSystemProbe(executor platformexec.Executor) *SystemProbe {
 		WireGuardConfigPath: "/etc/gateway-vpn/wireguard.yaml", LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
+		HostUpgradeMarker: "/var/lib/gateway-vpn-host-upgrade/active",
+		UninstallMarker:   "/var/lib/gateway-vpn-uninstall/active",
 		ManagementFabric:  &fakeManagementFabricRuntime{},
 	}
 }

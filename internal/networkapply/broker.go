@@ -24,6 +24,7 @@ import (
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/traffic"
+	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -42,6 +43,7 @@ type BrokerServer struct {
 	Diagnostics      HostDiagnosticsAdmin
 	Restore          RestoreAdmin
 	Update           UpdateAdmin
+	UpdateRestore    UpdateRestorePointAdmin
 	Traffic          TrafficAdmin
 	Recovery         ModemRecoveryAdmin
 	Power            PowerAdmin
@@ -134,6 +136,17 @@ type UpdateAdmin interface {
 	UpdateStatus(context.Context) (UpdateTransactionStatus, error)
 }
 
+// UpdateRestorePointAdmin owns verified historical update state below the
+// privileged root. The control plane may provide only a bounded point id or a
+// typed retention policy; release paths and protection roles are derived by
+// the root controller.
+type UpdateRestorePointAdmin interface {
+	RestorePointInventory(context.Context) ([]updatepkg.RestorePoint, error)
+	DeleteRestorePoint(context.Context, string) error
+	PruneRestorePoints(context.Context, updatepkg.RestorePointPolicy) ([]string, error)
+	RollbackToRestorePoint(context.Context, string) error
+}
+
 // TrafficAdmin exposes one read-only, parameter-free snapshot. The root
 // implementation reads only the two named counters in the owned nftables
 // table plus the boot/table epoch; callers cannot supply an nft object or
@@ -193,15 +206,20 @@ type ManagementFabricStatus struct {
 // the unprivileged control plane. It intentionally omits filesystem paths,
 // database hashes, snapshot identifiers and service-manager diagnostics.
 type UpdateTransactionStatus struct {
-	Exists            bool   `json:"exists"`
-	UpdateID          string `json:"update_id,omitempty"`
-	State             string `json:"state,omitempty"`
-	StartedAt         string `json:"started_at,omitempty"`
-	UpdatedAt         string `json:"updated_at,omitempty"`
-	OldVersion        string `json:"old_version,omitempty"`
-	NewVersion        string `json:"new_version,omitempty"`
-	StabilityDeadline string `json:"stability_deadline,omitempty"`
-	ErrorCode         string `json:"error_code,omitempty"`
+	Exists             bool   `json:"exists"`
+	OperationKind      string `json:"operation_kind,omitempty"`
+	UpdateID           string `json:"update_id,omitempty"`
+	State              string `json:"state,omitempty"`
+	StartedAt          string `json:"started_at,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+	OldVersion         string `json:"old_version,omitempty"`
+	NewVersion         string `json:"new_version,omitempty"`
+	StabilityDeadline  string `json:"stability_deadline,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
+	SourceKind         string `json:"source_kind,omitempty"`
+	SourceChannel      string `json:"source_channel,omitempty"`
+	SourceReference    string `json:"source_reference,omitempty"`
+	TargetRestorePoint string `json:"target_restore_point_id,omitempty"`
 }
 
 type brokerApplyRequest struct {
@@ -264,6 +282,9 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 		return nil, errors.New("network apply engine is required")
 	}
 	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin, Recovery: recoveryAdmin}
+	if restorePoints, ok := updateAdmin.(UpdateRestorePointAdmin); ok {
+		server.UpdateRestore = restorePoints
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/topology/preview", server.previewTopology)
 	mux.HandleFunc("POST /v1/stage", server.stage)
@@ -316,6 +337,12 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	if updateAdmin != nil {
 		mux.HandleFunc("POST /v1/update/apply", server.applyPendingUpdate)
 		mux.HandleFunc("POST /v1/update/status", server.updateTransactionStatus)
+	}
+	if server.UpdateRestore != nil {
+		mux.HandleFunc("POST /v1/update/restore-points/inventory", server.updateRestorePointInventory)
+		mux.HandleFunc("POST /v1/update/restore-points/delete", server.deleteUpdateRestorePoint)
+		mux.HandleFunc("POST /v1/update/restore-points/prune", server.pruneUpdateRestorePoints)
+		mux.HandleFunc("POST /v1/update/restore-points/rollback", server.rollbackToUpdateRestorePoint)
 	}
 	if trafficAdmin != nil {
 		mux.HandleFunc("POST /v1/traffic/counters", server.readTrafficCounters)
@@ -642,6 +669,66 @@ func (server *BrokerServer) updateTransactionStatus(writer http.ResponseWriter, 
 		return
 	}
 	writeBrokerJSON(writer, http.StatusOK, status)
+}
+
+func (server *BrokerServer) updateRestorePointInventory(writer http.ResponseWriter, request *http.Request) {
+	var input struct{}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	items, err := server.UpdateRestore.RestorePointInventory(request.Context())
+	if err != nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "UPDATE_RESTORE_POINTS_UNAVAILABLE")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *BrokerServer) deleteUpdateRestorePoint(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		PointID string `json:"point_id"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil || updatepkg.ValidateRestorePointID(input.PointID) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if err := server.UpdateRestore.DeleteRestorePoint(request.Context(), input.PointID); err != nil {
+		writeBrokerError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_DELETE_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *BrokerServer) pruneUpdateRestorePoints(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Policy updatepkg.RestorePointPolicy `json:"policy"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	removed, err := server.UpdateRestore.PruneRestorePoints(request.Context(), input.Policy)
+	if err != nil {
+		writeBrokerError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_PRUNE_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, map[string]any{"removed": removed})
+}
+
+func (server *BrokerServer) rollbackToUpdateRestorePoint(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		PointID string `json:"point_id"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil || updatepkg.ValidateRestorePointID(input.PointID) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if err := server.UpdateRestore.RollbackToRestorePoint(request.Context(), input.PointID); err != nil {
+		writeBrokerError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_ROLLBACK_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (server *BrokerServer) applyPendingRestore(writer http.ResponseWriter, request *http.Request) {
@@ -1359,6 +1446,30 @@ func (client *BrokerClient) UpdateStatus(ctx context.Context) (UpdateTransaction
 	var status UpdateTransactionStatus
 	err := client.call(ctx, "/v1/update/status", struct{}{}, http.StatusOK, &status)
 	return status, err
+}
+
+func (client *BrokerClient) RestorePointInventory(ctx context.Context) ([]updatepkg.RestorePoint, error) {
+	var result struct {
+		Items []updatepkg.RestorePoint `json:"items"`
+	}
+	err := client.call(ctx, "/v1/update/restore-points/inventory", struct{}{}, http.StatusOK, &result)
+	return result.Items, err
+}
+
+func (client *BrokerClient) DeleteRestorePoint(ctx context.Context, pointID string) error {
+	return client.call(ctx, "/v1/update/restore-points/delete", map[string]string{"point_id": pointID}, http.StatusNoContent, nil)
+}
+
+func (client *BrokerClient) PruneRestorePoints(ctx context.Context, policy updatepkg.RestorePointPolicy) ([]string, error) {
+	var result struct {
+		Removed []string `json:"removed"`
+	}
+	err := client.call(ctx, "/v1/update/restore-points/prune", map[string]any{"policy": policy}, http.StatusOK, &result)
+	return result.Removed, err
+}
+
+func (client *BrokerClient) RollbackToRestorePoint(ctx context.Context, pointID string) error {
+	return client.call(ctx, "/v1/update/restore-points/rollback", map[string]string{"point_id": pointID}, http.StatusNoContent, nil)
 }
 
 func (client *BrokerClient) AuthorizeBootstrap(ctx context.Context, authorization dataplane.BootstrapAuthorization) error {

@@ -57,6 +57,7 @@ var maintenanceUnits = []struct {
 	{"gateway-vpn-host-upgrade-recovery.service", "HOST_UPGRADE_RECOVERY_ACTIVE"},
 	{"gateway-vpn-uninstall.service", "UNINSTALL_ACTIVE"},
 	{"gateway-vpn-update.service", "UPDATE_ACTIVE"},
+	{"gateway-vpn-update-rollback.service", "UPDATE_ROLLBACK_ACTIVE"},
 	{"gateway-vpn-update-recovery.service", "UPDATE_RECOVERY_ACTIVE"},
 	{"gateway-vpn-update-finalize.service", "UPDATE_FINALIZE_ACTIVE"},
 	{"gateway-vpn-update-resume.service", "UPDATE_RESUME_ACTIVE"},
@@ -105,6 +106,8 @@ type SystemProbe struct {
 	RoutingTableStart   uint32
 	FwmarkStart         uint32
 	InstallMarkerPath   string
+	HostUpgradeMarker   string
+	UninstallMarker     string
 	ManagementFabric    ManagementFabricRuntime
 	Now                 func() time.Time
 
@@ -282,6 +285,12 @@ func (probe *SystemProbe) maintenance(ctx context.Context) (bool, string) {
 	if pathExists(probe.InstallMarkerPath) || pathExists("/run/gateway-vpn-install-authorized") {
 		return true, "INSTALL_ACTIVE"
 	}
+	if pathExists(probe.HostUpgradeMarker) {
+		return true, "HOST_UPGRADE_ACTIVE"
+	}
+	if pathExists(probe.UninstallMarker) {
+		return true, "UNINSTALL_ACTIVE"
+	}
 	for _, item := range maintenanceUnits {
 		if probe.unitTransitioning(ctx, item.unit) {
 			return true, item.code
@@ -432,7 +441,7 @@ func (probe *SystemProbe) run(ctx context.Context, executable string, arguments 
 }
 
 func (probe *SystemProbe) validate() error {
-	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.WG != "/usr/bin/wg" || probe.SSHD != "/usr/sbin/sshd" || probe.SS != "/usr/bin/ss" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.LogExportRoot != "/var/log/gateway-vpn" || probe.WireGuardConfigPath != "/etc/gateway-vpn/wireguard.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 || probe.LANPrefix == "" || probe.WireGuardPrefix != "10.80.0.0/24" || len(probe.BootstrapDNS) == 0 || probe.RoutingTableStart < 256 || probe.FwmarkStart == 0 {
+	if probe == nil || probe.Executor == nil || probe.Systemctl != "/usr/bin/systemctl" || probe.NFT != "/usr/sbin/nft" || probe.IP != "/usr/sbin/ip" || probe.WG != "/usr/bin/wg" || probe.SSHD != "/usr/sbin/sshd" || probe.SS != "/usr/bin/ss" || probe.GatewayBinary != "/opt/gateway-vpn/current/bin/gateway-vpn" || probe.ConfigPath != "/etc/gateway-vpn/config.yaml" || probe.DatabasePath != "/var/lib/gateway-vpn/state.db" || probe.HeartbeatPath != "/run/gateway-vpn-watchdog/control.json" || probe.MihomoConfigPath != "/var/lib/gateway-vpn/mihomo/active/config.yaml" || probe.LogExportRoot != "/var/log/gateway-vpn" || probe.WireGuardConfigPath != "/etc/gateway-vpn/wireguard.yaml" || probe.InstallMarkerPath != "/var/lib/gateway-vpn-privileged/install-transactions/active" || probe.HostUpgradeMarker != "/var/lib/gateway-vpn-host-upgrade/active" || probe.UninstallMarker != "/var/lib/gateway-vpn-uninstall/active" || probe.MihomoTUN == "" || len(probe.MihomoTUN) > 15 || probe.LANPrefix == "" || probe.WireGuardPrefix != "10.80.0.0/24" || len(probe.BootstrapDNS) == 0 || probe.RoutingTableStart < 256 || probe.FwmarkStart == 0 {
 		return errors.New("complete fixed system watchdog probe configuration is required")
 	}
 	return nil

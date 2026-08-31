@@ -59,6 +59,60 @@ type previewRefresher struct{}
 
 type previewDirectProbe struct{}
 
+type previewRestorePoints struct {
+	mutex sync.Mutex
+	items []updatepkg.RestorePoint
+}
+
+func (points *previewRestorePoints) RestorePointInventory(context.Context) ([]updatepkg.RestorePoint, error) {
+	points.mutex.Lock()
+	defer points.mutex.Unlock()
+	return append([]updatepkg.RestorePoint(nil), points.items...), nil
+}
+
+func (points *previewRestorePoints) DeleteRestorePoint(_ context.Context, pointID string) error {
+	points.mutex.Lock()
+	defer points.mutex.Unlock()
+	for index, item := range points.items {
+		if item.Manifest.PointID != pointID {
+			continue
+		}
+		if item.Protected {
+			return errors.New("preview restore point is protected")
+		}
+		points.items = append(points.items[:index], points.items[index+1:]...)
+		return nil
+	}
+	return errors.New("preview restore point was not found")
+}
+
+func (points *previewRestorePoints) PruneRestorePoints(context.Context, updatepkg.RestorePointPolicy) ([]string, error) {
+	points.mutex.Lock()
+	defer points.mutex.Unlock()
+	kept := points.items[:0]
+	removed := make([]string, 0)
+	for _, item := range points.items {
+		if item.Protected {
+			kept = append(kept, item)
+			continue
+		}
+		removed = append(removed, item.Manifest.PointID)
+	}
+	points.items = kept
+	return removed, nil
+}
+
+func (points *previewRestorePoints) RollbackToRestorePoint(_ context.Context, pointID string) error {
+	points.mutex.Lock()
+	defer points.mutex.Unlock()
+	for _, item := range points.items {
+		if item.Manifest.PointID == pointID && item.Compatible {
+			return nil
+		}
+	}
+	return errors.New("preview restore point is unavailable or incompatible")
+}
+
 func (previewDirectProbe) ProbeAllNow(context.Context) (directprobe.CycleResult, error) {
 	return directprobe.CycleResult{Due: 5, Probed: 5, Published: 5, Errors: map[string]string{}}, nil
 }
@@ -712,6 +766,22 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 	operationRepository := operations.NewRepository(database)
 	watchdogRepository := &watchdog.Repository{Database: database}
 	networkBroker := previewNetworkBroker{}
+	updateRestorePoints := &previewRestorePoints{items: []updatepkg.RestorePoint{
+		{
+			Manifest: updatepkg.RestorePointManifest{
+				FormatVersion: updatepkg.RestorePointFormatVersion, PointID: "point-20260830T030000Z-0123456789abcdef01234567", Kind: updatepkg.RestorePointKindPreUpdate,
+				CreatedAt: previewNow.Add(-30 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.1.0", SchemaVersion: 31, TotalBytes: 780 << 20, Verification: "PASS",
+			},
+			Protected: true, Roles: []string{"CURRENT", "RECOVERY"}, Compatible: true,
+		},
+		{
+			Manifest: updatepkg.RestorePointManifest{
+				FormatVersion: updatepkg.RestorePointFormatVersion, PointID: "point-20260801T030000Z-89abcdef0123456789abcdef", Kind: updatepkg.RestorePointKindPreUpdate,
+				CreatedAt: previewNow.Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.0.0", SchemaVersion: 30, TotalBytes: 704 << 20, Verification: "PASS",
+			},
+			Compatible: false, CompatibilityReason: "HOST_CONTRACT_CHANGED",
+		},
+	}}
 	api, err := webapi.New(webapi.Dependencies{
 		Database: database, Auth: authService, State: state.NewRepository(database),
 		Modems: modems, Uplinks: uplinks, Subscriptions: subscriptions, Nodes: subscription.NewNodeRepository(database), Paths: paths, Targets: targets, Matchers: matchers,
@@ -745,6 +815,7 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 			StartedAt: previewNow.Add(-48 * time.Hour).Format(time.RFC3339Nano), UpdatedAt: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 			OldVersion: "1.0.0", NewVersion: "1.1.0", StabilityDeadline: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 		}},
+		UpdatePolicy: &updatepkg.AutomationPolicyRepository{Database: database, Now: func() time.Time { return previewNow }}, UpdateRestorePoints: updateRestorePoints,
 	})
 	if err != nil {
 		return err

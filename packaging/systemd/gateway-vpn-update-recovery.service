@@ -34,8 +34,8 @@ AmbientCapabilities=CAP_DAC_OVERRIDE CAP_CHOWN
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
-ReadOnlyPaths=/etc/gateway-vpn /usr
-ReadWritePaths=/opt/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run
+ReadOnlyPaths=/usr
+ReadWritePaths=/opt/gateway-vpn /etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run
 
 [Install]
 WantedBy=multi-user.target

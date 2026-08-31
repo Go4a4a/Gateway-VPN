@@ -54,13 +54,16 @@ exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway lifecycle transaction is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-privileged/install-transactions/active && ! -L /var/lib/gateway-vpn-privileged/install-transactions/active ]] || { echo "Gateway installation recovery is active" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Gateway host-upgrade recovery is active" >&2; exit 1; }
+for pending in /var/lib/gateway-vpn/update-staging/pending-update.json /var/lib/gateway-vpn-privileged/update-rollback/pending.json /var/lib/gateway-vpn/recovery/pending-restore.json; do
+  [[ ! -e $pending && ! -L $pending ]] || { echo "Gateway update or restore transaction is active" >&2; exit 1; }
+done
 
 validate_tooling() {
   [[ -d $TOOLING && ! -L $TOOLING && $(stat -c '%u:%g:%a' "$TOOLING") == 0:0:700 ]] || return 1
   [[ -f $TOOLING_READY && ! -L $TOOLING_READY && $(stat -c '%u:%g:%a' "$TOOLING_READY") == 0:0:600 ]] || return 1
-  [[ $(wc -l <"$TOOLING_READY") == 4 ]] || return 1
+  [[ $(wc -l <"$TOOLING_READY") == 5 ]] || return 1
   local file key expected actual
-  for file in gateway-vpnctl uninstall.sh update-signing.pub; do
+  for file in gateway-vpn gateway-vpnctl uninstall.sh update-signing.pub; do
     [[ -f $TOOLING/$file && ! -L $TOOLING/$file ]] || return 1
     if [[ $file == update-signing.pub ]]; then
       [[ $(stat -c '%u:%g:%a' "$TOOLING/$file") == 0:0:600 ]] || return 1
@@ -82,7 +85,7 @@ if ! validate_tooling; then
     [[ -d $TOOLING && ! -L $TOOLING && $(stat -c '%u:%g:%a' "$TOOLING") == 0:0:700 ]] || { echo "Interrupted Gateway uninstall tooling root is unsafe" >&2; exit 1; }
     mapfile -t TOOLING_ENTRIES < <(find "$TOOLING" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
     for entry in "${TOOLING_ENTRIES[@]}"; do
-      [[ $entry == gateway-vpnctl || $entry == uninstall.sh || $entry == update-signing.pub ]] || { echo "Interrupted Gateway uninstall tooling has unknown entries" >&2; exit 1; }
+      [[ $entry == gateway-vpn || $entry == gateway-vpnctl || $entry == uninstall.sh || $entry == update-signing.pub ]] || { echo "Interrupted Gateway uninstall tooling has unknown entries" >&2; exit 1; }
       [[ -f $TOOLING/$entry && ! -L $TOOLING/$entry ]] || { echo "Interrupted Gateway uninstall tooling entry is unsafe" >&2; exit 1; }
     done
     rm -rf "$TOOLING"
@@ -97,17 +100,19 @@ if ! validate_tooling; then
   CURRENT_VERSION=${BASH_REMATCH[1]}
   [[ $CURRENT_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "Installed Gateway version is invalid" >&2; exit 1; }
   CURRENT_RELEASE=/opt/gateway-vpn/releases/v$CURRENT_VERSION
-  [[ -d $CURRENT_RELEASE && ! -L $CURRENT_RELEASE && -x $CURRENT_RELEASE/bin/gateway-vpnctl && -x $CURRENT_RELEASE/scripts/uninstall.sh ]] || { echo "Installed Gateway release is incomplete" >&2; exit 1; }
+  [[ -d $CURRENT_RELEASE && ! -L $CURRENT_RELEASE && -x $CURRENT_RELEASE/bin/gateway-vpn && -x $CURRENT_RELEASE/bin/gateway-vpnctl && -x $CURRENT_RELEASE/scripts/uninstall.sh ]] || { echo "Installed Gateway release is incomplete" >&2; exit 1; }
   [[ -f /etc/gateway-vpn/update-signing.pub && ! -L /etc/gateway-vpn/update-signing.pub && $(stat -c '%u:%a' /etc/gateway-vpn/update-signing.pub) == 0:644 ]] || { echo "Trusted Gateway update key is unavailable or unsafe" >&2; exit 1; }
   "$CURRENT_RELEASE/bin/gateway-vpnctl" release-verify --release-dir "$CURRENT_RELEASE" --public-key /etc/gateway-vpn/update-signing.pub --current-version 0.0.0 --current-schema 1 >/dev/null
   cmp -s -- "$HELPER" "$CURRENT_RELEASE/scripts/run-gateway-uninstall-job.sh" || { echo "Installed Gateway uninstall helper differs from the signed release" >&2; exit 1; }
   cmp -s -- "$UNIT" "$CURRENT_RELEASE/packaging/systemd/gateway-vpn-uninstall.service" || { echo "Installed Gateway uninstall unit differs from the signed release" >&2; exit 1; }
   install -d -m 0700 "$TOOLING"
+  install -m 0700 "$CURRENT_RELEASE/bin/gateway-vpn" "$TOOLING/gateway-vpn"
   install -m 0700 "$CURRENT_RELEASE/bin/gateway-vpnctl" "$TOOLING/gateway-vpnctl"
   install -m 0700 "$CURRENT_RELEASE/scripts/uninstall.sh" "$TOOLING/uninstall.sh"
   install -m 0600 /etc/gateway-vpn/update-signing.pub "$TOOLING/update-signing.pub"
   TOOLING_TMP=$ROOT/.tooling-ready.tmp
-  printf 'format=1\ngateway-vpnctl_sha256=%s\nuninstall.sh_sha256=%s\nupdate-signing.pub_sha256=%s\n' \
+  printf 'format=1\ngateway-vpn_sha256=%s\ngateway-vpnctl_sha256=%s\nuninstall.sh_sha256=%s\nupdate-signing.pub_sha256=%s\n' \
+    "$(sha256sum --binary "$TOOLING/gateway-vpn" | awk '{print $1}')" \
     "$(sha256sum --binary "$TOOLING/gateway-vpnctl" | awk '{print $1}')" \
     "$(sha256sum --binary "$TOOLING/uninstall.sh" | awk '{print $1}')" \
     "$(sha256sum --binary "$TOOLING/update-signing.pub" | awk '{print $1}')" >"$TOOLING_TMP"
@@ -117,6 +122,8 @@ if ! validate_tooling; then
   sync -f "$ROOT"
   validate_tooling || { echo "Prepared Gateway uninstall tooling failed verification" >&2; exit 1; }
 fi
+
+"$TOOLING/gateway-vpn" update-lifecycle-check >/dev/null || { echo "Gateway update lifecycle is active or unsafe" >&2; exit 1; }
 
 # Install the signed boot policy before stopping any process. It contains the
 # fixed PATH_BLOCKED forwarding posture while keeping scoped management access.

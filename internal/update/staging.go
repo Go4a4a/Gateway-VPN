@@ -25,6 +25,9 @@ const (
 	MaximumArchiveEntries = MaximumFiles * 2
 	MaximumArchiveTrailer = int64(1 << 20)
 	pendingFilename       = "pending-update.json"
+	SourceUpload          = "WEBUI_UPLOAD"
+	SourceGitHubChannel   = "GITHUB_CHANNEL"
+	SourceExactHTTPS      = "EXACT_HTTPS"
 )
 
 var updateIDPattern = regexp.MustCompile(`^update-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{24}$`)
@@ -42,6 +45,17 @@ type Operation struct {
 	ManifestSHA256    string `json:"manifest_sha256"`
 	UncompressedBytes int64  `json:"uncompressed_bytes"`
 	FileCount         int    `json:"file_count"`
+	SourceKind        string `json:"source_kind,omitempty"`
+	SourceChannel     string `json:"source_channel,omitempty"`
+	SourceReference   string `json:"source_reference,omitempty"`
+}
+
+// Source is intentionally safe to persist and display. Reference must never
+// contain a URL query, credentials, filesystem path, or bearer token.
+type Source struct {
+	Kind      string
+	Channel   string
+	Reference string
 }
 
 type Stager struct {
@@ -66,10 +80,17 @@ func NewStager(stateDirectory, trustedKeyPath string, policy VerificationPolicy)
 }
 
 func (stager *Stager) Stage(ctx context.Context, archive io.Reader) (Operation, error) {
+	return stager.StageWithSource(ctx, archive, Source{Kind: SourceUpload, Reference: "manual WebUI upload"})
+}
+
+func (stager *Stager) StageWithSource(ctx context.Context, archive io.Reader, source Source) (Operation, error) {
 	stager.mutex.Lock()
 	defer stager.mutex.Unlock()
 	if archive == nil {
 		return Operation{}, errors.New("release archive reader is required")
+	}
+	if !validSource(source) {
+		return Operation{}, errors.New("update source metadata is invalid or unsafe")
 	}
 	if err := stager.prepareRoot(); err != nil {
 		return Operation{}, err
@@ -115,6 +136,7 @@ func (stager *Stager) Stage(ctx context.Context, archive io.Reader) (Operation, 
 		GatewayVersion: verified.Release.GatewayVersion, MihomoVersion: verified.Release.MihomoVersion,
 		SignerKeySHA256: verified.Fingerprint, ManifestSHA256: manifestDigest,
 		UncompressedBytes: bytesWritten, FileCount: files,
+		SourceKind: source.Kind, SourceChannel: source.Channel, SourceReference: source.Reference,
 	}
 	if err := writePendingOperation(filepath.Join(stager.Root, pendingFilename), operation); err != nil {
 		_ = removeStrictTree(final)
@@ -321,7 +343,26 @@ func writePendingOperation(filename string, operation Operation) error {
 
 func validOperation(operation Operation) bool {
 	created, err := time.Parse(time.RFC3339Nano, operation.CreatedAt)
-	return operation.FormatVersion == StagingFormatVersion && updateIDPattern.MatchString(operation.UpdateID) && operation.State == "STAGED" && err == nil && !created.IsZero() && versionPattern.MatchString(operation.GatewayVersion) && mihomoVersionPattern.MatchString(operation.MihomoVersion) && digestPattern.MatchString(operation.SignerKeySHA256) && digestPattern.MatchString(operation.ManifestSHA256) && operation.UncompressedBytes > 0 && operation.UncompressedBytes <= MaximumArtifactBytes && operation.FileCount >= 7 && operation.FileCount <= MaximumFiles+2
+	sourceValid := operation.SourceKind == "" && operation.SourceChannel == "" && operation.SourceReference == "" || validSource(Source{Kind: operation.SourceKind, Channel: operation.SourceChannel, Reference: operation.SourceReference})
+	return operation.FormatVersion == StagingFormatVersion && updateIDPattern.MatchString(operation.UpdateID) && operation.State == "STAGED" && err == nil && !created.IsZero() && versionPattern.MatchString(operation.GatewayVersion) && mihomoVersionPattern.MatchString(operation.MihomoVersion) && digestPattern.MatchString(operation.SignerKeySHA256) && digestPattern.MatchString(operation.ManifestSHA256) && operation.UncompressedBytes > 0 && operation.UncompressedBytes <= MaximumArtifactBytes && operation.FileCount >= 7 && operation.FileCount <= MaximumFiles+2 && sourceValid
+}
+
+func validSource(source Source) bool {
+	if source.Kind != SourceUpload && source.Kind != SourceGitHubChannel && source.Kind != SourceExactHTTPS {
+		return false
+	}
+	if source.Kind == SourceGitHubChannel {
+		if source.Channel != "stable" && source.Channel != "testing" {
+			return false
+		}
+	} else if source.Channel != "" {
+		return false
+	}
+	reference := strings.TrimSpace(source.Reference)
+	if reference == "" || len(reference) > 256 || strings.ContainsAny(reference, "\r\n\t") || strings.Contains(reference, "?") || strings.Contains(reference, "@") {
+		return false
+	}
+	return reference == source.Reference
 }
 
 func (stager *Stager) prepareRoot() error {

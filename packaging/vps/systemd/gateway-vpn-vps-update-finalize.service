@@ -3,6 +3,7 @@ Description=Finalize a stable Gateway VPN VPS update
 Documentation=file:///opt/gateway-vpn-vps/recovery/share/doc/OPERATIONS.md
 After=gateway-vpn-vps-update-recovery.service gateway-vpn-vps-agent.service
 Requires=gateway-vpn-vps-update-recovery.service
+Conflicts=gateway-vpn-vps-update.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service
 OnFailure=gateway-vpn-vps-update-recovery.service
 ConditionPathExists=|!/var/lib/gateway-vpn-vps/install-transactions/active
 ConditionPathExists=|/run/gateway-vpn-vps-install-authorized
@@ -14,7 +15,6 @@ Type=oneshot
 User=root
 Group=root
 Environment=GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT=1
-ExecStartPre=/usr/bin/install -o root -g root -m 0600 /dev/null /run/gateway-vpn-vps-update-live
 ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-finalize --config /etc/gateway-vpn-vps/config.yaml --apply
 ExecStopPost=/usr/bin/rm -f /run/gateway-vpn-vps-update-live
 UMask=0077

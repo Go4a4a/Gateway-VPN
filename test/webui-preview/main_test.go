@@ -27,14 +27,20 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	go func() { done <- runContext(ctx, address, false, false, false) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	var networkBody, topologyBody []byte
+	var networkBody, topologyBody, updatePolicyBody, restorePointsBody []byte
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		networkBody, err = getPreview(client, "http://"+address+"/api/v1/settings/network")
 		if err == nil {
 			topologyBody, err = getPreview(client, "http://"+address+"/api/v1/network/topology")
 			if err == nil {
-				break
+				updatePolicyBody, err = getPreview(client, "http://"+address+"/api/v1/settings/software-update")
+				if err == nil {
+					restorePointsBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/restore-points")
+					if err == nil {
+						break
+					}
+				}
 			}
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -55,6 +61,22 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	}
 	if topology["active_profile"] != "ETHERNET_HILINK" || topology["desired_generation"] != float64(1) {
 		t.Fatalf("topology state = %s", topologyBody)
+	}
+	var updatePolicy map[string]any
+	if err := json.Unmarshal(updatePolicyBody, &updatePolicy); err != nil {
+		t.Fatal(err)
+	}
+	if updatePolicy["channel"] != "stable" || updatePolicy["maintenance_start_minute_utc"] != float64(180) {
+		t.Fatalf("software update policy = %s", updatePolicyBody)
+	}
+	var restorePoints struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(restorePointsBody, &restorePoints); err != nil {
+		t.Fatal(err)
+	}
+	if len(restorePoints.Items) != 2 {
+		t.Fatalf("restore point inventory = %s", restorePointsBody)
 	}
 
 	cancel()

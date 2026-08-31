@@ -232,11 +232,11 @@ Successor добавляет один лёгкий `gateway-vpn-vps` Go Agent с
 
 Вкладка **Обновление VPS Hub** принимает только versioned signed VPS `.tar.gz`. Upload выполняет непривилегированный Agent в закрытый `update-staging`, проверяет strict archive layout, Ed25519 signature, полный manifest/hash, OS/arch/profile, более новую SemVer и совместимость schema. Если hash полного `packaging/vps/*` host contract отличается, pointer-update возвращает `UPDATE_REQUIRES_INSTALLER` до изменения хоста: обычное обновление не заменяет systemd/nft/sysctl/WireGuard installation contract.
 
-После password re-authentication и точной фразы `ОБНОВИТЬ VPS HUB` WebUI создаёт только mode-`0600` trigger в Agent state. Fixed `.path` запускает root updater без HTTP-пути, unit name или command arguments. Root повторно проверяет staging и current signed tree, удерживает общий update `flock`, закрепляет старый `recovery`, устанавливает candidate в immutable release directory, quiesce-ит только owned control-plane units, создаёт SQLite Online Backup, мигрирует/проверяет копию и атомарно переключает DB с `current`.
+После password re-authentication и точной фразы `ОБНОВИТЬ VPS HUB` WebUI создаёт только mode-`0600` trigger в Agent state. Fixed `.path` запускает root updater без HTTP-пути, unit name или command arguments. До создания live-marker root-команда атомарно получает общий VPS lifecycle lock `/run/lock/gateway-vpn-vps-install.lock`, поэтому update/finalize не пересекаются с install/recovery/uninstall; отдельный update lock сериализует только журналы updater. Root повторно проверяет staging и current signed tree, закрепляет старый `recovery`, устанавливает candidate в immutable release directory, quiesce-ит только owned control-plane units, создаёт SQLite Online Backup, мигрирует/проверяет копию и атомарно переключает DB с `current`.
 
 Candidate обязан три последовательных раза пройти version/state и owned-unit health. После этого WebUI показывает `STABILIZING`: `current` уже новый, но `recovery` остаётся старым 24 часа. Fixed finalize timer повторяет health check и только после deadline переводит `recovery` на candidate. SIGKILL, service failure либо boot с незавершённым journal запускает independent recovery из старого pointer; потерянный `active.json` восстанавливается по второй transaction-local journal copy. Marker `/run/gateway-vpn-vps-update-live` подавляет boot recovery только пока реально работает apply/finalize и исчезает после process death/reboot.
 
-Состояния `PREPARED…STABILIZING/FINALIZED/ROLLED_BACK/ROLLBACK_FAILED`, версии, timestamps и безопасный error code доступны в WebUI. Привилегированные paths, DB/snapshot hashes и systemd stderr не публикуются. При `ROLLED_BACK` старая release+DB пара снова активна; `ROLLBACK_FAILED` требует не удалять transaction directory и сначала собрать diagnostic bundle/журнал. До завершения или rollback нельзя запускать restore, uninstall либо другую update transaction. Updater не меняет APT, AmneziaVPN, Docker, UFW, foreign WireGuard/routes/firewall и не вызывает reboot VPS.
+Состояния `PREPARED…STABILIZING/FINALIZED/ROLLED_BACK/ROLLBACK_FAILED`, версии, timestamps и безопасный error code доступны в WebUI. Привилегированные paths, DB/snapshot hashes и systemd stderr не публикуются. При `ROLLED_BACK` старая release+DB пара снова активна; `ROLLBACK_FAILED` требует не удалять transaction directory и сначала собрать diagnostic bundle/журнал. Незавершённый либо повреждённый journal блокирует reinstall/uninstall до recovery; оставшийся после сбоя terminal `FINALIZED`/`ROLLED_BACK` journal является безопасной audit-записью и не блокирует lifecycle навсегда. Uninstaller удерживает тот же общий lock, останавливает Agent и повторяет semantic transaction check до удаления первого owned файла. Updater не меняет APT, AmneziaVPN, Docker, UFW, foreign WireGuard/routes/firewall и не вызывает reboot VPS.
 
 Администратор может использовать `EXTERNAL`, при котором VPS получает только public key и отдельный private `/32`, либо `MANAGED`, при котором отдельный private key существует в закрытом state только до однократной re-authenticated выдачи готового `.conf`. Повторное скачивание запрещено; rotation создаёт replacement peer и не отзывает прежний автоматически. QR остаётся незаявленным до отдельной реализации. Ресурс имеет immutable `Gateway peer × resource_id`, typed kind/access profile, local destination и уникальный alias. `LOCAL_SUBNET` требует отдельного acknowledgement, а TCP/UDP ACL запрещает port 0/wildcard; ICMP не имеет port fields. Удаление администратора одной transaction удаляет все его ACL, revoke Gateway выключает его публикации. UI всегда показывает `desired/applied generation`; до следующего privileged этапа сервер честно возвращает `host_apply_available=false`, `AWAITING_HOST_APPLY`/`PENDING`, а не ложный working handshake.
 
@@ -783,7 +783,11 @@ WebUI требует свежую password re-authentication и введённу
 
 ## Подписанное обновление и atomic rollback
 
-Во вкладке **Система и безопасность → Подписанное обновление** принимается только versioned `.tar.gz`, подписанный доверенным Ed25519-ключом `/etc/gateway-vpn/update-signing.pub`. До изменения live-системы staging ограничивает archive/entry/path/depth/size, запрещает symlink, hardlink, device, sparse и concatenated/trailing gzip data, проверяет signature, signer SHA-256, полный file manifest, SHA-256 каждого файла, строгий SemVer, Git commit/build date, OS/arch, DB/config и Gateway/Mihomo API contracts. Дополнительно candidate `host_contract_sha256`, вычисленный по всем packaged systemd unit/socket/timer files, обязан совпасть с текущим release: WebUI pointer-update не оставляет на host несовместимые старые units. Несовпадение безопасно отклоняется до mutation и означает, что нужен отдельный signed installer-upgrade artifact. Один verified staging не доказывает установку и может быть безопасно удалён.
+Во вкладке **Система и безопасность → Подписанное обновление** принимается только versioned `.tar.gz`, подписанный доверенным Ed25519-ключом `/etc/gateway-vpn/update-signing.pub`. Источником может быть официальный signed GitHub Release выбранного канала `Stable`/`Testing`, ручная загрузка файла либо advanced exact immutable HTTPS URL. `main`, branch/commit URL, `latest`, `git pull`, URL credentials и private/link-local/loopback destination не поддерживаются. Redirect, DNS resolution, content type, download size, signed channel hash и конечный artifact повторно проверяются; URL/query не попадают в audit.
+
+До изменения live-системы staging ограничивает archive/entry/path/depth/size, запрещает symlink, hardlink, device, sparse и concatenated/trailing gzip data, проверяет signature, signer SHA-256, полный file manifest, SHA-256 каждого файла, строгий SemVer, Git commit/build date, OS/arch, DB/config и Gateway/Mihomo API contracts. Дополнительно candidate `host_contract_sha256`, вычисленный по всем packaged systemd unit/socket/timer files, обязан совпасть с текущим release: WebUI pointer-update не оставляет на host несовместимые старые units. Несовпадение безопасно отклоняется до mutation и означает, что нужен отдельный signed installer-upgrade artifact. Один verified staging не доказывает установку и может быть безопасно удалён.
+
+Карточка **Версии и восстановление** хранит отдельно channel, автоматическую проверку, автоматическую загрузку, автоматическое применение и ежедневное окно обслуживания в UTC. В текущем source manual `Проверить наличие`, download-to-verified-staging и Apply работают независимо; durable automatic check/download/apply worker остаётся отдельным незавершённым блоком и не должен считаться действующим только потому, что policy уже сохраняется в schema 31.
 
 После typed `ОБНОВИТЬ` и отдельного confirmation Web/API сначала закрывает data path, сохраняет blocked state и вызывает parameter-free root broker. `gateway-vpn-update.service` повторно загружает fixed `PATH_BLOCKED` firewall, повторно проверяет staging и выполняет одну root transaction:
 
@@ -798,10 +802,17 @@ WebUI требует свежую password re-authentication и введённу
 
 Блок **Последняя root-транзакция обновления** отдельно от staging показывает только sanitized поля root-owned журнала: update ID, старую/новую версии, `PREPARED…STABILIZING/FINALIZED/ROLLED_BACK/ROLLBACK_FAILED`, timestamps, stability deadline и стабильный error code. Пути, snapshot ID, DB hashes и systemd diagnostics через broker не выдаются. `ROLLED_BACK` означает, что старая пара восстановлена; `ROLLBACK_FAILED` является критическим состоянием и требует сохранить fail-closed режим до диагностики.
 
+### Версии и complete restore points
+
+Таблица **Проверенные точки восстановления** показывает полный retained point: identity подписанного release, SQLite, config, secrets, subscriptions, TLS, Mihomo generations/state и проверочные hashes. Роли `CURRENT`, `RECOVERY` и `ACTIVE_TRANSACTION` вычисляются root-контроллером из реальных pointers/journal и защищают point от ручного удаления и retention. Кнопка **Очистить по сохранённой политике** применяет count/size/age limits только к eligible history; превышение лимита protected points не является разрешением удалить их.
+
+Ручной rollback доступен только для point с тем же host contract. Он требует текущего пароля, `ROLLBACK_TO_RESTORE_POINT` и отдельного destructive confirmation. После повторной проверки совместимости control plane переводит пользовательский data path в `PATH_BLOCKED`, пишет audit и передаёт root только выбранный verified point ID через durable `/var/lib/gateway-vpn-privileged/update-rollback/pending.json`. Fixed `gateway-vpn-update-rollback.service` создаёт complete safety-point текущего состояния, восстанавливает historical release+DB/config/secrets/subscriptions/TLS/Mihomo pair и запускает обычные health/stability gates. Новые после выбранной точки настройки и данные намеренно заменяются. Ошибка, `SIGKILL` или reboot возвращает safety-point; вручную удалять pending request, safety-point или journal нельзя.
+
 Диагностика:
 
 ```bash
 sudo systemctl status gateway-vpn-update.service
+sudo systemctl status gateway-vpn-update-rollback.service
 sudo systemctl status gateway-vpn-update-recovery.service
 sudo systemctl status gateway-vpn-update-finalize.timer
 sudo systemctl status gateway-vpn-update-resume.service
@@ -809,10 +820,14 @@ sudo journalctl --namespace=gateway-vpn -u gateway-vpn-update.service -u gateway
 sudo readlink /opt/gateway-vpn/current
 sudo readlink /opt/gateway-vpn/recovery
 sudo ls -la /var/lib/gateway-vpn-privileged/update-transactions/
+sudo ls -la /var/lib/gateway-vpn-privileged/update-restore-points/
+sudo ls -la /var/lib/gateway-vpn-privileged/update-rollback/
 sudo nft list table inet gateway_vpn
 ```
 
-Не удаляйте staging, root journal, snapshot, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering. Exact privileged Ubuntu 24.04 Docker/systemd install/update/rollback/finalize/reboot gate пройден; bare-metal reboot/power-cut и 24/72h hardware endurance остаются обязательными до production acceptance.
+Не удаляйте staging, root journal, snapshot, restore point, rollback request, `current` или `recovery` вручную во время `PREPARED…STABILIZING/ROLLING_BACK/ROLLBACK_FAILED/RELEASE_SWITCH_PENDING`. Update helper-ы нельзя запускать напрямую: они требуют fixed systemd environment и ordering.
+
+Disposable privileged Ubuntu 24.04 Docker/systemd gate с тестовым signer подтвердил manual historical rollback, ownership всех восстановленных namespaces, сохранение foreign nft/interface, `SIGKILL` в `RELEASE_SWITCH_PENDING` и automatic safety-point recovery после настоящего нового PID 1. Terminal markers: `GATEWAY_RESTORE_POINT_SYSTEMD_PASS` и `GATEWAY_RESTORE_POINT_REBOOT_RECOVERY_PASS`. Это не заменяет bare-metal power-cut, физические modem/network paths и 24/72h hardware endurance; они остаются обязательными до production acceptance.
 
 ### Подписанное обновление host contract
 

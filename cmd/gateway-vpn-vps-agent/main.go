@@ -72,6 +72,8 @@ func run(args []string) int {
 			return runOperationsCollect(args[1:])
 		case "update-offline-check":
 			return runUpdateOfflineCheck(args[1:])
+		case "update-lifecycle-check":
+			return runVPSUpdateLifecycleCheck(args[1:])
 		case "update-apply":
 			return runVPSUpdateApply(args[1:])
 		case "update-recover":
@@ -113,9 +115,35 @@ func run(args []string) int {
 		fmt.Println("VPS Hub password file is valid")
 		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--schema-version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog|operations-collect|update-offline-check|update-apply|update-recover|update-finalize]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent [--version|--schema-version|--check-config PATH|--check-password-file PATH|serve|identity-init|init-admin|state-check|restore-apply|restore-recover|legacy-adopt|fabric-apply|fabric-recover|fabric-restore-prepare|fabric-restore-reset|fabric-watchdog|operations-collect|update-offline-check|update-lifecycle-check|update-apply|update-recover|update-finalize]")
 		return 2
 	}
+}
+
+func runVPSUpdateLifecycleCheck(args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn-vps-agent update-lifecycle-check")
+		return 2
+	}
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stderr, "VPS update lifecycle inspection requires root")
+		return 1
+	}
+	journal, exists, err := inspectVPSUpdateLifecycle(filepath.Join("/var/lib/gateway-vpn-vps-privileged", "update-transactions"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Gateway VPN VPS update lifecycle is unavailable or unsafe")
+		return 1
+	}
+	if exists && journal.InProgress() {
+		fmt.Fprintln(os.Stderr, "Gateway VPN VPS update lifecycle is active")
+		return 1
+	}
+	fmt.Println("Gateway VPN VPS update lifecycle is idle")
+	return 0
+}
+
+func inspectVPSUpdateLifecycle(root string) (vpsupdate.Journal, bool, error) {
+	return (vpsupdate.JournalStore{Root: root}).LoadActive()
 }
 
 func runUpdateOfflineCheck(args []string) int {
@@ -313,6 +341,18 @@ func runVPSUpdateApply(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_UNIT") != "1" || os.Geteuid() != 0 {
 		return 2
 	}
+	unlockLifecycle, err := acquireVPSUpdateRootLifecycle(false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update is blocked by another Gateway VPN VPS lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
+	removeLiveMarker, err := createVPSUpdateLiveMarker()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create VPS update live marker failed")
+		return 1
+	}
+	defer removeLiveMarker()
 	engine, err := productionVPSUpdateEngine(*configPath, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "initialize VPS update transaction failed")
@@ -335,6 +375,15 @@ func runVPSUpdateRecover(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_RECOVERY_UNIT") != "1" || os.Geteuid() != 0 {
 		return 2
 	}
+	// During first install the installer owns the common lock while
+	// synchronously starting this recovery unit. Permit that one verified
+	// owner only while both root-owned install markers are present.
+	unlockLifecycle, err := acquireVPSUpdateRootLifecycle(true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update recovery is blocked by another Gateway VPN VPS lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
 	engine, err := productionVPSUpdateEngine(*configPath, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "initialize VPS update recovery failed")
@@ -357,6 +406,18 @@ func runVPSUpdateFinalize(args []string) int {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !*apply || os.Getenv("GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT") != "1" || os.Geteuid() != 0 {
 		return 2
 	}
+	unlockLifecycle, err := acquireVPSUpdateRootLifecycle(false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "VPS update finalization is blocked by another Gateway VPN VPS lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
+	removeLiveMarker, err := createVPSUpdateLiveMarker()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create VPS update live marker failed")
+		return 1
+	}
+	defer removeLiveMarker()
 	engine, err := productionVPSUpdateEngine(*configPath, false)
 	if err != nil {
 		return 1

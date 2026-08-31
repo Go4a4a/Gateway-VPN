@@ -55,11 +55,17 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "update-offline-check" {
 		return runUpdateOfflineCheck(args[1:])
 	}
+	if len(args) > 0 && args[0] == "update-lifecycle-check" {
+		return runUpdateLifecycleCheck(args[1:])
+	}
 	if len(args) > 0 && args[0] == "update-apply" {
 		return runUpdateApply(args[1:])
 	}
 	if len(args) > 0 && args[0] == "update-recover" {
 		return runUpdateRecover(args[1:])
+	}
+	if len(args) > 0 && args[0] == "update-rollback" {
+		return runUpdateRollback(args[1:])
 	}
 	if len(args) > 0 && args[0] == "update-finalize" {
 		return runUpdateFinalize(args[1:])
@@ -99,7 +105,7 @@ func run(args []string) int {
 		}
 		return 1
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|wireguard-ingress-bootstrap|watchdog|network-rollback|network-recover|database-restore|update-offline-check|update-apply|update-recover|update-finalize|serve]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|wireguard-ingress-bootstrap|watchdog|network-rollback|network-recover|database-restore|update-offline-check|update-lifecycle-check|update-apply|update-recover|update-rollback|update-finalize|serve]")
 		fmt.Fprintln(os.Stderr, "no network changes were made")
 		return 2
 	}

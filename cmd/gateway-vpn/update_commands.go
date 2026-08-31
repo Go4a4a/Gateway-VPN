@@ -26,6 +26,28 @@ const (
 	defaultPrivilegedRoot   = "/var/lib/gateway-vpn-privileged"
 )
 
+func runUpdateLifecycleCheck(args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn update-lifecycle-check")
+		return 2
+	}
+	journal, exists, err := inspectUpdateLifecycle(filepath.Join(defaultPrivilegedRoot, "update-transactions"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Gateway VPN update lifecycle is unavailable or unsafe")
+		return 1
+	}
+	if exists && journal.InProgress() {
+		fmt.Fprintln(os.Stderr, "Gateway VPN update lifecycle is active")
+		return 1
+	}
+	fmt.Println("Gateway VPN update lifecycle is idle")
+	return 0
+}
+
+func inspectUpdateLifecycle(root string) (updatepkg.Journal, bool, error) {
+	return (updatepkg.JournalStore{Root: root}).LoadActive()
+}
+
 func runUpdateOfflineCheck(args []string) int {
 	flags := flag.NewFlagSet("gateway-vpn update-offline-check", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -93,6 +115,12 @@ func runUpdateApply(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	unlockLifecycle, err := acquireUpdateRootLifecycle(false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "signed update is blocked by another Gateway VPN lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	engine, err := productionUpdateEngine(ctx, *configPath, true)
@@ -131,6 +159,16 @@ func runUpdateRecover(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	// During a first install or host-upgrade inner install, the installer owns
+	// the common lifecycle lock while synchronously starting this fixed recovery
+	// unit. The Linux lock implementation accepts that one verified busy-owner
+	// case only when both root-owned install markers are present.
+	unlockLifecycle, err := acquireUpdateRootLifecycle(true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "update recovery is blocked by another Gateway VPN lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	engine, err := productionUpdateEngine(ctx, *configPath, false)
@@ -147,7 +185,63 @@ func runUpdateRecover(args []string) int {
 		fmt.Fprintln(os.Stderr, "update recovery failed; Gateway VPN remains fail-closed")
 		return 1
 	}
+	requests := updatepkg.RollbackRequestStore{Root: filepath.Join(defaultPrivilegedRoot, "update-rollback")}
+	if err := discardRollbackRequestAfterRecovery(requests); err != nil {
+		fmt.Fprintln(os.Stderr, "update recovery completed but stale rollback request cleanup failed")
+		return 1
+	}
 	fmt.Printf("Gateway VPN update recovery completed; rolled_back=%t\n", recovered)
+	return 0
+}
+
+func discardRollbackRequestAfterRecovery(requests updatepkg.RollbackRequestStore) error {
+	return requests.DiscardPending()
+}
+
+func runUpdateRollback(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn update-rollback", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", "/etc/gateway-vpn/config.yaml", "strict bootstrap YAML path")
+	apply := flags.Bool("apply", false, "apply the fixed pending restore point rollback")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	if err := requireUpdateUnit("GATEWAY_VPN_UPDATE_ROLLBACK_UNIT", *apply); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	unlockLifecycle, err := acquireUpdateRootLifecycle(false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "restore point rollback is blocked by another Gateway VPN lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	requests := updatepkg.RollbackRequestStore{Root: filepath.Join(defaultPrivilegedRoot, "update-rollback")}
+	request, exists, err := requests.Load()
+	if err != nil || !exists {
+		fmt.Fprintln(os.Stderr, "no verified restore point rollback is pending")
+		return 1
+	}
+	engine, err := productionUpdateEngine(ctx, *configPath, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "initialize restore point rollback failed")
+		return 1
+	}
+	result, rollbackErr := engine.RollbackToRestorePoint(ctx, request.PointID)
+	removeErr := requests.Remove(request.PointID)
+	if rollbackErr != nil {
+		fmt.Fprintln(os.Stderr, "restore point rollback failed; the safety pair was restored or boot recovery remains armed")
+		return 1
+	}
+	if removeErr != nil {
+		fmt.Fprintln(os.Stderr, "restore point rollback started but pending request cleanup failed")
+		return 1
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return 1
+	}
 	return 0
 }
 
@@ -163,6 +257,12 @@ func runUpdateFinalize(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	unlockLifecycle, err := acquireUpdateRootLifecycle(false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "update finalization is blocked by another Gateway VPN lifecycle transaction")
+		return 1
+	}
+	defer unlockLifecycle()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	engine, err := productionUpdateEngine(ctx, *configPath, false)
@@ -206,6 +306,24 @@ func productionUpdateEngine(ctx context.Context, configPath string, withStager b
 		ReleaseRoot: defaultReleaseRoot, StateDir: configuration.System.StateDir, DatabasePath: configuration.System.Database,
 		ConfigPath: configPath, CurrentVersion: buildinfo.Version, StateUID: int(uid), StateGID: int(gid),
 	}
+	trustedKey, err := updatepkg.LoadPublicKey(defaultTrustedUpdateKey)
+	if err != nil {
+		return nil, err
+	}
+	currentReleaseRoot := filepath.Join(defaultReleaseRoot, "releases", "v"+buildinfo.Version)
+	currentRelease, err := updatepkg.ReadReleaseMetadata(currentReleaseRoot)
+	if err != nil || currentRelease.GatewayVersion != buildinfo.Version {
+		return nil, errors.New("read current release host lifecycle contract failed")
+	}
+	verification := updatepkg.VerificationPolicy{
+		PublicKey: trustedKey, ExpectedOS: "linux", ExpectedArch: "amd64",
+		ConfigGeneration: config.CurrentVersion, CurrentHostContractSHA256: currentRelease.HostContractSHA256,
+		GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
+	}
+	engine.RestorePoints = &updatepkg.RestorePointStore{
+		Root: filepath.Join(defaultPrivilegedRoot, "update-restore-points"), ReleaseRoot: defaultReleaseRoot,
+		StateDir: configuration.System.StateDir, Configuration: configPath, Verification: verification,
+	}
 	if !withStager {
 		return engine, nil
 	}
@@ -217,11 +335,6 @@ func productionUpdateEngine(ctx context.Context, configPath string, withStager b
 	closeErr := database.Close()
 	if schemaErr != nil || closeErr != nil || schema < 1 {
 		return nil, errors.New("read current schema for update compatibility failed")
-	}
-	currentReleaseRoot := filepath.Join(defaultReleaseRoot, "releases", "v"+buildinfo.Version)
-	currentRelease, err := updatepkg.ReadReleaseMetadata(currentReleaseRoot)
-	if err != nil || currentRelease.GatewayVersion != buildinfo.Version {
-		return nil, errors.New("read current release host lifecycle contract failed")
 	}
 	stager, err := updatepkg.NewStager(configuration.System.StateDir, defaultTrustedUpdateKey, updatepkg.VerificationPolicy{
 		ExpectedOS: "linux", ExpectedArch: "amd64", CurrentGatewayVersion: buildinfo.Version,

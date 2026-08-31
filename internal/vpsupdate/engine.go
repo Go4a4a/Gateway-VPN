@@ -240,6 +240,12 @@ func (engine *Engine) recoverLocked(ctx context.Context, scheduleStart bool) (bo
 	if err != nil || !exists {
 		return false, err
 	}
+	if !journal.InProgress() {
+		// A crash can occur after the terminal journal is durably saved but
+		// before active.json is removed. That is completed audit evidence, not
+		// a transaction to roll back.
+		return false, engine.Store.ClearActive()
+	}
 	if journal.State == StateStabilizing {
 		if err := engine.verifyCurrentOffline(ctx, journal.NewCurrentTarget, journal.NewVersion, journal.NewSchema); err == nil {
 			return false, nil

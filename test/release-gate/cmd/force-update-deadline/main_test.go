@@ -111,6 +111,7 @@ func testJournal(started time.Time) updatepkg.Journal {
 		OldCurrentTarget:           "releases/v0.1.0-old",
 		NewCurrentTarget:           "releases/v0.1.0-new",
 		PreUpdateSnapshotID:        "20260828T010000.000000000Z-0123456789abcdef01234567",
+		RestorePointID:             "point-20260828T010000Z-0123456789abcdef01234567",
 		OldSchemaVersion:           13,
 		NewSchemaVersion:           16,
 		CandidateDBSHA256:          strings.Repeat("a", 64),

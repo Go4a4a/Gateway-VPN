@@ -1128,6 +1128,74 @@ paths:
         - {$ref: '#/components/parameters/DestructiveConfirmation'}
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/available:
+    get:
+      tags: [System]
+      operationId: checkSignedUpdateChannel
+      summary: Проверить stable/testing через подписанный channel manifest без загрузки release
+      parameters:
+        - name: channel
+          in: query
+          schema: {type: string, enum: [stable, testing], default: stable}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/remote:
+    post:
+      tags: [System]
+      operationId: stageRemoteSignedUpdate
+      summary: Загрузить и проверить release из signed GitHub channel либо exact HTTPS URL
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/settings/software-update:
+    get:
+      tags: [System]
+      operationId: getSoftwareUpdatePolicy
+      summary: Получить канал, automation gates, окно обслуживания и retention истории версий
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    put:
+      tags: [System]
+      operationId: updateSoftwareUpdatePolicy
+      summary: Обновить типизированную и аудируемую политику обновлений
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/restore-points:
+    get:
+      tags: [System]
+      operationId: getUpdateRestorePoints
+      summary: Получить проверенную историю версий с current/recovery/active protection и host compatibility
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/restore-points/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    delete:
+      tags: [System]
+      operationId: deleteUpdateRestorePoint
+      summary: Удалить одну неподтверждённую protected-ролями точку восстановления
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/restore-points/{id}/rollback:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [System]
+      operationId: rollbackToUpdateRestorePoint
+      summary: После password re-authentication закрыть data path и запустить all-or-rollback восстановление точной verified пары версии, БД и настроек
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/UpdateRestorePointRollback'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/restore-points/prune:
+    post:
+      tags: [System]
+      operationId: pruneUpdateRestorePoints
+      summary: Применить сохранённую count/size/age retention-политику без удаления protected-версий
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/DestructiveConfirmation'}
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
 
   /api/v1/traffic/current:
     get:
@@ -1397,6 +1465,17 @@ components:
             required: [release]
             properties:
               release: {type: string, format: binary}
+    UpdateRestorePointRollback:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [password, confirmation]
+            properties:
+              password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true}
+              confirmation: {type: string, const: ROLLBACK_TO_RESTORE_POINT}
     WatchdogPolicyUpdate:
       required: true
       content:

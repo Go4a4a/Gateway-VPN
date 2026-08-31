@@ -82,6 +82,8 @@ func runWatchdog(args []string) int {
 		BootstrapDNS:      configuration.Mihomo.BootstrapDNS,
 		RoutingTableStart: configuration.Modems.RoutingTableStart, FwmarkStart: configuration.Modems.FwmarkStart,
 		InstallMarkerPath: "/var/lib/gateway-vpn-privileged/install-transactions/active",
+		HostUpgradeMarker: "/var/lib/gateway-vpn-host-upgrade/active",
+		UninstallMarker:   "/var/lib/gateway-vpn-uninstall/active",
 		ManagementFabric:  watchdogManagementFabricClient{client: managementFabric},
 	}
 	supervisor := &watchdog.Supervisor{

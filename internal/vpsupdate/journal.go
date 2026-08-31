@@ -68,6 +68,13 @@ type Status struct {
 
 type JournalStore struct{ Root string }
 
+// InProgress reports whether this journal still requires exclusive ownership
+// of the VPS lifecycle. Terminal journals may remain on disk as durable audit
+// evidence and must not permanently block reinstall or uninstall.
+func (journal Journal) InProgress() bool {
+	return journal.State != StateRolledBack && journal.State != StateFinalized
+}
+
 func (store JournalStore) Save(journal Journal) error {
 	if err := validateJournal(journal); err != nil {
 		return err
@@ -89,8 +96,25 @@ func (store JournalStore) Save(journal Journal) error {
 }
 
 func (store JournalStore) LoadActive() (Journal, bool, error) {
-	if err := store.prepare(); err != nil {
+	exists, err := store.inspectRoot()
+	if err != nil || !exists {
 		return Journal{}, false, err
+	}
+	// Inspection is intentionally read-only: lifecycle checks are used by
+	// installer dry-runs and uninstall guards and must not create or chmod
+	// privileged state merely by observing it.
+	if err := store.validateRoot(); err != nil {
+		return Journal{}, false, err
+	}
+	// Save durably writes the per-transaction copy before active.json. Always
+	// prefer unfinished transaction evidence, even when active.json still
+	// contains a valid terminal journal from the preceding update.
+	recoverable, recoverableExists, scanErr := store.scanRecoverableTransaction()
+	if scanErr != nil {
+		return Journal{}, false, scanErr
+	}
+	if recoverableExists {
+		return recoverable, true, nil
 	}
 	active, activeExists, activeErr := readJournal(filepath.Join(store.Root, "active.json"))
 	if activeErr == nil && activeExists {
@@ -106,16 +130,6 @@ func (store JournalStore) LoadActive() (Journal, bool, error) {
 		return active, true, nil
 	}
 
-	// Save writes the per-transaction copy first and active.json second. Scan
-	// only when the active pointer is absent or damaged, so an interruption in
-	// that narrow window remains recoverable.
-	candidate, exists, scanErr := store.scanRecoverableTransaction()
-	if scanErr != nil {
-		return Journal{}, false, scanErr
-	}
-	if exists {
-		return candidate, true, nil
-	}
 	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
 		return Journal{}, false, errors.New("both VPS update journal copies are invalid")
 	}
@@ -155,7 +169,7 @@ func (store JournalStore) scanRecoverableTransaction() (Journal, bool, error) {
 		if readErr != nil || !exists || journal.UpdateID != entry.Name() {
 			continue
 		}
-		if journal.State == StateRolledBack || journal.State == StateFinalized {
+		if !journal.InProgress() {
 			continue
 		}
 		if found && journal.UpdateID != candidate.UpdateID {
@@ -181,11 +195,29 @@ func (store JournalStore) prepare() error {
 	if err := os.MkdirAll(store.Root, 0o700); err != nil {
 		return err
 	}
+	if err := store.validateRoot(); err != nil {
+		return err
+	}
+	return os.Chmod(store.Root, 0o700)
+}
+
+func (store JournalStore) inspectRoot() (bool, error) {
+	if !filepath.IsAbs(store.Root) || filepath.Base(filepath.Clean(store.Root)) != "update-transactions" {
+		return false, errors.New("fixed VPS update transaction root is required")
+	}
+	_, err := os.Lstat(store.Root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (store JournalStore) validateRoot() error {
 	info, err := os.Lstat(store.Root)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return errors.New("VPS update transaction root is unsafe")
 	}
-	return os.Chmod(store.Root, 0o700)
+	return nil
 }
 
 type StatusStore struct {

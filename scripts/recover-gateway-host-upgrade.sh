@@ -77,7 +77,7 @@ fi
 gateway_units=(
   gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-network-recovery.service
-  gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service
+  gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update-rollback.service
   gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service
   gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service
   gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service
@@ -196,7 +196,7 @@ for unit in gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gate
 done
 [[ ! -f /etc/gateway-vpn/dnsmasq.conf ]] || enable_if_present gateway-vpn-dnsmasq.service
 
-systemctl reset-failed gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service 2>/dev/null || true
+systemctl reset-failed gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-rollback.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service 2>/dev/null || true
 [[ $(readlink /opt/gateway-vpn/current) == releases/v$OLD_VERSION && $(readlink /opt/gateway-vpn/recovery) == releases/v$OLD_VERSION ]] || { echo "Old release pointers were not restored" >&2; exit 1; }
 nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
 

@@ -46,6 +46,7 @@ import (
 	"gateway-vpn/internal/store"
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/wgingress"
@@ -1535,6 +1536,159 @@ func TestSignedUpdateUploadApplyAndDiscardAreExactAuditedAndFailClosed(t *testin
 	}
 }
 
+func TestSoftwareUpdatePolicyAndRestorePointAPIAreTypedAuditedAndProtected(t *testing.T) {
+	server, ctx := testServer(t)
+	cookie, csrf := login(t, server)
+	policyRequest := httptest.NewRequest(http.MethodGet, "/api/v1/settings/software-update", nil)
+	policyRequest.AddCookie(cookie)
+	policyResponse := httptest.NewRecorder()
+	server.ServeHTTP(policyResponse, policyRequest)
+	if policyResponse.Code != http.StatusOK || !strings.Contains(policyResponse.Body.String(), `"channel":"stable"`) || !strings.Contains(policyResponse.Body.String(), `"automatic_check_enabled":true`) {
+		t.Fatalf("default software update policy = %d %s", policyResponse.Code, policyResponse.Body.String())
+	}
+
+	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"stable","automatic_check_enabled":true,"automatic_download_enabled":false,"automatic_apply_enabled":true,"check_interval_hours":24,"jitter_minutes":30,"maintenance_window_enabled":false,"maintenance_start_minute_utc":180,"maintenance_duration_minutes":120,"retention_maximum_points":4,"retention_maximum_bytes":8589934592,"retention_maximum_age_days":365,"retention_minimum_old_points":2}`))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalid.Header.Set("X-CSRF-Token", csrf)
+	invalid.AddCookie(cookie)
+	invalidResponse := httptest.NewRecorder()
+	server.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe automatic apply policy = %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+
+	valid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"testing","automatic_check_enabled":true,"automatic_download_enabled":true,"automatic_apply_enabled":false,"check_interval_hours":12,"jitter_minutes":20,"maintenance_window_enabled":true,"maintenance_start_minute_utc":240,"maintenance_duration_minutes":90,"retention_maximum_points":6,"retention_maximum_bytes":12884901888,"retention_maximum_age_days":730,"retention_minimum_old_points":3}`))
+	valid.Header.Set("Content-Type", "application/json")
+	valid.Header.Set("X-CSRF-Token", csrf)
+	valid.AddCookie(cookie)
+	validResponse := httptest.NewRecorder()
+	server.ServeHTTP(validResponse, valid)
+	if validResponse.Code != http.StatusOK || !strings.Contains(validResponse.Body.String(), `"channel":"testing"`) {
+		t.Fatalf("valid software update policy = %d %s", validResponse.Code, validResponse.Body.String())
+	}
+
+	pointID := "point-20260831T100000Z-0123456789abcdef01234567"
+	controller := &fakeUpdateApplyTrigger{
+		restorePoints: []updatepkg.RestorePoint{{Manifest: updatepkg.RestorePointManifest{PointID: pointID, GatewayVersion: "1.1.0", CreatedAt: "2026-08-31T10:00:00Z", TotalBytes: 4096}, Compatible: true, CompatibilityReason: "COMPATIBLE"}},
+		pruned:        []string{pointID},
+	}
+	server.dependencies.UpdateRestorePoints = controller
+	runtime := &fakeModemRuntime{}
+	server.dependencies.ModemRuntime = runtime
+	inventory := httptest.NewRequest(http.MethodGet, "/api/v1/system/update/restore-points", nil)
+	inventory.AddCookie(cookie)
+	inventoryResponse := httptest.NewRecorder()
+	server.ServeHTTP(inventoryResponse, inventory)
+	if inventoryResponse.Code != http.StatusOK || !strings.Contains(inventoryResponse.Body.String(), pointID) {
+		t.Fatalf("restore point inventory = %d %s", inventoryResponse.Code, inventoryResponse.Body.String())
+	}
+
+	withoutTypedConfirmation := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/restore-points/"+pointID+"/rollback", strings.NewReader(`{"password":"correct horse battery staple","confirmation":"WRONG"}`))
+	withoutTypedConfirmation.Header.Set("Content-Type", "application/json")
+	withoutTypedConfirmation.Header.Set("X-CSRF-Token", csrf)
+	withoutTypedConfirmation.Header.Set("X-Confirm-Destructive", "rollback-update-restore-point")
+	withoutTypedConfirmation.AddCookie(cookie)
+	withoutTypedConfirmationResponse := httptest.NewRecorder()
+	server.ServeHTTP(withoutTypedConfirmationResponse, withoutTypedConfirmation)
+	if withoutTypedConfirmationResponse.Code != http.StatusConflict || runtime.blocks != 0 || controller.rollbackPoint != "" {
+		t.Fatalf("rollback without typed confirmation = %d blocks=%d point=%q", withoutTypedConfirmationResponse.Code, runtime.blocks, controller.rollbackPoint)
+	}
+	wrongPassword := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/restore-points/"+pointID+"/rollback", strings.NewReader(`{"password":"wrong password","confirmation":"ROLLBACK_TO_RESTORE_POINT"}`))
+	wrongPassword.Header.Set("Content-Type", "application/json")
+	wrongPassword.Header.Set("X-CSRF-Token", csrf)
+	wrongPassword.Header.Set("X-Confirm-Destructive", "rollback-update-restore-point")
+	wrongPassword.AddCookie(cookie)
+	wrongPasswordResponse := httptest.NewRecorder()
+	server.ServeHTTP(wrongPasswordResponse, wrongPassword)
+	if wrongPasswordResponse.Code != http.StatusUnauthorized || runtime.blocks != 0 || controller.rollbackPoint != "" {
+		t.Fatalf("rollback without password reauthentication = %d blocks=%d point=%q %s", wrongPasswordResponse.Code, runtime.blocks, controller.rollbackPoint, wrongPasswordResponse.Body.String())
+	}
+	controller.onRollback = func() error {
+		current, err := server.dependencies.State.Get(ctx)
+		if err != nil || current.GatewayState != state.GatewayBlocked || current.PathState != state.PathBlocked {
+			return errors.New("runtime was not durably blocked before rollback trigger")
+		}
+		var audit int
+		if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type='UPDATE_RESTORE_POINT_ROLLBACK_REQUESTED'").Scan(&audit); err != nil || audit != 1 {
+			return errors.New("rollback audit was not committed before root trigger")
+		}
+		return nil
+	}
+	rollback := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/restore-points/"+pointID+"/rollback", strings.NewReader(`{"password":"correct horse battery staple","confirmation":"ROLLBACK_TO_RESTORE_POINT"}`))
+	rollback.Header.Set("Content-Type", "application/json")
+	rollback.Header.Set("X-CSRF-Token", csrf)
+	rollback.Header.Set("X-Confirm-Destructive", "rollback-update-restore-point")
+	rollback.AddCookie(cookie)
+	rollbackResponse := httptest.NewRecorder()
+	server.ServeHTTP(rollbackResponse, rollback)
+	if rollbackResponse.Code != http.StatusAccepted || runtime.blocks != 1 || controller.rollbackPoint != pointID || !strings.Contains(rollbackResponse.Body.String(), `"operation_kind":"RESTORE_POINT_ROLLBACK"`) {
+		t.Fatalf("rollback restore point = %d blocks=%d point=%q %s", rollbackResponse.Code, runtime.blocks, controller.rollbackPoint, rollbackResponse.Body.String())
+	}
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/system/update/restore-points/"+pointID, nil)
+	deleteRequest.Header.Set("X-CSRF-Token", csrf)
+	deleteRequest.Header.Set("X-Confirm-Destructive", "delete-update-restore-point")
+	deleteRequest.AddCookie(cookie)
+	deleteResponse := httptest.NewRecorder()
+	server.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusNoContent || controller.deletedPoint != pointID {
+		t.Fatalf("delete restore point = %d point=%q %s", deleteResponse.Code, controller.deletedPoint, deleteResponse.Body.String())
+	}
+
+	prune := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/restore-points/prune", strings.NewReader(`{}`))
+	prune.Header.Set("Content-Type", "application/json")
+	prune.Header.Set("X-CSRF-Token", csrf)
+	prune.Header.Set("X-Confirm-Destructive", "prune-update-restore-points")
+	prune.AddCookie(cookie)
+	pruneResponse := httptest.NewRecorder()
+	server.ServeHTTP(pruneResponse, prune)
+	if pruneResponse.Code != http.StatusOK || controller.prunePolicy.MaximumPoints != 6 || controller.prunePolicy.MinimumOldPoints != 3 {
+		t.Fatalf("prune restore points = %d policy=%+v %s", pruneResponse.Code, controller.prunePolicy, pruneResponse.Body.String())
+	}
+	var audits int
+	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE type IN ('SOFTWARE_UPDATE_POLICY_CHANGED','UPDATE_RESTORE_POINT_ROLLBACK_REQUESTED','UPDATE_RESTORE_POINT_DELETED','UPDATE_RESTORE_POINTS_PRUNED')").Scan(&audits); err != nil || audits != 4 {
+		t.Fatalf("software update audit count = %d,%v", audits, err)
+	}
+}
+
+func TestRemoteSignedUpdateCheckAndStageUseTypedSources(t *testing.T) {
+	server, ctx := testServer(t)
+	operation := updatepkg.Operation{
+		FormatVersion: 1, UpdateID: "update-20260831T010203Z-0123456789abcdef01234567", State: "STAGED",
+		CreatedAt: "2026-08-31T01:02:03Z", GatewayVersion: "1.3.0", MihomoVersion: "v1.19.30",
+		SignerKeySHA256: strings.Repeat("a", 64), ManifestSHA256: strings.Repeat("b", 64),
+		UncompressedBytes: 8192, FileCount: 8, SourceKind: updatepkg.SourceGitHubChannel,
+		SourceChannel: "stable", SourceReference: "Go4a4a/Gateway-VPN#v1.3.0",
+	}
+	remote := &fakeRemoteUpdateSource{available: updateremote.Available{
+		Available: true, Channel: "stable", CurrentVersion: "1.2.0", CandidateVersion: "1.3.0",
+		ReleaseTag: "v1.3.0", ArtifactBytes: 8192, ArtifactSHA256: strings.Repeat("c", 64),
+		SourceReference: "Go4a4a/Gateway-VPN#v1.3.0", SourceCommit: strings.Repeat("d", 40),
+	}, operation: operation}
+	server.dependencies.RemoteUpdates = remote
+	cookie, csrf := login(t, server)
+	check := httptest.NewRequest(http.MethodGet, "/api/v1/system/update/available?channel=stable", nil)
+	check.AddCookie(cookie)
+	checkResponse := httptest.NewRecorder()
+	server.ServeHTTP(checkResponse, check)
+	if checkResponse.Code != http.StatusOK || remote.checkChannel != "stable" || !strings.Contains(checkResponse.Body.String(), `"candidate_version":"1.3.0"`) {
+		t.Fatalf("remote check = %d channel=%q %s", checkResponse.Code, remote.checkChannel, checkResponse.Body.String())
+	}
+	stage := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/remote", strings.NewReader(`{"source":"GITHUB_CHANNEL","channel":"stable","exact_url":""}`))
+	stage.Header.Set("Content-Type", "application/json")
+	stage.Header.Set("X-CSRF-Token", csrf)
+	stage.AddCookie(cookie)
+	stageResponse := httptest.NewRecorder()
+	server.ServeHTTP(stageResponse, stage)
+	if stageResponse.Code != http.StatusCreated || remote.stageChannel != "stable" || remote.stageExact != "" || !strings.Contains(stageResponse.Body.String(), `"source_kind":"GITHUB_CHANNEL"`) {
+		t.Fatalf("remote stage = %d channel=%q exact=%q %s", stageResponse.Code, remote.stageChannel, remote.stageExact, stageResponse.Body.String())
+	}
+	var details string
+	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT details_json FROM events WHERE type='SIGNED_UPDATE_STAGED' ORDER BY occurred_at DESC LIMIT 1").Scan(&details); err != nil || !strings.Contains(details, `"source_reference":"Go4a4a/Gateway-VPN#v1.3.0"`) || strings.Contains(details, "https://") {
+		t.Fatalf("remote staged audit = %q,%v", details, err)
+	}
+}
+
 func TestDiagnosticBundleAPIRedactsBuilderFailure(t *testing.T) {
 	server, _ := testServer(t)
 	server.dependencies.Diagnostics = &fakeDiagnosticBundler{err: errors.New("private path /root/secret and token=diagnostic-secret")}
@@ -1721,6 +1875,29 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("static auth management UI missing %q: %d", required, response.Code)
 		}
+	}
+	for _, required := range []string{"formatUTCTime", "timeZone:'UTC'", " UTC`"} {
+		if !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("static WebUI UTC formatter missing %q", required)
+		}
+	}
+	if strings.Contains(response.Body.String(), "toLocaleString(") || strings.Contains(response.Body.String(), "toLocaleDateString(") || strings.Contains(response.Body.String(), "toLocaleTimeString(") {
+		t.Fatal("static WebUI must not render timestamps in the browser-local timezone")
+	}
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/logging-ui.js", nil))
+	for _, required := range []string{"От (UTC)", "initial.toISOString().slice(0, 16)", "`${since}:00Z`"} {
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("static UTC logging UI missing %q: %d", required, response.Code)
+		}
+	}
+	if strings.Contains(response.Body.String(), "getTimezoneOffset") {
+		t.Fatalf("static logging UI must not reinterpret UTC through browser timezone: %s", response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/contextual-help.js", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "выбранного времени UTC") || strings.Contains(response.Body.String(), "местного времени") {
+		t.Fatalf("static contextual help must describe UTC-only logging filter: %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -2974,11 +3151,41 @@ type fakeUpdateStager struct {
 }
 
 type fakeUpdateApplyTrigger struct {
-	calls     int
-	err       error
-	onApply   func() error
-	status    networkapply.UpdateTransactionStatus
-	statusErr error
+	calls         int
+	err           error
+	onApply       func() error
+	status        networkapply.UpdateTransactionStatus
+	statusErr     error
+	restorePoints []updatepkg.RestorePoint
+	deletedPoint  string
+	prunePolicy   updatepkg.RestorePointPolicy
+	pruned        []string
+	rollbackPoint string
+	onRollback    func() error
+}
+
+type fakeRemoteUpdateSource struct {
+	available    updateremote.Available
+	operation    updatepkg.Operation
+	err          error
+	checkChannel string
+	stageChannel string
+	stageExact   string
+}
+
+func (source *fakeRemoteUpdateSource) Check(_ context.Context, channel string) (updateremote.Available, error) {
+	source.checkChannel = channel
+	return source.available, source.err
+}
+
+func (source *fakeRemoteUpdateSource) StageChannel(_ context.Context, channel string) (updatepkg.Operation, error) {
+	source.stageChannel = channel
+	return source.operation, source.err
+}
+
+func (source *fakeRemoteUpdateSource) StageExact(_ context.Context, rawURL string) (updatepkg.Operation, error) {
+	source.stageExact = rawURL
+	return source.operation, source.err
 }
 
 type restoreMultipartPart struct {
@@ -3114,6 +3321,30 @@ func (trigger *fakeUpdateApplyTrigger) ApplyPendingUpdate(context.Context) error
 
 func (trigger *fakeUpdateApplyTrigger) UpdateStatus(context.Context) (networkapply.UpdateTransactionStatus, error) {
 	return trigger.status, trigger.statusErr
+}
+
+func (trigger *fakeUpdateApplyTrigger) RestorePointInventory(context.Context) ([]updatepkg.RestorePoint, error) {
+	return append([]updatepkg.RestorePoint(nil), trigger.restorePoints...), trigger.statusErr
+}
+
+func (trigger *fakeUpdateApplyTrigger) DeleteRestorePoint(_ context.Context, pointID string) error {
+	trigger.deletedPoint = pointID
+	return trigger.err
+}
+
+func (trigger *fakeUpdateApplyTrigger) PruneRestorePoints(_ context.Context, policy updatepkg.RestorePointPolicy) ([]string, error) {
+	trigger.prunePolicy = policy
+	return append([]string(nil), trigger.pruned...), trigger.err
+}
+
+func (trigger *fakeUpdateApplyTrigger) RollbackToRestorePoint(_ context.Context, pointID string) error {
+	trigger.rollbackPoint = pointID
+	if trigger.onRollback != nil {
+		if err := trigger.onRollback(); err != nil {
+			return err
+		}
+	}
+	return trigger.err
 }
 
 func (manager *fakePortableBackups) Build(_ context.Context, passphrase string) (backup.PortableArtifact, error) {

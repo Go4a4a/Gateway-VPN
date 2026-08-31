@@ -29,8 +29,27 @@ else
   exec 9<>"$LOCK_FILE"
   flock -n 9 || { echo "Another Gateway VPN install/recovery/uninstall transaction is active" >&2; exit 1; }
 fi
+
+if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]]; then
+  UPDATE_LIFECYCLE_CHECKER=/var/lib/gateway-vpn-uninstall/tooling/gateway-vpn
+else
+  UPDATE_LIFECYCLE_CHECKER=/opt/gateway-vpn/current/bin/gateway-vpn
+fi
+
+assert_no_update_restore_transaction() {
+  local pending checker_mode
+  [[ -f $UPDATE_LIFECYCLE_CHECKER && ! -L $UPDATE_LIFECYCLE_CHECKER ]] || { echo "Gateway update lifecycle checker is unavailable or unsafe" >&2; return 1; }
+  checker_mode=$(stat -c '%u:%g:%a' "$UPDATE_LIFECYCLE_CHECKER")
+  [[ $checker_mode == 0:0:700 || $checker_mode == 0:0:755 ]] || { echo "Gateway update lifecycle checker ownership or mode is unsafe" >&2; return 1; }
+  for pending in /var/lib/gateway-vpn/update-staging/pending-update.json /var/lib/gateway-vpn-privileged/update-rollback/pending.json /var/lib/gateway-vpn/recovery/pending-restore.json; do
+    [[ ! -e $pending && ! -L $pending ]] || { echo "Finish or discard the existing Gateway update/restore transaction before uninstall" >&2; return 1; }
+  done
+  "$UPDATE_LIFECYCLE_CHECKER" update-lifecycle-check >/dev/null || { echo "Finish or recover the active Gateway update before uninstall" >&2; return 1; }
+}
+
 [[ ! -e /var/lib/gateway-vpn-privileged/install-transactions/active && ! -L /var/lib/gateway-vpn-privileged/install-transactions/active ]] || { echo "Recover the interrupted Gateway install before uninstall" >&2; exit 1; }
 [[ ! -e /var/lib/gateway-vpn-host-upgrade/active && ! -L /var/lib/gateway-vpn-host-upgrade/active ]] || { echo "Recover the interrupted Gateway host upgrade before uninstall" >&2; exit 1; }
+assert_no_update_restore_transaction
 if [[ -e /var/lib/gateway-vpn-uninstall/active || -L /var/lib/gateway-vpn-uninstall/active ]]; then
   [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]] || { echo "A durable WebUI uninstall is active; let its guardian finish" >&2; exit 1; }
   [[ -f /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active && $(stat -c '%u:%g:%a' /var/lib/gateway-vpn-uninstall/active) == 0:0:600 ]] || { echo "Durable uninstall marker is unsafe" >&2; exit 1; }
@@ -184,7 +203,21 @@ reload_networkd_policy_if_active() {
     echo "systemd-networkd is not active; skipped live policy reload after removing Gateway-owned files"
   fi
 }
-systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service 2>/dev/null || true
+
+# Close the only unprivileged API that can create a new staged update, then
+# repeat the lifecycle check while the common root lock is still held. A
+# conflicting request detected in this narrow window aborts before unit files
+# or persistent host state are removed.
+CONTROL_PLANE_WAS_ACTIVE=0
+systemctl is-active --quiet gateway-vpn.service && CONTROL_PLANE_WAS_ACTIVE=1
+systemctl stop gateway-vpn.service 2>/dev/null || true
+if ! assert_no_update_restore_transaction; then
+  if ((CONTROL_PLANE_WAS_ACTIVE)); then
+    systemctl start gateway-vpn.service >/dev/null 2>&1 || true
+  fi
+  exit 1
+fi
+systemctl disable --now gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer gateway-vpn-update-finalize.service gateway-vpn-update-rollback.service gateway-vpn-update-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 2>/dev/null || true
 systemctl stop 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
 if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} != 1 ]]; then
@@ -192,7 +225,7 @@ if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} != 1 ]]; then
 fi
 rm -f /etc/systemd/system/gateway-vpn.service /etc/systemd/system/gateway-vpn-watchdog.service /etc/systemd/system/gateway-vpn-mihomo.service /etc/systemd/system/gateway-vpn-dnsmasq.service /etc/systemd/system/gateway-vpn-firewall.service
 rm -f /etc/systemd/system/gateway-vpn-network-broker.socket /etc/systemd/system/gateway-vpn-network-broker.service /etc/systemd/system/gateway-vpn-network-recovery.service /etc/systemd/system/gateway-vpn-network-rollback@.timer /etc/systemd/system/gateway-vpn-network-rollback@.service /etc/systemd/system/gateway-vpn-database-restore-boot.service /etc/systemd/system/gateway-vpn-database-restore-dispatch.service /etc/systemd/system/gateway-vpn-database-restore.service /etc/systemd/system/gateway-vpn-database-restore-resume.service /etc/systemd/system/gateway-vpn-firewall-guard.service
-rm -f /etc/systemd/system/gateway-vpn-update.service /etc/systemd/system/gateway-vpn-update-recovery.service /etc/systemd/system/gateway-vpn-update-resume.service /etc/systemd/system/gateway-vpn-update-finalize.service /etc/systemd/system/gateway-vpn-update-finalize.timer
+rm -f /etc/systemd/system/gateway-vpn-update.service /etc/systemd/system/gateway-vpn-update-rollback.service /etc/systemd/system/gateway-vpn-update-recovery.service /etc/systemd/system/gateway-vpn-update-resume.service /etc/systemd/system/gateway-vpn-update-finalize.service /etc/systemd/system/gateway-vpn-update-finalize.timer
 rm -f /etc/systemd/system/gateway-vpn-power-cycle@.service
 rm -f /etc/systemd/system/gateway-vpn-host-upgrade-recovery.service
 if [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} != 1 ]]; then

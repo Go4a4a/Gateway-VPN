@@ -36,6 +36,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
+	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/wgingress"
 	wireguardpkg "gateway-vpn/internal/wireguard"
@@ -181,6 +182,28 @@ func runNetworkBroker(args []string) int {
 		Executor: executor, IP: "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg",
 		Uname: "/usr/bin/uname", MihomoBinary: "/opt/gateway-vpn/current/libexec/mihomo", OSReleaseFile: "/etc/os-release",
 	}
+	updateAdmin := networkapply.SystemdUpdateAdmin{
+		Executor: executor, Systemctl: "/usr/bin/systemctl",
+		JournalRoot: filepath.Join(defaultPrivilegedRoot, "update-transactions"),
+	}
+	if trustedKey, keyErr := updatepkg.LoadPublicKey(defaultTrustedUpdateKey); keyErr == nil {
+		currentRelease, releaseErr := updatepkg.ReadReleaseMetadata(filepath.Join(defaultReleaseRoot, "releases", "v"+buildinfo.Version))
+		if releaseErr == nil && currentRelease.GatewayVersion == buildinfo.Version {
+			store := &updatepkg.RestorePointStore{
+				Root: filepath.Join(defaultPrivilegedRoot, "update-restore-points"), ReleaseRoot: defaultReleaseRoot,
+				StateDir: configuration.System.StateDir, Configuration: *configPath,
+				Verification: updatepkg.VerificationPolicy{
+					PublicKey: trustedKey, ExpectedOS: "linux", ExpectedArch: "amd64", ConfigGeneration: config.CurrentVersion,
+					CurrentHostContractSHA256: currentRelease.HostContractSHA256,
+					GatewayAPIContract:        updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
+				},
+			}
+			updateAdmin.RestorePoints = &updatepkg.RestorePointController{
+				Store: store, Journals: updatepkg.JournalStore{Root: updateAdmin.JournalRoot},
+				Requests: updatepkg.RollbackRequestStore{Root: filepath.Join(defaultPrivilegedRoot, "update-rollback")}, ReleaseRoot: defaultReleaseRoot,
+			}
+		}
+	}
 	server, err := networkapply.NewBrokerServerWithFullRuntime(
 		engine,
 		mihomoruntime.SystemdAdmin{Executor: executor, Systemctl: "/usr/bin/systemctl"},
@@ -192,10 +215,7 @@ func runNetworkBroker(args []string) int {
 		journalReader,
 		hostDiagnostics,
 		networkapply.SystemdRestoreAdmin{Executor: executor, Systemctl: "/usr/bin/systemctl"},
-		networkapply.SystemdUpdateAdmin{
-			Executor: executor, Systemctl: "/usr/bin/systemctl",
-			JournalRoot: filepath.Join(defaultPrivilegedRoot, "update-transactions"),
-		},
+		updateAdmin,
 		traffic.NFTReader{Executor: executor, NFT: "/usr/sbin/nft"},
 		modemrecovery.LinuxBackend{Database: database, Executor: executor, Networkctl: "/usr/bin/networkctl"},
 	)

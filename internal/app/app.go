@@ -47,6 +47,7 @@ import (
 	"gateway-vpn/internal/tlsbootstrap"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
 	"gateway-vpn/internal/wgingress"
@@ -335,19 +336,30 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 	restores.ExpectedTLSCertPath = configuration.API.TLSCert
 	restores.ExpectedTLSKeyPath = configuration.API.TLSKey
 	var updates *updatepkg.Stager
+	var remoteUpdates *updateremote.Manager
 	trustedUpdateKey := "/etc/gateway-vpn/update-signing.pub"
 	if info, keyErr := os.Lstat(trustedUpdateKey); keyErr == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() {
 		schema, schemaErr := databasepkg.ReadSchemaVersion(ctx, database)
 		if schemaErr != nil {
 			return fail(schemaErr)
 		}
+		currentRelease, releaseErr := updatepkg.ReadReleaseMetadata(filepath.Join("/opt/gateway-vpn/releases", "v"+buildinfo.Version))
+		if releaseErr != nil || currentRelease.GatewayVersion != buildinfo.Version {
+			return fail(errors.New("read current signed release contract for remote updates failed"))
+		}
 		updates, keyErr = updatepkg.NewStager(configuration.System.StateDir, trustedUpdateKey, updatepkg.VerificationPolicy{
 			ExpectedOS: "linux", ExpectedArch: "amd64", CurrentGatewayVersion: buildinfo.Version,
 			CurrentSchemaVersion: schema, ConfigGeneration: config.CurrentVersion,
-			GatewayAPIContract: updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
+			CurrentHostContractSHA256: currentRelease.HostContractSHA256,
+			GatewayAPIContract:        updatepkg.GatewayAPIContract, MihomoAPIContract: updatepkg.MihomoAPIContract,
 		})
 		if keyErr != nil {
 			systemLogger.Error("signed update trust configuration is invalid", "error", keyErr)
+		} else {
+			remoteUpdates, keyErr = updateremote.New(updateremote.DefaultRepository, buildinfo.Version, updates)
+			if keyErr != nil {
+				systemLogger.Error("remote signed update source is invalid", "error", keyErr)
+			}
 		}
 	} else if keyErr == nil || !errors.Is(keyErr, os.ErrNotExist) {
 		systemLogger.Error("signed update trust key is unsafe or unavailable")
@@ -401,7 +413,10 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 		Restores:             restores,
 		RestoreApply:         networkBroker,
 		Updates:              updates,
+		RemoteUpdates:        remoteUpdates,
 		UpdateApply:          networkBroker,
+		UpdatePolicy:         &updatepkg.AutomationPolicyRepository{Database: database},
+		UpdateRestorePoints:  networkBroker,
 		Watchdog:             &watchdog.Repository{Database: database},
 		WatchdogStatus:       watchdog.StatusFile{Path: "/run/gateway-vpn-watchdog/status.json"},
 		Power:                networkBroker,

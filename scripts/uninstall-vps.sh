@@ -26,20 +26,38 @@ fi
 [[ -f "$LOCK_FILE" && ! -L "$LOCK_FILE" && $(stat -c '%u:%g:%a' "$LOCK_FILE") == "0:0:600" ]] || { echo "VPS transaction lock ownership or mode is invalid" >&2; exit 1; }
 exec 9<>"$LOCK_FILE"
 flock -n 9 || { echo "Another Gateway VPN VPS install/recovery/uninstall transaction is active" >&2; exit 1; }
-[[ ! -e /var/lib/gateway-vpn-vps/install-transactions/active && ! -L /var/lib/gateway-vpn-vps/install-transactions/active ]] || { echo "Recover the interrupted VPS install before uninstall" >&2; exit 1; }
-[[ ! -e /var/lib/gateway-vpn-vps/agent/restore.trigger && ! -L /var/lib/gateway-vpn-vps/agent/restore.trigger ]] || { echo "Finish or discard the pending VPS restore before uninstall" >&2; exit 1; }
-[[ ! -e /var/lib/gateway-vpn-vps/agent/fabric.trigger && ! -L /var/lib/gateway-vpn-vps/agent/fabric.trigger ]] || { echo "Finish the pending VPS Management Fabric apply before uninstall" >&2; exit 1; }
-[[ ! -e /var/lib/gateway-vpn-vps/agent/update.trigger && ! -L /var/lib/gateway-vpn-vps/agent/update.trigger ]] || { echo "Finish the pending VPS update before uninstall" >&2; exit 1; }
-if [[ -d /var/lib/gateway-vpn-vps-privileged/restore-transactions ]] && find /var/lib/gateway-vpn-vps-privileged/restore-transactions -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
-  echo "Recover the interrupted VPS restore before uninstall" >&2
-  exit 1
+VPS_UPDATE_CHECKER=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent
+[[ -x "$VPS_UPDATE_CHECKER" ]] || { echo "Verified VPS update lifecycle checker is unavailable" >&2; exit 1; }
+
+assert_no_vps_transaction() {
+  [[ ! -e /var/lib/gateway-vpn-vps/install-transactions/active && ! -L /var/lib/gateway-vpn-vps/install-transactions/active ]] || { echo "Recover the interrupted VPS install before uninstall" >&2; return 1; }
+  [[ ! -e /var/lib/gateway-vpn-vps/agent/restore.trigger && ! -L /var/lib/gateway-vpn-vps/agent/restore.trigger ]] || { echo "Finish or discard the pending VPS restore before uninstall" >&2; return 1; }
+  [[ ! -e /var/lib/gateway-vpn-vps/agent/fabric.trigger && ! -L /var/lib/gateway-vpn-vps/agent/fabric.trigger ]] || { echo "Finish the pending VPS Management Fabric apply before uninstall" >&2; return 1; }
+  [[ ! -e /var/lib/gateway-vpn-vps/agent/update.trigger && ! -L /var/lib/gateway-vpn-vps/agent/update.trigger ]] || { echo "Finish the pending VPS update before uninstall" >&2; return 1; }
+  if [[ -d /var/lib/gateway-vpn-vps-privileged/restore-transactions ]] && find /var/lib/gateway-vpn-vps-privileged/restore-transactions -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
+    echo "Recover the interrupted VPS restore before uninstall" >&2
+    return 1
+  fi
+  if [[ -d /var/lib/gateway-vpn-vps-privileged/fabric ]] && find /var/lib/gateway-vpn-vps-privileged/fabric -maxdepth 1 -type f \( -name 'transaction.json' -o -name 'restore-reconcile.json' \) -print -quit | grep -q .; then
+    echo "Recover the pending VPS Management Fabric transaction before uninstall" >&2
+    return 1
+  fi
+  "$VPS_UPDATE_CHECKER" update-lifecycle-check || { echo "Recover or finalize the active VPS update before uninstall" >&2; return 1; }
+}
+
+assert_no_vps_transaction
+CONTROL_PLANE_WAS_ACTIVE=0
+systemctl is-active --quiet gateway-vpn-vps-agent.service && CONTROL_PLANE_WAS_ACTIVE=1
+if ((CONTROL_PLANE_WAS_ACTIVE)); then
+  systemctl stop gateway-vpn-vps-agent.service
+  ! systemctl is-active --quiet gateway-vpn-vps-agent.service || { echo "VPS control plane did not stop before uninstall" >&2; exit 1; }
+else
+  systemctl stop gateway-vpn-vps-agent.service 2>/dev/null || true
 fi
-if [[ -d /var/lib/gateway-vpn-vps-privileged/fabric ]] && find /var/lib/gateway-vpn-vps-privileged/fabric -maxdepth 1 -type f \( -name 'transaction.json' -o -name 'restore-reconcile.json' \) -print -quit | grep -q .; then
-  echo "Recover the pending VPS Management Fabric transaction before uninstall" >&2
-  exit 1
-fi
-if [[ -e /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json || -L /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json ]]; then
-  echo "Recover or finalize the active VPS update before uninstall" >&2
+if ! assert_no_vps_transaction; then
+  if ((CONTROL_PLANE_WAS_ACTIVE)); then
+    systemctl start gateway-vpn-vps-agent.service >/dev/null 2>&1 || true
+  fi
   exit 1
 fi
 

@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 30 {
+	if err != nil || version != 31 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 30 {
+	if err != nil || latest != 31 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -257,8 +257,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 30 {
-		t.Fatalf("SchemaVersion() = %d, want 30", version)
+	if version != 31 {
+		t.Fatalf("SchemaVersion() = %d, want 31", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -302,8 +302,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 30 {
-		t.Fatalf("migration count = %d, want 30", count)
+	if count != 31 {
+		t.Fatalf("migration count = %d, want 31", count)
 	}
 }
 
@@ -435,7 +435,7 @@ FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode, &ma
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 30 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
+	if version != 31 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
 		t.Fatalf("watchdog migrations = version:%d interval:%d modes:%s/%s/%s count:%d", version, interval, loggingMode, managementFabricMode, wireGuardAdminMode, modeCount)
 	}
 }

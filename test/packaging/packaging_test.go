@@ -204,6 +204,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		`if [[ $OLD_MARKER_FIELD_COUNT == 20 ]]; then`,
 		`$OLD_MARKER_FIELD_COUNT != 20 && $MERGED_FIELD_COUNT == 18`,
 		"Merged host-upgrade install marker does not preserve the original OS state",
+		"/var/lib/gateway-vpn-privileged/update-rollback/pending.json",
+		"update-lifecycle-check",
+		"assert_no_conflicting_lifecycle",
 	} {
 		if !strings.Contains(upgrader, required) {
 			t.Errorf("signed host upgrade contract missing %q", required)
@@ -692,8 +695,24 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 		t.Fatal("VPS first-install recovery does not restore only owned state")
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall-vps.sh"))
-	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || !strings.Contains(uninstaller, "VPS Hub settings/backups/account") || !strings.Contains(uninstaller, "gateway-vpn-vps-restore.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-fabric.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-operations.timer") || !strings.Contains(uninstaller, "gateway-vpn-vps-update.path") || !strings.Contains(uninstaller, "update-transactions/active.json") || !strings.Contains(uninstaller, "update-staging") || strings.Contains(uninstaller, "flush ruleset") {
+	if !strings.Contains(uninstaller, "--purge-keys") || !strings.Contains(uninstaller, "WireGuard keys are preserved") || !strings.Contains(uninstaller, "VPS Hub settings/backups/account") || !strings.Contains(uninstaller, "gateway-vpn-vps-restore.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-fabric.path") || !strings.Contains(uninstaller, "gateway-vpn-vps-operations.timer") || !strings.Contains(uninstaller, "gateway-vpn-vps-update.path") || !strings.Contains(uninstaller, "update-lifecycle-check") || !strings.Contains(uninstaller, "update-staging") || strings.Contains(uninstaller, "flush ruleset") {
 		t.Fatal("VPS uninstall key-preservation or firewall ownership contract is incomplete")
+	}
+	if strings.Contains(uninstaller, "/var/lib/gateway-vpn-vps-privileged/update-transactions/active.json") || strings.Contains(installer, "/var/lib/gateway-vpn-vps-privileged/update-transactions/active.json") {
+		t.Fatal("VPS install/uninstall uses raw active.json existence instead of semantic update lifecycle inspection")
+	}
+	if !strings.Contains(installer, "update-lifecycle-check") {
+		t.Fatal("VPS reinstall does not perform semantic update lifecycle inspection")
+	}
+	installedVerify := strings.Index(installer, `"$RELEASE_DIR/bin/gateway-vpnctl" vps-release-verify --release-dir "$DEST"`)
+	lifecycleInspect := strings.Index(installer, `"$DEST/bin/gateway-vpn-vps-agent" update-lifecycle-check`)
+	if installedVerify < 0 || lifecycleInspect < 0 || installedVerify > lifecycleInspect {
+		t.Fatal("VPS reinstall executes the installed lifecycle checker before the signed source verifier authenticates that tree")
+	}
+	for _, required := range []string{"assert_no_vps_transaction", "CONTROL_PLANE_WAS_ACTIVE", "systemctl stop gateway-vpn-vps-agent.service"} {
+		if !strings.Contains(uninstaller, required) {
+			t.Errorf("VPS uninstall TOCTOU guard missing %q", required)
+		}
 	}
 	commandGenerator := read(t, filepath.Join(root, "scripts", "generate-vps-install-command.sh"))
 	for _, required := range []string{"channel-vps-install-command", "install-vps-$VERSION.command.txt", "--gateway-public-key", "--admin-public-key", "--install-dependencies", "--apply"} {
@@ -706,6 +725,8 @@ func TestVPSRoleIsSignedProfileScopedRecoverableAndOwned(t *testing.T) {
 func TestVPSUpdatePackagingHasIndependentLiveAndBootRecoveryBoundaries(t *testing.T) {
 	root := repositoryRoot(t)
 	directory := filepath.Join(root, "packaging", "vps", "systemd")
+	agentCommand := read(t, filepath.Join(root, "cmd", "gateway-vpn-vps-agent", "main.go"))
+	lifecycleLock := read(t, filepath.Join(root, "cmd", "gateway-vpn-vps-agent", "lifecycle_lock.go"))
 	update := read(t, filepath.Join(directory, "gateway-vpn-vps-update.service"))
 	recovery := read(t, filepath.Join(directory, "gateway-vpn-vps-update-recovery.service"))
 	finalize := read(t, filepath.Join(directory, "gateway-vpn-vps-update-finalize.service"))
@@ -716,10 +737,10 @@ func TestVPSUpdatePackagingHasIndependentLiveAndBootRecoveryBoundaries(t *testin
 
 	for _, required := range []string{
 		"GATEWAY_VPN_VPS_UPDATE_UNIT=1",
-		"ExecStartPre=/usr/bin/install -o root -g root -m 0600 /dev/null /run/gateway-vpn-vps-update-live",
 		"ExecStart=/opt/gateway-vpn-vps/recovery/bin/gateway-vpn-vps-agent update-apply",
 		"ExecStopPost=/usr/bin/rm -f /run/gateway-vpn-vps-update-live /var/lib/gateway-vpn-vps/agent/update.trigger",
 		"OnFailure=gateway-vpn-vps-update-recovery.service",
+		"Conflicts=gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service gateway-vpn-vps-update-finalize.service",
 		"ReadWritePaths=/opt/gateway-vpn-vps /var/lib/gateway-vpn-vps/agent /var/lib/gateway-vpn-vps-privileged /run/systemd",
 		"RestrictAddressFamilies=AF_UNIX",
 	} {
@@ -743,6 +764,22 @@ func TestVPSUpdatePackagingHasIndependentLiveAndBootRecoveryBoundaries(t *testin
 	for _, required := range []string{"GATEWAY_VPN_VPS_UPDATE_FINALIZE_UNIT=1", "/run/gateway-vpn-vps-update-live", "update-finalize", "OnFailure=gateway-vpn-vps-update-recovery.service"} {
 		if !strings.Contains(finalize, required) {
 			t.Errorf("VPS update finalize unit missing %q", required)
+		}
+	}
+	if !strings.Contains(finalize, "Conflicts=gateway-vpn-vps-update.service gateway-vpn-vps-restore.service gateway-vpn-vps-fabric.service") {
+		t.Fatal("VPS update finalizer can overlap another root data-plane transaction")
+	}
+	if strings.Contains(update, "ExecStartPre=") || strings.Contains(finalize, "ExecStartPre=") {
+		t.Fatal("VPS update units mutate root state before the shared lifecycle lock is acquired")
+	}
+	for _, required := range []string{"acquireVPSUpdateRootLifecycle(false)", "acquireVPSUpdateRootLifecycle(true)", "createVPSUpdateLiveMarker()"} {
+		if !strings.Contains(agentCommand, required) {
+			t.Errorf("VPS root update command is missing lifecycle boundary %q", required)
+		}
+	}
+	for _, required := range []string{"/run/lock/gateway-vpn-vps-install.lock", "/var/lib/gateway-vpn-vps/install-transactions/active", "/run/gateway-vpn-vps-install-authorized"} {
+		if !strings.Contains(lifecycleLock, required) {
+			t.Errorf("VPS update lifecycle lock is missing fixed boundary %q", required)
 		}
 	}
 	if !strings.Contains(pathUnit, "PathExists=/var/lib/gateway-vpn-vps/agent/update.trigger") || !strings.Contains(pathUnit, "Unit=gateway-vpn-vps-update.service") || !strings.Contains(timer, "OnUnitActiveSec=15min") || !strings.Contains(timer, "Persistent=true") {
@@ -992,8 +1029,10 @@ func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
 
 	for _, required := range []string{
 		"GATEWAY_VPN_UNINSTALL_UNIT", "ROOT=/var/lib/gateway-vpn-uninstall", "ACTIVE=$ROOT/active", "uninstall-[a-f0-9]{32}",
-		"release-verify", "tooling-ready", "sha256sum --binary", "gateway-vpn PATH_BLOCKED",
+		"release-verify", "tooling-ready", "gateway-vpn_sha256", "sha256sum --binary", "gateway-vpn PATH_BLOCKED",
 		"GATEWAY_VPN_UNINSTALL_GUARDIAN=1", "completed-$OPERATION_ID", "sync -f \"$RECEIPT_TMP\"",
+		"/var/lib/gateway-vpn/update-staging/pending-update.json", `"$TOOLING/gateway-vpn" update-lifecycle-check`,
+		"/var/lib/gateway-vpn-privileged/update-rollback/pending.json", "/var/lib/gateway-vpn/recovery/pending-restore.json",
 	} {
 		if !strings.Contains(helper, required) {
 			t.Errorf("uninstall guardian helper missing %q", required)
@@ -1029,8 +1068,19 @@ func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
 			t.Errorf("WebUI uninstall confirmation flow missing %q", required)
 		}
 	}
-	if !strings.Contains(uninstaller, "Gateway did not enter PATH_BLOCKED before uninstall") || !strings.Contains(uninstaller, "rm -rf /var/log/gateway-vpn") || strings.Contains(uninstaller, "gateway-vpn-state-$(date") {
+	if !strings.Contains(uninstaller, "Gateway did not enter PATH_BLOCKED before uninstall") || !strings.Contains(uninstaller, "rm -rf /var/log/gateway-vpn") || !strings.Contains(uninstaller, "/var/lib/gateway-vpn-privileged/update-rollback/pending.json") || strings.Contains(uninstaller, "gateway-vpn-state-$(date") {
 		t.Fatal("CLI uninstall does not match fail-closed preserve/purge contract")
+	}
+	for _, required := range []string{"assert_no_update_restore_transaction", "CONTROL_PLANE_WAS_ACTIVE", "update-lifecycle-check"} {
+		if !strings.Contains(uninstaller, required) {
+			t.Errorf("CLI uninstall lifecycle recheck missing %q", required)
+		}
+	}
+	upgrader := read(t, filepath.Join(root, "scripts", "upgrade-gateway-host.sh"))
+	for name, content := range map[string]string{"uninstall helper": helper, "uninstaller": uninstaller, "host upgrader": upgrader} {
+		if strings.Contains(content, "/var/lib/gateway-vpn-privileged/update-transactions/active.json") {
+			t.Errorf("%s still treats durable terminal active.json as an active transaction", name)
+		}
 	}
 }
 
@@ -1532,7 +1582,6 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 	for _, required := range []string{
 		"ConditionPathExists=/var/lib/gateway-vpn/update-staging/pending-update.json",
 		"GATEWAY_VPN_UPDATE_UNIT=1",
-		"ExecStartPre=/opt/gateway-vpn/recovery/bin/gateway-vpn firewall-boot --config /etc/gateway-vpn/config.yaml --apply",
 		"update-apply --config /etc/gateway-vpn/config.yaml --apply",
 		"Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service",
 		"Requires=gateway-vpn-update-recovery.service",
@@ -1544,6 +1593,47 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 			t.Errorf("signed update unit missing %q", required)
 		}
 	}
+	rollback := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-rollback.service"))
+	for _, required := range []string{
+		"ConditionPathExists=/var/lib/gateway-vpn-privileged/update-rollback/pending.json",
+		"GATEWAY_VPN_UPDATE_ROLLBACK_UNIT=1",
+		"GATEWAY_VPN_UPDATE_UNIT=1",
+		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-rollback --config /etc/gateway-vpn/config.yaml --apply",
+		"Requires=gateway-vpn-update-recovery.service",
+		"OnFailure=gateway-vpn-update-resume.service",
+		"ReadWritePaths=/opt/gateway-vpn /etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run",
+	} {
+		if !strings.Contains(rollback, required) {
+			t.Errorf("restore point rollback unit missing %q", required)
+		}
+	}
+	if strings.Contains(update, "ExecStartPre=") || strings.Contains(rollback, "ExecStartPre=") {
+		t.Fatal("update units can mutate PATH_BLOCKED before acquiring the common lifecycle lock")
+	}
+	commands := read(t, filepath.Join(root, "cmd", "gateway-vpn", "update_commands.go"))
+	lock := read(t, filepath.Join(root, "cmd", "gateway-vpn", "lifecycle_lock.go")) + read(t, filepath.Join(root, "cmd", "gateway-vpn", "lifecycle_lock_linux.go"))
+	for _, required := range []string{
+		"acquireUpdateRootLifecycle(false)",
+		"acquireUpdateRootLifecycle(true)",
+		"gateway-vpn-install.lock",
+		"O_NOFOLLOW",
+		"LOCK_EX|unix.LOCK_NB",
+		"gateway-vpn-install-authorized",
+	} {
+		if !strings.Contains(commands+lock, required) {
+			t.Errorf("common update lifecycle lock contract missing %q", required)
+		}
+	}
+	broker := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.service"))
+	for _, required := range []string{
+		"/var/lib/gateway-vpn-privileged/update-transactions",
+		"/var/lib/gateway-vpn-privileged/update-restore-points",
+		"/var/lib/gateway-vpn-privileged/update-rollback",
+	} {
+		if !strings.Contains(broker, required) {
+			t.Errorf("network broker sandbox missing restore point path %q", required)
+		}
+	}
 	recovery := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-recovery.service"))
 	for _, required := range []string{
 		"DefaultDependencies=no",
@@ -1552,6 +1642,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"ExecStart=/opt/gateway-vpn/recovery/bin/gateway-vpn update-recover",
 		"update-recover --config /etc/gateway-vpn/config.yaml --apply",
 		"Before=gateway-vpn-database-restore-boot.service gateway-vpn-database-restore.service gateway-vpn-network-recovery.service gateway-vpn-watchdog.service gateway-vpn-network-broker.socket",
+		"ReadWritePaths=/opt/gateway-vpn /etc/gateway-vpn /var/lib/gateway-vpn /var/lib/gateway-vpn-privileged /run",
 	} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("update recovery unit missing %q", required)
@@ -1573,7 +1664,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		t.Fatal("stability-window finalization contract is incomplete")
 	}
 	resume := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-update-resume.service"))
-	if !strings.Contains(resume, "systemctl restart gateway-vpn-update-recovery.service") || !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") || !strings.Contains(resume, "systemctl reset-failed gateway-vpn-update.service gateway-vpn-update-finalize.service") {
+	if !strings.Contains(resume, "systemctl restart gateway-vpn-update-recovery.service") || !strings.Contains(resume, "systemctl start gateway-vpn-network-broker.socket") || !strings.Contains(resume, "systemctl start gateway-vpn.service") || !strings.Contains(resume, "systemctl reset-failed gateway-vpn-update.service gateway-vpn-update-rollback.service gateway-vpn-update-finalize.service") {
 		t.Fatal("failed update does not recover before resuming management")
 	}
 	if !strings.Contains(resume, "Wants=gateway-vpn-firewall.service gateway-vpn-firewall-guard.service") || strings.Contains(resume, "Requires=gateway-vpn-firewall.service") {
@@ -1585,6 +1676,8 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 		"d /var/lib/gateway-vpn-privileged 0700 root root",
 		"d /var/lib/gateway-vpn-privileged/update-transactions 0700 root root",
 		"d /var/lib/gateway-vpn-privileged/update-snapshots 0700 root root",
+		"d /var/lib/gateway-vpn-privileged/update-restore-points 0700 root root",
+		"d /var/lib/gateway-vpn-privileged/update-rollback 0700 root root",
 	} {
 		if !strings.Contains(tmpfiles, required) {
 			t.Errorf("update tmpfiles policy missing %q", required)
@@ -1595,7 +1688,7 @@ func TestSignedUpdateIsBootRecoverableAndRootTransactionScoped(t *testing.T) {
 	if !strings.Contains(installer, "/opt/gateway-vpn/recovery") {
 		t.Fatal("installer does not pin an independent recovery release pointer")
 	}
-	for _, unit := range []string{"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service", "gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer"} {
+	for _, unit := range []string{"gateway-vpn-update.service", "gateway-vpn-update-rollback.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service", "gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer"} {
 		if !strings.Contains(installer, unit) || !strings.Contains(uninstaller, unit) {
 			t.Errorf("installer lifecycle is missing %s", unit)
 		}

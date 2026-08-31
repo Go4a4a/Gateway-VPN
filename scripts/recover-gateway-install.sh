@@ -139,7 +139,7 @@ reload_networkd_policy_if_active() {
 UNITS=(
   gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-mihomo.service gateway-vpn-dnsmasq.service
   gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn-update-finalize.timer
-  gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update.service
+  gateway-vpn-update-finalize.service gateway-vpn-update-resume.service gateway-vpn-update-rollback.service gateway-vpn-update.service
   gateway-vpn-update-recovery.service gateway-vpn-database-restore-boot.service gateway-vpn-network-recovery.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service
   gateway-vpn-database-restore-resume.service gateway-vpn-firewall-guard.service gateway-vpn-firewall.service
   gateway-vpn-uninstall.service
@@ -225,7 +225,7 @@ UNIT_FILES=( \
   gateway-vpn-network-rollback@.timer gateway-vpn-network-rollback@.service gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service \
   gateway-vpn-power-cycle@.service \
   gateway-vpn-uninstall.service \
-  gateway-vpn-database-restore-resume.service gateway-vpn-update.service gateway-vpn-update-recovery.service \
+  gateway-vpn-database-restore-resume.service gateway-vpn-update.service gateway-vpn-update-rollback.service gateway-vpn-update-recovery.service \
   gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer
 )
 if [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} != 1 ]]; then

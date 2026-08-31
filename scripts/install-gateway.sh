@@ -901,7 +901,7 @@ for unit in gateway-vpn.service gateway-vpn-watchdog.service gateway-vpn-firewal
   gateway-vpn-uninstall.service \
   gateway-vpn-host-upgrade-recovery.service \
   gateway-vpn-database-restore-boot.service gateway-vpn-database-restore-dispatch.service gateway-vpn-database-restore.service gateway-vpn-database-restore-resume.service \
-  gateway-vpn-update.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
+  gateway-vpn-update.service gateway-vpn-update-rollback.service gateway-vpn-update-recovery.service gateway-vpn-update-resume.service gateway-vpn-update-finalize.service gateway-vpn-update-finalize.timer; do
   install -D -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "/etc/systemd/system/$unit"
 done
 ln -sfn "releases/v$RELEASE_VERSION" /opt/gateway-vpn/.current.new

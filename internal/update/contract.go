@@ -524,6 +524,7 @@ var requiredHostContractFiles = []string{
 	"packaging/systemd/gateway-vpn-host-upgrade-recovery.service",
 	"packaging/systemd/gateway-vpn-uninstall.service",
 	"packaging/systemd/gateway-vpn-update.service",
+	"packaging/systemd/gateway-vpn-update-rollback.service",
 	"packaging/systemd/gateway-vpn-update-recovery.service",
 	"packaging/systemd/gateway-vpn-update-resume.service",
 	"packaging/systemd/gateway-vpn-update-finalize.service",
@@ -710,6 +711,13 @@ func ValidateGatewayVersion(value string) error {
 		return errors.New("Gateway VPN version is not strict SemVer 2.0.0")
 	}
 	return nil
+}
+
+// CompareGatewayVersions compares two strict SemVer versions. It is exported
+// for the signed remote-channel resolver; callers must still verify the
+// channel signature before using the result for update selection.
+func CompareGatewayVersions(left, right string) (int, error) {
+	return compareVersions(left, right)
 }
 
 func validateRelease(release Release) error {

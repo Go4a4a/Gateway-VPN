@@ -13,13 +13,21 @@ import (
 	"time"
 )
 
-const JournalFormatVersion = 1
+const JournalFormatVersion = 3
+
+type TransactionKind string
+
+const (
+	TransactionSignedUpdate         TransactionKind = "SIGNED_UPDATE"
+	TransactionRestorePointRollback TransactionKind = "RESTORE_POINT_ROLLBACK"
+)
 
 type TransactionState string
 
 const (
 	StatePrepared              TransactionState = "PREPARED"
 	StateQuiesced              TransactionState = "QUIESCED"
+	StateRestorePointReady     TransactionState = "RESTORE_POINT_READY"
 	StateCandidateReady        TransactionState = "CANDIDATE_READY"
 	StateDatabaseSwitchPending TransactionState = "DATABASE_SWITCH_PENDING"
 	StateDatabaseSwitched      TransactionState = "DATABASE_SWITCHED"
@@ -37,6 +45,7 @@ var errorCodePattern = regexp.MustCompile(`^[A-Z0-9_]{0,64}$`)
 
 type Journal struct {
 	FormatVersion              int              `json:"format_version"`
+	OperationKind              TransactionKind  `json:"operation_kind,omitempty"`
 	UpdateID                   string           `json:"update_id"`
 	State                      TransactionState `json:"state"`
 	StartedAt                  string           `json:"started_at"`
@@ -46,6 +55,8 @@ type Journal struct {
 	OldCurrentTarget           string           `json:"old_current_target"`
 	NewCurrentTarget           string           `json:"new_current_target"`
 	PreUpdateSnapshotID        string           `json:"pre_update_snapshot_id,omitempty"`
+	RestorePointID             string           `json:"restore_point_id,omitempty"`
+	TargetRestorePointID       string           `json:"target_restore_point_id,omitempty"`
 	OldSchemaVersion           int64            `json:"old_schema_version,omitempty"`
 	NewSchemaVersion           int64            `json:"new_schema_version,omitempty"`
 	CandidateDBSHA256          string           `json:"candidate_db_sha256,omitempty"`
@@ -54,6 +65,9 @@ type Journal struct {
 	DNSMasqWasActive           bool             `json:"dnsmasq_was_active"`
 	StabilityDeadline          string           `json:"stability_deadline,omitempty"`
 	ErrorCode                  string           `json:"error_code,omitempty"`
+	SourceKind                 string           `json:"source_kind,omitempty"`
+	SourceChannel              string           `json:"source_channel,omitempty"`
+	SourceReference            string           `json:"source_reference,omitempty"`
 }
 
 type journalEnvelope struct {
@@ -179,17 +193,47 @@ func readJournal(filename string) (Journal, error) {
 func validJournal(journal Journal) bool {
 	started, startErr := time.Parse(time.RFC3339Nano, journal.StartedAt)
 	updated, updateErr := time.Parse(time.RFC3339Nano, journal.UpdatedAt)
-	if journal.FormatVersion != JournalFormatVersion || !updateIDPattern.MatchString(journal.UpdateID) || !validTransactionState(journal.State) || startErr != nil || updateErr != nil || updated.Before(started) || !versionPattern.MatchString(journal.OldVersion) || !versionPattern.MatchString(journal.NewVersion) || journal.OldVersion == journal.NewVersion || journal.OldCurrentTarget != "releases/v"+journal.OldVersion || journal.NewCurrentTarget != "releases/v"+journal.NewVersion || !errorCodePattern.MatchString(journal.ErrorCode) {
+	kind := journal.transactionKind()
+	if journal.FormatVersion < 1 || journal.FormatVersion > JournalFormatVersion || !updateIDPattern.MatchString(journal.UpdateID) || !validTransactionState(journal.State) || journal.FormatVersion == 1 && journal.State == StateRestorePointReady || startErr != nil || updateErr != nil || updated.Before(started) || !versionPattern.MatchString(journal.OldVersion) || !versionPattern.MatchString(journal.NewVersion) || kind == TransactionSignedUpdate && journal.OldVersion == journal.NewVersion || journal.OldCurrentTarget != "releases/v"+journal.OldVersion || journal.NewCurrentTarget != "releases/v"+journal.NewVersion || !errorCodePattern.MatchString(journal.ErrorCode) {
+		return false
+	}
+	if kind != TransactionSignedUpdate && kind != TransactionRestorePointRollback {
 		return false
 	}
 	if journal.PreUpdateSnapshotID != "" && !snapshotIDPatternForUpdate(journal.PreUpdateSnapshotID) {
 		return false
 	}
+	if journal.RestorePointID != "" && !restorePointIDPattern.MatchString(journal.RestorePointID) {
+		return false
+	}
+	if kind == TransactionRestorePointRollback {
+		if !restorePointIDPattern.MatchString(journal.TargetRestorePointID) || journal.SourceKind != "" || journal.SourceChannel != "" || journal.SourceReference != "" {
+			return false
+		}
+	} else if journal.TargetRestorePointID != "" {
+		return false
+	}
+	if !(journal.SourceKind == "" && journal.SourceChannel == "" && journal.SourceReference == "") && !validSource(Source{Kind: journal.SourceKind, Channel: journal.SourceChannel, Reference: journal.SourceReference}) {
+		return false
+	}
 	if journal.OldSchemaVersion < 0 || journal.NewSchemaVersion < 0 || journal.CandidateDBSHA256 != "" && !digestPattern.MatchString(journal.CandidateDBSHA256) {
 		return false
 	}
+	if journal.FormatVersion >= 2 && (journal.State == StateRestorePointReady || journal.PreUpdateSnapshotID != "") && journal.RestorePointID == "" {
+		return false
+	}
+	if journal.State == StateRestorePointReady && (journal.PreUpdateSnapshotID == "" || journal.OldSchemaVersion < 1) {
+		return false
+	}
 	if journal.State == StateCandidateReady || stateMayHaveSwitchedDatabase(journal.State) || journal.DatabaseReplacementStarted {
-		if journal.PreUpdateSnapshotID == "" || journal.OldSchemaVersion < 1 || journal.NewSchemaVersion < journal.OldSchemaVersion || !digestPattern.MatchString(journal.CandidateDBSHA256) {
+		if journal.PreUpdateSnapshotID == "" || journal.OldSchemaVersion < 1 || journal.NewSchemaVersion < 1 || !digestPattern.MatchString(journal.CandidateDBSHA256) {
+			return false
+		}
+		// A signed forward update may migrate only monotonically. A complete
+		// restore-point rollback deliberately restores the historical binary and
+		// its exact historical database, so its schema may be lower than the
+		// currently active schema without running a down-migration.
+		if kind == TransactionSignedUpdate && journal.NewSchemaVersion < journal.OldSchemaVersion {
 			return false
 		}
 	}
@@ -204,9 +248,25 @@ func validJournal(journal Journal) bool {
 	return true
 }
 
+func (journal Journal) transactionKind() TransactionKind {
+	// v1/v2 journals and early v3 fixtures predate the explicit discriminator
+	// and are unambiguously signed updates because they have no target point.
+	if journal.OperationKind == "" {
+		return TransactionSignedUpdate
+	}
+	return journal.OperationKind
+}
+
+func (journal Journal) TransactionKind() TransactionKind { return journal.transactionKind() }
+
+// InProgress reports whether a verified journal still owns live host state.
+// Terminal journals remain durable as history but do not block a later host
+// lifecycle operation.
+func (journal Journal) InProgress() bool { return !terminalState(journal.State) }
+
 func validTransactionState(state TransactionState) bool {
 	switch state {
-	case StatePrepared, StateQuiesced, StateCandidateReady, StateDatabaseSwitchPending, StateDatabaseSwitched, StateReleaseSwitchPending, StateSwitched, StateHealthChecking, StateStabilizing, StateRollingBack, StateRolledBack, StateRollbackFailed, StateFinalized:
+	case StatePrepared, StateQuiesced, StateRestorePointReady, StateCandidateReady, StateDatabaseSwitchPending, StateDatabaseSwitched, StateReleaseSwitchPending, StateSwitched, StateHealthChecking, StateStabilizing, StateRollingBack, StateRolledBack, StateRollbackFailed, StateFinalized:
 		return true
 	default:
 		return false

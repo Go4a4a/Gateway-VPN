@@ -38,6 +38,7 @@ type ManagedRuntimeState struct {
 
 type Engine struct {
 	Stager          *Stager
+	RestorePoints   *RestorePointStore
 	Store           JournalStore
 	Runtime         HostRuntime
 	ReleaseRoot     string
@@ -60,9 +61,22 @@ type ApplyResult struct {
 	OldSchemaVersion  int64  `json:"old_schema_version"`
 	NewSchemaVersion  int64  `json:"new_schema_version"`
 	PreUpdateSnapshot string `json:"pre_update_snapshot"`
+	RestorePoint      string `json:"restore_point"`
 	State             string `json:"state"`
 	StabilityDeadline string `json:"stability_deadline"`
 	StagingCleaned    bool   `json:"staging_cleaned"`
+}
+
+type RestorePointRollbackResult struct {
+	UpdateID          string `json:"update_id"`
+	RestorePointID    string `json:"restore_point_id"`
+	SafetyPointID     string `json:"safety_point_id"`
+	OldVersion        string `json:"old_version"`
+	TargetVersion     string `json:"target_version"`
+	OldSchemaVersion  int64  `json:"old_schema_version"`
+	TargetSchema      int64  `json:"target_schema_version"`
+	State             string `json:"state"`
+	StabilityDeadline string `json:"stability_deadline"`
 }
 
 func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, error) {
@@ -94,6 +108,10 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	operation, pending, err := engine.Stager.Status()
+	if err != nil || !pending || operation.UpdateID != updateID {
+		return ApplyResult{}, errors.New("verified staged update metadata changed before apply")
+	}
 	verified, err := VerifyRelease(stagedRoot, engine.Stager.Policy)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("reverify staged candidate: %w", err)
@@ -122,11 +140,12 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	}
 	now := engine.now()
 	journal := Journal{
-		FormatVersion: JournalFormatVersion, UpdateID: updateID, State: StatePrepared,
+		FormatVersion: JournalFormatVersion, OperationKind: TransactionSignedUpdate, UpdateID: updateID, State: StatePrepared,
 		StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
 		OldVersion: oldRelease.GatewayVersion, NewVersion: verified.Release.GatewayVersion,
 		OldCurrentTarget: oldTarget, NewCurrentTarget: newTarget,
 		MihomoWasActive: managedState.MihomoActive, DNSMasqWasActive: managedState.DNSMasqActive,
+		SourceKind: operation.SourceKind, SourceChannel: operation.SourceChannel, SourceReference: operation.SourceReference,
 	}
 	if err := engine.saveState(&journal, StatePrepared); err != nil {
 		return ApplyResult{}, err
@@ -151,8 +170,19 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	if err != nil {
 		return failed("PRE_UPDATE_SNAPSHOT_FAILED", err)
 	}
+	restorePoint, err := engine.RestorePoints.CreatePreUpdate(ctx, oldRelease.GatewayVersion, oldSchema, filepath.Join(snapshot.Path, "state.db"))
+	if err != nil {
+		return failed("RESTORE_POINT_FAILED", err)
+	}
 	journal.PreUpdateSnapshotID = snapshot.Manifest.SnapshotID
+	journal.RestorePointID = restorePoint.Manifest.PointID
 	journal.OldSchemaVersion = oldSchema
+	if err := engine.saveState(&journal, StateRestorePointReady); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return ApplyResult{}, err
+		}
+		return failed("JOURNAL_RESTORE_POINT_FAILED", err)
+	}
 	candidatePath := engine.candidateDatabasePath(updateID)
 	if err := copyExclusiveFile(filepath.Join(snapshot.Path, "state.db"), candidatePath, 0o600, MaximumFileBytes); err != nil {
 		return failed("CANDIDATE_DB_COPY_FAILED", err)
@@ -241,8 +271,186 @@ func (engine *Engine) Apply(ctx context.Context, updateID string) (ApplyResult, 
 	return ApplyResult{
 		UpdateID: updateID, OldVersion: journal.OldVersion, NewVersion: journal.NewVersion,
 		OldSchemaVersion: oldSchema, NewSchemaVersion: offline.SchemaVersion,
-		PreUpdateSnapshot: snapshot.Manifest.SnapshotID, State: string(StateStabilizing),
+		PreUpdateSnapshot: snapshot.Manifest.SnapshotID, RestorePoint: restorePoint.Manifest.PointID, State: string(StateStabilizing),
 		StabilityDeadline: journal.StabilityDeadline, StagingCleaned: cleaned,
+	}, nil
+}
+
+// RollbackToRestorePoint applies one exact, fully verified historical pair.
+// Before any live mutation it creates a second complete safety point for the
+// currently running pair. The ordinary update boot-recovery journal then has
+// enough information to restore that safety point after SIGKILL or reboot.
+func (engine *Engine) RollbackToRestorePoint(ctx context.Context, pointID string) (RestorePointRollbackResult, error) {
+	if err := engine.validateWithoutStager(); err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	if ValidateRestorePointID(pointID) != nil {
+		return RestorePointRollbackResult{}, errors.New("restore point id is invalid")
+	}
+	unlock, err := acquireTransactionLock(engine.Store.Root)
+	if err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	defer unlock()
+	active, exists, err := engine.Store.LoadActive()
+	if err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	if exists && !terminalState(active.State) {
+		return RestorePointRollbackResult{}, ErrUpdateInProgress
+	}
+	target, err := engine.RestorePoints.Get(ctx, pointID)
+	if err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	if !target.Compatible {
+		return RestorePointRollbackResult{}, errors.New("restore point is incompatible with the installed host contract")
+	}
+	oldTarget, oldRelease, err := engine.currentRelease()
+	if err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	if oldRelease.GatewayVersion != engine.CurrentVersion {
+		return RestorePointRollbackResult{}, errors.New("running recovery binary does not match the current release")
+	}
+	targetRoot := filepath.Join(engine.ReleaseRoot, filepath.FromSlash(target.Manifest.ReleaseTarget))
+	targetRelease, err := ReadReleaseMetadata(targetRoot)
+	if err != nil || targetRelease.GatewayVersion != target.Manifest.GatewayVersion || targetRelease.DatabaseSchemaMaximum != target.Manifest.SchemaVersion {
+		return RestorePointRollbackResult{}, errors.New("restore point release and database pair is inconsistent")
+	}
+	managedState, err := engine.Runtime.Observe(ctx)
+	if err != nil {
+		return RestorePointRollbackResult{}, fmt.Errorf("observe managed services before restore point rollback: %w", err)
+	}
+	transactionID, err := newUpdateID(engine.now())
+	if err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	if err := engine.switchReleasePointer("recovery", oldTarget, transactionID+"-recovery"); err != nil {
+		return RestorePointRollbackResult{}, fmt.Errorf("pin current release recovery entry point: %w", err)
+	}
+	now := engine.now()
+	journal := Journal{
+		FormatVersion: JournalFormatVersion, OperationKind: TransactionRestorePointRollback,
+		UpdateID: transactionID, State: StatePrepared, StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+		OldVersion: oldRelease.GatewayVersion, NewVersion: target.Manifest.GatewayVersion,
+		OldCurrentTarget: oldTarget, NewCurrentTarget: target.Manifest.ReleaseTarget,
+		TargetRestorePointID: pointID, MihomoWasActive: managedState.MihomoActive, DNSMasqWasActive: managedState.DNSMasqActive,
+	}
+	if err := engine.saveState(&journal, StatePrepared); err != nil {
+		return RestorePointRollbackResult{}, err
+	}
+	failed := func(code string, cause error) (RestorePointRollbackResult, error) {
+		rollbackErr := engine.rollback(ctx, &journal, code)
+		if rollbackErr != nil {
+			return RestorePointRollbackResult{}, fmt.Errorf("restore point rollback failed (%v) and safety recovery failed: %w", cause, rollbackErr)
+		}
+		return RestorePointRollbackResult{}, fmt.Errorf("restore point was rejected and the safety pair was restored: %w", cause)
+	}
+	if err := engine.Runtime.Quiesce(ctx); err != nil {
+		return failed("RESTORE_QUIESCE_FAILED", err)
+	}
+	if err := engine.saveState(&journal, StateQuiesced); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_JOURNAL_QUIESCED_FAILED", err)
+	}
+	snapshot, oldSchema, err := engine.createPreUpdateSnapshot(ctx)
+	if err != nil {
+		return failed("RESTORE_SAFETY_SNAPSHOT_FAILED", err)
+	}
+	safety, err := engine.RestorePoints.CreatePreUpdate(ctx, oldRelease.GatewayVersion, oldSchema, filepath.Join(snapshot.Path, "state.db"))
+	if err != nil {
+		return failed("RESTORE_SAFETY_POINT_FAILED", err)
+	}
+	journal.PreUpdateSnapshotID = snapshot.Manifest.SnapshotID
+	journal.RestorePointID = safety.Manifest.PointID
+	journal.OldSchemaVersion = oldSchema
+	if err := engine.saveState(&journal, StateRestorePointReady); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_SAFETY_JOURNAL_FAILED", err)
+	}
+	projection, err := engine.prepareRestoreProjection(ctx, pointID, transactionID)
+	if err != nil {
+		return failed("RESTORE_PROJECTION_PREPARE_FAILED", err)
+	}
+	defer projection.cleanupCandidates()
+	offline, err := engine.Runtime.OfflineCheck(ctx, filepath.Join(targetRoot, "bin", "gateway-vpn"), projection.Database, projection.Configuration, targetRelease.GatewayVersion, targetRelease.MihomoVersion, targetRelease.DatabaseSchemaMaximum)
+	if err != nil {
+		return failed("RESTORE_OFFLINE_CHECK_FAILED", err)
+	}
+	if err := verifyOfflineResult(offline, target.Manifest.SchemaVersion); err != nil {
+		return failed("RESTORE_OFFLINE_RESULT_INVALID", err)
+	}
+	if err := verifyCandidateDatabase(ctx, projection.Database, offline); err != nil {
+		return failed("RESTORE_DATABASE_REVERIFY_FAILED", err)
+	}
+	projection.DatabaseSHA256 = offline.DatabaseSHA256
+	projection.DatabaseBytes = offline.DatabaseBytes
+	journal.NewSchemaVersion = offline.SchemaVersion
+	journal.CandidateDBSHA256 = offline.DatabaseSHA256
+	if err := engine.saveState(&journal, StateCandidateReady); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_CANDIDATE_JOURNAL_FAILED", err)
+	}
+	journal.DatabaseReplacementStarted = true
+	if err := engine.saveState(&journal, StateDatabaseSwitchPending); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_SWITCH_PENDING_JOURNAL_FAILED", err)
+	}
+	if err := engine.applyRestoreProjection(ctx, projection); err != nil {
+		return failed("RESTORE_PROJECTION_APPLY_FAILED", err)
+	}
+	if err := engine.saveState(&journal, StateDatabaseSwitched); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_PROJECTION_SWITCHED_JOURNAL_FAILED", err)
+	}
+	if err := engine.saveState(&journal, StateReleaseSwitchPending); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_RELEASE_PENDING_JOURNAL_FAILED", err)
+	}
+	if err := engine.switchCurrent(target.Manifest.ReleaseTarget, transactionID); err != nil {
+		return failed("RESTORE_CURRENT_SWITCH_FAILED", err)
+	}
+	if err := engine.saveState(&journal, StateSwitched); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_RELEASE_SWITCHED_JOURNAL_FAILED", err)
+	}
+	if err := engine.saveState(&journal, StateHealthChecking); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_HEALTH_JOURNAL_FAILED", err)
+	}
+	if err := engine.Runtime.StartAndHealth(ctx, target.Manifest.GatewayVersion, engine.DatabasePath, managedState); err != nil {
+		return failed("RESTORE_TARGET_HEALTH_FAILED", err)
+	}
+	journal.StabilityDeadline = engine.now().Add(engine.stabilityWindow()).Format(time.RFC3339Nano)
+	journal.ErrorCode = ""
+	if err := engine.saveState(&journal, StateStabilizing); err != nil {
+		if errors.Is(err, errInjectedInterruption) {
+			return RestorePointRollbackResult{}, err
+		}
+		return failed("RESTORE_STABILIZING_JOURNAL_FAILED", err)
+	}
+	return RestorePointRollbackResult{
+		UpdateID: transactionID, RestorePointID: pointID, SafetyPointID: safety.Manifest.PointID,
+		OldVersion: oldRelease.GatewayVersion, TargetVersion: target.Manifest.GatewayVersion,
+		OldSchemaVersion: oldSchema, TargetSchema: offline.SchemaVersion,
+		State: string(StateStabilizing), StabilityDeadline: journal.StabilityDeadline,
 	}, nil
 }
 
@@ -350,7 +558,18 @@ func (engine *Engine) rollback(ctx context.Context, journal *Journal, code strin
 		_ = engine.markRollbackFailed(journal, "ROLLBACK_QUIESCE_FAILED")
 		return err
 	}
-	if journal.DatabaseReplacementStarted {
+	if journal.DatabaseReplacementStarted && journal.transactionKind() == TransactionRestorePointRollback {
+		projection, err := engine.prepareRestoreProjection(ctx, journal.RestorePointID, journal.UpdateID)
+		if err != nil {
+			_ = engine.markRollbackFailed(journal, "ROLLBACK_SAFETY_POINT_INVALID")
+			return err
+		}
+		defer projection.cleanupCandidates()
+		if err := engine.applyRestoreProjection(ctx, projection); err != nil {
+			_ = engine.markRollbackFailed(journal, "ROLLBACK_SAFETY_POINT_APPLY_FAILED")
+			return err
+		}
+	} else if journal.DatabaseReplacementStarted {
 		snapshot, err := engine.verifiedSnapshot(ctx, journal.PreUpdateSnapshotID)
 		if err != nil {
 			_ = engine.markRollbackFailed(journal, "ROLLBACK_SNAPSHOT_INVALID")
@@ -724,14 +943,18 @@ func (engine *Engine) validate() error {
 }
 
 func (engine *Engine) validateWithoutStager() error {
-	if engine.Runtime == nil || !filepath.IsAbs(engine.ReleaseRoot) || !filepath.IsAbs(engine.StateDir) || !filepath.IsAbs(engine.DatabasePath) || !filepath.IsAbs(engine.ConfigPath) || !versionPattern.MatchString(engine.CurrentVersion) || engine.StateUID < 0 || engine.StateGID < 0 {
+	if engine.Runtime == nil || engine.RestorePoints == nil || !filepath.IsAbs(engine.ReleaseRoot) || !filepath.IsAbs(engine.StateDir) || !filepath.IsAbs(engine.DatabasePath) || !filepath.IsAbs(engine.ConfigPath) || !versionPattern.MatchString(engine.CurrentVersion) || engine.StateUID < 0 || engine.StateGID < 0 {
 		return errors.New("complete fixed update engine configuration is required")
+	}
+	if err := engine.RestorePoints.validate(); err != nil {
+		return err
 	}
 	state := filepath.Clean(engine.StateDir)
 	database := filepath.Clean(engine.DatabasePath)
 	relative, err := filepath.Rel(state, database)
 	transactionRoot := filepath.Clean(engine.Store.Root)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || !filepath.IsAbs(transactionRoot) || filepath.Base(transactionRoot) != "update-transactions" || transactionRoot == state || pathInside(state, transactionRoot) {
+	restoreRoot := filepath.Clean(engine.RestorePoints.Root)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || !filepath.IsAbs(transactionRoot) || filepath.Base(transactionRoot) != "update-transactions" || transactionRoot == state || pathInside(state, transactionRoot) || restoreRoot != filepath.Join(filepath.Dir(transactionRoot), "update-restore-points") || filepath.Clean(engine.RestorePoints.ReleaseRoot) != filepath.Clean(engine.ReleaseRoot) || filepath.Clean(engine.RestorePoints.StateDir) != state || filepath.Clean(engine.RestorePoints.Configuration) != filepath.Clean(engine.ConfigPath) {
 		return errors.New("update database must remain inside state while privileged journals remain outside it")
 	}
 	return nil

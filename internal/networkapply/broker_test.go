@@ -24,6 +24,7 @@ import (
 	"gateway-vpn/internal/power"
 	"gateway-vpn/internal/removal"
 	"gateway-vpn/internal/traffic"
+	updatepkg "gateway-vpn/internal/update"
 )
 
 type failingWireGuardIngressAdmin struct {
@@ -83,10 +84,15 @@ type fakeRestoreAdmin struct {
 }
 
 type fakeUpdateAdmin struct {
-	calls     int
-	err       error
-	status    UpdateTransactionStatus
-	statusErr error
+	calls         int
+	err           error
+	status        UpdateTransactionStatus
+	statusErr     error
+	restorePoints []updatepkg.RestorePoint
+	deletedPoint  string
+	prunePolicy   updatepkg.RestorePointPolicy
+	pruned        []string
+	rollbackPoint string
 }
 
 type fakeTrafficAdmin struct {
@@ -451,6 +457,25 @@ func (admin *fakeUpdateAdmin) ApplyPendingUpdate(context.Context) error {
 
 func (admin *fakeUpdateAdmin) UpdateStatus(context.Context) (UpdateTransactionStatus, error) {
 	return admin.status, admin.statusErr
+}
+
+func (admin *fakeUpdateAdmin) RestorePointInventory(context.Context) ([]updatepkg.RestorePoint, error) {
+	return append([]updatepkg.RestorePoint(nil), admin.restorePoints...), admin.statusErr
+}
+
+func (admin *fakeUpdateAdmin) DeleteRestorePoint(_ context.Context, pointID string) error {
+	admin.deletedPoint = pointID
+	return admin.err
+}
+
+func (admin *fakeUpdateAdmin) PruneRestorePoints(_ context.Context, policy updatepkg.RestorePointPolicy) ([]string, error) {
+	admin.prunePolicy = policy
+	return append([]string(nil), admin.pruned...), admin.err
+}
+
+func (admin *fakeUpdateAdmin) RollbackToRestorePoint(_ context.Context, pointID string) error {
+	admin.rollbackPoint = pointID
+	return admin.err
 }
 
 func (admin *fakeRestoreAdmin) ApplyPendingRestore(context.Context) error {
@@ -950,6 +975,30 @@ func TestBrokerUpdateApplyIsParameterFreeAndRedactsErrors(t *testing.T) {
 	client.client.Transport = rewriteOriginTransport{base: httpServer.URL, next: httpServer.Client().Transport}
 	if err := client.ApplyPendingUpdate(ctx); err != nil || admin.calls != 1 {
 		t.Fatalf("ApplyPendingUpdate() calls=%d error=%v", admin.calls, err)
+	}
+	pointID := "point-20260825T000000Z-0123456789abcdef01234567"
+	admin.restorePoints = []updatepkg.RestorePoint{{Manifest: updatepkg.RestorePointManifest{PointID: pointID, GatewayVersion: "1.1.0"}, Compatible: true, CompatibilityReason: "COMPATIBLE"}}
+	points, err := client.RestorePointInventory(ctx)
+	if err != nil || len(points) != 1 || points[0].Manifest.PointID != pointID {
+		t.Fatalf("RestorePointInventory() = %+v,%v", points, err)
+	}
+	if err := client.DeleteRestorePoint(ctx, pointID); err != nil || admin.deletedPoint != pointID {
+		t.Fatalf("DeleteRestorePoint() point=%q error=%v", admin.deletedPoint, err)
+	}
+	policy := updatepkg.DefaultRestorePointPolicy()
+	admin.pruned = []string{pointID}
+	removed, err := client.PruneRestorePoints(ctx, policy)
+	if err != nil || len(removed) != 1 || removed[0] != pointID || admin.prunePolicy != policy {
+		t.Fatalf("PruneRestorePoints() = %+v,%+v,%v", removed, admin.prunePolicy, err)
+	}
+	if err := client.DeleteRestorePoint(ctx, "../../etc/shadow"); err == nil || admin.deletedPoint != pointID {
+		t.Fatalf("unsafe restore point id crossed broker boundary: point=%q error=%v", admin.deletedPoint, err)
+	}
+	if err := client.RollbackToRestorePoint(ctx, pointID); err != nil || admin.rollbackPoint != pointID {
+		t.Fatalf("RollbackToRestorePoint() point=%q error=%v", admin.rollbackPoint, err)
+	}
+	if err := client.RollbackToRestorePoint(ctx, "../../etc/shadow"); err == nil || admin.rollbackPoint != pointID {
+		t.Fatalf("unsafe rollback point crossed broker boundary: point=%q error=%v", admin.rollbackPoint, err)
 	}
 	admin.status = UpdateTransactionStatus{Exists: true, UpdateID: "update-20260824T220000Z-0123456789abcdef01234567", State: "ROLLED_BACK", OldVersion: "1.1.0", NewVersion: "1.2.0", ErrorCode: "NEW_RELEASE_HEALTH_FAILED"}
 	status, err := client.UpdateStatus(ctx)

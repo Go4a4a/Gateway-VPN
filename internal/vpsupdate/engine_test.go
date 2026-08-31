@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -297,12 +298,18 @@ func TestStatusStorePublishesRootStatusToAgentGroupAndServiceResetsStaleStatus(t
 	}
 	path := filepath.Join(state, "update-status.json")
 	now := time.Date(2026, 8, 31, 11, 0, 0, 0, time.UTC)
-	store := StatusStore{Path: path, UID: os.Getuid(), GID: os.Getgid()}
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		// Windows has no POSIX process identity. Production is Linux-only, but
+		// the portable status contract can still be exercised with fixed IDs.
+		uid, gid = 0, 0
+	}
+	store := StatusStore{Path: path, UID: uid, GID: gid}
 	if err := store.Write(Status{FormatVersion: JournalFormatVersion, Available: true, CurrentVersion: "1.1.0", CurrentSchema: 4, UpdatedAt: now.Format(time.RFC3339Nano)}); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o640 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
 		t.Fatalf("root status mode = %v,%v", info.Mode().Perm(), err)
 	}
 	service := &Service{StatusPath: path, CurrentVersion: "1.2.0", CurrentSchema: 5, Now: func() time.Time { return now.Add(time.Minute) }}

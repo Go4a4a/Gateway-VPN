@@ -55,6 +55,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
+	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/wgingress"
@@ -119,7 +120,10 @@ type Dependencies struct {
 	Restores                RestoreStager
 	RestoreApply            RestoreApplyTrigger
 	Updates                 UpdateStager
+	RemoteUpdates           RemoteUpdateSource
 	UpdateApply             UpdateApplyTrigger
+	UpdatePolicy            *updatepkg.AutomationPolicyRepository
+	UpdateRestorePoints     UpdateRestorePointController
 	Watchdog                *watchdog.Repository
 	WatchdogStatus          WatchdogStatusReader
 	Power                   PowerController
@@ -190,6 +194,19 @@ type UpdateStager interface {
 type UpdateApplyTrigger interface {
 	ApplyPendingUpdate(context.Context) error
 	UpdateStatus(context.Context) (networkapply.UpdateTransactionStatus, error)
+}
+
+type UpdateRestorePointController interface {
+	RestorePointInventory(context.Context) ([]updatepkg.RestorePoint, error)
+	DeleteRestorePoint(context.Context, string) error
+	PruneRestorePoints(context.Context, updatepkg.RestorePointPolicy) ([]string, error)
+	RollbackToRestorePoint(context.Context, string) error
+}
+
+type RemoteUpdateSource interface {
+	Check(context.Context, string) (updateremote.Available, error)
+	StageChannel(context.Context, string) (updatepkg.Operation, error)
+	StageExact(context.Context, string) (updatepkg.Operation, error)
 }
 
 type NetworkBroker interface {
@@ -308,6 +325,9 @@ func New(dependencies Dependencies) (*Server, error) {
 	}
 	if dependencies.Operations == nil {
 		dependencies.Operations = operations.NewRepository(dependencies.Database)
+	}
+	if dependencies.UpdatePolicy == nil {
+		dependencies.UpdatePolicy = &updatepkg.AutomationPolicyRepository{Database: dependencies.Database}
 	}
 	if dependencies.BootIDReader == nil {
 		dependencies.BootIDReader = func() (string, error) { return hostboot.Read("") }
@@ -460,6 +480,14 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("POST /api/v1/system/update", server.protected(http.HandlerFunc(server.stageUpdate)))
 	mux.Handle("DELETE /api/v1/system/update", server.protected(http.HandlerFunc(server.discardUpdate)))
 	mux.Handle("POST /api/v1/system/update/apply", server.protected(http.HandlerFunc(server.applyUpdate)))
+	mux.Handle("GET /api/v1/system/update/available", server.protected(http.HandlerFunc(server.availableUpdate)))
+	mux.Handle("POST /api/v1/system/update/remote", server.protected(http.HandlerFunc(server.stageRemoteUpdate)))
+	mux.Handle("GET /api/v1/settings/software-update", server.protected(http.HandlerFunc(server.softwareUpdatePolicy)))
+	mux.Handle("PUT /api/v1/settings/software-update", server.protected(http.HandlerFunc(server.updateSoftwareUpdatePolicy)))
+	mux.Handle("GET /api/v1/system/update/restore-points", server.protected(http.HandlerFunc(server.updateRestorePoints)))
+	mux.Handle("POST /api/v1/system/update/restore-points/{id}/rollback", server.protected(http.HandlerFunc(server.rollbackToUpdateRestorePoint)))
+	mux.Handle("DELETE /api/v1/system/update/restore-points/{id}", server.protected(http.HandlerFunc(server.deleteUpdateRestorePoint)))
+	mux.Handle("POST /api/v1/system/update/restore-points/prune", server.protected(http.HandlerFunc(server.pruneUpdateRestorePoints)))
 	mux.Handle("GET /api/v1/traffic/current", server.protected(http.HandlerFunc(server.trafficCurrent)))
 	mux.Handle("GET /api/v1/traffic/daily", server.protected(http.HandlerFunc(server.trafficDaily)))
 	mux.Handle("GET /api/v1/traffic/monthly", server.protected(http.HandlerFunc(server.trafficMonthly)))
@@ -4333,6 +4361,317 @@ func (server *Server) updateStatus(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, response)
 }
 
+func (server *Server) softwareUpdatePolicy(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdatePolicy == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Политика обновлений не подключена")
+		return
+	}
+	policy, err := server.dependencies.UpdatePolicy.Get(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_POLICY_UNAVAILABLE", "Не удалось прочитать политику обновлений")
+		return
+	}
+	writeJSON(writer, http.StatusOK, policy)
+}
+
+func (server *Server) updateSoftwareUpdatePolicy(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdatePolicy == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Политика обновлений не подключена")
+		return
+	}
+	var input struct {
+		Channel                    string `json:"channel"`
+		AutomaticCheckEnabled      bool   `json:"automatic_check_enabled"`
+		AutomaticDownloadEnabled   bool   `json:"automatic_download_enabled"`
+		AutomaticApplyEnabled      bool   `json:"automatic_apply_enabled"`
+		CheckIntervalHours         int    `json:"check_interval_hours"`
+		JitterMinutes              int    `json:"jitter_minutes"`
+		MaintenanceWindowEnabled   bool   `json:"maintenance_window_enabled"`
+		MaintenanceStartMinuteUTC  int    `json:"maintenance_start_minute_utc"`
+		MaintenanceDurationMinutes int    `json:"maintenance_duration_minutes"`
+		RetentionMaximumPoints     int    `json:"retention_maximum_points"`
+		RetentionMaximumBytes      int64  `json:"retention_maximum_bytes"`
+		RetentionMaximumAgeDays    int    `json:"retention_maximum_age_days"`
+		RetentionMinimumOldPoints  int    `json:"retention_minimum_old_points"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректная политика обновлений")
+		return
+	}
+	policy, err := server.dependencies.UpdatePolicy.Update(request.Context(), updatepkg.AutomationPolicyInput{
+		Channel: input.Channel, AutomaticCheckEnabled: input.AutomaticCheckEnabled,
+		AutomaticDownloadEnabled: input.AutomaticDownloadEnabled, AutomaticApplyEnabled: input.AutomaticApplyEnabled,
+		CheckIntervalHours: input.CheckIntervalHours, JitterMinutes: input.JitterMinutes,
+		MaintenanceWindowEnabled:  input.MaintenanceWindowEnabled,
+		MaintenanceStartMinuteUTC: input.MaintenanceStartMinuteUTC, MaintenanceDurationMinutes: input.MaintenanceDurationMinutes,
+		RetentionMaximumPoints: input.RetentionMaximumPoints, RetentionMaximumBytes: input.RetentionMaximumBytes,
+		RetentionMaximumAgeDays: input.RetentionMaximumAgeDays, RetentionMinimumOldPoints: input.RetentionMinimumOldPoints,
+	})
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "UPDATE_POLICY_INVALID", "Политика обновлений содержит небезопасное или неподдерживаемое сочетание")
+		return
+	}
+	writeJSON(writer, http.StatusOK, policy)
+}
+
+func (server *Server) updateRestorePoints(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdateRestorePoints == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "История версий не подключена")
+		return
+	}
+	items, err := server.dependencies.UpdateRestorePoints.RestorePointInventory(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_RESTORE_POINTS_UNAVAILABLE", "Не удалось проверить историю версий")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (server *Server) rollbackToUpdateRestorePoint(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdateRestorePoints == nil || server.dependencies.ModemRuntime == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Откат к сохранённой версии не подключён")
+		return
+	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UPDATE_ROLLBACK_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
+	if request.Header.Get("X-Confirm-Destructive") != "rollback-update-restore-point" {
+		writeError(writer, http.StatusConflict, "UPDATE_ROLLBACK_CONFIRMATION_REQUIRED", "Требуется явное подтверждение отката с заменой более новых настроек и данных")
+		return
+	}
+	var input struct {
+		Password     string `json:"password"`
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil || len(input.Password) > 1024 || input.Confirmation != "ROLLBACK_TO_RESTORE_POINT" {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "UPDATE_ROLLBACK_TYPED_CONFIRMATION_REQUIRED", "Введите точную контрольную фразу ROLLBACK_TO_RESTORE_POINT")
+		return
+	}
+	pointID := request.PathValue("id")
+	if updatepkg.ValidateRestorePointID(pointID) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректный идентификатор точки восстановления")
+		return
+	}
+	items, err := server.dependencies.UpdateRestorePoints.RestorePointInventory(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_RESTORE_POINTS_UNAVAILABLE", "Не удалось повторно проверить историю версий")
+		return
+	}
+	var target *updatepkg.RestorePoint
+	for index := range items {
+		if items[index].Manifest.PointID == pointID {
+			target = &items[index]
+			break
+		}
+	}
+	if target == nil {
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_CHANGED", "Точка восстановления не найдена или изменилась")
+		return
+	}
+	if !target.Compatible {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_INCOMPATIBLE", "Точка восстановления несовместима с текущим host contract")
+		return
+	}
+	principal, ok := request.Context().Value(principalKey).(auth.Principal)
+	if !ok {
+		input.Password, input.Confirmation = "", ""
+		writeError(writer, http.StatusUnauthorized, "AUTH_REQUIRED", "Требуется вход")
+		return
+	}
+	if err := server.dependencies.Auth.Reauthenticate(request.Context(), principal, input.Password); err != nil {
+		input.Password, input.Confirmation = "", ""
+		switch {
+		case errors.Is(err, auth.ErrRateLimited):
+			writer.Header().Set("Retry-After", "2")
+			writeError(writer, http.StatusTooManyRequests, "REAUTH_RATE_LIMITED", "Слишком много неверных попыток; повторите позже")
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(writer, http.StatusUnauthorized, "REAUTH_FAILED", "Текущий пароль указан неверно")
+		case errors.Is(err, auth.ErrInvalidSession):
+			writeError(writer, http.StatusUnauthorized, "SESSION_INVALID", "Сессия истекла или отозвана")
+		default:
+			writeInternalError(writer, err)
+		}
+		return
+	}
+	input.Password, input.Confirmation = "", ""
+	if err := server.dependencies.ModemRuntime.BlockPath(request.Context()); err != nil {
+		writeError(writer, http.StatusBadGateway, "PATH_BLOCK_FAILED", "Не удалось закрыть data path перед откатом")
+		return
+	}
+	if _, _, err := server.dependencies.State.Block(request.Context(), state.GatewayBlocked, "UPDATE_RESTORE_POINT_ROLLBACK_REQUESTED"); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "WARNING", Type: "UPDATE_RESTORE_POINT_ROLLBACK_REQUESTED", Details: map[string]any{
+		"user_id": principal.UserID, "point_id": pointID,
+		"target_gateway_version": target.Manifest.GatewayVersion, "target_schema_version": target.Manifest.SchemaVersion,
+		"target_release_manifest_sha256": target.Manifest.ReleaseManifestSHA256,
+	}}); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	if err := server.dependencies.UpdateRestorePoints.RollbackToRestorePoint(request.Context(), pointID); err != nil {
+		writeError(writer, http.StatusBadGateway, "UPDATE_ROLLBACK_START_FAILED", "Data path закрыт, но fixed systemd rollback helper не запустился")
+		return
+	}
+	writeJSON(writer, http.StatusAccepted, map[string]any{
+		"operation_kind": "RESTORE_POINT_ROLLBACK", "target_restore_point_id": pointID,
+		"target_gateway_version": target.Manifest.GatewayVersion, "state": "ROLLBACK_SCHEDULED", "management_reconnect_required": true,
+	})
+}
+
+func (server *Server) deleteUpdateRestorePoint(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdateRestorePoints == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "История версий не подключена")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "delete-update-restore-point" {
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_CONFIRMATION_REQUIRED", "Требуется явное подтверждение удаления точки восстановления")
+		return
+	}
+	pointID := request.PathValue("id")
+	if updatepkg.ValidateRestorePointID(pointID) != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректный идентификатор точки восстановления")
+		return
+	}
+	if err := server.dependencies.UpdateRestorePoints.DeleteRestorePoint(request.Context(), pointID); err != nil {
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_PROTECTED", "Точка текущей, recovery или активной версии защищена либо изменилась")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "WARNING", Type: "UPDATE_RESTORE_POINT_DELETED", Details: map[string]any{"user_id": principal.UserID, "point_id": pointID}}); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (server *Server) pruneUpdateRestorePoints(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.UpdateRestorePoints == nil || server.dependencies.UpdatePolicy == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Очистка истории версий не подключена")
+		return
+	}
+	if request.Header.Get("X-Confirm-Destructive") != "prune-update-restore-points" {
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_CONFIRMATION_REQUIRED", "Требуется явное подтверждение очистки истории версий")
+		return
+	}
+	var input struct{}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Запрос очистки не должен содержать параметры")
+		return
+	}
+	policy, err := server.dependencies.UpdatePolicy.Get(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "UPDATE_POLICY_UNAVAILABLE", "Не удалось прочитать retention-политику")
+		return
+	}
+	removed, err := server.dependencies.UpdateRestorePoints.PruneRestorePoints(request.Context(), policy.RetentionPolicy())
+	if err != nil {
+		writeError(writer, http.StatusConflict, "UPDATE_RESTORE_POINT_PRUNE_FAILED", "История изменилась или защищённые версии не прошли проверку")
+		return
+	}
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "WARNING", Type: "UPDATE_RESTORE_POINTS_PRUNED", Details: map[string]any{"user_id": principal.UserID, "removed": removed, "removed_count": len(removed)}}); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"removed": removed})
+}
+
+func (server *Server) availableUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.RemoteUpdates == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Проверка официальных каналов обновления не подключена")
+		return
+	}
+	channel := request.URL.Query().Get("channel")
+	if channel == "" {
+		channel = "stable"
+	}
+	if channel != "stable" && channel != "testing" {
+		writeError(writer, http.StatusBadRequest, "UPDATE_CHANNEL_INVALID", "Канал должен быть stable или testing")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
+	defer cancel()
+	available, err := server.dependencies.RemoteUpdates.Check(ctx, channel)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "UPDATE_CHECK_FAILED", "Не удалось получить и проверить подписанный manifest выбранного канала")
+		return
+	}
+	writeJSON(writer, http.StatusOK, available)
+}
+
+func (server *Server) stageRemoteUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.RemoteUpdates == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Удалённая загрузка подписанных обновлений не подключена")
+		return
+	}
+	if !server.beginMaintenanceMutation() {
+		writeError(writer, http.StatusConflict, "UPDATE_BLOCKED_BY_POWER", "Операция питания уже подтверждена")
+		return
+	}
+	defer server.endMaintenanceMutation()
+	principal := request.Context().Value(principalKey).(auth.Principal)
+	if allowed, retry := server.updateLimiter.allow(principal.SessionHash, server.now()); !allowed {
+		seconds := int64((retry + time.Second - 1) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		writeError(writer, http.StatusTooManyRequests, "RATE_LIMITED", "Повторите загрузку release позже")
+		return
+	}
+	var input struct {
+		Source   string `json:"source"`
+		Channel  string `json:"channel"`
+		ExactURL string `json:"exact_url"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", "Некорректный источник обновления")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Minute)
+	defer cancel()
+	var (
+		operation updatepkg.Operation
+		err       error
+	)
+	switch input.Source {
+	case "GITHUB_CHANNEL":
+		if (input.Channel != "stable" && input.Channel != "testing") || input.ExactURL != "" {
+			writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Для официального источника выберите stable или testing без URL")
+			return
+		}
+		operation, err = server.dependencies.RemoteUpdates.StageChannel(ctx, input.Channel)
+	case "EXACT_HTTPS":
+		if input.Channel != "" || input.ExactURL == "" {
+			writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Для advanced-источника укажите один exact HTTPS URL")
+			return
+		}
+		operation, err = server.dependencies.RemoteUpdates.StageExact(ctx, input.ExactURL)
+	default:
+		writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Поддерживаются только официальный канал и exact HTTPS")
+		return
+	}
+	if errors.Is(err, updatepkg.ErrUpdatePending) {
+		writeError(writer, http.StatusConflict, "UPDATE_ALREADY_PENDING", "Сначала примените или удалите существующий staged release")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "REMOTE_UPDATE_STAGE_FAILED", "Release не загружен либо не прошёл подписанную проверку и compatibility gate")
+		return
+	}
+	if err := server.appendUpdateStagedEvent(request.Context(), principal, operation); err != nil {
+		writeInternalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, operation)
+}
+
 func (server *Server) stageUpdate(writer http.ResponseWriter, request *http.Request) {
 	if server.dependencies.Updates == nil {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Подписанные обновления не подключены")
@@ -4404,11 +4743,22 @@ func (server *Server) stageUpdate(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "UPDATE_VERIFICATION_FAILED", "Подпись, signer, файлы или compatibility release не прошли проверку")
 		return
 	}
-	if err := server.dependencies.State.AppendEvent(request.Context(), state.EventInput{Severity: "WARNING", Type: "SIGNED_UPDATE_STAGED", Details: map[string]any{"user_id": principal.UserID, "update_id": operation.UpdateID, "gateway_version": operation.GatewayVersion, "mihomo_version": operation.MihomoVersion, "signer_key_sha256": operation.SignerKeySHA256, "manifest_sha256": operation.ManifestSHA256, "bytes": operation.UncompressedBytes, "file_count": operation.FileCount}}); err != nil {
+	if err := server.appendUpdateStagedEvent(request.Context(), principal, operation); err != nil {
 		writeInternalError(writer, err)
 		return
 	}
 	writeJSON(writer, http.StatusCreated, operation)
+}
+
+func (server *Server) appendUpdateStagedEvent(ctx context.Context, principal auth.Principal, operation updatepkg.Operation) error {
+	return server.dependencies.State.AppendEvent(ctx, state.EventInput{Severity: "WARNING", Type: "SIGNED_UPDATE_STAGED", Details: map[string]any{
+		"user_id": principal.UserID, "update_id": operation.UpdateID,
+		"gateway_version": operation.GatewayVersion, "mihomo_version": operation.MihomoVersion,
+		"signer_key_sha256": operation.SignerKeySHA256, "manifest_sha256": operation.ManifestSHA256,
+		"bytes": operation.UncompressedBytes, "file_count": operation.FileCount,
+		"source_kind": operation.SourceKind, "source_channel": operation.SourceChannel,
+		"source_reference": operation.SourceReference,
+	}})
 }
 
 func (server *Server) applyUpdate(writer http.ResponseWriter, request *http.Request) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/platformexec"
+	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/watchdog"
 )
 
@@ -23,18 +24,26 @@ const (
 	DefaultInstallMarkerPath    = "/var/lib/gateway-vpn-privileged/install-transactions/active"
 	DefaultHostUpgradeMarker    = "/var/lib/gateway-vpn-host-upgrade/active"
 	DefaultInstallRunMarkerPath = "/run/gateway-vpn-install-authorized"
+	DefaultUpdateStagingMarker  = "/var/lib/gateway-vpn/update-staging/pending-update.json"
+	DefaultUpdateJournalRoot    = "/var/lib/gateway-vpn-privileged/update-transactions"
+	DefaultUpdateRollbackMarker = "/var/lib/gateway-vpn-privileged/update-rollback/pending.json"
+	DefaultRestoreMarker        = "/var/lib/gateway-vpn/recovery/pending-restore.json"
 )
 
 type LinuxBackend struct {
-	Database         *sql.DB
-	Executor         platformexec.Executor
-	Root             string
-	Systemctl        string
-	Unit             string
-	Helper           string
-	InstallMarker    string
-	HostUpgrade      string
-	InstallRunMarker string
+	Database          *sql.DB
+	Executor          platformexec.Executor
+	Root              string
+	Systemctl         string
+	Unit              string
+	Helper            string
+	InstallMarker     string
+	HostUpgrade       string
+	InstallRunMarker  string
+	UpdateStaging     string
+	UpdateJournalRoot string
+	UpdateRollback    string
+	RestoreMarker     string
 
 	mutex      sync.Mutex
 	dispatched bool
@@ -47,6 +56,8 @@ func DefaultLinuxBackend(database *sql.DB, executor platformexec.Executor) *Linu
 		Helper:        DefaultHelperPath,
 		InstallMarker: DefaultInstallMarkerPath, HostUpgrade: DefaultHostUpgradeMarker,
 		InstallRunMarker: DefaultInstallRunMarkerPath,
+		UpdateStaging:    DefaultUpdateStagingMarker, UpdateJournalRoot: DefaultUpdateJournalRoot,
+		UpdateRollback: DefaultUpdateRollbackMarker, RestoreMarker: DefaultRestoreMarker,
 	}
 }
 
@@ -119,8 +130,14 @@ func (backend *LinuxBackend) Dispatch(ctx context.Context, request Request) erro
 }
 
 func (backend *LinuxBackend) maintenance(ctx context.Context) (bool, string) {
-	if pathExists(backend.InstallMarker) || pathExists(backend.HostUpgrade) || pathExists(backend.InstallRunMarker) {
+	if pathExists(backend.InstallMarker) || pathExists(backend.HostUpgrade) || pathExists(backend.InstallRunMarker) ||
+		pathExists(backend.UpdateStaging) || pathExists(backend.UpdateRollback) ||
+		pathExists(backend.RestoreMarker) {
 		return true, "LIFECYCLE_TRANSACTION_ACTIVE"
+	}
+	journal, exists, err := (updatepkg.JournalStore{Root: backend.UpdateJournalRoot}).LoadActive()
+	if err != nil || exists && journal.InProgress() {
+		return true, "UPDATE_TRANSACTION_ACTIVE_OR_UNKNOWN"
 	}
 	var count int
 	if err := backend.Database.QueryRowContext(ctx, `
@@ -150,7 +167,9 @@ func (backend *LinuxBackend) validate() error {
 		backend.Systemctl != DefaultSystemctlPath || backend.Unit != DefaultUnit ||
 		backend.Helper != DefaultHelperPath ||
 		backend.InstallMarker != DefaultInstallMarkerPath || backend.HostUpgrade != DefaultHostUpgradeMarker ||
-		backend.InstallRunMarker != DefaultInstallRunMarkerPath {
+		backend.InstallRunMarker != DefaultInstallRunMarkerPath || backend.UpdateStaging != DefaultUpdateStagingMarker ||
+		backend.UpdateJournalRoot != DefaultUpdateJournalRoot || backend.UpdateRollback != DefaultUpdateRollbackMarker ||
+		backend.RestoreMarker != DefaultRestoreMarker {
 		return errors.New("complete fixed Linux uninstall backend configuration is required")
 	}
 	return nil

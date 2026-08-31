@@ -45,7 +45,7 @@ loggingJournalViewer = async function categorizedLoggingJournalViewer(components
 
   const form = document.createElement('form');
   form.className = 'toolbar journal-filters';
-  form.innerHTML = '<label>От<input name="since" type="datetime-local"></label><label>Уровень<select name="level"><option value="">Все</option><option value="error">Error</option><option value="warning">Warning</option><option value="info">Info</option><option value="debug">Debug</option></select></label><label>Компонент<select name="component"><option value="">Все</option></select></label><label>Модем<input name="modem_id" maxlength="128" placeholder="modem-id"></label><label>Подписка<input name="subscription_id" maxlength="128" placeholder="subscription-id"></label><label>Путь<input name="path_id" maxlength="128" placeholder="path-id"></label><label>Correlation ID<input name="correlation_id" maxlength="128"></label><label>Текст<input name="search" maxlength="128"></label><button>Применить</button>';
+  form.innerHTML = '<label>От (UTC)<input name="since" type="datetime-local"></label><label>Уровень<select name="level"><option value="">Все</option><option value="error">Error</option><option value="warning">Warning</option><option value="info">Info</option><option value="debug">Debug</option></select></label><label>Компонент<select name="component"><option value="">Все</option></select></label><label>Модем<input name="modem_id" maxlength="128" placeholder="modem-id"></label><label>Подписка<input name="subscription_id" maxlength="128" placeholder="subscription-id"></label><label>Путь<input name="path_id" maxlength="128" placeholder="path-id"></label><label>Correlation ID<input name="correlation_id" maxlength="128"></label><label>Текст<input name="search" maxlength="128"></label><button>Применить</button>';
   components.forEach((component) => {
     const option = document.createElement('option');
     option.value = component;
@@ -53,7 +53,7 @@ loggingJournalViewer = async function categorizedLoggingJournalViewer(components
     form.elements.component.append(option);
   });
   const initial = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  form.elements.since.value = new Date(initial.getTime() - initial.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  form.elements.since.value = initial.toISOString().slice(0, 16);
 
   const pages = document.createElement('div');
   pages.className = 'journal-pages';
@@ -65,7 +65,7 @@ loggingJournalViewer = async function categorizedLoggingJournalViewer(components
     if (reset) cursor = '';
     const params = new URLSearchParams({limit: '25', category: activeCategory});
     const since = form.elements.since.value;
-    if (since) params.set('since', new Date(since).toISOString());
+    if (since) params.set('since', `${since}:00Z`);
     for (const name of ['level', 'component', 'modem_id', 'subscription_id', 'path_id', 'correlation_id', 'search']) {
       const value = form.elements[name].value.trim();
       if (value) params.append(name, value);

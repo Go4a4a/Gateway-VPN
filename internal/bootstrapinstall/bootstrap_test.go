@@ -506,7 +506,7 @@ func (fixture *bootstrapFixture) rebuild(t *testing.T) {
 		"gateway-vpn-firewall-guard.service", "gateway-vpn-network-broker.socket",
 		"gateway-vpn-power-cycle@.service", "gateway-vpn-host-upgrade-recovery.service",
 		"gateway-vpn-uninstall.service",
-		"gateway-vpn-update.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service",
+		"gateway-vpn-update.service", "gateway-vpn-update-rollback.service", "gateway-vpn-update-recovery.service", "gateway-vpn-update-resume.service",
 		"gateway-vpn-update-finalize.service", "gateway-vpn-update-finalize.timer",
 	} {
 		writeFixtureFile(t, releaseRoot, "packaging/systemd/"+name, []byte("[Unit]\nDescription=synthetic lifecycle unit\n"))
