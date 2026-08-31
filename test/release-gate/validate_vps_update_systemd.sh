@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
+trap 'echo "VPS update systemd gate failed at line $LINENO" >&2' ERR
 
 BASE_VERSION=${1:?baseline version}
 SUCCESS_VERSION=${2:?successful update version}
@@ -94,7 +95,15 @@ for _ in $(seq 1 600); do
   sleep 0.1
 done
 [[ ! -e /var/lib/gateway-vpn-vps-privileged/update-transactions/active.json ]]
-systemctl is-active --quiet gateway-vpn-vps-agent.service
+for _ in $(seq 1 300); do
+  systemctl is-active --quiet gateway-vpn-vps-agent.service && break
+  sleep 0.1
+done
+if ! systemctl is-active --quiet gateway-vpn-vps-agent.service; then
+  systemctl status gateway-vpn-vps-agent.service gateway-vpn-vps-update-recovery.service --no-pager >&2 || true
+  echo "VPS Agent did not become active after asynchronous rollback recovery" >&2
+  exit 1
+fi
 [[ $(readlink /opt/gateway-vpn-vps/current) == "releases/v$SUCCESS_VERSION" ]]
 [[ $(readlink /opt/gateway-vpn-vps/recovery) == "releases/v$SUCCESS_VERSION" ]]
 [[ $(/opt/gateway-vpn-vps/current/bin/gateway-vpn-vps-agent --version) == "gateway-vpn-vps-agent $SUCCESS_VERSION "* ]]
