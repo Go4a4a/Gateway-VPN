@@ -67,7 +67,7 @@ type AutomationPolicyRepository struct {
 
 func DefaultAutomationPolicy() AutomationPolicy {
 	return AutomationPolicy{
-		SchemaVersion: AutomationPolicySchemaVersion, Channel: "stable", AutomaticCheckEnabled: true,
+		SchemaVersion: AutomationPolicySchemaVersion, Channel: "stable", AutomaticCheckEnabled: false,
 		CheckIntervalHours: 24, JitterMinutes: 30,
 		MaintenanceStartMinuteUTC: 180, MaintenanceDurationMinutes: 120,
 		MaximumApplyDelayHours: 72,

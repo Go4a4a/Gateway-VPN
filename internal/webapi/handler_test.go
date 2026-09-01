@@ -1634,7 +1634,7 @@ func TestSoftwareUpdatePolicyAndRestorePointAPIAreTypedAuditedAndProtected(t *te
 	policyRequest.AddCookie(cookie)
 	policyResponse := httptest.NewRecorder()
 	server.ServeHTTP(policyResponse, policyRequest)
-	if policyResponse.Code != http.StatusOK || !strings.Contains(policyResponse.Body.String(), `"channel":"stable"`) || !strings.Contains(policyResponse.Body.String(), `"automatic_check_enabled":true`) {
+	if policyResponse.Code != http.StatusOK || !strings.Contains(policyResponse.Body.String(), `"channel":"stable"`) || !strings.Contains(policyResponse.Body.String(), `"automatic_check_enabled":false`) {
 		t.Fatalf("default software update policy = %d %s", policyResponse.Code, policyResponse.Body.String())
 	}
 

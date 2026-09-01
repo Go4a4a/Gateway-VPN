@@ -21,7 +21,7 @@ func TestAutomationPolicyRepositoryDefaultsAndAuditsUpdate(t *testing.T) {
 	}
 	repository := AutomationPolicyRepository{Database: database, Now: func() time.Time { return time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC) }}
 	current, err := repository.Get(ctx)
-	if err != nil || current.Channel != "stable" || !current.AutomaticCheckEnabled || current.AutomaticDownloadEnabled || current.AutomaticApplyEnabled || current.RetentionPolicy() != DefaultRestorePointPolicy() {
+	if err != nil || current.Channel != "stable" || current.AutomaticCheckEnabled || current.AutomaticDownloadEnabled || current.AutomaticApplyEnabled || current.RetentionPolicy() != DefaultRestorePointPolicy() {
 		t.Fatalf("Get() = %+v,%v", current, err)
 	}
 	input := AutomationPolicyInput{
