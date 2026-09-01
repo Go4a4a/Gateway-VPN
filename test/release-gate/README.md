@@ -40,6 +40,35 @@ It is used only to prepare a candidate before a controlled systemd interruption
 test. Actual apply/recovery/finalization must still be performed by the exact
 production systemd units.
 
+## `prepare-windows-targets`
+
+This Windows/amd64 source-only helper runs on the Docker Desktop host and
+prepares two genuinely fresh Ubuntu systemd SSH targets for the separate clean
+Windows guest that executes the portable deploy gate. It is guarded
+by `GATEWAY_VPN_RELEASE_GATE=1`, `--release-gate-only`, and a separate
+`--apply`; without `--apply` it performs only inventory, exact-address port
+availability, image, name, Win32 OpenSSH identity, and Docker preflight.
+
+The helper uses only the fixed Docker Desktop and Windows OpenSSH executables,
+an already present exact local image, an exact assigned non-wildcard host IPv4
+address, two distinct unprivileged ports, and a dedicated unencrypted
+disposable Ed25519 identity. It never pulls, removes, or silently reuses a
+container or image. Each role is first hardened without a published port,
+receives a unique SSH host key and key-only root policy, is committed to a
+unique test image, and only then starts as a separately published final
+container. The final check requires absence of both Gateway and VPS application
+trees, exact port projection, generated pinned `known_hosts`, and successful
+fixed Win32 OpenSSH authentication. On a partial failure, started containers
+are stopped for safety but all resources remain for diagnostics.
+
+Build it from the source tree and run the same command once without `--apply`.
+After reviewing the JSON plan, repeat it with `--apply`. `--listen-address`
+must be the exact host-side address reachable from the clean Windows
+Sandbox/VM; `127.0.0.1` is useful only for a same-host dry run and is not valid
+evidence of Sandbox reachability. The new `--evidence-dir` receives only public
+SSH material, executable/image identities, target IDs, hashes, and the pinned
+`known_hosts`; the private identity is never copied or recorded there.
+
 ## `validate_gateway_systemd.sh`
 
 This read-only validator checks an already installed or rebooted release. It
