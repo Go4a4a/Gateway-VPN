@@ -266,16 +266,19 @@ ORDER BY tunnel.id`)
 	}
 
 	resourceRows, err := tx.QueryContext(ctx, `
-SELECT r.id,r.site_id,r.resource_kind,r.access_profile,r.local_destination,r.advanced_scope_acknowledged
+SELECT r.id,r.site_id,r.resource_kind,r.access_profile,r.local_destination,r.advanced_scope_acknowledged,
+       r.probe_interface,r.probe_gateway,r.health_probe_address
 FROM management_resources AS r JOIN management_sites AS s ON s.id=r.site_id
-WHERE r.enabled=1 AND s.is_local=1 AND s.identity_state='ACTIVE' ORDER BY r.id`)
+WHERE r.enabled=1 AND r.health_state='HEALTHY'
+  AND r.last_probe_route_generation=r.desired_route_generation
+  AND s.is_local=1 AND s.identity_state='ACTIVE' ORDER BY r.id`)
 	if err != nil {
 		return FabricSpec{}, nil, fmt.Errorf("read management resources: %w", err)
 	}
 	for resourceRows.Next() {
 		var item ResourceSpec
 		var acknowledged int
-		if err := resourceRows.Scan(&item.ID, &item.SiteID, &item.Kind, &item.AccessProfile, &item.LocalDestination, &acknowledged); err != nil {
+		if err := resourceRows.Scan(&item.ID, &item.SiteID, &item.Kind, &item.AccessProfile, &item.LocalDestination, &acknowledged, &item.ProbeInterface, &item.ProbeGateway, &item.HealthProbeAddress); err != nil {
 			resourceRows.Close()
 			return FabricSpec{}, nil, fmt.Errorf("scan management resource: %w", err)
 		}
@@ -283,6 +286,36 @@ WHERE r.enabled=1 AND s.is_local=1 AND s.identity_state='ACTIVE' ORDER BY r.id`)
 		spec.Resources = append(spec.Resources, item)
 	}
 	if err := resourceRows.Close(); err != nil {
+		return FabricSpec{}, nil, err
+	}
+	resourceIndexes := make(map[string]int, len(spec.Resources))
+	for index := range spec.Resources {
+		resourceIndexes[spec.Resources[index].ID] = index
+	}
+	portRows, err := tx.QueryContext(ctx, `
+SELECT p.resource_id,p.protocol,p.port_start,p.port_end
+FROM management_resource_ports AS p
+JOIN management_resources AS r ON r.id=p.resource_id
+JOIN management_sites AS s ON s.id=r.site_id
+WHERE r.enabled=1 AND r.health_state='HEALTHY'
+  AND r.last_probe_route_generation=r.desired_route_generation
+  AND s.is_local=1 AND s.identity_state='ACTIVE'
+ORDER BY p.resource_id,p.protocol,p.port_start,p.port_end`)
+	if err != nil {
+		return FabricSpec{}, nil, fmt.Errorf("read management resource ports: %w", err)
+	}
+	for portRows.Next() {
+		var resourceID string
+		var item ResourcePort
+		if err := portRows.Scan(&resourceID, &item.Protocol, &item.PortStart, &item.PortEnd); err != nil {
+			portRows.Close()
+			return FabricSpec{}, nil, fmt.Errorf("scan management resource port: %w", err)
+		}
+		if index, exists := resourceIndexes[resourceID]; exists {
+			spec.Resources[index].Ports = append(spec.Resources[index].Ports, item)
+		}
+	}
+	if err := portRows.Close(); err != nil {
 		return FabricSpec{}, nil, err
 	}
 
@@ -293,7 +326,8 @@ JOIN management_resources AS r ON r.id=p.resource_id
 JOIN management_links AS l ON l.id=p.link_id
 JOIN vps_nodes AS v ON v.id=l.vps_id
 JOIN management_sites AS s ON s.id=l.site_id
-WHERE r.enabled=1 AND l.enabled=1
+WHERE r.enabled=1 AND r.health_state='HEALTHY'
+  AND r.last_probe_route_generation=r.desired_route_generation AND l.enabled=1
   AND p.state NOT IN ('DISABLED','CONFLICT')
   AND l.state NOT IN ('DISABLED','REVOKED') AND v.enabled=1 AND v.state!='REVOKED'
   AND s.is_local=1 AND s.identity_state='ACTIVE'
@@ -324,7 +358,9 @@ WHERE a.enabled=1 AND EXISTS (
     JOIN management_resources AS r ON r.id=p.resource_id
     JOIN vps_nodes AS v ON v.id=l.vps_id
     WHERE ap.admin_id=a.admin_id AND ap.state IN ('CONFIGURED','ACTIVE')
-      AND r.enabled=1 AND l.enabled=1 AND l.state NOT IN ('DISABLED','REVOKED')
+      AND r.enabled=1 AND r.health_state='HEALTHY'
+      AND r.last_probe_route_generation=r.desired_route_generation
+      AND l.enabled=1 AND l.state NOT IN ('DISABLED','REVOKED')
       AND p.state NOT IN ('DISABLED','CONFLICT') AND v.enabled=1 AND v.state!='REVOKED'
 )
 ORDER BY a.id`)
@@ -573,7 +609,8 @@ func ValidateGatewayHostPlan(plan GatewayHostPlan) error {
 	for _, alias := range plan.Aliases {
 		if !safeIdentifier.MatchString(alias.PublicationID) || !safeIdentifier.MatchString(alias.ResourceID) ||
 			!safeIdentifier.MatchString(alias.LinkID) || !validLinuxInterface(alias.InterfaceName) ||
-			!validResourceKind(alias.ResourceKind) || !validAccessProfile(alias.AccessProfile) {
+			!validResourceKind(alias.ResourceKind) || !validAccessProfile(alias.AccessProfile) ||
+			!validRenderedResourcePath(alias.AccessProfile, alias.EgressInterface, alias.NextHop) {
 			return errors.New("Gateway host alias identity is invalid")
 		}
 		if _, exists := seenLinks[alias.LinkID]; !exists {
@@ -600,6 +637,7 @@ func ValidateGatewayHostPlan(plan GatewayHostPlan) error {
 		if !exists || !safeIdentifier.MatchString(rule.RuleID) || !safeIdentifier.MatchString(rule.AdminID) ||
 			rule.LinkID != alias.LinkID ||
 			rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile ||
+			rule.EgressInterface != alias.EgressInterface || rule.NextHop != alias.NextHop ||
 			rule.PublishedAlias != alias.PublishedAlias || rule.LocalDestination != alias.LocalDestination ||
 			sourceErr != nil || !source.Addr().Is4() || source.Bits() != 32 || source.Addr().IsUnspecified() ||
 			validateProtocolPorts(rule.Protocol, rule.PortStart, rule.PortEnd) != nil {

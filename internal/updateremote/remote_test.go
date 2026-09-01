@@ -145,6 +145,44 @@ func TestRequestRejectsMissingOrUnexpectedContentType(t *testing.T) {
 	}
 }
 
+func TestUseTransportPreservesTimeoutRedirectAndContentTypeGuards(t *testing.T) {
+	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	stager := &updatepkg.Stager{StateDir: t.TempDir(), Policy: updatepkg.VerificationPolicy{PublicKey: publicKey}}
+	manager, err := New(DefaultRepository, "1.0.0", stager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UseTransport(nil); err == nil {
+		t.Fatal("nil service-route transport was accepted")
+	}
+	called := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		called++
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")),
+			Header: http.Header{"Content-Type": []string{"text/html"}}, Request: request,
+		}, nil
+	})
+	if err := manager.UseTransport(transport); err != nil {
+		t.Fatal(err)
+	}
+	redirectGuard := manager.Client.CheckRedirect != nil
+	if manager.Client.Timeout != 15*time.Minute || !redirectGuard {
+		t.Fatalf("service transport weakened client guards: timeout=%s redirect_guard=%t", manager.Client.Timeout, redirectGuard)
+	}
+	credentialRequest, _ := http.NewRequest(http.MethodGet, "https://user:secret@updates.example/release.tar.gz", nil)
+	if err := manager.Client.CheckRedirect(credentialRequest, nil); err == nil {
+		t.Fatal("service transport redirect guard accepted URL credentials")
+	}
+	redirectRequest, _ := http.NewRequest(http.MethodGet, "https://updates.example/release.tar.gz", nil)
+	if err := manager.Client.CheckRedirect(redirectRequest, make([]*http.Request, maximumRedirects)); err == nil {
+		t.Fatal("service transport redirect guard accepted excessive redirect chain")
+	}
+	if _, err := manager.fetchBytes(context.Background(), "https://updates.example/channel-stable.json", 1024, "application/json"); err == nil || called != 1 {
+		t.Fatalf("service transport bypassed content-type guard: called=%d error=%v", called, err)
+	}
+}
+
 func releaseFixture(t *testing.T, transport staticTransport, privateKey ed25519.PrivateKey, channel, tag string, draft, prerelease bool, artifactSHA string) map[string]any {
 	t.Helper()
 	version := strings.TrimPrefix(tag, "v")

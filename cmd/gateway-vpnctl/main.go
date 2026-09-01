@@ -75,6 +75,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "channel-deploy-command" {
 		return runChannelDeployCommand(args[1:])
 	}
+	if len(args) > 0 && args[0] == "channel-windows-deploy-command" {
+		return runChannelWindowsDeployCommand(args[1:])
+	}
 	if len(args) > 0 && args[0] == "gateway-install-preflight" {
 		return runGatewayInstallPreflight(args[1:])
 	}
@@ -98,7 +101,7 @@ func run(args []string) int {
 		return 0
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|database-verify|release-keygen|release-key-verify|release-key-backup|release-keyfile-create|release-keyfile-verify|release-keyfile-backup|release-keyfile-unlock|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
+	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|database-verify|release-keygen|release-key-verify|release-key-backup|release-keyfile-create|release-keyfile-verify|release-keyfile-backup|release-keyfile-unlock|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|channel-windows-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
 	return 2
 }
 

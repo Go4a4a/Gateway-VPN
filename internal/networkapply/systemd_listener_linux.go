@@ -25,5 +25,9 @@ func ListenerFromSystemdFD(fd uintptr, allowedUID uint32) (net.Listener, error) 
 		listener.Close()
 		return nil, errors.New("network broker systemd socket must be Unix-domain")
 	}
-	return &PeerAuthorizingListener{Listener: listener, AllowedUID: allowedUID, PeerUID: LinuxPeerUID}, nil
+	// The unprivileged control plane is the normal caller. UID 0 is also
+	// admitted explicitly for the fixed privileged watchdog and recovery
+	// helpers; any other local UID is still rejected through SO_PEERCRED before
+	// HTTP parsing.
+	return &PeerAuthorizingListener{Listener: listener, AllowedUID: allowedUID, AllowRoot: true, PeerUID: LinuxPeerUID}, nil
 }

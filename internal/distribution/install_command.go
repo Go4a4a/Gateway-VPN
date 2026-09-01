@@ -84,6 +84,13 @@ type DeployCommandOptions struct {
 	AllowGatewaySSH     bool
 }
 
+type WindowsDeployCommandOptions struct {
+	Repository      string
+	ReleaseTag      string
+	ManifestSHA256  string
+	SignerKeySHA256 string
+}
+
 // GatewayInstallCommand returns one copy/paste command with every mutable
 // release input pinned. The downloaded bootstrap is never passed to sudo until
 // its externally published SHA-256 has matched.
@@ -352,6 +359,73 @@ func DeployCommand(manifest Manifest, options DeployCommandOptions) (string, err
 	return "bash --norc -ceu " + shellQuote(strings.Join(parts, "; ")), nil
 }
 
+// WindowsDeployCommand returns a copy/paste PowerShell command that downloads
+// the exact Windows launcher and trust inputs into a private random directory,
+// verifies both the launcher and raw manifest hashes, and then starts the
+// signed interactive wizard. No credential or private-key content is placed in
+// the command, process arguments, or persistent state.
+func WindowsDeployCommand(manifest Manifest, options WindowsDeployCommandOptions) (string, error) {
+	if err := ValidateManifest(manifest); err != nil {
+		return "", err
+	}
+	if !digestPattern.MatchString(options.ManifestSHA256) || !digestPattern.MatchString(options.SignerKeySHA256) || options.SignerKeySHA256 != manifest.SignerKeySHA256 {
+		return "", errors.New("exact channel manifest and signer fingerprints are required")
+	}
+	if !validRepository(options.Repository) || !tagPattern.MatchString(options.ReleaseTag) {
+		return "", errors.New("safe GitHub release inputs are required")
+	}
+	launcher, err := SelectArtifact(manifest, RoleDeploy, "windows", "amd64")
+	if err != nil {
+		return "", err
+	}
+	for _, identity := range []struct{ role, operatingSystem string }{
+		{RoleBootstrap, "linux"}, {RoleDeploy, "linux"}, {RoleGateway, "linux"}, {RoleVPS, "linux"},
+	} {
+		if _, err := SelectArtifact(manifest, identity.role, identity.operatingSystem, "amd64"); err != nil {
+			return "", err
+		}
+	}
+	baseURL := "https://github.com/" + options.Repository + "/releases/download/" + options.ReleaseTag + "/"
+	manifestName := "channel-" + manifest.Channel + ".json"
+	signatureName := "channel-" + manifest.Channel + ".sig"
+	assignments := []string{
+		"$ErrorActionPreference='Stop'",
+		"$ProgressPreference='SilentlyContinue'",
+		"$previousSecurityProtocol=[Net.ServicePointManager]::SecurityProtocol",
+		"$root=$null",
+		"$code=1",
+		"$failure=$null",
+	}
+	downloads := []struct{ url, destination string }{
+		{baseURL + launcher.Filename, "$launcher"},
+		{baseURL + manifestName, "$manifest"},
+		{baseURL + signatureName, "$signature"},
+		{baseURL + "update-signing.pub", "$publicKey"},
+	}
+	body := []string{
+		"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+		"$root=Join-Path ([IO.Path]::GetTempPath()) ('gateway-vpn-deploy-'+[Guid]::NewGuid().ToString('N'))",
+		"[IO.Directory]::CreateDirectory($root) | Out-Null",
+		"$launcher=Join-Path $root " + powershellQuote(launcher.Filename),
+		"$manifest=Join-Path $root " + powershellQuote(manifestName),
+		"$signature=Join-Path $root " + powershellQuote(signatureName),
+		"$publicKey=Join-Path $root 'update-signing.pub'",
+	}
+	for _, download := range downloads {
+		body = append(body, "Invoke-WebRequest -UseBasicParsing -MaximumRedirection 5 -Uri "+powershellQuote(download.url)+" -OutFile "+download.destination)
+	}
+	body = append(body,
+		"if ((Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+powershellQuote(launcher.SHA256)+") { throw 'Gateway VPN Windows launcher SHA-256 mismatch' }",
+		"if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+powershellQuote(options.ManifestSHA256)+") { throw 'Gateway VPN channel manifest SHA-256 mismatch' }",
+		"& $launcher --manifest $manifest --signature $signature --public-key $publicKey --manifest-sha256 "+powershellQuote(options.ManifestSHA256)+" --signer-key-sha256 "+powershellQuote(options.SignerKeySHA256)+" --channel "+powershellQuote(manifest.Channel)+" --release-version "+powershellQuote(manifest.ReleaseVersion)+" --source-commit "+powershellQuote(manifest.SourceCommit)+" --github-repository "+powershellQuote(options.Repository)+" --release-tag "+powershellQuote(options.ReleaseTag)+" --interactive",
+		"$code=$LASTEXITCODE",
+	)
+	cleanup := "[Net.ServicePointManager]::SecurityProtocol=$previousSecurityProtocol; if ($null -ne $root -and [IO.Directory]::Exists($root)) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }"
+	status := "$global:LASTEXITCODE=$code; if ($null -ne $failure) { Write-Error ('Gateway VPN deploy: '+$failure) -ErrorAction Continue }; if ($code -eq 0) { Write-Host 'Gateway VPN deploy completed successfully. This PowerShell window remains open.' } else { Write-Error ('Gateway VPN deploy failed with exit code '+$code+'. This PowerShell window remains open for diagnostics.') -ErrorAction Continue }"
+	script := "& { " + strings.Join(assignments, "; ") + "; try { " + strings.Join(body, "; ") + " } catch { $failure=$_.Exception.Message; $code=1 } finally { " + cleanup + " }; " + status + " }"
+	return script, nil
+}
+
 func bootstrapCommandPrefix(downloadURL, expectedSHA256 string, nonInteractiveRoot bool) []string {
 	rootCommand := "sudo \"$@\""
 	if nonInteractiveRoot {
@@ -458,10 +532,20 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
+func powershellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 func expectedArtifactFilename(role, version string) string {
+	return expectedArtifactFilenameForPlatform(role, version, "linux", "amd64")
+}
+
+func expectedArtifactFilenameForPlatform(role, version, operatingSystem, architecture string) string {
 	suffix := ""
 	if role == RoleGateway || role == RoleVPS {
 		suffix = ".tar.gz"
+	} else if operatingSystem == "windows" {
+		suffix = ".exe"
 	}
-	return fmt.Sprintf("gateway-vpn-%s-%s-linux-amd64%s", role, version, suffix)
+	return fmt.Sprintf("gateway-vpn-%s-%s-%s-%s%s", role, version, operatingSystem, architecture, suffix)
 }

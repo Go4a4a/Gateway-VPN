@@ -50,6 +50,23 @@ and restart counters, HTTPS security headers, SSH/DNS/DHCP listeners, IPv6
 policy, empty direct/TUN gates, install report, and current-boot failure
 signatures. It does not install packages or change host state.
 
+## `validate_gateway_install_marker_lifecycle.sh`
+
+This helper validates the current 21-field completed install marker, creates
+explicit 14/16/18/20-field compatibility fixtures from that already validated
+marker, and checks recovery or uninstall cleanup. It is intentionally
+destructive, requires the release-gate environment and flag, and must run only
+inside a disposable Ubuntu/systemd host. The surrounding gate still invokes
+the signed production installer, host upgrader, recovery helper, and
+uninstaller; this helper only prepares the historical marker shape and asserts
+the resulting host state.
+
+The required matrix is: fresh 21-field install with an original
+`src_valid_mark=0`, interrupted recovery and normal uninstall restoring `0`,
+21→21 upgrade retaining the original `0`, 20→21 upgrade capturing the
+already-installed value, and 14/16/18 compatibility without inventing unknown
+source-mark or `ssh.socket` state.
+
 ## Evidence boundary
 
 These helpers may shorten a release-gate setup step, but they never prove

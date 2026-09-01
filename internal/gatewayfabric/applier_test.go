@@ -624,7 +624,8 @@ func newGatewayApplierFixture(t *testing.T) gatewayApplierFixture {
 	statements := []string{
 		`INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at) VALUES('admin:a','Admin','ADMIN',1,'ACTIVE','` + stamp + `','` + stamp + `')`,
 		`INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at) VALUES('peer:a','admin:a','vps:a','` + admin.Public + `','10.81.0.10','CONFIGURED',1,0,'` + stamp + `','` + stamp + `')`,
-		`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,created_at,updated_at) VALUES('resource:a','site:home','Gateway','GATEWAY_SERVICE','GATEWAY_ONLY','192.168.200.1',1,0,1,0,'UNKNOWN','` + stamp + `','` + stamp + `')`,
+		`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,health_reason_code,last_probe_at,last_probe_route_generation,probe_interface,created_at,updated_at) VALUES('resource:a','site:home','Gateway','GATEWAY_SERVICE','GATEWAY_ONLY','192.168.200.1',1,0,1,0,'HEALTHY','RESOURCE_PROBE_PASSED','` + stamp + `',1,'lo','` + stamp + `','` + stamp + `')`,
+		`INSERT INTO management_resource_ports(resource_id,protocol,port_start,port_end) VALUES('resource:a','TCP',8443,9443)`,
 		`INSERT INTO management_resource_publications(id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES('publication:a','resource:a','` + link.ID + `','10.96.1.1/32',1,0,1,0,'PENDING','` + stamp + `','` + stamp + `')`,
 		`INSERT INTO management_resource_acl(id,admin_id,resource_id,protocol,port_start,port_end,enabled,generation,created_at,updated_at) VALUES('acl:a','admin:a','resource:a','TCP',8443,8443,1,1,'` + stamp + `','` + stamp + `')`,
 		`UPDATE management_fabric_generations SET desired_generation=desired_generation+1,state='PENDING' WHERE singleton_id=1`,
@@ -654,7 +655,7 @@ func newGatewayApplierFixture(t *testing.T) gatewayApplierFixture {
 	applier := &Applier{Repository: repository, Executor: executor, Paths: Paths{
 		TransactionRoot: transactionRoot, SecretRoot: secretRoot,
 		SecretReferenceRoot: "/var/lib/gateway-vpn/secrets/management",
-		IP:                  executable("ip"), NFT: executable("nft"), WG: executable("wg"),
+		IP:                  executable("ip"), NFT: executable("nft"), WG: executable("wg"), Ping: executable("ping"),
 	}, Now: func() time.Time { return time.Date(2026, 8, 30, 16, 0, 0, 0, time.UTC) }}
 	return gatewayApplierFixture{database: database, repository: repository, applier: applier, executor: executor}
 }

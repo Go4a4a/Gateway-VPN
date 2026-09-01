@@ -123,6 +123,8 @@ type fakeManagementFabricAdmin struct {
 	applyCalls     int
 	statusCalls    int
 	observeCalls   int
+	probeCalls     int
+	probeID        string
 	configureCalls int
 	rotateCalls    int
 	needed         bool
@@ -135,6 +137,12 @@ type fakeManagementFabricAdmin struct {
 	observeErr     error
 }
 
+func (admin *fakeManagementFabricAdmin) ProbeResource(_ context.Context, id string) (managementfabric.ResourceProbeResult, error) {
+	admin.probeCalls++
+	admin.probeID = id
+	return managementfabric.ResourceProbeResult{ResourceID: id, RouteGeneration: 1, State: "HEALTHY", ReasonCode: "RESOURCE_PROBE_PASSED", CheckedAt: "2026-09-01T12:00:00Z"}, admin.err
+}
+
 type fakePortableBackupAdmin struct {
 	artifact   backup.PortableArtifact
 	content    []byte
@@ -143,6 +151,46 @@ type fakePortableBackupAdmin struct {
 	opens      int
 	removes    int
 	err        error
+}
+
+func TestBrokerResourceProbeAcceptsOnlyStableResourceID(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, _, _ := testEngine(t, database)
+	server, err := NewBrokerServer(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeManagementFabricAdmin{}
+	server.ManagementFabric = admin
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	call := func(body string) int {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL+"/v1/management-fabric/resources/probe", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := httpServer.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := call(`{"resource_id":"resource:bounded"}`); status != http.StatusOK || admin.probeCalls != 1 || admin.probeID != "resource:bounded" {
+		t.Fatalf("bounded resource probe = %d calls=%d id=%q", status, admin.probeCalls, admin.probeID)
+	}
+	for _, malicious := range []string{
+		`{"resource_id":"resource:bounded","interface":"eth0"}`,
+		`{"resource_id":"resource:bounded","gateway":"192.168.1.1"}`,
+		`{"resource_id":"resource:bounded","command":"ip route add default"}`,
+		`{"resource_id":"resource:bounded","path":"/etc/shadow"}`,
+	} {
+		if status := call(malicious); status != http.StatusBadRequest || admin.probeCalls != 1 {
+			t.Fatalf("parameterized root resource probe accepted: status=%d calls=%d body=%s", status, admin.probeCalls, malicious)
+		}
+	}
 }
 
 func (admin *fakePortableBackupAdmin) Build(_ context.Context, passphrase string) (backup.PortableArtifact, error) {
@@ -567,7 +615,13 @@ type fakeBootstrapAdmin struct {
 	requests []dataplane.BootstrapAuthorization
 	direct   []dataplane.DirectProbeAuthorization
 	mihomo   []dataplane.MihomoEndpointAuthorization
+	updates  []dataplane.UpdateServiceAuthorization
 	err      error
+}
+
+func (admin *fakeBootstrapAdmin) AuthorizeUpdateService(_ context.Context, input dataplane.UpdateServiceAuthorization) error {
+	admin.updates = append(admin.updates, input)
+	return admin.err
 }
 
 func (admin *fakeBootstrapAdmin) AuthorizeMihomoEndpoints(_ context.Context, input dataplane.MihomoEndpointAuthorization) error {
@@ -829,6 +883,12 @@ func TestBrokerBootstrapAuthorizationUsesTypedBoundedRequest(t *testing.T) {
 	}
 	if len(admin.direct) != 1 || admin.direct[0].TargetID != "target-a" || admin.direct[0].ModemID != "modem-a" {
 		t.Fatalf("direct probe admin requests = %+v", admin.direct)
+	}
+	if err := client.AuthorizeUpdateService(ctx, "modem-a", []string{"203.0.113.12"}, 443); err != nil {
+		t.Fatalf("AuthorizeUpdateService() error = %v", err)
+	}
+	if len(admin.updates) != 1 || admin.updates[0].UplinkID != "modem-a" || admin.updates[0].Port != 443 || len(admin.updates[0].Addresses) != 1 {
+		t.Fatalf("signed update service admin requests = %+v", admin.updates)
 	}
 	admin.err = errors.New("private nft set detail")
 	if err := client.AuthorizeBootstrap(ctx, input); err == nil || strings.Contains(err.Error(), "nft set detail") {
@@ -1147,6 +1207,59 @@ func TestPeerAuthorizingListenerDropsWrongUIDBeforeAcceptingAllowedPeer(t *testi
 	if _, err := unauthorizedClient.Read(buffer); err == nil {
 		t.Fatal("unauthorized connection remained open")
 	}
+}
+
+func TestBrokerClientDoesNotReuseConnectionsAcrossRootBrokerRestart(t *testing.T) {
+	client, err := NewBrokerClient("/run/gateway-vpn/network-broker.sock")
+	if err != nil {
+		t.Fatalf("NewBrokerClient() error = %v", err)
+	}
+	transport, ok := client.client.Transport.(*http.Transport)
+	if !ok || !transport.DisableKeepAlives {
+		t.Fatal("broker client may reuse a stale Unix connection across privileged service restart")
+	}
+}
+
+func TestPeerAuthorizingListenerAllowsRootOnlyWhenExplicit(t *testing.T) {
+	unauthorizedRootServer, unauthorizedRootClient := net.Pipe()
+	authorizedRootServer, authorizedRootClient := net.Pipe()
+	defer unauthorizedRootClient.Close()
+	defer authorizedRootClient.Close()
+
+	denied := &scriptedListener{connections: []net.Conn{unauthorizedRootServer}}
+	deniedListener := &PeerAuthorizingListener{
+		Listener: denied, AllowedUID: 1002,
+		PeerUID: func(net.Conn) (uint32, error) { return 0, nil },
+	}
+	accepted := make(chan net.Conn, 1)
+	errorsSeen := make(chan error, 1)
+	go func() {
+		connection, err := deniedListener.Accept()
+		if err != nil {
+			errorsSeen <- err
+			return
+		}
+		accepted <- connection
+	}()
+	select {
+	case connection := <-accepted:
+		connection.Close()
+		t.Fatal("root peer was accepted without the explicit root policy")
+	case <-errorsSeen:
+	case <-time.After(time.Second):
+		t.Fatal("listener did not reject the unauthorized root peer")
+	}
+
+	allowed := &scriptedListener{connections: []net.Conn{authorizedRootServer}}
+	allowedListener := &PeerAuthorizingListener{
+		Listener: allowed, AllowedUID: 1002, AllowRoot: true,
+		PeerUID: func(net.Conn) (uint32, error) { return 0, nil },
+	}
+	connection, err := allowedListener.Accept()
+	if err != nil {
+		t.Fatalf("Accept(root) error = %v", err)
+	}
+	connection.Close()
 }
 
 func TestWireGuardIngressBrokerLogsPrivateCauseButReturnsOnlyStableCode(t *testing.T) {

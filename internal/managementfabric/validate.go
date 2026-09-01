@@ -1,6 +1,7 @@
 package managementfabric
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -362,6 +363,9 @@ func ValidateFabric(spec FabricSpec) error {
 		if err := validateProtocolPorts(rule.Protocol, rule.PortStart, rule.PortEnd); err != nil {
 			return fmt.Errorf("ACL rule %s: %w", rule.ID, err)
 		}
+		if !resourcePortsAllow(resource.Ports, rule.Protocol, rule.PortStart, rule.PortEnd) {
+			return fmt.Errorf("ACL rule %s exceeds the declared resource ports", rule.ID)
+		}
 		matchedVPS := false
 		for _, admin := range adminPeers {
 			for _, binding := range resourceBindings[resource.ID] {
@@ -399,14 +403,137 @@ func validateResource(resource ResourceSpec) (netip.Prefix, error) {
 	if !validResourceKind(resource.Kind) || !validAccessProfile(resource.AccessProfile) {
 		return netip.Prefix{}, fmt.Errorf("management resource %s kind or access profile is invalid", resource.ID)
 	}
+	if !ResourceKindProfileCompatible(resource.Kind, resource.AccessProfile) {
+		return netip.Prefix{}, fmt.Errorf("management resource %s kind is incompatible with its access profile", resource.ID)
+	}
 	if resource.Kind == ResourceLocalSubnet && !resource.AdvancedScopeAcknowledged {
 		return netip.Prefix{}, fmt.Errorf("management resource %s requires explicit LOCAL_SUBNET acknowledgement", resource.ID)
+	}
+	if err := ValidateResourcePorts(resource.Kind, resource.Ports); err != nil {
+		return netip.Prefix{}, fmt.Errorf("management resource %s ports: %w", resource.ID, err)
+	}
+	if resource.AccessProfile == ProfileGatewayOnly {
+		if resource.ProbeInterface != "" && resource.ProbeInterface != "lo" || resource.ProbeGateway != "" {
+			return netip.Prefix{}, fmt.Errorf("management resource %s has an invalid local probe route", resource.ID)
+		}
+	} else if resource.ProbeInterface != "" && !validLinuxInterface(resource.ProbeInterface) {
+		return netip.Prefix{}, fmt.Errorf("management resource %s probe interface is invalid", resource.ID)
+	}
+	if resource.AccessProfile == ProfileKeeneticWANRouted {
+		if resource.ProbeGateway != "" {
+			gateway, gatewayErr := netip.ParseAddr(resource.ProbeGateway)
+			if gatewayErr != nil || !gateway.Is4() || !gateway.IsPrivate() {
+				return netip.Prefix{}, fmt.Errorf("management resource %s probe gateway is invalid", resource.ID)
+			}
+		}
+	} else if resource.ProbeGateway != "" {
+		return netip.Prefix{}, fmt.Errorf("management resource %s unexpectedly contains a route gateway", resource.ID)
 	}
 	prefix, err := parseResourceDestination(resource.Kind, resource.LocalDestination)
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("management resource %s destination is invalid", resource.ID)
 	}
+	probeAddress := strings.TrimSpace(resource.HealthProbeAddress)
+	if resource.Kind == ResourceLocalSubnet {
+		probe, probeErr := netip.ParseAddr(probeAddress)
+		if probeErr != nil || !probe.Is4() || !probe.IsPrivate() || !usableIPv4Host(prefix, probe) {
+			return netip.Prefix{}, fmt.Errorf("management resource %s requires a private health probe host inside its subnet", resource.ID)
+		}
+	} else if probeAddress != "" && probeAddress != resource.LocalDestination {
+		return netip.Prefix{}, fmt.Errorf("management resource %s health probe address must equal its host destination", resource.ID)
+	}
 	return prefix, nil
+}
+
+func ValidateResourceInput(input ResourceInput) error {
+	input.Name = strings.TrimSpace(input.Name)
+	if !safeIdentifier.MatchString(input.ID) || input.Name == "" || len(input.Name) > 128 {
+		return errors.New("management resource requires a safe id and a name of at most 128 bytes")
+	}
+	_, err := validateResource(ResourceSpec{
+		ID: input.ID, SiteID: "site:validation", Kind: input.Kind, AccessProfile: input.AccessProfile,
+		LocalDestination:          strings.TrimSpace(input.LocalDestination),
+		HealthProbeAddress:        strings.TrimSpace(input.HealthProbeAddress),
+		AdvancedScopeAcknowledged: input.AdvancedScopeAcknowledged, Ports: input.Ports,
+	})
+	return err
+}
+
+func usableIPv4Host(prefix netip.Prefix, address netip.Addr) bool {
+	if !prefix.IsValid() || !prefix.Addr().Is4() || !address.Is4() || prefix.Bits() < 0 || prefix.Bits() > 30 || !prefix.Contains(address) {
+		return false
+	}
+	network := binary.BigEndian.Uint32(prefix.Masked().Addr().AsSlice())
+	value := binary.BigEndian.Uint32(address.AsSlice())
+	hostMask := uint32(1)<<(32-prefix.Bits()) - 1
+	return value != network && value != network|hostMask
+}
+
+func ResourceKindProfileCompatible(kind, profile string) bool {
+	switch kind {
+	case ResourceGatewayService:
+		return profile == ProfileGatewayOnly
+	case ResourceKeeneticService:
+		return profile == ProfileKeeneticWAN || profile == ProfileKeeneticWANRouted || profile == ProfileWireGuardRouter || profile == ProfileDedicatedLAN
+	case ResourceLocalHost, ResourceLocalSubnet, ResourceCustomService:
+		return profile == ProfileKeeneticWANRouted || profile == ProfileWireGuardRouter || profile == ProfileDedicatedLAN
+	default:
+		return false
+	}
+}
+
+func ValidateResourcePorts(kind string, ports []ResourcePort) error {
+	if len(ports) == 0 || len(ports) > 64 {
+		return errors.New("1..64 explicit protocol/port entries are required")
+	}
+	seen := make(map[string]struct{}, len(ports))
+	for _, port := range ports {
+		if err := validateProtocolPorts(port.Protocol, port.PortStart, port.PortEnd); err != nil {
+			return err
+		}
+		if kind == ResourceCustomService && (len(ports) != 1 || port.Protocol == ProtocolICMP || port.PortStart != port.PortEnd) {
+			return errors.New("CUSTOM_SERVICE requires exactly one TCP or UDP port")
+		}
+		key := fmt.Sprintf("%s:%d:%d", port.Protocol, port.PortStart, port.PortEnd)
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("resource port entry is duplicated")
+		}
+		seen[key] = struct{}{}
+	}
+	for left := range ports {
+		for right := left + 1; right < len(ports); right++ {
+			if ports[left].Protocol == ports[right].Protocol && ports[left].PortStart <= ports[right].PortEnd && ports[right].PortStart <= ports[left].PortEnd {
+				return errors.New("resource port ranges overlap")
+			}
+		}
+	}
+	return nil
+}
+
+func resourcePortsAllow(ports []ResourcePort, protocol string, start, end int) bool {
+	for _, port := range ports {
+		if port.Protocol == protocol && start >= port.PortStart && end <= port.PortEnd {
+			return true
+		}
+	}
+	return false
+}
+
+func ResourceExternalPrerequisites(profile string) []string {
+	switch profile {
+	case ProfileGatewayOnly:
+		return []string{"Локальный адрес принадлежит Gateway", "Выбранные TCP/UDP-службы запущены на Gateway"}
+	case ProfileKeeneticWAN:
+		return []string{"WAN-адрес Keenetic находится в локальном сегменте Gateway", "Сервис и firewall Keenetic разрешают выбранные порты"}
+	case ProfileKeeneticWANRouted:
+		return []string{"Gateway имеет точный маршрут через WAN-адрес Keenetic", "На Keenetic настроены WAN→LAN firewall и обратный маршрут"}
+	case ProfileWireGuardRouter:
+		return []string{"Включён peer ROUTER_ROUTED в wg-ingress", "Behind-subnet содержит ресурс и не включает default route"}
+	case ProfileDedicatedLAN:
+		return []string{"Назначен отдельный интерфейс MANAGEMENT", "Интерфейс не имеет default route и DHCP server"}
+	default:
+		return nil
+	}
 }
 
 func validResourceKind(value string) bool {

@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	DefaultSSHExecutable        = "/usr/bin/ssh"
 	DefaultOutputLimit          = 256 * 1024
 	defaultControlPersistSecond = 45 * 60
 )
+
+// DefaultSSHExecutable is deliberately fixed per supported administrative
+// platform. In particular, Windows never searches PATH for an alternate ssh.
+var DefaultSSHExecutable = platformSSHExecutable()
 
 var sshUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
@@ -47,6 +50,12 @@ type SSHExecutor struct {
 	Executable       string
 	OutputLimit      int
 	controlDirectory string
+	backend          sshBackend
+}
+
+type sshBackend interface {
+	Run(context.Context, Host, string) (RemoteResult, error)
+	Close(context.Context, ...Host) error
 }
 
 type RemoteCommandError struct {
@@ -76,11 +85,12 @@ func ValidateHost(host Host) error {
 	return nil
 }
 
-// NewSSHExecutor creates a process-owned OpenSSH multiplexing directory. The
-// first command authenticates and pins the host normally; later phases reuse
-// that established TCP connection after fail-closed firewalls are applied.
+// NewSSHExecutor creates a process-owned OpenSSH session directory. Linux uses
+// ControlMaster; Windows uses one long-lived framed ssh.exe process per host.
+// Both implementations reuse the already authenticated TCP connection after
+// fail-closed firewalls are applied.
 func NewSSHExecutor() (*SSHExecutor, error) {
-	directory, err := os.MkdirTemp("", "gateway-vpn-ssh-control-")
+	directory, err := os.MkdirTemp("", platformControlDirectoryPrefix())
 	if err != nil {
 		return nil, errors.New("create private SSH control directory failed")
 	}
@@ -92,7 +102,12 @@ func NewSSHExecutor() (*SSHExecutor, error) {
 		Executable: DefaultSSHExecutable, OutputLimit: DefaultOutputLimit,
 		controlDirectory: directory,
 	}
+	executor.backend = newPlatformSSHBackend(executor)
 	if err := executor.validate(); err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, err
+	}
+	if err := validateSSHRuntime(executor.Executable, executor.controlPath()); err != nil {
 		_ = os.RemoveAll(directory)
 		return nil, err
 	}
@@ -100,12 +115,15 @@ func NewSSHExecutor() (*SSHExecutor, error) {
 }
 
 func (executor *SSHExecutor) Run(ctx context.Context, host Host, remoteCommand string) (RemoteResult, error) {
+	if executor != nil && executor.backend != nil {
+		return executor.backend.Run(ctx, host, remoteCommand)
+	}
 	arguments, err := executor.commandArguments(host, remoteCommand)
 	if err != nil {
 		return RemoteResult{}, err
 	}
 	command := exec.CommandContext(ctx, executor.Executable, arguments...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
+	command.Env = platformSSHEnvironment()
 	var stdout, stderr boundedBuffer
 	stdout.maximum = executor.OutputLimit
 	stderr.maximum = executor.OutputLimit
@@ -143,7 +161,7 @@ func (executor *SSHExecutor) commandArguments(host Host, remoteCommand string) (
 		return nil, errors.New("bounded single-line remote command is required")
 	}
 	arguments := []string{
-		"-F", "/dev/null", "-T",
+		"-F", platformNullDevice(), "-T",
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPersist=" + strconv.Itoa(defaultControlPersistSecond),
 		"-o", "ControlPath=" + executor.controlPath(),
@@ -151,8 +169,9 @@ func (executor *SSHExecutor) commandArguments(host Host, remoteCommand string) (
 		"-o", "PasswordAuthentication=no",
 		"-o", "KbdInteractiveAuthentication=no",
 		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=" + host.KnownHosts,
-		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "UserKnownHostsFile=" + platformSSHConfigPath(host.KnownHosts),
+		"-o", "GlobalKnownHostsFile=" + platformNullDevice(),
+		"-o", "IdentityAgent=none",
 		"-o", "RequestTTY=no",
 		"-o", "ConnectTimeout=15",
 		"-o", "ServerAliveInterval=15",
@@ -173,6 +192,19 @@ func (executor *SSHExecutor) Close(ctx context.Context, hosts ...Host) error {
 	if executor == nil || executor.controlDirectory == "" {
 		return nil
 	}
+	if executor.backend != nil {
+		directory := executor.controlDirectory
+		executor.controlDirectory = ""
+		backendErr := executor.backend.Close(ctx, hosts...)
+		removeErr := os.RemoveAll(directory)
+		if backendErr != nil {
+			return backendErr
+		}
+		if removeErr != nil {
+			return errors.New("remove private SSH session directory failed")
+		}
+		return nil
+	}
 	directory := executor.controlDirectory
 	executor.controlDirectory = ""
 	defer os.RemoveAll(directory)
@@ -185,14 +217,14 @@ func (executor *SSHExecutor) Close(ctx context.Context, hosts ...Host) error {
 			continue
 		}
 		arguments := []string{
-			"-F", "/dev/null", "-T",
+			"-F", platformNullDevice(), "-T",
 			"-o", "BatchMode=yes",
 			"-o", "ControlPath=" + controlPath,
 			"-O", "exit", "-p", strconv.Itoa(host.Port),
 			"--", host.Destination,
 		}
 		command := exec.CommandContext(ctx, executor.Executable, arguments...)
-		command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
+		command.Env = platformSSHEnvironment()
 		_ = command.Run()
 	}
 	for {
@@ -220,6 +252,31 @@ func (executor *SSHExecutor) validate() error {
 
 func (executor *SSHExecutor) controlPath() string {
 	return filepath.Join(executor.controlDirectory, "%C")
+}
+
+// validateSSHRuntime proves that the fixed OpenSSH client accepts every
+// option needed for connection persistence before either target is contacted.
+// ssh -G only expands configuration; it does not open a network connection.
+func validateSSHRuntime(executable, controlPath string) error {
+	info, err := os.Lstat(executable)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("fixed system OpenSSH client is unavailable or unsafe")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	arguments := platformSSHRuntimeArguments(controlPath)
+	command := exec.CommandContext(ctx, executable, arguments...)
+	command.Env = platformSSHEnvironment()
+	var stdout, stderr boundedBuffer
+	stdout.maximum = 64 * 1024
+	stderr.maximum = 64 * 1024
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil || ctx.Err() != nil || stdout.overflow || stderr.overflow {
+		return fmt.Errorf("fixed system OpenSSH persistent-session capability check failed: %v", err)
+	}
+	effective := strings.ToLower(string(stdout.Bytes()) + "\n" + string(stderr.Bytes()))
+	return validatePlatformSSHRuntime(effective)
 }
 
 func validateControlDirectory(directory string) error {
@@ -299,7 +356,7 @@ func validDNSName(value string) bool {
 }
 
 func validateSSHFile(filename string, allowEmpty bool) error {
-	if !filepath.IsAbs(filename) || strings.ContainsAny(filename, " \t\r\n\x00") {
+	if !filepath.IsAbs(filename) || strings.ContainsAny(filename, "\"\t\r\n\x00") {
 		return errors.New("absolute SSH file path is required")
 	}
 	info, err := os.Lstat(filename)

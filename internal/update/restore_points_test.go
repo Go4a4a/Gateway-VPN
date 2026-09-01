@@ -13,7 +13,7 @@ import (
 
 func TestRestorePointInventoryProtectsCurrentAndDetectsTampering(t *testing.T) {
 	store, databasePath, clock := restorePointFixture(t)
-	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 32, databasePath)
+	point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 34, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestRestorePointDeletionAndRetentionKeepNewestHistoricalPoints(t *testing.T
 	var points []RestorePoint
 	for index := 0; index < 4; index++ {
 		*clock = clock.Add(time.Hour)
-		point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 32, databasePath)
+		point, err := store.CreatePreUpdate(context.Background(), "1.2.0", 34, databasePath)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func restorePointFixture(t *testing.T) (*RestorePointStore, string, *time.Time) 
 	if err := os.WriteFile(configuration, []byte(testBootstrapConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	release, publicKey, _ := signedReleaseFixture(t, "1.2.0", 1, 32)
+	release, publicKey, _ := signedReleaseFixture(t, "1.2.0", 1, 34)
 	releaseMetadata, err := ReadReleaseMetadata(release)
 	if err != nil {
 		t.Fatal(err)

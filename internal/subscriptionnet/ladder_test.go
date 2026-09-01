@@ -54,9 +54,6 @@ func TestRouteRepositoryOrdersTargetSubscriptionFirstAndNeverReturnsExcludedNode
 	if _, err := subscription.NewNodeRepository(database).SetOverride(ctx, otherNodes[1].ID, subscription.OverrideExclude); err != nil {
 		t.Fatal(err)
 	}
-	if err := accesspolicy.NewRepository(database).SetMethodEnabled(ctx, "access:subscription:sub-b", false); err != nil {
-		t.Fatal(err)
-	}
 	if err := pathmatrix.NewRepository(database).ReconcileCells(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +84,8 @@ WHERE singleton_id=1`, targetNodes[0].ID); err != nil {
 		}
 		if route.SubscriptionID == "sub-b" {
 			seenOther = true
-			if route.MethodEnabled {
-				t.Fatalf("disabled user method was reported enabled: %+v", route)
+			if !route.MethodEnabled {
+				t.Fatalf("enabled user method was reported disabled: %+v", route)
 			}
 		} else if seenOther {
 			t.Fatalf("target-subscription route appeared after another subscription: %+v", route)
@@ -97,6 +94,28 @@ WHERE singleton_id=1`, targetNodes[0].ID); err != nil {
 	if err := NewRouteRepository(database).ValidateVPNRoute(ctx, routes[0]); err != nil {
 		t.Fatalf("ValidateVPNRoute(current) error = %v", err)
 	}
+	if err := accesspolicy.NewRepository(database).SetMethodEnabled(ctx, "access:subscription:sub-b", false); err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := NewRouteRepository(database).ListVPNRoutes(ctx, "sub-a")
+	if err != nil || len(filtered) != 4 {
+		t.Fatalf("disabled non-target routes=%+v error=%v", filtered, err)
+	}
+	for _, route := range filtered {
+		if route.SubscriptionID != "sub-a" {
+			t.Fatalf("disabled non-target method remained a refresh route: %+v", route)
+		}
+	}
+	if err := accesspolicy.NewRepository(database).SetMethodEnabled(ctx, "access:subscription:sub-a", false); err != nil {
+		t.Fatal(err)
+	}
+	selfRoutes, err := NewRouteRepository(database).ListVPNRoutes(ctx, "sub-a")
+	if err != nil || len(selfRoutes) != 4 {
+		t.Fatalf("disabled target self-refresh routes=%+v error=%v", selfRoutes, err)
+	}
+	if err := NewRouteRepository(database).ValidateVPNRoute(ctx, selfRoutes[0]); err != nil {
+		t.Fatalf("disabled target self-refresh route rejected: %v", err)
+	}
 	if _, err := subscription.NewNodeRepository(database).SetOverride(ctx, routes[0].NodeID, subscription.OverrideExclude); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +123,72 @@ WHERE singleton_id=1`, targetNodes[0].ID); err != nil {
 		t.Fatal("ValidateVPNRoute accepted node excluded after route inventory")
 	}
 	_ = modems
+}
+
+func TestRouteRepositoryOrdersGenericUpdateServiceRoutesByActiveAndMethodPriority(t *testing.T) {
+	ctx, database, _, subscriptions, versions := routeFixture(t)
+	defer database.Close()
+	firstNodes := activateRouteSubscription(t, ctx, subscriptions, versions, "sub-a", "A", "version-a")
+	secondNodes := activateRouteSubscription(t, ctx, subscriptions, versions, "sub-b", "B", "version-b")
+	if err := accesspolicy.NewRepository(database).ReorderEnabled(ctx, []string{"access:direct", "access:subscription:sub-b", "access:subscription:sub-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pathmatrix.NewRepository(database).ReconcileCells(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+UPDATE runtime_state
+SET gateway_state='ONLINE', path_state='PATH_ACTIVE', active_method_id='access:subscription:sub-a',
+    active_method_kind='SUBSCRIPTION', active_quality_class='FULL',
+    active_uplink_id='modem-b', active_modem_id='modem-b',
+    active_path_id=(SELECT id FROM subscription_uplink_paths WHERE uplink_id='modem-b' AND subscription_id='sub-a'),
+    active_subscription_id='sub-a', active_node_id=?
+WHERE singleton_id=1`, firstNodes[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := NewRouteRepository(database).ListServiceVPNRoutes(ctx)
+	if err != nil || len(routes) != 8 {
+		t.Fatalf("generic service routes=%+v error=%v", routes, err)
+	}
+	if !routes[0].ActiveForService || routes[0].SubscriptionID != "sub-a" || routes[0].ModemID != "modem-b" || routes[0].NodeID != firstNodes[1].ID {
+		t.Fatalf("active service route is not first: %+v", routes[0])
+	}
+	firstOther := -1
+	for index, route := range routes {
+		if route.SubscriptionID == "sub-b" {
+			firstOther = index
+			break
+		}
+	}
+	if firstOther < 1 || routes[firstOther].MethodPriority >= routes[firstOther+4].MethodPriority || routes[firstOther].NodeID != secondNodes[0].ID && routes[firstOther].NodeID != secondNodes[1].ID {
+		t.Fatalf("generic service priority order=%+v", routes)
+	}
+	staleRoute := routes[0]
+	if err := accesspolicy.NewRepository(database).SetMethodEnabled(ctx, "access:subscription:sub-b", false); err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := NewRouteRepository(database).ListServiceVPNRoutes(ctx)
+	if err != nil || len(filtered) != 4 {
+		t.Fatalf("generic routes after method disable=%+v error=%v", filtered, err)
+	}
+	for _, route := range filtered {
+		if route.SubscriptionID == "sub-b" || !route.MethodEnabled {
+			t.Fatalf("disabled method remained in generic service inventory: %+v", route)
+		}
+	}
+	if staleRoute.SubscriptionID != "sub-a" {
+		t.Fatalf("unexpected active route before disable: %+v", staleRoute)
+	}
+	if err := accesspolicy.NewRepository(database).SetMethodEnabled(ctx, "access:subscription:sub-a", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewRouteRepository(database).ValidateServiceVPNRoute(ctx, staleRoute); err == nil {
+		t.Fatal("generic service route remained valid after access method disable")
+	}
+	filtered, err = NewRouteRepository(database).ListServiceVPNRoutes(ctx)
+	if err != nil || len(filtered) != 0 {
+		t.Fatalf("disabled generic service routes=%+v error=%v", filtered, err)
+	}
 }
 
 func TestRouteLadderSerializesSelectorAndHTTPSAndPersistsRedactedAttempts(t *testing.T) {

@@ -98,6 +98,17 @@ func New(repository, currentVersion string, stager *updatepkg.Stager) (*Manager,
 	return &Manager{Repository: repository, CurrentVersion: currentVersion, Stager: stager, Client: secureHTTPClient(), APIBase: defaultAPIBase}, nil
 }
 
+// UseTransport installs a service-route RoundTripper while preserving the
+// updater's fixed timeout and redirect validation. The transport still cannot
+// bypass request-level URL, media-type, size, hash or signature checks.
+func (manager *Manager) UseTransport(transport http.RoundTripper) error {
+	if manager == nil || transport == nil {
+		return errors.New("remote updater service transport is required")
+	}
+	manager.Client = secureHTTPClientWithTransport(transport)
+	return nil
+}
+
 func (manager *Manager) Check(ctx context.Context, channel string) (Available, error) {
 	resolved, err := manager.resolve(ctx, channel)
 	return resolved.Available, err
@@ -443,6 +454,10 @@ func secureHTTPClient() *http.Client {
 		}
 		return nil, errors.New("remote update host has no reachable public address")
 	}
+	return secureHTTPClientWithTransport(transport)
+}
+
+func secureHTTPClientWithTransport(transport http.RoundTripper) *http.Client {
 	return &http.Client{
 		Transport: transport,
 		Timeout:   15 * time.Minute,

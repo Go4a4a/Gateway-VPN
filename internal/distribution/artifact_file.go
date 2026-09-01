@@ -30,6 +30,8 @@ func ArtifactFromFile(role, operatingSystem, architecture, filename, version str
 	mediaType := "application/octet-stream"
 	if role == RoleGateway || role == RoleVPS {
 		mediaType = "application/gzip"
+	} else if role == RoleDeploy && operatingSystem == "windows" {
+		mediaType = "application/vnd.microsoft.portable-executable"
 	}
 	artifact := Artifact{
 		Role: role, OS: operatingSystem, Arch: architecture,

@@ -59,6 +59,7 @@ ip -n "$GW" address add 10.90.0.1/24 dev wg-ingress
 ip -n "$GW" link set wan0 up
 ip -n "$GW" address add 192.168.8.2/24 dev wan0
 ip netns exec "$GW" sysctl -q -w net.ipv4.ip_forward=1
+ip netns exec "$GW" sysctl -q -w net.ipv4.conf.all.src_valid_mark=1
 ip -n "$GW" route add default via 192.168.8.1 dev wan0 table 1101 protocol 186
 ip -n "$GW" rule add priority 1101 fwmark 0x1101/0xffffffff table 1101 protocol 186
 

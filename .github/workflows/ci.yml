@@ -52,6 +52,7 @@ jobs:
           for name in gateway-vpn gateway-vpnctl gateway-vpn-bootstrap gateway-vpn-deploy; do
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/gateway-vpn-ci/$name" "./cmd/$name"
           done
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/gateway-vpn-ci/gateway-vpn-deploy.exe" ./cmd/gateway-vpn-deploy
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true -o "$RUNNER_TEMP/gateway-vpn-ci/gateway-vpn-endurance" ./test/endurance
       - name: Check JavaScript and shell syntax
         shell: bash
@@ -63,6 +64,33 @@ jobs:
           node --check internal/webapi/static/contextual-help.js
           node --check internal/vpswebapi/static/app.js
           bash -n scripts/*.sh test/netns/*.sh test/systemd/*.sh test/release-gate/*.sh
+
+  windows-deploy:
+    name: Windows portable deploy contract
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install exact Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Verify system Windows OpenSSH and portable launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ssh = 'C:\Windows\System32\OpenSSH\ssh.exe'
+          if (-not (Test-Path -LiteralPath $ssh -PathType Leaf)) { throw 'system Windows OpenSSH Client is missing' }
+          & $ssh -V
+          go test ./cmd/gateway-vpn-deploy ./internal/deploy ./internal/distribution -count=1
+          go build -trimpath -o "$env:RUNNER_TEMP\gateway-vpn-deploy.exe" ./cmd/gateway-vpn-deploy
+          & "$env:RUNNER_TEMP\gateway-vpn-deploy.exe" --version
 
   netns:
     name: Linux nftables fail-closed gate
@@ -84,7 +112,7 @@ jobs:
       - name: Refresh Ubuntu package indexes
         run: sudo apt-get update
       - name: Install netns test dependencies
-        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping wireguard-tools
+        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping wireguard-tools libcap2-bin
       - name: Build native Linux netns binary
         shell: bash
         run: |
@@ -94,6 +122,8 @@ jobs:
           go test -c -o /tmp/gateway-vpn-app-test ./internal/app
           go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
           go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
+          go test -c -o /tmp/gateway-vpn-updatenet-test ./internal/updatenet
+          go test -c -o /tmp/gateway-vpn-gatewayfabric-test ./internal/gatewayfabric
           go build -trimpath -o /tmp/gateway-vpn-vps-agent ./cmd/gateway-vpn-vps-agent
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
@@ -105,6 +135,10 @@ jobs:
         run: sudo ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
       - name: Prove topology rollback and peer-scoped one-arm firewall
         run: sudo ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
+      - name: Prove signed-update service routes through exact HiLink and Ethernet contexts
+        run: sudo ./test/netns/update_service_routes.sh /tmp/gateway-vpn-dataplane-test /tmp/gateway-vpn-updatenet-test
+      - name: Prove five exact Management Resource profiles and external return paths
+        run: sudo ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-test
       - name: Prove VPS operations read-only ownership boundary
         run: sudo ./test/netns/vps_operations_boundary.sh /tmp/gateway-vpn-vps-agent
       - name: Verify Gateway and VPS systemd units on pinned Ubuntu 24.04

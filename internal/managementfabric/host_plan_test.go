@@ -107,7 +107,9 @@ id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_
 		{`INSERT INTO management_resources(
 id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,
 desired_route_generation,applied_route_generation,health_state,created_at,updated_at
-) VALUES('resource:a','site:home','Local service','LOCAL_HOST','VIA_DEDICATED_LAN','192.168.50.10',1,0,1,0,'UNKNOWN',?,?)`, []any{stamp, stamp}},
+) VALUES('resource:a','site:home','Local service','LOCAL_HOST','VIA_DEDICATED_LAN','192.168.50.10',1,0,1,0,'HEALTHY',?,?)`, []any{stamp, stamp}},
+		{`UPDATE management_resources SET last_probe_at=?,last_probe_route_generation=1,probe_interface='mgmt0',health_reason_code='RESOURCE_PROBE_PASSED' WHERE id='resource:a'`, []any{stamp}},
+		{`INSERT INTO management_resource_ports(resource_id,protocol,port_start,port_end) VALUES('resource:a','TCP',443,443)`, nil},
 		{`INSERT INTO management_resource_publications(
 id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,
 desired_acl_generation,applied_acl_generation,state,created_at,updated_at

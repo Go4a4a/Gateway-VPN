@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,8 +11,24 @@ import (
 	"testing"
 )
 
+func TestWindowsSystemOpenSSHSupportsRequiredClientOptions(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows system OpenSSH contract")
+	}
+	executor, err := NewSSHExecutor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateHostRejectsOptionInjectionSymlinkAndInsecureIdentity(t *testing.T) {
-	directory := t.TempDir()
+	directory := filepath.Join(t.TempDir(), "keys with spaces")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	knownHosts := filepath.Join(directory, "known_hosts")
 	identity := filepath.Join(directory, "identity")
 	if err := os.WriteFile(knownHosts, []byte("host key\n"), 0o600); err != nil {
@@ -60,9 +77,9 @@ func TestBoundedBufferTruncatesWithoutUnboundedAllocation(t *testing.T) {
 
 func TestSSHExecutorPinsAndPersistsPrivateControlConnection(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("OpenSSH Unix control sockets are Linux-only")
+		t.Skip("Windows uses one long-lived framed ssh.exe process instead of unsupported ControlMaster")
 	}
-	directory, err := os.MkdirTemp("", "gateway-vpn-ssh-test-")
+	directory, err := os.MkdirTemp("", "gvt-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,12 +112,14 @@ func TestSSHExecutorPinsAndPersistsPrivateControlConnection(t *testing.T) {
 	}
 	joined := strings.Join(arguments, "\x00")
 	for _, required := range []string{
+		"-F\x00" + platformNullDevice(),
 		"ControlMaster=auto",
 		"ControlPersist=" + strconv.Itoa(defaultControlPersistSecond),
 		"ControlPath=" + filepath.Join(controlDirectory, "%C"),
 		"StrictHostKeyChecking=yes",
-		"UserKnownHostsFile=" + knownHosts,
+		"UserKnownHostsFile=" + platformSSHConfigPath(knownHosts),
 		"IdentitiesOnly=yes",
+		"IdentityAgent=none",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("persistent SSH command missing %q", required)

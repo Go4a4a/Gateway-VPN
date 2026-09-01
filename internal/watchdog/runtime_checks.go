@@ -147,7 +147,7 @@ func (probe *SystemProbe) policyRoutingHealth(ctx context.Context) (bool, string
 	}
 	defer database.Close()
 	backend := dataplane.RoutingBackend{
-		Uplinks: uplink.NewRepository(database, probe.RoutingTableStart, probe.FwmarkStart), Executor: probe.Executor, IP: probe.IP,
+		Uplinks: uplink.NewRepository(database, probe.RoutingTableStart, probe.FwmarkStart), Executor: probe.Executor, IP: probe.IP, Sysctl: "/usr/sbin/sysctl",
 		LANPrefix: probe.LANPrefix, WireGuardPrefix: probe.WireGuardPrefix,
 		BootstrapDNS:      append([]string(nil), probe.BootstrapDNS...),
 		RoutingTableStart: probe.RoutingTableStart, FwmarkStart: probe.FwmarkStart,

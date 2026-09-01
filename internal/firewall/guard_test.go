@@ -255,10 +255,10 @@ counter user_download
 counter service_upload
 counter service_download
 chain input { type filter hook input priority filter; policy drop; jump management_fabric_input; iifname . udp dport @wireguard_ingress_listeners; }
-chain prerouting { type filter hook prerouting priority mangle; meta mark set iifname map @active_direct_marks }
+chain prerouting { type filter hook prerouting priority mangle; iifname @hilink_interfaces ct state { established, related } meta mark set ct mark; meta mark set iifname map @active_direct_marks }
 chain forward { type filter hook forward priority filter; policy drop; jump management_fabric_forward; ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces oifname . meta mark @active_direct_context counter comment "gateway-vpn PATH_BLOCKED" }
 chain postrouting { type nat hook postrouting priority srcnat; jump management_fabric_postrouting; oifname . meta mark @active_direct_context masquerade }
-chain output { type filter hook output priority filter; policy drop; oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 accept; oifname . meta mark . ip daddr . udp dport @management_fabric_endpoints accept; }
+chain output { type filter hook output priority filter; policy drop; oifname @hilink_interfaces meta mark != 0x00000000 ct mark set meta mark; oifname . meta mark . ip daddr @wireguard_endpoint_v4 udp dport 51821 accept; oifname . meta mark . ip daddr . udp dport @management_fabric_endpoints accept; }
 chain management_fabric_input { }
 chain management_fabric_forward { }
 chain management_fabric_postrouting { }

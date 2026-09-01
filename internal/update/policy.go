@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	AutomationPolicySchemaVersion = 1
+	AutomationPolicySchemaVersion = 2
 	MinimumCheckIntervalHours     = 1
 	MaximumCheckIntervalHours     = 24 * 7
 	MaximumJitterMinutes          = 6 * 60
 	MinimumMaintenanceMinutes     = 15
 	MaximumMaintenanceMinutes     = 12 * 60
+	MinimumApplyDelayHours        = 1
+	MaximumApplyDelayHours        = 30 * 24
 	MinimumRetentionAgeDays       = 1
 	MaximumRetentionAgeDays       = 10 * 365
 )
@@ -33,6 +35,7 @@ type AutomationPolicy struct {
 	MaintenanceWindowEnabled   bool   `json:"maintenance_window_enabled"`
 	MaintenanceStartMinuteUTC  int    `json:"maintenance_start_minute_utc"`
 	MaintenanceDurationMinutes int    `json:"maintenance_duration_minutes"`
+	MaximumApplyDelayHours     int    `json:"maximum_apply_delay_hours"`
 	RetentionMaximumPoints     int    `json:"retention_maximum_points"`
 	RetentionMaximumBytes      int64  `json:"retention_maximum_bytes"`
 	RetentionMaximumAgeDays    int    `json:"retention_maximum_age_days"`
@@ -50,6 +53,7 @@ type AutomationPolicyInput struct {
 	MaintenanceWindowEnabled   bool
 	MaintenanceStartMinuteUTC  int
 	MaintenanceDurationMinutes int
+	MaximumApplyDelayHours     int
 	RetentionMaximumPoints     int
 	RetentionMaximumBytes      int64
 	RetentionMaximumAgeDays    int
@@ -66,6 +70,7 @@ func DefaultAutomationPolicy() AutomationPolicy {
 		SchemaVersion: AutomationPolicySchemaVersion, Channel: "stable", AutomaticCheckEnabled: true,
 		CheckIntervalHours: 24, JitterMinutes: 30,
 		MaintenanceStartMinuteUTC: 180, MaintenanceDurationMinutes: 120,
+		MaximumApplyDelayHours: 72,
 		RetentionMaximumPoints: 4, RetentionMaximumBytes: 8 << 30,
 		RetentionMaximumAgeDays: 365, RetentionMinimumOldPoints: 2,
 	}
@@ -83,6 +88,9 @@ func (policy AutomationPolicy) Validate() error {
 	}
 	if policy.MaintenanceStartMinuteUTC < 0 || policy.MaintenanceStartMinuteUTC >= 24*60 || policy.MaintenanceDurationMinutes < MinimumMaintenanceMinutes || policy.MaintenanceDurationMinutes > MaximumMaintenanceMinutes {
 		return errors.New("software update maintenance window is outside the supported range")
+	}
+	if policy.MaximumApplyDelayHours < MinimumApplyDelayHours || policy.MaximumApplyDelayHours > MaximumApplyDelayHours {
+		return errors.New("software update maximum apply delay is outside the supported range")
 	}
 	retention := policy.RetentionPolicy()
 	if !validRestorePointPolicy(retention) || policy.RetentionMaximumAgeDays < MinimumRetentionAgeDays || policy.RetentionMaximumAgeDays > MaximumRetentionAgeDays {
@@ -111,6 +119,7 @@ func NormalizeAutomationPolicy(input AutomationPolicyInput, now time.Time) (Auto
 		AutomaticApplyEnabled: input.AutomaticApplyEnabled, CheckIntervalHours: input.CheckIntervalHours,
 		JitterMinutes: input.JitterMinutes, MaintenanceWindowEnabled: input.MaintenanceWindowEnabled,
 		MaintenanceStartMinuteUTC: input.MaintenanceStartMinuteUTC, MaintenanceDurationMinutes: input.MaintenanceDurationMinutes,
+		MaximumApplyDelayHours: input.MaximumApplyDelayHours,
 		RetentionMaximumPoints: input.RetentionMaximumPoints, RetentionMaximumBytes: input.RetentionMaximumBytes,
 		RetentionMaximumAgeDays: input.RetentionMaximumAgeDays, RetentionMinimumOldPoints: input.RetentionMinimumOldPoints,
 		UpdatedAt: now.UTC().Format(time.RFC3339Nano),
@@ -206,6 +215,7 @@ func automationPolicyAudit(policy AutomationPolicy) map[string]any {
 		"maintenance_window_enabled":   policy.MaintenanceWindowEnabled,
 		"maintenance_start_minute_utc": policy.MaintenanceStartMinuteUTC,
 		"maintenance_duration_minutes": policy.MaintenanceDurationMinutes,
+		"maximum_apply_delay_hours":    policy.MaximumApplyDelayHours,
 		"retention_maximum_points":     policy.RetentionMaximumPoints, "retention_maximum_bytes": policy.RetentionMaximumBytes,
 		"retention_maximum_age_days":   policy.RetentionMaximumAgeDays,
 		"retention_minimum_old_points": policy.RetentionMinimumOldPoints,

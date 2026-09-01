@@ -153,12 +153,13 @@ validate_completed_install_marker() {
   value=$(stat -c '%s' "$marker")
   [[ $value =~ ^[0-9]+$ && $value -gt 0 && $value -le 2048 ]] || return 1
   field_count=$(wc -l <"$marker")
-  [[ $field_count == 14 || $field_count == 16 || $field_count == 18 || $field_count == 20 ]] || return 1
-  [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$marker") == "$field_count" ]] || return 1
+  [[ $field_count == 14 || $field_count == 16 || $field_count == 18 || $field_count == 20 || $field_count == 21 ]] || return 1
+  [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv4_src_valid_mark|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$marker") == "$field_count" ]] || return 1
   local keys=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
-  if [[ $field_count == 16 || $field_count == 18 || $field_count == 20 ]]; then keys+=(boot_network_policy grub_policy); fi
-  if [[ $field_count == 18 || $field_count == 20 ]]; then keys+=(log_reader_user log_reader_was_member); fi
-  if [[ $field_count == 20 ]]; then keys+=(ssh_socket_was_enabled ssh_socket_was_active); fi
+  if [[ $field_count == 16 || $field_count == 18 || $field_count == 20 || $field_count == 21 ]]; then keys+=(boot_network_policy grub_policy); fi
+  if [[ $field_count == 18 || $field_count == 20 || $field_count == 21 ]]; then keys+=(log_reader_user log_reader_was_member); fi
+  if [[ $field_count == 20 || $field_count == 21 ]]; then keys+=(ssh_socket_was_enabled ssh_socket_was_active); fi
+  if [[ $field_count == 21 ]]; then keys+=(old_ipv4_src_valid_mark); fi
   for key in "${keys[@]}"; do [[ $(grep -c "^${key}=" "$marker") == 1 ]] || return 1; done
   marker_field() { sed -n "s/^$1=//p" "$marker"; }
   [[ $(marker_field version) == "$expected_version" && $(marker_field lan_interface) == "$REPORT_LAN_INTERFACE" && $(marker_field lan_members) == "$REPORT_LAN_MEMBERS" && $(marker_field lan_address) == "$REPORT_LAN_ADDRESS" ]] || return 1
@@ -172,15 +173,18 @@ validate_completed_install_marker() {
     IFS=, read -r -a marker_member_states <<<"$value"
     ((${#marker_members[@]} == ${#marker_member_states[@]})) || return 1
   fi
-  if [[ $field_count == 16 || $field_count == 18 || $field_count == 20 ]]; then
+  if [[ $field_count == 16 || $field_count == 18 || $field_count == 20 || $field_count == 21 ]]; then
     value=$(marker_field boot_network_policy); [[ $value == gateway-nonblocking || $value == keep ]] || return 1
     value=$(marker_field grub_policy); [[ $value == automatic-hidden || $value == menu-5s || $value == keep ]] || return 1
   fi
-  if [[ $field_count == 18 || $field_count == 20 ]]; then
+  if [[ $field_count == 18 || $field_count == 20 || $field_count == 21 ]]; then
     value=$(marker_field log_reader_user); [[ $value =~ ^[a-z_][a-z0-9_-]{0,31}$ && $value != root && $(marker_field log_reader_was_member) =~ ^[01]$ ]] || return 1
   fi
-  if [[ $field_count == 20 ]]; then
+  if [[ $field_count == 20 || $field_count == 21 ]]; then
     [[ $(marker_field ssh_socket_was_enabled) =~ ^[01]$ && $(marker_field ssh_socket_was_active) =~ ^[01]$ ]] || return 1
+  fi
+  if [[ $field_count == 21 ]]; then
+    [[ $(marker_field old_ipv4_src_valid_mark) =~ ^[01]$ ]] || return 1
   fi
 }
 
@@ -273,7 +277,7 @@ systemctl stop \
   gateway-vpn-firewall-guard.service 2>/dev/null || true
 systemctl stop 'gateway-vpn-power-cycle@*.service' 'gateway-vpn-network-rollback@*.timer' 'gateway-vpn-network-rollback@*.service' 2>/dev/null || true
 RUNTIME_QUIESCED=1
-nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 assert_no_conflicting_lifecycle
 "$RELEASE_DIR/bin/gateway-vpnctl" database-verify --database /var/lib/gateway-vpn/state.db --expected-schema "$OLD_SCHEMA" --json >/dev/null
 
@@ -382,7 +386,7 @@ for _ in {1..60}; do
 done
 ((CANDIDATE_RUNTIME_READY == 1)) || { echo "Candidate Gateway runtime did not converge to a fresh healthy state" >&2; exit 1; }
 grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json
-nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 
 OLD_MARKER=$SNAPSHOT_INSTALL_MARKER
 NEW_MARKER=$(find /var/lib/gateway-vpn-privileged/install-transactions -maxdepth 1 -type f -name 'completed-*' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {sub(/^[^ ]+ /, ""); print}')
@@ -390,19 +394,22 @@ NEW_MARKER=$(find /var/lib/gateway-vpn-privileged/install-transactions -maxdepth
 validate_completed_install_marker "$OLD_MARKER" "$OLD_VERSION" || { echo "Old host-upgrade install marker changed after snapshot" >&2; exit 1; }
 validate_completed_install_marker "$NEW_MARKER" "$RELEASE_VERSION" || { echo "Candidate host-upgrade install marker is invalid" >&2; exit 1; }
 old_marker_value() { sed -n "s/^$1=//p" "$OLD_MARKER"; }
+new_marker_value() { sed -n "s/^$1=//p" "$NEW_MARKER"; }
 old_or_default() { local value; value=$(old_marker_value "$1"); printf '%s' "${value:-$2}"; }
 MERGED=$NEW_MARKER.merged
 OLD_MARKER_FIELD_COUNT=$(wc -l <"$OLD_MARKER")
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\n' \
-  "$RELEASE_VERSION" "$(old_marker_value old_ipv4_forward)" "$(old_marker_value old_ipv6_all_disable)" "$(old_marker_value old_ipv6_default_disable)" "$(old_marker_value old_ipv6_all_forwarding)" "$(old_marker_value preserve_state_root)" "$(old_marker_value lan_interface)" "$(old_marker_value lan_members)" "$(old_marker_value lan_member_was_up)" "$(old_marker_value lan_address)" "$(old_marker_value preserve_lan_address)" "$(old_marker_value lan_was_up)" "$(old_marker_value ssh_was_enabled)" "$(old_marker_value ssh_was_active)" >"$MERGED"
-if [[ $OLD_MARKER_FIELD_COUNT == 20 ]]; then
-  printf 'ssh_socket_was_enabled=%s\nssh_socket_was_active=%s\n' "$(old_marker_value ssh_socket_was_enabled)" "$(old_marker_value ssh_socket_was_active)" >>"$MERGED"
+if [[ $OLD_MARKER_FIELD_COUNT == 20 || $OLD_MARKER_FIELD_COUNT == 21 ]]; then
+  ORIGINAL_SOURCE_MARK=$(old_marker_value old_ipv4_src_valid_mark)
+  ORIGINAL_SOURCE_MARK=${ORIGINAL_SOURCE_MARK:-$(new_marker_value old_ipv4_src_valid_mark)}
+  printf 'version=%s\nold_ipv4_forward=%s\nold_ipv4_src_valid_mark=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' \
+    "$RELEASE_VERSION" "$(old_marker_value old_ipv4_forward)" "$ORIGINAL_SOURCE_MARK" "$(old_marker_value old_ipv6_all_disable)" "$(old_marker_value old_ipv6_default_disable)" "$(old_marker_value old_ipv6_all_forwarding)" "$(old_marker_value preserve_state_root)" "$(old_marker_value lan_interface)" "$(old_marker_value lan_members)" "$(old_marker_value lan_member_was_up)" "$(old_marker_value lan_address)" "$(old_marker_value preserve_lan_address)" "$(old_marker_value lan_was_up)" "$(old_marker_value ssh_was_enabled)" "$(old_marker_value ssh_was_active)" "$(old_marker_value ssh_socket_was_enabled)" "$(old_marker_value ssh_socket_was_active)" "$(old_or_default log_reader_user "$LOG_READER_USER")" "$(old_or_default log_reader_was_member "$LOG_READER_WAS_MEMBER")" "$(old_or_default boot_network_policy keep)" "$(old_or_default grub_policy keep)" >"$MERGED"
+else
+  printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' \
+    "$RELEASE_VERSION" "$(old_marker_value old_ipv4_forward)" "$(old_marker_value old_ipv6_all_disable)" "$(old_marker_value old_ipv6_default_disable)" "$(old_marker_value old_ipv6_all_forwarding)" "$(old_marker_value preserve_state_root)" "$(old_marker_value lan_interface)" "$(old_marker_value lan_members)" "$(old_marker_value lan_member_was_up)" "$(old_marker_value lan_address)" "$(old_marker_value preserve_lan_address)" "$(old_marker_value lan_was_up)" "$(old_marker_value ssh_was_enabled)" "$(old_marker_value ssh_was_active)" "$(old_or_default log_reader_user "$LOG_READER_USER")" "$(old_or_default log_reader_was_member "$LOG_READER_WAS_MEMBER")" "$(old_or_default boot_network_policy keep)" "$(old_or_default grub_policy keep)" >"$MERGED"
 fi
-printf 'log_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' \
-  "$(old_or_default log_reader_user "$LOG_READER_USER")" "$(old_or_default log_reader_was_member "$LOG_READER_WAS_MEMBER")" "$(old_or_default boot_network_policy keep)" "$(old_or_default grub_policy keep)" >>"$MERGED"
 chmod 0600 "$MERGED"
 MERGED_FIELD_COUNT=$(wc -l <"$MERGED")
-[[ $OLD_MARKER_FIELD_COUNT == 20 && $MERGED_FIELD_COUNT == 20 || $OLD_MARKER_FIELD_COUNT != 20 && $MERGED_FIELD_COUNT == 18 ]] || { echo "Merged host-upgrade install marker is invalid" >&2; exit 1; }
+[[ ($OLD_MARKER_FIELD_COUNT == 20 || $OLD_MARKER_FIELD_COUNT == 21) && $MERGED_FIELD_COUNT == 21 || ($OLD_MARKER_FIELD_COUNT != 20 && $OLD_MARKER_FIELD_COUNT != 21) && $MERGED_FIELD_COUNT == 18 ]] || { echo "Merged host-upgrade install marker is invalid" >&2; exit 1; }
 validate_completed_install_marker "$MERGED" "$RELEASE_VERSION" || { echo "Merged host-upgrade install marker does not preserve the original OS state" >&2; exit 1; }
 sync -f "$MERGED"
 mv -T "$MERGED" "$NEW_MARKER"

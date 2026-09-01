@@ -2,10 +2,10 @@ package watchdog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -384,7 +384,7 @@ func (probe *SystemProbe) sshManagementHealthForConfig(ctx context.Context, conf
 		observation.ErrorCode = "SSH_IPV4_LISTENER_MISSING"
 		return observation
 	}
-	if !probe.sshFirewallScopeHealthy(ctx, configuration.Network.LANInterface) {
+	if !probe.sshFirewallScopeHealthy(ctx, configuration.Network.LANInterface, configuration.Network.ManagementInterfaces) {
 		observation.ErrorCode = "SSH_FIREWALL_SCOPE_INVALID"
 		return observation
 	}
@@ -392,22 +392,63 @@ func (probe *SystemProbe) sshManagementHealthForConfig(ctx context.Context, conf
 	return observation
 }
 
-func (probe *SystemProbe) sshFirewallScopeHealthy(ctx context.Context, lanInterface string) bool {
+func (probe *SystemProbe) sshFirewallScopeHealthy(ctx context.Context, lanInterface string, configured []string) bool {
 	result, err := probe.Executor.Run(ctx, platformexec.Request{Executable: probe.NFT, Arguments: []string{"list", "chain", "inet", firewall.TableName, "input"}, MaxOutputBytes: 256 << 10})
 	if err != nil {
 		return false
 	}
-	expected := "iifname " + strconv.Quote(lanInterface) + " tcp dport 22 accept"
+	expected := "iifname @local_management_interfaces tcp dport 22 accept"
 	count := 0
 	for _, line := range strings.Split(result.Stdout, "\n") {
 		if strings.Contains(line, "tcp dport 22") {
 			count++
-			if !strings.Contains(line, expected) || !strings.Contains(line, `comment "gateway-vpn LAN SSH"`) {
+			if !strings.Contains(line, expected) || !strings.Contains(line, `comment "gateway-vpn management SSH"`) {
 				return false
 			}
 		}
 	}
-	return count == 1
+	if count != 1 {
+		return false
+	}
+	set, err := probe.Executor.Run(ctx, platformexec.Request{Executable: probe.NFT, Arguments: []string{"--json", "list", "set", "inet", firewall.TableName, "local_management_interfaces"}, MaxOutputBytes: 256 << 10})
+	if err != nil {
+		return false
+	}
+	var document struct {
+		NFTables []struct {
+			Set *struct {
+				Family string   `json:"family"`
+				Table  string   `json:"table"`
+				Name   string   `json:"name"`
+				Type   string   `json:"type"`
+				Elem   []string `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(set.Stdout), &document); err != nil {
+		return false
+	}
+	expectedInterfaces := make(map[string]struct{}, len(configured)+1)
+	expectedInterfaces[lanInterface] = struct{}{}
+	for _, interfaceName := range configured {
+		expectedInterfaces[interfaceName] = struct{}{}
+	}
+	for _, object := range document.NFTables {
+		if object.Set == nil || object.Set.Family != "inet" || object.Set.Table != firewall.TableName || object.Set.Name != "local_management_interfaces" || object.Set.Type != "ifname" {
+			continue
+		}
+		if len(object.Set.Elem) != len(expectedInterfaces) {
+			return false
+		}
+		for _, interfaceName := range object.Set.Elem {
+			if _, ok := expectedInterfaces[interfaceName]; !ok {
+				return false
+			}
+			delete(expectedInterfaces, interfaceName)
+		}
+		return len(expectedInterfaces) == 0
+	}
+	return false
 }
 
 func ipv4WildcardSSHListener(output string) bool {

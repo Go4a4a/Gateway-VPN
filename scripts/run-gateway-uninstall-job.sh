@@ -125,15 +125,15 @@ fi
 
 "$TOOLING/gateway-vpn" update-lifecycle-check >/dev/null || { echo "Gateway update lifecycle is active or unsafe" >&2; exit 1; }
 
-# Install the signed boot policy before stopping any process. It contains the
-# fixed PATH_BLOCKED forwarding posture while keeping scoped management access.
+# Install the signed boot policy before stopping any process. The exact copied
+# binary atomically replaces only the owned table; loading the static table text
+# over an existing table would append duplicate rules on every guardian retry.
 if [[ -f /etc/gateway-vpn/nftables/boot.nft && ! -L /etc/gateway-vpn/nftables/boot.nft ]]; then
   [[ $(stat -c '%u:%a' /etc/gateway-vpn/nftables/boot.nft) == 0:640 ]] || { echo "Gateway boot firewall ownership or mode is unsafe" >&2; exit 1; }
-  /usr/sbin/nft --check --file /etc/gateway-vpn/nftables/boot.nft
-  /usr/sbin/nft --file /etc/gateway-vpn/nftables/boot.nft
-  /usr/sbin/nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+  "$TOOLING/gateway-vpn" firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+  /usr/sbin/nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 elif /usr/sbin/nft list table inet gateway_vpn >/dev/null 2>&1; then
-  /usr/sbin/nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED' || { echo "Gateway firewall is not fail-closed during uninstall retry" >&2; exit 1; }
+  /usr/sbin/nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null || { echo "Gateway firewall is not fail-closed during uninstall retry" >&2; exit 1; }
 fi
 
 UNINSTALL_ARGS=(--apply)

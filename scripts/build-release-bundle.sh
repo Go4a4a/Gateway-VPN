@@ -58,6 +58,7 @@ CHANNEL_ARGS=(
 CHANNEL_ARGS+=(
   "bootstrap=$ROOT/dist/gateway-vpn-bootstrap-$VERSION-linux-amd64"
   "deploy=$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64"
+  "deploy-windows=$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.exe"
   "gateway=$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz"
   "vps=$ROOT/dist/gateway-vpn-vps-$VERSION-linux-amd64.tar.gz"
 )
@@ -77,6 +78,7 @@ CONTROL="$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64/bin/gateway-vpnctl"
   --channel "$CHANNEL" --release-version "$VERSION" --source-commit "$COMMIT" \
   --artifact "bootstrap=$ROOT/dist/gateway-vpn-bootstrap-$VERSION-linux-amd64" \
   --artifact "deploy=$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64" \
+  --artifact "deploy-windows=$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.exe" \
   --artifact "gateway=$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz" \
   --artifact "vps=$ROOT/dist/gateway-vpn-vps-$VERSION-linux-amd64.tar.gz"
 

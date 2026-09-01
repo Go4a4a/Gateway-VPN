@@ -94,6 +94,13 @@ type DashboardResource struct {
 	DesiredRouteGeneration    int64           `json:"desired_route_generation"`
 	AppliedRouteGeneration    int64           `json:"applied_route_generation"`
 	HealthState               string          `json:"health_state"`
+	HealthReasonCode          string          `json:"health_reason_code,omitempty"`
+	LastProbeAt               string          `json:"last_probe_at,omitempty"`
+	LastProbeRouteGeneration  int64           `json:"last_probe_route_generation"`
+	ProbeInterface            string          `json:"probe_interface,omitempty"`
+	ProbeGateway              string          `json:"probe_gateway,omitempty"`
+	HealthProbeAddress        string          `json:"health_probe_address"`
+	ExternalPrerequisites     []string        `json:"external_prerequisites"`
 	Ports                     []DashboardPort `json:"ports"`
 }
 
@@ -114,6 +121,7 @@ type DashboardPublication struct {
 	AppliedACLGeneration   int64  `json:"applied_acl_generation"`
 	State                  string `json:"state"`
 	LastErrorCode          string `json:"last_error_code,omitempty"`
+	Enabled                bool   `json:"enabled"`
 }
 
 type DashboardACL struct {
@@ -227,7 +235,8 @@ ORDER BY a.name,a.id,p.vps_id`)
 func (repository *Repository) readDashboardResources(ctx context.Context, result *Dashboard) error {
 	rows, err := repository.Database.QueryContext(ctx, `
 SELECT id,name,resource_kind,access_profile,local_destination,enabled,
-       advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state
+       advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,
+       health_reason_code,COALESCE(last_probe_at,''),last_probe_route_generation,probe_interface,probe_gateway,health_probe_address
 FROM management_resources ORDER BY name,id`)
 	if err != nil {
 		return fmt.Errorf("list management resources: %w", err)
@@ -235,11 +244,12 @@ FROM management_resources ORDER BY name,id`)
 	for rows.Next() {
 		var item DashboardResource
 		var enabled, acknowledged int
-		if err := rows.Scan(&item.ID, &item.Name, &item.Kind, &item.AccessProfile, &item.LocalDestination, &enabled, &acknowledged, &item.DesiredRouteGeneration, &item.AppliedRouteGeneration, &item.HealthState); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Kind, &item.AccessProfile, &item.LocalDestination, &enabled, &acknowledged, &item.DesiredRouteGeneration, &item.AppliedRouteGeneration, &item.HealthState, &item.HealthReasonCode, &item.LastProbeAt, &item.LastProbeRouteGeneration, &item.ProbeInterface, &item.ProbeGateway, &item.HealthProbeAddress); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan management resource: %w", err)
 		}
 		item.Enabled, item.AdvancedScopeAcknowledged = enabled != 0, acknowledged != 0
+		item.ExternalPrerequisites = ResourceExternalPrerequisites(item.AccessProfile)
 		result.Resources = append(result.Resources, item)
 	}
 	if err := rows.Close(); err != nil {
@@ -280,6 +290,7 @@ FROM management_resource_publications ORDER BY resource_id,link_id,id`)
 			publicationRows.Close()
 			return err
 		}
+		item.Enabled = item.State != "DISABLED"
 		result.Publications = append(result.Publications, item)
 	}
 	if err := publicationRows.Close(); err != nil {

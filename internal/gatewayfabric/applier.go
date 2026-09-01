@@ -37,6 +37,7 @@ type Paths struct {
 	IP                   string
 	NFT                  string
 	WG                   string
+	Ping                 string
 	RequireRootOwnership bool
 }
 
@@ -45,17 +46,18 @@ func DefaultPaths() Paths {
 		TransactionRoot:     "/var/lib/gateway-vpn-privileged/management-fabric",
 		SecretRoot:          "/var/lib/gateway-vpn/secrets/management",
 		SecretReferenceRoot: "/var/lib/gateway-vpn/secrets/management",
-		IP:                  "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg",
+		IP:                  "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg", Ping: "/usr/bin/ping",
 		RequireRootOwnership: true,
 	}
 }
 
 type Applier struct {
-	Repository *managementfabric.Repository
-	Executor   platformexec.Executor
-	Paths      Paths
-	Now        func() time.Time
-	mutex      sync.Mutex
+	Repository     *managementfabric.Repository
+	Executor       platformexec.Executor
+	Paths          Paths
+	Now            func() time.Time
+	TransportProbe ResourceTransportProbe
+	mutex          sync.Mutex
 }
 
 type Receipt struct {
@@ -910,7 +912,7 @@ func (applier *Applier) validate() error {
 	if applier == nil || applier.Repository == nil || applier.Repository.Database == nil || applier.Executor == nil {
 		return errors.New("complete Gateway Management Fabric applier is required")
 	}
-	for _, path := range []string{applier.Paths.TransactionRoot, applier.Paths.SecretRoot, applier.Paths.IP, applier.Paths.NFT, applier.Paths.WG} {
+	for _, path := range []string{applier.Paths.TransactionRoot, applier.Paths.SecretRoot, applier.Paths.IP, applier.Paths.NFT, applier.Paths.WG, applier.Paths.Ping} {
 		if !filepath.IsAbs(path) {
 			return errors.New("Gateway Management Fabric paths must be absolute")
 		}

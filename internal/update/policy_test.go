@@ -28,10 +28,11 @@ func TestAutomationPolicyRepositoryDefaultsAndAuditsUpdate(t *testing.T) {
 		Channel: "testing", AutomaticCheckEnabled: true, AutomaticDownloadEnabled: true,
 		AutomaticApplyEnabled: true, CheckIntervalHours: 12, JitterMinutes: 20,
 		MaintenanceWindowEnabled: true, MaintenanceStartMinuteUTC: 240, MaintenanceDurationMinutes: 90,
+		MaximumApplyDelayHours: 48,
 		RetentionMaximumPoints: 6, RetentionMaximumBytes: 12 << 30, RetentionMaximumAgeDays: 730, RetentionMinimumOldPoints: 3,
 	}
 	next, err := repository.Update(ctx, input)
-	if err != nil || next.Channel != "testing" || !next.AutomaticApplyEnabled || next.UpdatedAt != "2026-08-31T10:00:00Z" {
+	if err != nil || next.Channel != "testing" || !next.AutomaticApplyEnabled || next.MaximumApplyDelayHours != 48 || next.UpdatedAt != "2026-08-31T10:00:00Z" {
 		t.Fatalf("Update() = %+v,%v", next, err)
 	}
 	var count int

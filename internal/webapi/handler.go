@@ -254,6 +254,7 @@ type WireGuardIngressController interface {
 type ManagementFabricController interface {
 	SyncManagementFabric(context.Context) error
 	ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error)
+	ProbeManagementResource(context.Context, string) (managementfabric.ResourceProbeResult, error)
 	ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error)
 	RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error)
 }
@@ -377,6 +378,16 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("DELETE /api/v1/management-fabric/admin-tunnels/{id}", server.protected(http.HandlerFunc(server.deleteManagementAdminTunnel)))
 	mux.Handle("PUT /api/v1/management-fabric/admins/{admin_id}/vps/{vps_id}/trust-mode", server.protected(http.HandlerFunc(server.updateManagementAdminTrustMode)))
 	mux.Handle("POST /api/v1/management-fabric/sync", server.protected(http.HandlerFunc(server.syncManagementFabric)))
+	mux.Handle("POST /api/v1/management-fabric/resources", server.protected(http.HandlerFunc(server.createManagementResource)))
+	mux.Handle("PUT /api/v1/management-fabric/resources/{id}", server.protected(http.HandlerFunc(server.updateManagementResource)))
+	mux.Handle("DELETE /api/v1/management-fabric/resources/{id}", server.protected(http.HandlerFunc(server.deleteManagementResource)))
+	mux.Handle("POST /api/v1/management-fabric/resources/{id}/probe", server.protected(http.HandlerFunc(server.probeManagementResource)))
+	mux.Handle("POST /api/v1/management-fabric/publications", server.protected(http.HandlerFunc(server.createManagementResourcePublication)))
+	mux.Handle("PUT /api/v1/management-fabric/publications/{id}", server.protected(http.HandlerFunc(server.updateManagementResourcePublication)))
+	mux.Handle("DELETE /api/v1/management-fabric/publications/{id}", server.protected(http.HandlerFunc(server.deleteManagementResourcePublication)))
+	mux.Handle("POST /api/v1/management-fabric/acl", server.protected(http.HandlerFunc(server.createManagementResourceACL)))
+	mux.Handle("PUT /api/v1/management-fabric/acl/{id}", server.protected(http.HandlerFunc(server.updateManagementResourceACL)))
+	mux.Handle("DELETE /api/v1/management-fabric/acl/{id}", server.protected(http.HandlerFunc(server.deleteManagementResourceACL)))
 	mux.Handle("GET /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.wireGuardSettings)))
 	mux.Handle("PUT /api/v1/settings/wireguard", server.protected(http.HandlerFunc(server.updateWireGuardSettings)))
 	mux.Handle("GET /api/v1/wireguard-ingress", server.protected(http.HandlerFunc(server.wireGuardIngressServer)))
@@ -4412,6 +4423,7 @@ func (server *Server) updateSoftwareUpdatePolicy(writer http.ResponseWriter, req
 		MaintenanceWindowEnabled   bool   `json:"maintenance_window_enabled"`
 		MaintenanceStartMinuteUTC  int    `json:"maintenance_start_minute_utc"`
 		MaintenanceDurationMinutes int    `json:"maintenance_duration_minutes"`
+		MaximumApplyDelayHours     int    `json:"maximum_apply_delay_hours"`
 		RetentionMaximumPoints     int    `json:"retention_maximum_points"`
 		RetentionMaximumBytes      int64  `json:"retention_maximum_bytes"`
 		RetentionMaximumAgeDays    int    `json:"retention_maximum_age_days"`
@@ -4427,6 +4439,7 @@ func (server *Server) updateSoftwareUpdatePolicy(writer http.ResponseWriter, req
 		CheckIntervalHours: input.CheckIntervalHours, JitterMinutes: input.JitterMinutes,
 		MaintenanceWindowEnabled:  input.MaintenanceWindowEnabled,
 		MaintenanceStartMinuteUTC: input.MaintenanceStartMinuteUTC, MaintenanceDurationMinutes: input.MaintenanceDurationMinutes,
+		MaximumApplyDelayHours: input.MaximumApplyDelayHours,
 		RetentionMaximumPoints: input.RetentionMaximumPoints, RetentionMaximumBytes: input.RetentionMaximumBytes,
 		RetentionMaximumAgeDays: input.RetentionMaximumAgeDays, RetentionMinimumOldPoints: input.RetentionMinimumOldPoints,
 	})

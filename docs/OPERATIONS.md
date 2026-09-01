@@ -2,7 +2,7 @@
 
 ## Поддерживаемая платформа
 
-Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS role поддерживает перечисленные release manifest профили Ubuntu Server 20.04/22.04/24.04/26.04 LTS x86_64 и Debian 12+; Ubuntu 20.04 принимается только при активном Ubuntu Pro/ESM и актуальных security updates. Gateway/VPS runtime на Windows не поддерживается; после стабилизации Management Fabric отдельным support profile становится portable административный `gateway-vpn-deploy.exe` для Windows 10/11 x64. Production Linux runtime ожидает systemd, nftables, iproute2 и WireGuard tools; dnsmasq и `/dev/net/tun` обязательны только для Gateway role.
+Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS role поддерживает перечисленные release manifest профили Ubuntu Server 20.04/22.04/24.04/26.04 LTS x86_64 и Debian 12+; Ubuntu 20.04 принимается только при активном Ubuntu Pro/ESM и актуальных security updates. Gateway/VPS runtime на Windows не поддерживается; Windows 10/11 x64 используется только как административный компьютер для portable `gateway-vpn-deploy.exe`. Production Linux runtime ожидает systemd, nftables, iproute2 и WireGuard tools; dnsmasq и `/dev/net/tun` обязательны только для Gateway role.
 
 До аппаратного gate запрещено считать Gateway готовым к домашнему трафику. Рабочая установка поддерживает `1..N` HiLink-модемов и не требует резервного uplink; при disconnect единственного модема data path остаётся `PATH_BLOCKED` до его возврата. Стенд должен включать Keenetic и минимум два HiLink-модема с разными management-подсетями, чтобы отдельно доказать multi-modem failover; результаты фиксируются в `PROJECT_STATUS.md`.
 
@@ -52,7 +52,7 @@ Builder требует clean committed Git tree и создаёт:
 - `dist/gateway-vpn-gateway-<version>-linux-amd64/` — полный подписанный tree;
 - `dist/gateway-vpn-gateway-<version>-linux-amd64.tar.gz` — Gateway role artifact;
 - `dist/gateway-vpn-bootstrap-<version>-linux-amd64` — независимый bootstrap binary;
-- `dist/gateway-vpn-deploy-<version>-linux-amd64` и после стабилизации API `dist/gateway-vpn-deploy-<version>-windows-amd64.exe`, каждый со своим SBOM/provenance, — административные SSH launchers;
+- `dist/gateway-vpn-deploy-<version>-linux-amd64` и `dist/gateway-vpn-deploy-<version>-windows-amd64.exe`, каждый со своим SBOM/provenance, — административные SSH launchers;
 - SHA-256 role archives, bootstrap и deploy launcher в stdout trusted build.
 
 Все четыре роли и signed channel можно собрать и повторно проверить одной командой на trusted Ubuntu builder. `dist/` перед запуском обязан отсутствовать, private key должен быть regular non-symlink file без group/other permissions, а tag — точно `vVERSION`:
@@ -83,6 +83,7 @@ Fetcher принимает только официальный compatible `mihom
   OWNER/REPOSITORY v0.1.0 \
   bootstrap=dist/gateway-vpn-bootstrap-0.1.0-linux-amd64 \
   deploy=dist/gateway-vpn-deploy-0.1.0-linux-amd64 \
+  deploy-windows=dist/gateway-vpn-deploy-0.1.0-windows-amd64.exe \
   gateway=dist/gateway-vpn-gateway-0.1.0-linux-amd64.tar.gz \
   vps=dist/gateway-vpn-vps-0.1.0-linux-amd64.tar.gz
 ```
@@ -248,7 +249,19 @@ Endpoint завершения pairing принимает только bounded in
 
 Первый `gateway-vpn-deploy` запускается с отдельного административного Linux/amd64 компьютера. Нужны `/usr/bin/ssh`, HTTPS downloader, `sha256sum`, два заранее проверенных SSH host keys в одном absolute `known_hosts`, passwordless `sudo -n` на обеих machines и отдельные SSH destinations. Launcher запускает OpenSSH с `-F /dev/null`, `BatchMode=yes`, `StrictHostKeyChecking=yes`, запрещёнными password/keyboard-interactive/TTY и bounded output; произвольные SSH options, ProxyCommand и shell fragments из пользовательских полей не принимаются. Первый pinned SSH check создаёт отдельные ControlMaster connections в новом private `0700` temporary directory. Все последующие команды используют те же established TCP sessions после включения fail-closed firewall; TCP/22 ради installer не открывается. В конце launcher посылает обоим masters `-O exit`, проверяет исчезновение control sockets и удаляет temporary directory.
 
-Windows 10/11 x64 launcher реализуется в конце после заморозки VPS Agent/pairing API как один подписанный portable `gateway-vpn-deploy.exe` без установки. Он использует проверенный системный `C:\Windows\System32\OpenSSH\ssh.exe`, pinned host fingerprints и явно выбранный SSH key; password/private key не сохраняются и не попадают в report. Clean Windows VM должна пройти тот же signed-channel, dry-run, READY/INSTALLED_NOT_READY и interruption diagnostics contract до объявления Windows support.
+Windows 10/11 x64 launcher выпускается как один подписанный channel manifest-ом portable `gateway-vpn-deploy.exe` без установки. Он использует только точный системный `C:\Windows\System32\OpenSSH\ssh.exe`, проверяет обязательные client options до сети, требует pinned `known_hosts` и явно выбранные SSH key files для обеих машин; password/private key не сохраняются и не попадают в report. Так как официальный Win32-OpenSSH не поддерживает Client `ControlMaster`, launcher держит по одному `ssh.exe`/TCP на Gateway и VPS и передаёт последовательные фазы через bounded framed stdin/stdout protocol к фиксированному `/usr/bin/bash --norc`; новые TCP connections после firewall apply не создаются. Clean Windows VM должна пройти тот же signed-channel, dry-run, READY/INSTALLED_NOT_READY и interruption diagnostics contract до объявления конкретного release Windows-supported.
+
+Signed release дополнительно содержит `install-deploy-windows-<version>.command.txt`. Его содержимое копируется в уже открытый PowerShell — файл `.ps1` запускать и менять ExecutionPolicy не требуется. Команда выполняется в отдельном PowerShell scope, создаёт случайный temporary directory, через HTTPS загружает exact Windows EXE, raw manifest, detached signature и public signing key, сверяет опубликованные SHA-256 EXE и manifest **до запуска**, затем открывает русскоязычный `--interactive` wizard и гарантированно удаляет temporary files. После успеха или ошибки исходное окно не закрывается: команда показывает результат, сохраняет точный launcher code в `$LASTEXITCODE`, восстанавливает изменённую на время загрузки TLS-настройку и возвращает обычный prompt для диагностики. Перед использованием администратор независимо сверяет signer fingerprint и SSH host-key fingerprints с доверенным источником.
+
+Мастер запрашивает только:
+
+- `USER@HOST` и SSH port Gateway/VPS;
+- absolute pinned `known_hosts` и явный private-key **file path** для каждой машины;
+- удалённый Gateway Ethernet interface, transit CIDR, DHCP policy и VPS `HOST:51821`;
+- local path для создаваемого administrator WireGuard config либо заранее переданный public key;
+- dependency и Gateway-through-VPS SSH policies.
+
+Содержимое SSH/WireGuard private keys и пароли не читаются мастером как ответы, не помещаются в argv/report и не сохраняются в wizard state. После сводки требуется точный ввод `INSTALL`. Code `0` означает только `READY`, code `3` — безопасный `INSTALLED_NOT_READY`, остальные коды означают остановку с redacted phase/diagnostic codes.
 
 Точная команда создаётся после signed channel. Вариант ниже сам создаёт admin private key локально и после получения VPS public key атомарно формирует `/home/operator/.config/gateway-vpn/admin.conf` с mode `0600`; каталог должен существовать и иметь mode `0700`:
 
@@ -306,7 +319,7 @@ Boot order:
 6. при отсутствии users создаётся `admin` и одноразовый пароль в `/var/lib/gateway-vpn/secrets/bootstrap-admin-password` с mode `0600`;
 7. self-signed TLS certificate создаётся в `/var/lib/gateway-vpn/tls/`, fingerprint пишется в journald;
 8. HTTPS API начинает слушать LAN address; WireGuard bind подключается после появления адреса;
-9. root broker активируется только через `/run/gateway-vpn/network-broker.sock`, доступный owner `gateway-vpn` с mode `0600`;
+9. root broker активируется только через `/run/gateway-vpn/network-broker.sock` с owner/group `gateway-vpn` и mode `0660`; dedicated-группа нужна root-watchdog в его ограниченном systemd sandbox, а `SO_PEERCRED` до разбора HTTP дополнительно допускает только UID `gateway-vpn` либо root;
 10. Mihomo остаётся condition-inactive до проверенной LKG; dnsmasq запускается только для установки с явно включённым DHCP.
 
 ```bash
@@ -787,9 +800,17 @@ WebUI требует свежую password re-authentication и введённу
 
 До изменения live-системы staging ограничивает archive/entry/path/depth/size, запрещает symlink, hardlink, device, sparse и concatenated/trailing gzip data, проверяет signature, signer SHA-256, полный file manifest, SHA-256 каждого файла, строгий SemVer, Git commit/build date, OS/arch, DB/config и Gateway/Mihomo API contracts. Дополнительно candidate `host_contract_sha256`, вычисленный по всем packaged systemd unit/socket/timer files, обязан совпасть с текущим release: WebUI pointer-update не оставляет на host несовместимые старые units. Несовпадение безопасно отклоняется до mutation и означает, что нужен отдельный signed installer-upgrade artifact. Один verified staging не доказывает установку и может быть безопасно удалён.
 
-Карточка **Версии и восстановление** хранит отдельно channel, автоматическую проверку, автоматическую загрузку, автоматическое применение и ежедневное окно обслуживания в UTC. Durable automatic check/download/apply worker сохраняет restart-safe состояние в schema 32 и использует только подписанный channel staging и fixed root apply; ручной staged release никогда не присваивается автоматике.
+Карточка **Версии и восстановление** хранит отдельно channel, автоматическую проверку, автоматическую загрузку, автоматическое применение, ежедневное окно обслуживания в UTC и максимальную задержку Apply от `1` до `720` часов (по умолчанию `72`). Durable automatic check/download/apply worker сохраняет restart-safe состояние, впервые введённое в schema 33, и использует только подписанный channel staging и fixed root apply; ручной staged release никогда не присваивается автоматике.
 
-По умолчанию включена только автоматическая проверка. Загрузка включается отдельно, а автоматическое применение дополнительно требует включённого UTC maintenance window. Состояние worker отображается после перезагрузки WebUI и не зависит от живого HTTP-запроса: `IDLE/DISABLED`, `CHECKING`, `CANDIDATE`, `DOWNLOADING`, `STAGED/WAITING_WINDOW`, `APPLY_INTENT/APPLY_DISPATCHED`, `SUCCEEDED/FAILED/SUPPRESSED`, `MANUAL_PENDING` либо `OUTCOME_UNKNOWN`. Lease owner и его expiry являются внутренними полями SQLite и не возвращаются API.
+По умолчанию включена только автоматическая проверка. Загрузка включается отдельно, а автоматическое применение дополнительно требует включённого UTC maintenance window. Состояние worker отображается после перезагрузки WebUI и не зависит от живого HTTP-запроса: `IDLE/DISABLED`, `CHECKING`, `CANDIDATE`, `DOWNLOADING`, `STAGED/WAITING_WINDOW`, `APPLY_INTENT/APPLY_DISPATCHED`, `SUCCEEDED/FAILED/SUPPRESSED`, `MANUAL_PENDING`, `MANUAL_ATTENTION` либо `OUTCOME_UNKNOWN`. Lease owner и его expiry являются внутренними полями SQLite и не возвращаются API. Для automatic staging сохраняется immutable `staged_at + apply_deadline_at`; изменение policy пересчитывает deadline только от исходного `staged_at`, а не продлевает его от текущего момента. Истечение deadline никогда не принуждает unsafe Apply: candidate остаётся проверенным staging, automation переходит в `MANUAL_ATTENTION`, фиксирует audit и ждёт решения администратора.
+
+Check и download используют отдельную service-only лестницу, не переключающую активный пользовательский путь:
+
+1. текущий active VPN node, если его access method всё ещё включён;
+2. остальные разрешённые nodes включённых подписок по access-method/node/uplink priority и свежему evidence;
+3. если policy **«Разрешить служебное обновление через прямой интернет»** включена — каждый ready uplink по приоритету.
+
+VPN-попытка выполняется через изолированный Mihomo probe selector/SOCKS listener и перед выбором повторно проверяет stable node, `EXCLUDE`, enabled subscription и ready uplink уже под общим Mihomo operation lock. Direct fallback сначала сверяет owned policy routing, затем root-authorizes только точный `Gateway UID × interface × fwmark × resolved public IPv4 × TCP/443`; DNS и socket также привязаны к тому же uplink. CGNAT/private/link-local/documentation/benchmark/reserved адреса, другой UID/interface/mark/port и Ethernet-доступ к HiLink management subnet остаются закрыты. Отключённая подписка не может переносить generic Gateway update, но сохраняет отдельный self-refresh своей LKG через service-only selector.
 
 Перед unattended Apply worker повторно читает последнюю policy generation и требует одновременно:
 
@@ -950,7 +971,7 @@ sudo systemctl kill -s SIGKILL gateway-vpn-mihomo.service
 
 После остановки Mihomo новый LAN traffic не должен попасть в HiLink напрямую. `nft flush ruleset`, reboot, unplug/replug обоих модемов и обратный USB-порядок входят в integration/hardware matrix и не заменяются unit-тестами.
 
-`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `6`, точный набор локальных management-интерфейсов, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
+`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `7`, exact conntrack mark preserve/restore rules, точный набор локальных management-интерфейсов, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
 
 Диагностика guard:
 
@@ -968,7 +989,7 @@ Guard никогда не выполняет `nft flush ruleset` и не вос�
 
 ## Удаление
 
-`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` сначала атомарно загружает signed boot ruleset и проверяет `PATH_BLOCKED`, затем удаляет units/program/config и owned nftables/networkd/sysctl/journald/GRUB projection, восстанавливает сохранённые перед первой установкой forwarding/IPv6, LAN link/bridge members, SSH service/socket и log-reader membership, но сохраняет `/var/lib/gateway-vpn` для повторной установки. `--purge-data --apply` дополнительно и без скрытой копии удаляет application DB/secrets/keys/backups и `/var/log/gateway-vpn`; нужный portable backup/diagnostic export следует скачать до команды.
+`./scripts/uninstall.sh` по умолчанию является dry-run. `--apply` сначала атомарно загружает signed boot ruleset и проверяет `PATH_BLOCKED`, затем удаляет units/program/config и owned nftables/networkd/sysctl/journald/GRUB projection, восстанавливает сохранённые перед первой установкой forwarding/IPv6 и `src_valid_mark` (если это значение известно marker текущего поколения), LAN link/bridge members, SSH service/socket и log-reader membership, но сохраняет `/var/lib/gateway-vpn` для повторной установки. `--purge-data --apply` дополнительно и без скрытой копии удаляет application DB/secrets/keys/backups и `/var/log/gateway-vpn`; нужный portable backup/diagnostic export следует скачать до команды.
 
 Удаление не является factory reset Ubuntu. Установленные системные packages не удаляются автоматически, чужие firewall/network rules не изменяются, а изменения, сделанные оператором или другим ПО после установки, не угадываются и не откатываются. После удаления owned firewall table оператор обязан убедиться, что обычная host firewall policy соответствует его требованиям. Восстановление прежней сети либо отключение SSH, который до установки был выключен, может оборвать текущую сессию.
 

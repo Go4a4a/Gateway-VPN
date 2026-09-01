@@ -24,7 +24,7 @@ func TestSQLiteApplyReadinessRequiresFreshFullPathAndManagementHandshake(t *test
 	if err := databasepkg.Migrate(ctx, database); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 9, 1, 4, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	digest := sha256.Sum256([]byte("automatic-update-uplink"))
 	modems := modem.NewRepository(database, 1101, 0x1101)
 	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem:update", Name: "Update", IdentityKind: "usb_serial_hash", IdentityHash: hex.EncodeToString(digest[:])}); err != nil {

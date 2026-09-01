@@ -29,12 +29,16 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 	version := "1.2.0"
 	bootstrapPath := filepath.Join(directory, "gateway-vpn-bootstrap-1.2.0-linux-amd64")
 	deployPath := filepath.Join(directory, "gateway-vpn-deploy-1.2.0-linux-amd64")
+	windowsDeployPath := filepath.Join(directory, "gateway-vpn-deploy-1.2.0-windows-amd64.exe")
 	gatewayPath := filepath.Join(directory, "gateway-vpn-gateway-1.2.0-linux-amd64.tar.gz")
 	vpsPath := filepath.Join(directory, "gateway-vpn-vps-1.2.0-linux-amd64.tar.gz")
 	if err := os.WriteFile(bootstrapPath, []byte("trusted bootstrap artifact"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(deployPath, []byte("trusted deploy artifact"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(windowsDeployPath, []byte("trusted Windows deploy artifact"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(gatewayPath, []byte("trusted gateway archive"), 0o644); err != nil {
@@ -48,7 +52,8 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 		"--channel", "stable", "--release-version", version, "--source-commit", commit,
 		"--generated-at", "2026-08-25T00:00:00Z", "--private-key", privateKey,
 		"--output-dir", directory, "--artifact", "bootstrap=" + bootstrapPath,
-		"--artifact", "deploy=" + deployPath, "--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
+		"--artifact", "deploy=" + deployPath, "--artifact", "deploy-windows=" + windowsDeployPath,
+		"--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
 	}); code != 0 {
 		t.Fatalf("runChannelSign() code = %d", code)
 	}
@@ -58,7 +63,7 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 		"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
 		"--channel", "stable", "--release-version", version, "--source-commit", commit,
 		"--artifact", "bootstrap=" + bootstrapPath, "--artifact", "deploy=" + deployPath,
-		"--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
+		"--artifact", "deploy-windows=" + windowsDeployPath, "--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
 	}); code != 0 {
 		t.Fatalf("runChannelVerify() code = %d", code)
 	}
@@ -125,6 +130,19 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 	if strings.Index(deployCommand, "test ") < 0 || strings.Index(deployCommand, "test ") > strings.LastIndex(deployCommand, "\"$tmp/deploy\"") {
 		t.Fatal("generated deploy command executes its launcher before exact SHA-256 verification")
 	}
+	windowsCommand, code := captureStdout(t, func() int {
+		return runChannelWindowsDeployCommand([]string{
+			"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
+			"--channel", "stable", "--release-version", version, "--source-commit", commit,
+			"--github-repository", "owner/gateway-vpn", "--release-tag", "v1.2.0",
+		})
+	})
+	if code != 0 || !strings.Contains(windowsCommand, "gateway-vpn-deploy-1.2.0-windows-amd64.exe") || !strings.Contains(windowsCommand, "Get-FileHash") || !strings.Contains(windowsCommand, "--interactive") {
+		t.Fatalf("generated Windows deploy command code=%d output=%q", code, windowsCommand)
+	}
+	if strings.Index(windowsCommand, "Get-FileHash -LiteralPath $launcher") > strings.Index(windowsCommand, "& $launcher") {
+		t.Fatal("generated Windows deploy command executes its launcher before exact SHA-256 verification")
+	}
 	if err := os.WriteFile(deployPath, []byte("modified deploy artifact"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +150,7 @@ func TestChannelCommandsSignVerifyAndGeneratePinnedGatewayCommand(t *testing.T) 
 		"--manifest", manifestPath, "--signature", signaturePath, "--public-key", publicKey,
 		"--channel", "stable", "--release-version", version, "--source-commit", commit,
 		"--artifact", "bootstrap=" + bootstrapPath, "--artifact", "deploy=" + deployPath,
-		"--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
+		"--artifact", "deploy-windows=" + windowsDeployPath, "--artifact", "gateway=" + gatewayPath, "--artifact", "vps=" + vpsPath,
 	}); code != 1 {
 		t.Fatalf("modified local artifact verify code = %d, want 1", code)
 	}

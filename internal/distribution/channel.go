@@ -183,10 +183,13 @@ func ManifestSHA256(content []byte) (string, error) {
 }
 
 func validateArtifact(artifact Artifact, version string) error {
-	if !validRole(artifact.Role) || artifact.OS != "linux" || artifact.Arch != "amd64" || !filenamePattern.MatchString(artifact.Filename) || !digestPattern.MatchString(artifact.SHA256) || artifact.Bytes <= 0 || artifact.Bytes > MaximumArtifactBytes {
+	if !validRole(artifact.Role) || !validArtifactPlatform(artifact.Role, artifact.OS, artifact.Arch) || !filenamePattern.MatchString(artifact.Filename) || !digestPattern.MatchString(artifact.SHA256) || artifact.Bytes <= 0 || artifact.Bytes > MaximumArtifactBytes {
 		return errors.New("channel artifact identity, platform, hash, or size is invalid")
 	}
-	expectedFilename := fmt.Sprintf("gateway-vpn-%s-%s-linux-amd64", artifact.Role, version)
+	expectedFilename := fmt.Sprintf("gateway-vpn-%s-%s-%s-%s", artifact.Role, version, artifact.OS, artifact.Arch)
+	if artifact.OS == "windows" {
+		expectedFilename += ".exe"
+	}
 	switch artifact.Role {
 	case RoleGateway, RoleVPS:
 		expectedFilename += ".tar.gz"
@@ -194,11 +197,25 @@ func validateArtifact(artifact Artifact, version string) error {
 			return errors.New("role release artifact filename or media type is invalid")
 		}
 	case RoleDeploy, RoleBootstrap:
-		if artifact.MediaType != "application/octet-stream" || artifact.Filename != expectedFilename {
+		expectedMediaType := "application/octet-stream"
+		if artifact.OS == "windows" {
+			expectedMediaType = "application/vnd.microsoft.portable-executable"
+		}
+		if artifact.MediaType != expectedMediaType || artifact.Filename != expectedFilename {
 			return errors.New("launcher artifact media type is invalid")
 		}
 	}
 	return nil
+}
+
+func validArtifactPlatform(role, operatingSystem, architecture string) bool {
+	if architecture != "amd64" {
+		return false
+	}
+	if operatingSystem == "linux" {
+		return true
+	}
+	return role == RoleDeploy && operatingSystem == "windows"
 }
 
 func validRole(value string) bool {

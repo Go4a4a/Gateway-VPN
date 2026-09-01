@@ -69,6 +69,7 @@ ip -n "$GW" link set wan0 up
 ip -n "$GW" link add gateway-vpn-tun type dummy
 ip -n "$GW" link set gateway-vpn-tun up
 ip netns exec "$GW" sysctl -q -w net.ipv4.ip_forward=1
+ip netns exec "$GW" sysctl -q -w net.ipv4.conf.all.src_valid_mark=1
 ip -n "$GW" route add default via 192.168.8.1 dev wan0 table 1101 protocol 186
 ip -n "$GW" rule add priority 1101 fwmark 0x1101/0xffffffff table 1101 protocol 186
 
@@ -123,7 +124,7 @@ wait_recovery() {
   local attempt
   for attempt in $(seq 1 100); do
     if ip netns exec "$GW" nft list table inet gateway_vpn >/dev/null 2>&1 \
-      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*6[[:space:]]*\]' >/dev/null \
+      && ip netns exec "$GW" nft --json list set inet gateway_vpn firewall_schema_generation | grep -E '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*7[[:space:]]*\]' >/dev/null \
       && ip -n "$GW" -json link show dev lan0 | grep '"UP"' >/dev/null \
       && [[ $(grep -c 'recovered=true' "$WORK/guard.log" || true) -ge $expected_count ]]; then
       return 0

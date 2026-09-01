@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,19 +26,37 @@ type serviceExecutor struct {
 	endpointGeneration  [2]uint32
 	wireGuardGeneration [2]uint32
 	payloads            []string
+	rulesJSON           string
+	routesJSON          string
 }
 
 func (executor *serviceExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
 	executor.requests = append(executor.requests, request)
 	arguments := strings.Join(request.Arguments, " ")
+	if request.Executable == "/usr/sbin/sysctl" {
+		if arguments != "-n net.ipv4.conf.all.src_valid_mark" {
+			return platformexec.Result{}, fmt.Errorf("unexpected sysctl request %s", arguments)
+		}
+		return platformexec.Result{Stdout: "1\n"}, nil
+	}
 	if request.Executable == "/usr/sbin/ip" {
 		switch arguments {
 		case "-N -json -4 rule show":
-			return platformexec.Result{Stdout: desiredRulesJSON}, nil
+			value := executor.rulesJSON
+			if value == "" {
+				value = desiredRulesJSON
+			}
+			return platformexec.Result{Stdout: value}, nil
 		case "-json -4 route show table all protocol 186":
-			return platformexec.Result{Stdout: desiredRoutesJSON}, nil
+			value := executor.routesJSON
+			if value == "" {
+				value = desiredRoutesJSON
+			}
+			return platformexec.Result{Stdout: value}, nil
 		case "-json -4 route get 1.1.1.1 mark 0x1101":
 			return platformexec.Result{Stdout: `[{"dst":"1.1.1.1","gateway":"192.168.8.1","dev":"enx0001","table":1101}]`}, nil
+		case "-json -4 route get 1.1.1.1 mark 0x1102":
+			return platformexec.Result{Stdout: `[{"dst":"1.1.1.1","gateway":"172.20.1.1","dev":"enp3s0","table":1102}]`}, nil
 		}
 		return platformexec.Result{}, fmt.Errorf("unexpected ip request %s", arguments)
 	}
@@ -167,13 +186,27 @@ func TestServiceFirewallSynchronizesModemTuplesAndAuthorizesBoundHTTPS(t *testin
 			t.Errorf("authorization missing %q:\n%s", expected, authorization)
 		}
 	}
+	if err := backend.AuthorizeUpdateService(context.Background(), UpdateServiceAuthorization{UplinkID: "modem-a", Addresses: []string{"8.8.4.4"}, Port: 443}); err != nil {
+		t.Fatalf("AuthorizeUpdateService() error = %v", err)
+	}
+	if len(executor.payloads) != 3 || !strings.Contains(executor.payloads[2], `bootstrap_http_v4 { "enx0001" . 0x1101 . 8.8.4.4 . 443 timeout 2m }`) {
+		t.Fatalf("signed update authorization payloads = %#v", executor.payloads)
+	}
+	for _, address := range []string{"100.64.0.1", "192.0.2.1", "198.18.0.1", "203.0.113.12"} {
+		if err := backend.AuthorizeUpdateService(context.Background(), UpdateServiceAuthorization{UplinkID: "modem-a", Addresses: []string{address}, Port: 443}); err == nil {
+			t.Fatalf("signed update root boundary accepted non-routable address %s", address)
+		}
+	}
+	if len(executor.payloads) != 3 {
+		t.Fatalf("rejected update authorization mutated firewall: %d payloads", len(executor.payloads))
+	}
 	if gate.blocks != 0 {
 		t.Fatalf("unchanged valid routes unexpectedly closed path gate %d times", gate.blocks)
 	}
 	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 443}); err != nil {
 		t.Fatalf("AuthorizeDirectProbe() error = %v", err)
 	}
-	if len(executor.payloads) != 3 || !strings.Contains(executor.payloads[2], `bootstrap_http_v4 { "enx0001" . 0x1101 . 203.0.113.11 . 443 timeout 2m }`) {
+	if len(executor.payloads) != 4 || !strings.Contains(executor.payloads[3], `bootstrap_http_v4 { "enx0001" . 0x1101 . 203.0.113.11 . 443 timeout 2m }`) {
 		t.Fatalf("direct authorization payloads = %#v", executor.payloads)
 	}
 	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 444}); err == nil {
@@ -194,6 +227,163 @@ func TestServiceFirewallSynchronizesModemTuplesAndAuthorizesBoundHTTPS(t *testin
 	if err := backend.AuthorizeDirectProbe(context.Background(), DirectProbeAuthorization{ModemID: "modem-a", TargetID: "target-a", Addresses: []string{"203.0.113.11"}, Port: 443}); err == nil {
 		t.Fatal("direct probe authorization accepted a target disabled during policy change")
 	}
+}
+
+func TestServiceFirewallAuthorizesSignedUpdateThroughReadyEthernetUplink(t *testing.T) {
+	database, modems, subscriptions, closeDatabase := serviceRepositories(t)
+	defer closeDatabase()
+	ctx := context.Background()
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:ethernet:a", StableIdentityKind: "ETHERNET_PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("e", 64), CurrentIfname: "enp3s0", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "WAN Ethernet", NetworkInterfaceID: "netif:ethernet:a",
+		AddressMode: uplink.AddressDHCP, DNS: []string{"9.9.9.9"}, MTU: 1500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uplinks.ObserveEthernetRuntime(ctx, created.ID, uplink.EthernetRuntimeObservation{
+		NetworkInterfaceID: created.NetworkInterfaceID, InterfaceName: "enp3s0",
+		IPv4CIDR: "172.20.1.2/24", Gateway: "172.20.1.1", DNS: []string{"9.9.9.9"},
+		State: uplink.StateReady, ReadinessReason: "READY", ConfigurationSeen: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executor := &serviceExecutor{
+		rulesJSON: `[{"priority":1101,"src":"all","fwmark":"0x1101","table":"1101","protocol":"186"},{"priority":1102,"src":"all","fwmark":"0x1102","table":"1102","protocol":"186"}]`,
+		routesJSON: `[
+  {"dst":"192.168.8.0/24","dev":"enx0001","scope":"link","table":"1101"},
+  {"dst":"default","gateway":"192.168.8.1","dev":"enx0001","table":"1101"},
+  {"dst":"172.20.1.0/24","dev":"enp3s0","scope":"link","table":"1102"},
+  {"dst":"default","gateway":"172.20.1.1","dev":"enp3s0","table":"1102"}
+]`,
+	}
+	backend := ServiceFirewallBackend{
+		Routing: testRoutingBackend(uplinks, executor, &routingGate{}), Modems: modems,
+		Subscriptions: subscriptions, AccessPolicy: accesspolicy.NewRepository(database),
+		Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"},
+	}
+	if err := backend.SyncRouting(ctx); err != nil {
+		t.Fatalf("SyncRouting(Ethernet) error = %v", err)
+	}
+	if len(executor.payloads) != 1 {
+		t.Fatalf("Ethernet service context payloads = %d", len(executor.payloads))
+	}
+	contextPayload := executor.payloads[0]
+	for _, expected := range []string{
+		`hilink_interfaces { "enp3s0" }`,
+		`bootstrap_dns_v4 { "enp3s0" . 0x1102 . 1.1.1.1 }`,
+	} {
+		if !strings.Contains(contextPayload, expected) {
+			t.Errorf("Ethernet service context missing %q:\n%s", expected, contextPayload)
+		}
+	}
+	if strings.Contains(contextPayload, `hilink_management_v4 { "enp3s0"`) {
+		t.Fatalf("Ethernet incorrectly received a HiLink management exception:\n%s", contextPayload)
+	}
+	if err := backend.AuthorizeUpdateService(ctx, UpdateServiceAuthorization{UplinkID: created.ID, Addresses: []string{"9.9.9.9"}, Port: 443}); err != nil {
+		t.Fatalf("AuthorizeUpdateService(Ethernet) error = %v", err)
+	}
+	if len(executor.payloads) != 2 || !strings.Contains(executor.payloads[1], `bootstrap_http_v4 { "enp3s0" . 0x1102 . 9.9.9.9 . 443 timeout 2m }`) {
+		t.Fatalf("Ethernet update authorization payloads = %#v", executor.payloads)
+	}
+}
+
+func TestUpdateServiceRoutesAgainstKernelNFTablesAndPolicyRouting(t *testing.T) {
+	if os.Getenv("GATEWAY_VPN_UPDATE_SERVICE_INTEGRATION") != "1" {
+		t.Skip("set GATEWAY_VPN_UPDATE_SERVICE_INTEGRATION=1 inside an isolated Linux network namespace")
+	}
+	ctx := context.Background()
+	executor := platformexec.OSExecutor{}
+	ruleset, err := firewall.RenderBootBlocked(firewall.BootConfig{
+		LANInterface: "lan0", TUNInterface: "gateway-vpn-tun", WireGuardInterface: "wg-mgmt",
+		APIPort: 8443, WireGuardListenPort: 51821,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firewall.ValidateAndLoad(ctx, executor, ruleset, firewall.LoadOptions{NFTExecutable: "/usr/sbin/nft", Mutate: true}); err != nil {
+		t.Fatalf("load update-service integration ruleset: %v", err)
+	}
+	database, err := databasepkg.Open(ctx, databasepkg.OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := databasepkg.Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	modems := modem.NewRepository(database, 1101, 0x1101)
+	if _, err := modems.Adopt(ctx, modem.AdoptInput{ID: "modem-a", Name: "HiLink", IdentityKind: "hilink_serial_hash", IdentityHash: strings.Repeat("a", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modems.ApplyLease(ctx, "modem-a", modem.LeaseInput{
+		InterfaceName: "wan0", ManagementCIDR: "192.168.8.0/24", Gateway: "192.168.8.1",
+		DNS: []string{"1.1.1.1"}, MTU: 1500, State: modem.StateReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	uplinks := uplink.NewRepository(database, 1101, 0x1101)
+	if _, err := uplinks.ObserveInterface(ctx, uplink.InterfaceObservation{
+		ID: "netif:wan1", StableIdentityKind: "ETHERNET_PERMANENT_MAC",
+		StableIdentityHash: strings.Repeat("e", 64), CurrentIfname: "wan1", CarrierState: "UP",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ethernet, err := uplinks.CreateEthernet(ctx, uplink.CreateEthernetInput{
+		ID: "ethernet-a", Name: "Ethernet", NetworkInterfaceID: "netif:wan1",
+		AddressMode: uplink.AddressDHCP, DNS: []string{"1.1.1.1"}, MTU: 1500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uplinks.ObserveEthernetRuntime(ctx, ethernet.ID, uplink.EthernetRuntimeObservation{
+		NetworkInterfaceID: ethernet.NetworkInterfaceID, InterfaceName: "wan1",
+		IPv4CIDR: "172.20.1.2/24", Gateway: "172.20.1.1", DNS: []string{"1.1.1.1"},
+		State: uplink.StateReady, ReadinessReason: "READY", ConfigurationSeen: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gate := &routingGate{}
+	routingBackend := testRoutingBackend(uplinks, executor, gate)
+	routingBackend.Sysctl = "/usr/sbin/sysctl"
+	backend := ServiceFirewallBackend{
+		Routing: routingBackend, Modems: modems,
+		Subscriptions: subscription.NewRepository(database), AccessPolicy: accesspolicy.NewRepository(database),
+		Executor: executor, NFT: "/usr/sbin/nft", BootstrapDNS: []string{"1.1.1.1"},
+	}
+	if err := backend.AuthorizeUpdateService(ctx, UpdateServiceAuthorization{UplinkID: "modem-a", Addresses: []string{"8.8.8.8"}, Port: 443}); err != nil {
+		t.Fatalf("authorize HiLink update packet: %v", err)
+	}
+	if err := backend.AuthorizeUpdateService(ctx, UpdateServiceAuthorization{UplinkID: ethernet.ID, Addresses: []string{"9.9.9.9"}, Port: 443}); err != nil {
+		t.Fatalf("authorize Ethernet update packet: %v", err)
+	}
+	result, err := executor.Run(ctx, platformexec.Request{Executable: "/usr/sbin/nft", Arguments: []string{"list", "set", "inet", firewall.TableName, bootstrapHTTPSet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tuple := range []string{`"wan0" . 0x00001101 . 8.8.8.8 . 443`, `"wan1" . 0x00001102 . 9.9.9.9 . 443`} {
+		if !strings.Contains(result.Stdout, tuple) {
+			t.Errorf("kernel update-service allowlist missing %q:\n%s", tuple, result.Stdout)
+		}
+	}
+	management, err := executor.Run(ctx, platformexec.Request{Executable: "/usr/sbin/nft", Arguments: []string{"list", "set", "inet", firewall.TableName, hilinkManagementSet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(management.Stdout, `"wan0" . 192.168.8.1`) || strings.Contains(management.Stdout, `"wan1"`) {
+		t.Fatalf("kernel HiLink management projection is not type-scoped:\n%s", management.Stdout)
+	}
+	if gate.blocks != 1 {
+		t.Fatalf("initial policy-routing mutation did not close the path exactly once: %d", gate.blocks)
+	}
+	// Kernel state intentionally remains until the disposable namespace exits;
+	// the shell harness performs packet probes after this root test process.
 }
 
 func TestServiceFirewallRejectsPrivateOrNonHTTPSBootstrap(t *testing.T) {

@@ -103,7 +103,7 @@ func TestGatewayFabricKernelManyToManyACLAndSelectiveRemoval(t *testing.T) {
 	applier := &Applier{Repository: repository, Executor: platformexec.OSExecutor{}, Paths: Paths{
 		TransactionRoot: transactionRoot, SecretRoot: secretRoot,
 		SecretReferenceRoot: "/var/lib/gateway-vpn/secrets/management",
-		IP:                  "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg", RequireRootOwnership: true,
+		IP:                  "/usr/sbin/ip", NFT: "/usr/sbin/nft", WG: "/usr/bin/wg", Ping: "/usr/bin/ping", RequireRootOwnership: true,
 	}}
 	if err := applier.Apply(ctx); err != nil {
 		t.Fatalf("apply real two-link Gateway projection: %v\n%s", err, gatewayKernelDiagnostics(links))
@@ -213,7 +213,8 @@ func seedGatewayKernelRepository(t *testing.T, ctx context.Context, links []gate
 		{`INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at) VALUES('admin:kernel','Kernel admin','ADMIN',1,'ACTIVE',?,?)`, []any{stamp, stamp}},
 		{`INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at) VALUES('admin-peer:kernel:1','admin:kernel','vps:kernel:1',?,'10.81.0.10','ACTIVE',1,0,?,?)`, []any{admin1.Public, stamp, stamp}},
 		{`INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at) VALUES('admin-peer:kernel:2','admin:kernel','vps:kernel:2',?,'10.83.0.10','ACTIVE',1,0,?,?)`, []any{admin2.Public, stamp, stamp}},
-		{`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,created_at,updated_at) VALUES('resource:kernel','site:kernel','Kernel LAN','LOCAL_SUBNET','VIA_DEDICATED_LAN','192.168.50.0/24',1,1,1,0,'UNKNOWN',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,health_reason_code,last_probe_at,last_probe_route_generation,probe_interface,health_probe_address,created_at,updated_at) VALUES('resource:kernel','site:kernel','Kernel LAN','LOCAL_SUBNET','VIA_DEDICATED_LAN','192.168.50.0/24',1,1,1,0,'HEALTHY','RESOURCE_SUBNET_PATH_CONFIRMED',?,1,'resource0','192.168.50.10',?,?)`, []any{stamp, stamp, stamp}},
+		{`INSERT INTO management_resource_ports(resource_id,protocol,port_start,port_end) VALUES('resource:kernel','TCP',8443,8443)`, nil},
 		{`INSERT INTO management_resource_publications(id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES('publication:kernel:1','resource:kernel','link:kernel:1','10.96.1.0/24',1,0,1,0,'PENDING',?,?)`, []any{stamp, stamp}},
 		{`INSERT INTO management_resource_publications(id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES('publication:kernel:2','resource:kernel','link:kernel:2','10.97.1.0/24',1,0,1,0,'PENDING',?,?)`, []any{stamp, stamp}},
 		{`INSERT INTO management_resource_acl(id,admin_id,resource_id,protocol,port_start,port_end,enabled,generation,created_at,updated_at) VALUES('acl:kernel','admin:kernel','resource:kernel','TCP',8443,8443,1,1,?,?)`, []any{stamp, stamp}},

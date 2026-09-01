@@ -234,7 +234,8 @@ for command in systemctl journalctl networkctl systemd-sysusers systemd-tmpfiles
 done
 [[ ! -e /var/lib/gateway-vpn-uninstall/active && ! -L /var/lib/gateway-vpn-uninstall/active ]] || { echo "Complete the durable Gateway uninstall before installing" >&2; exit 1; }
 UNINSTALL_TERMINAL_REMNANTS=0
-if [[ -e /etc/systemd/system/gateway-vpn-uninstall.service || -L /etc/systemd/system/gateway-vpn-uninstall.service || -e /usr/libexec/gateway-vpn-uninstall-job || -L /usr/libexec/gateway-vpn-uninstall-job ]]; then
+if [[ ! -e /opt/gateway-vpn/current && ! -L /opt/gateway-vpn/current ]] &&
+   [[ -e /etc/systemd/system/gateway-vpn-uninstall.service || -L /etc/systemd/system/gateway-vpn-uninstall.service || -e /usr/libexec/gateway-vpn-uninstall-job || -L /usr/libexec/gateway-vpn-uninstall-job ]]; then
   [[ -d /var/lib/gateway-vpn-uninstall && ! -L /var/lib/gateway-vpn-uninstall && $(stat -c '%u:%g:%a' /var/lib/gateway-vpn-uninstall) == 0:0:700 ]] || { echo "Previous Gateway uninstall receipt root is unsafe" >&2; exit 1; }
   LATEST_UNINSTALL_RECEIPT=$(find /var/lib/gateway-vpn-uninstall -maxdepth 1 -type f -name 'completed-uninstall-*' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {sub(/^[^ ]+ /, ""); print}')
   [[ -n $LATEST_UNINSTALL_RECEIPT && -f $LATEST_UNINSTALL_RECEIPT && ! -L $LATEST_UNINSTALL_RECEIPT && $(stat -c '%u:%g:%a' "$LATEST_UNINSTALL_RECEIPT") == 0:0:600 && $(stat -c '%s' "$LATEST_UNINSTALL_RECEIPT") -le 512 ]] || { echo "Previous Gateway uninstall terminal receipt is unavailable or unsafe" >&2; exit 1; }
@@ -272,10 +273,34 @@ if [[ "$GRUB_POLICY" != keep ]]; then
 fi
 INNER_UPGRADE_HINT=0
 host_upgrade_inner_authorized && INNER_UPGRADE_HINT=1
+COMPLETED_INSTALL_HINT=0
+if [[ -f /var/lib/gateway-vpn/install-report.json && ! -L /var/lib/gateway-vpn/install-report.json &&
+      $(stat -c '%u:%g:%a' /var/lib/gateway-vpn/install-report.json) == "0:0:600" &&
+      -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" &&
+      -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] &&
+   grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"log_reader_user\": \"$LOG_READER_USER\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"wireguard_ingress_enabled\": $([[ $ENABLE_WIREGUARD_INGRESS == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json &&
+   grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
+  COMPLETED_INSTALL_HINT=1
+  if ((ENABLE_WIREGUARD_INGRESS)) &&
+     { ! grep -Fq "\"wireguard_endpoint_host\": \"$WIREGUARD_ENDPOINT_HOST\"" /var/lib/gateway-vpn/install-report.json ||
+       ! grep -Fq "\"wireguard_subnet\": \"$WIREGUARD_SUBNET\"" /var/lib/gateway-vpn/install-report.json ||
+       ! grep -Fq "\"wireguard_listen_port\": $WIREGUARD_LISTEN_PORT" /var/lib/gateway-vpn/install-report.json ||
+       ! grep -Fq "\"wireguard_client_dns\": \"$WIREGUARD_CLIENT_DNS\"" /var/lib/gateway-vpn/install-report.json; }; then
+    COMPLETED_INSTALL_HINT=0
+  fi
+fi
 if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) != yes ]]; then
   if ((INNER_UPGRADE_HINT == 1)); then
     echo "Gateway NTP is unavailable inside the signed host-upgrade transaction; continuing with strict offline release and host verification"
-  elif ((HOST_UPGRADE_REQUIRED == 1)); then
+  elif ((COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1)); then
     echo "Gateway NTP is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification"
   else
     echo "Gateway clock is not reported as NTP-synchronized" >&2
@@ -283,23 +308,6 @@ if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) != yes ]]; then
   fi
 fi
 if ! getent ahostsv4 github.com >/dev/null; then
-  COMPLETED_INSTALL_HINT=0
-  if [[ -f /var/lib/gateway-vpn/install-report.json && ! -L /var/lib/gateway-vpn/install-report.json &&
-        $(stat -c '%u:%g:%a' /var/lib/gateway-vpn/install-report.json) == "0:0:600" &&
-        -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION" &&
-        -L /opt/gateway-vpn/recovery && $(readlink /opt/gateway-vpn/recovery) == "releases/v$RELEASE_VERSION" ]] &&
-     grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"lan_members\": \"$LAN_MEMBERS\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"dhcp_enabled\": $([[ $ENABLE_DHCP == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"lan_ssh_enabled\": $([[ $ENABLE_SSH == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"log_reader_user\": \"$LOG_READER_USER\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"wireguard_ingress_enabled\": $([[ $ENABLE_WIREGUARD_INGRESS == 1 ]] && echo true || echo false)" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"boot_network_policy\": \"$BOOT_NETWORK_POLICY\"" /var/lib/gateway-vpn/install-report.json &&
-     grep -Fq "\"grub_policy\": \"$GRUB_POLICY\"" /var/lib/gateway-vpn/install-report.json; then
-    COMPLETED_INSTALL_HINT=1
-  fi
   ((COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1 || INNER_UPGRADE_HINT == 1)) || { echo "Gateway DNS resolution failed" >&2; exit 1; }
   echo "Gateway DNS is blocked by the installed fail-closed policy; continuing with strict signed existing/upgrade verification"
 fi
@@ -468,7 +476,7 @@ fi
 [[ -d /sys/module/wireguard ]] || modprobe -n wireguard >/dev/null 2>&1 || { echo "Kernel WireGuard support is unavailable" >&2; exit 1; }
 systemctl is-active --quiet systemd-networkd.service || { echo "Gateway VPN requires active systemd-networkd" >&2; exit 1; }
 [[ -c /dev/net/tun ]] || { echo "/dev/net/tun is unavailable" >&2; exit 1; }
-[[ -w /proc/sys/net/ipv4/ip_forward && -w /proc/sys/net/ipv6/conf/all/disable_ipv6 && -w /proc/sys/net/ipv6/conf/default/disable_ipv6 && -w /proc/sys/net/ipv6/conf/all/forwarding ]] || { echo "Required Gateway IPv4/IPv6 sysctls are unavailable" >&2; exit 1; }
+[[ -w /proc/sys/net/ipv4/ip_forward && -w /proc/sys/net/ipv4/conf/all/src_valid_mark && -w /proc/sys/net/ipv6/conf/all/disable_ipv6 && -w /proc/sys/net/ipv6/conf/default/disable_ipv6 && -w /proc/sys/net/ipv6/conf/all/forwarding ]] || { echo "Required Gateway IPv4/IPv6 sysctls are unavailable" >&2; exit 1; }
 if ((${#LAN_MEMBER_NAMES[@]})); then
   for member in "${LAN_MEMBER_NAMES[@]}"; do
     ip link show dev "$member" >/dev/null || { echo "LAN bridge member not found: $member" >&2; exit 1; }
@@ -546,6 +554,7 @@ if ((EXISTING_PROJECTION)); then
   cmp -s -- /etc/systemd/system/gateway-vpn-uninstall.service "$ROOT_DIR/packaging/systemd/gateway-vpn-uninstall.service" || { echo "Installed Gateway uninstall guardian unit differs from the signed release" >&2; exit 1; }
   cmp -s -- /usr/libexec/gateway-vpn-uninstall-job "$ROOT_DIR/scripts/run-gateway-uninstall-job.sh" || { echo "Installed Gateway uninstall guardian helper differs from the signed release" >&2; exit 1; }
   [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] || { echo "Gateway IPv4 forwarding is not active" >&2; exit 1; }
+  [[ $(cat /proc/sys/net/ipv4/conf/all/src_valid_mark) == 1 ]] || { echo "Gateway marked-response reverse-path validation is not active" >&2; exit 1; }
   [[ -x /usr/libexec/gateway-vpn-install-recovery ]] || { echo "Installed Gateway recovery helper is not executable" >&2; exit 1; }
   EXPECTED_LAN_NETWORK=$(sed -e "s|__LAN_INTERFACE__|$LAN_INTERFACE|g" -e "s|__LAN_ADDRESS__|$LAN_ADDRESS|g" "$ROOT_DIR/packaging/systemd-networkd/05-gateway-vpn-lan.network.in")
   [[ $(stat -c '%u:%g:%a' /etc/systemd/network/05-gateway-vpn-lan.network) == "0:0:644" ]] || { echo "Persistent Gateway LAN policy ownership or mode is invalid" >&2; exit 1; }
@@ -657,7 +666,7 @@ else
   fi
   if nft list table inet gateway_vpn >/dev/null 2>&1; then
     if ((HOST_UPGRADE_INNER)); then
-      nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED' || { echo "Inherited Gateway firewall is not fail-closed" >&2; exit 1; }
+      nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null || { echo "Inherited Gateway firewall is not fail-closed" >&2; exit 1; }
     else
       echo "Unmanaged table inet gateway_vpn already exists" >&2
       exit 1
@@ -720,6 +729,7 @@ OLD_IPV6_ALL_DISABLE=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)
 OLD_IPV6_DEFAULT_DISABLE=$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6)
 OLD_IPV6_ALL_FORWARDING=$(cat /proc/sys/net/ipv6/conf/all/forwarding)
 OLD_IPV4_FORWARD=$(cat /proc/sys/net/ipv4/ip_forward)
+OLD_IPV4_SRC_VALID_MARK=$(cat /proc/sys/net/ipv4/conf/all/src_valid_mark)
 SSH_WAS_ENABLED=0
 systemctl is-enabled --quiet ssh.service 2>/dev/null && SSH_WAS_ENABLED=1
 SSH_WAS_ACTIVE=0
@@ -745,7 +755,7 @@ systemctl daemon-reload
 systemctl enable gateway-vpn-install-recovery.service gateway-vpn-host-upgrade-recovery.service gateway-vpn-uninstall.service
 MARKER_TMP=/var/lib/gateway-vpn-privileged/install-transactions/.active.tmp
 LAN_MEMBER_WAS_UP=$(IFS=,; echo "${LAN_MEMBER_WAS_UP_VALUES[*]}")
-printf 'version=%s\nold_ipv4_forward=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
+printf 'version=%s\nold_ipv4_forward=%s\nold_ipv4_src_valid_mark=%s\nold_ipv6_all_disable=%s\nold_ipv6_default_disable=%s\nold_ipv6_all_forwarding=%s\npreserve_state_root=%s\nlan_interface=%s\nlan_members=%s\nlan_member_was_up=%s\nlan_address=%s\npreserve_lan_address=%s\nlan_was_up=%s\nssh_was_enabled=%s\nssh_was_active=%s\nssh_socket_was_enabled=%s\nssh_socket_was_active=%s\nlog_reader_user=%s\nlog_reader_was_member=%s\nboot_network_policy=%s\ngrub_policy=%s\n' "$RELEASE_VERSION" "$OLD_IPV4_FORWARD" "$OLD_IPV4_SRC_VALID_MARK" "$OLD_IPV6_ALL_DISABLE" "$OLD_IPV6_DEFAULT_DISABLE" "$OLD_IPV6_ALL_FORWARDING" "$PRESERVE_STATE_ROOT" "$LAN_INTERFACE" "$LAN_MEMBERS" "$LAN_MEMBER_WAS_UP" "$LAN_ADDRESS" "$PRESERVE_LAN_ADDRESS" "$LAN_WAS_UP" "$SSH_WAS_ENABLED" "$SSH_WAS_ACTIVE" "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "$LOG_READER_USER" "$LOG_READER_WAS_MEMBER" "$BOOT_NETWORK_POLICY" "$GRUB_POLICY" >"$MARKER_TMP"
 chmod 0600 "$MARKER_TMP"
 sync -f "$MARKER_TMP"
 mv -T "$MARKER_TMP" /var/lib/gateway-vpn-privileged/install-transactions/active
@@ -950,6 +960,7 @@ for _ in {1..20}; do
      watchdog_runtime_ready &&
      nft list table inet gateway_vpn >/dev/null 2>&1 &&
      [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]] &&
+     [[ $(cat /proc/sys/net/ipv4/conf/all/src_valid_mark) == 1 ]] &&
      ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}' | grep -Fxq "$LAN_ADDRESS" &&
      ss -H -ltn "sport = :8443" | awk '{print $4}' | grep -Fxq "$LAN_IP:8443"; then
     GATEWAY_RUNTIME_READY=1

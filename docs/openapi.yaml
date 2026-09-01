@@ -383,6 +383,83 @@ paths:
       summary: Попросить root broker перечитать SQLite/secrets и безопасно согласовать все VPS links/routes/ACL
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/resources:
+    post:
+      tags: [ManagementFabric]
+      operationId: createGatewayManagementResource
+      summary: Создать typed локальный ресурс; LOCAL_SUBNET требует проверочный host, а до fresh root probe ресурс не публикуется в host runtime
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/resources/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [ManagementFabric]
+      operationId: updateGatewayManagementResource
+      summary: Изменить typed resource, сбросить qualification и атомарно продвинуть route/ACL generation
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [ManagementFabric]
+      operationId: deleteGatewayManagementResource
+      summary: После отдельного подтверждения удалить отключённый ресурс и зависимые публикации/ACL
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/resources/{id}/probe:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    post:
+      tags: [ManagementFabric]
+      operationId: probeGatewayManagementResource
+      summary: Передать root broker только resource ID; route/interface/transport и проверочный host подсети он повторно читает из typed SQLite state
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/publications:
+    post:
+      tags: [ManagementFabric]
+      operationId: createGatewayResourcePublication
+      summary: Выделить явный непересекающийся alias ресурса на выбранном management link
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/publications/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [ManagementFabric]
+      operationId: updateGatewayResourcePublication
+      summary: Изменить alias/link/enabled публикации с атомарным generation bump
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [ManagementFabric]
+      operationId: deleteGatewayResourcePublication
+      summary: После подтверждения удалить отключённую публикацию
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/acl:
+    post:
+      tags: [ManagementFabric]
+      operationId: createGatewayResourceACL
+      summary: Разрешить администратору только подмножество объявленных protocol/ports опубликованного ресурса
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/management-fabric/acl/{id}:
+    parameters: [{$ref: '#/components/parameters/ID'}]
+    put:
+      tags: [ManagementFabric]
+      operationId: updateGatewayResourceACL
+      summary: Изменить bounded ACL и атомарно продвинуть generation затронутых links
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+    delete:
+      tags: [ManagementFabric]
+      operationId: deleteGatewayResourceACL
+      summary: После подтверждения удалить отключённую ACL запись
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/settings/wireguard:
     get:
       tags: [WireGuard]

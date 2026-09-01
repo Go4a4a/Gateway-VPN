@@ -59,12 +59,13 @@ elif [[ ${GATEWAY_VPN_UNINSTALL_GUARDIAN:-} == 1 ]]; then
 fi
 
 # Quarantine forwarding before the first service is stopped. This is the
-# signed, installed boot ruleset and preserves only scoped management access.
+# signed runtime renderer and preserves only scoped management access. Applying
+# the static table text to an existing table would append duplicate rules; the
+# exact installed binary replaces only the owned table in one nft transaction.
 if [[ -f /etc/gateway-vpn/nftables/boot.nft && ! -L /etc/gateway-vpn/nftables/boot.nft ]]; then
   [[ $(stat -c '%u:%a' /etc/gateway-vpn/nftables/boot.nft) == 0:640 ]] || { echo "Gateway boot firewall ownership or mode is unsafe" >&2; exit 1; }
-  /usr/sbin/nft --check --file /etc/gateway-vpn/nftables/boot.nft
-  /usr/sbin/nft --file /etc/gateway-vpn/nftables/boot.nft
-  /usr/sbin/nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED' || { echo "Gateway did not enter PATH_BLOCKED before uninstall" >&2; exit 1; }
+  "$UPDATE_LIFECYCLE_CHECKER" firewall-boot --config /etc/gateway-vpn/config.yaml --apply
+  /usr/sbin/nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null || { echo "Gateway did not enter PATH_BLOCKED before uninstall" >&2; exit 1; }
 fi
 
 validate_marker_lan() {
@@ -99,23 +100,32 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     MARKER_BYTES=$(stat -c '%s' "$LATEST_TRANSACTION")
     [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Completed Gateway install marker size is unsafe" >&2; exit 1; }
     MARKER_FIELD_COUNT=$(wc -l <"$LATEST_TRANSACTION")
-    [[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
-    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$LATEST_TRANSACTION") == "$MARKER_FIELD_COUNT" ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
+    [[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]] || { echo "Completed Gateway install marker field count is invalid" >&2; exit 1; }
+    [[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv4_src_valid_mark|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$LATEST_TRANSACTION") == "$MARKER_FIELD_COUNT" ]] || { echo "Completed Gateway install marker schema is invalid" >&2; exit 1; }
     MARKER_KEYS=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
-    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       MARKER_KEYS+=(boot_network_policy grub_policy)
     fi
-    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       MARKER_KEYS+=(log_reader_user log_reader_was_member)
     fi
-    if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       MARKER_KEYS+=(ssh_socket_was_enabled ssh_socket_was_active)
+    fi
+    if [[ "$MARKER_FIELD_COUNT" == 21 ]]; then
+      MARKER_KEYS+=(old_ipv4_src_valid_mark)
     fi
     for marker_key in "${MARKER_KEYS[@]}"; do
       [[ $(grep -c "^${marker_key}=" "$LATEST_TRANSACTION") == 1 ]] || { echo "Completed Gateway install marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
     done
     VERSION=$(sed -n 's/^version=//p' "$LATEST_TRANSACTION")
     OLD_IPV4_FORWARD=$(sed -n 's/^old_ipv4_forward=//p' "$LATEST_TRANSACTION")
+    OLD_IPV4_SRC_VALID_MARK=0
+    SOURCE_MARK_STATE_KNOWN=0
+    if [[ "$MARKER_FIELD_COUNT" == 21 ]]; then
+      OLD_IPV4_SRC_VALID_MARK=$(sed -n 's/^old_ipv4_src_valid_mark=//p' "$LATEST_TRANSACTION")
+      SOURCE_MARK_STATE_KNOWN=1
+    fi
     OLD_IPV6_ALL_DISABLE=$(sed -n 's/^old_ipv6_all_disable=//p' "$LATEST_TRANSACTION")
     OLD_IPV6_DEFAULT_DISABLE=$(sed -n 's/^old_ipv6_default_disable=//p' "$LATEST_TRANSACTION")
     OLD_IPV6_ALL_FORWARDING=$(sed -n 's/^old_ipv6_all_forwarding=//p' "$LATEST_TRANSACTION")
@@ -135,15 +145,15 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     SSH_SOCKET_STATE_KNOWN=0
     SSH_SOCKET_WAS_ENABLED=0
     SSH_SOCKET_WAS_ACTIVE=0
-    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       BOOT_NETWORK_POLICY=$(sed -n 's/^boot_network_policy=//p' "$LATEST_TRANSACTION")
       GRUB_POLICY=$(sed -n 's/^grub_policy=//p' "$LATEST_TRANSACTION")
     fi
-    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       LOG_READER_USER=$(sed -n 's/^log_reader_user=//p' "$LATEST_TRANSACTION")
       LOG_READER_WAS_MEMBER=$(sed -n 's/^log_reader_was_member=//p' "$LATEST_TRANSACTION")
     fi
-    if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
+    if [[ "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
       SSH_SOCKET_STATE_KNOWN=1
       SSH_SOCKET_WAS_ENABLED=$(sed -n 's/^ssh_socket_was_enabled=//p' "$LATEST_TRANSACTION")
       SSH_SOCKET_WAS_ACTIVE=$(sed -n 's/^ssh_socket_was_active=//p' "$LATEST_TRANSACTION")
@@ -153,6 +163,7 @@ if [[ -e "$TRANSACTIONS_DIR" || -L "$TRANSACTIONS_DIR" ]]; then
     [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Completed Gateway GRUB policy is invalid" >&2; exit 1; }
     [[ -z "$LOG_READER_USER" || "$LOG_READER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$LOG_READER_USER" != root && "$LOG_READER_WAS_MEMBER" =~ ^[01]$ ]] || { echo "Completed Gateway log-reader values are invalid" >&2; exit 1; }
     ((SSH_SOCKET_STATE_KNOWN == 0)) || [[ "$SSH_SOCKET_WAS_ENABLED" =~ ^[01]$ && "$SSH_SOCKET_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "Completed Gateway OpenSSH socket values are invalid" >&2; exit 1; }
+    ((SOURCE_MARK_STATE_KNOWN == 0)) || [[ "$OLD_IPV4_SRC_VALID_MARK" =~ ^[01]$ ]] || { echo "Completed Gateway source-mark state is invalid" >&2; exit 1; }
     if [[ -n "$LAN_MEMBERS" ]]; then
       [[ "$LAN_INTERFACE" == gateway-vpn-lan && "$LAN_MEMBERS" =~ ^[A-Za-z0-9_.:-]{1,15}(,[A-Za-z0-9_.:-]{1,15}){0,15}$ && "$LAN_MEMBER_WAS_UP" =~ ^[01](,[01]){0,15}$ ]] || { echo "Completed Gateway LAN bridge marker values are invalid" >&2; exit 1; }
       IFS=, read -r -a LAN_MEMBER_NAMES <<<"$LAN_MEMBERS"
@@ -261,9 +272,15 @@ fi
 
 if ((HAVE_COMPLETED_TRANSACTION)); then
   sysctl -q -w "net.ipv4.ip_forward=$OLD_IPV4_FORWARD"
+  if ((SOURCE_MARK_STATE_KNOWN)); then
+    sysctl -q -w "net.ipv4.conf.all.src_valid_mark=$OLD_IPV4_SRC_VALID_MARK"
+  fi
   sysctl -q -w "net.ipv6.conf.all.disable_ipv6=$OLD_IPV6_ALL_DISABLE"
   sysctl -q -w "net.ipv6.conf.default.disable_ipv6=$OLD_IPV6_DEFAULT_DISABLE"
   sysctl -q -w "net.ipv6.conf.all.forwarding=$OLD_IPV6_ALL_FORWARDING"
+  if ((SOURCE_MARK_STATE_KNOWN)); then
+    [[ $(cat /proc/sys/net/ipv4/conf/all/src_valid_mark) == "$OLD_IPV4_SRC_VALID_MARK" ]] || { echo "Gateway IPv4 source-mark state was not restored" >&2; exit 1; }
+  fi
   if ip link show dev "$LAN_INTERFACE" >/dev/null 2>&1; then
     if ((PRESERVE_LAN_ADDRESS == 0)) && ip -o -4 address show dev "$LAN_INTERFACE" scope global | awk '{print $4}' | grep -Fxq "$LAN_ADDRESS"; then
       ip -4 address del "$LAN_ADDRESS" dev "$LAN_INTERFACE"

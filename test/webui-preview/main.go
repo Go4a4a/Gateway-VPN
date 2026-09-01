@@ -158,6 +158,9 @@ func (previewRuntime) SyncManagementFabric(context.Context) error { return nil }
 func (previewRuntime) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
 	return networkapply.ManagementFabricStatus{}, nil
 }
+func (previewRuntime) ProbeManagementResource(_ context.Context, id string) (managementfabric.ResourceProbeResult, error) {
+	return managementfabric.ResourceProbeResult{ResourceID: id, RouteGeneration: 1, State: "HEALTHY", ReasonCode: "RESOURCE_PROBE_PASSED", CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
+}
 func (previewRuntime) ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
 	return managementfabric.AdminContour{}, errors.New("preview administrator contour mutation is disabled")
 }
@@ -779,7 +782,7 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 		{
 			Manifest: updatepkg.RestorePointManifest{
 				FormatVersion: updatepkg.RestorePointFormatVersion, PointID: "point-20260830T030000Z-0123456789abcdef01234567", Kind: updatepkg.RestorePointKindPreUpdate,
-				CreatedAt: previewNow.Add(-30 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.1.0", SchemaVersion: 32, TotalBytes: 780 << 20, Verification: "PASS",
+				CreatedAt: previewNow.Add(-30 * time.Hour).Format(time.RFC3339Nano), GatewayVersion: "1.1.0", SchemaVersion: 33, TotalBytes: 780 << 20, Verification: "PASS",
 			},
 			Protected: true, Roles: []string{"CURRENT", "RECOVERY"}, Compatible: true,
 		},
@@ -1034,7 +1037,7 @@ func seedManagementFabric(ctx context.Context, database *sql.DB) error {
 	}{
 		{`INSERT INTO management_admins(id,name,identity_kind,enabled,state,created_at,updated_at) VALUES('admin:igor','Игорь','ADMIN',1,'ACTIVE',?,?)`, []any{stamp, stamp}},
 		{`INSERT INTO management_admin_vps_peers(id,admin_id,vps_id,public_key,assigned_address,state,desired_generation,applied_generation,created_at,updated_at) VALUES('admin-peer:preview','admin:igor','vps:primary',?,'10.81.0.10','ACTIVE',1,1,?,?)`, []any{adminKeys.Public, stamp, stamp}},
-		{`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,created_at,updated_at) VALUES('resource:webui','site:preview','WebUI Gateway','GATEWAY_SERVICE','GATEWAY_ONLY','192.168.200.1',1,0,1,0,'HEALTHY',?,?)`, []any{stamp, stamp}},
+		{`INSERT INTO management_resources(id,site_id,name,resource_kind,access_profile,local_destination,enabled,advanced_scope_acknowledged,desired_route_generation,applied_route_generation,health_state,health_reason_code,last_probe_at,last_probe_route_generation,probe_interface,created_at,updated_at) VALUES('resource:webui','site:preview','WebUI Gateway','GATEWAY_SERVICE','GATEWAY_ONLY','192.168.200.1',1,0,1,0,'HEALTHY','RESOURCE_PROBE_PASSED',?,1,'lo',?,?)`, []any{stamp, stamp, stamp}},
 		{`INSERT INTO management_resource_ports(resource_id,protocol,port_start,port_end) VALUES('resource:webui','TCP',8443,8443)`, nil},
 		{`INSERT INTO management_resource_publications(id,resource_id,link_id,published_alias,desired_route_generation,applied_route_generation,desired_acl_generation,applied_acl_generation,state,created_at,updated_at) VALUES('publication:webui','resource:webui','link:preview:1','10.96.1.10/32',1,0,1,0,'PENDING',?,?)`, []any{stamp, stamp}},
 		{`INSERT INTO management_resource_acl(id,admin_id,resource_id,protocol,port_start,port_end,enabled,generation,created_at,updated_at) VALUES('acl:webui','admin:igor','resource:webui','TCP',8443,8443,1,1,?,?)`, []any{stamp, stamp}},

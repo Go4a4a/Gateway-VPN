@@ -324,22 +324,37 @@ func TestSSHHealthIsNotApplicableWhenOperatorDisabledIt(t *testing.T) {
 func TestSSHHealthRequiresEnabledValidWildcardServiceAndLANOnlyFirewall(t *testing.T) {
 	configuration := configpkg.Default()
 	configuration.Network.LANInterface = "gateway-vpn-lan"
+	configuration.Network.ManagementInterfaces = nil
 	executor := &exactOutputExecutor{outputs: map[string]string{
 		"/usr/bin/systemctl is-enabled --quiet ssh.service": "",
 		"/usr/bin/systemctl is-active --quiet ssh.service":  "",
-		"/usr/sbin/sshd -t":                               "",
-		"/usr/bin/ss -H -ltn sport = :22":                 "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n",
-		"/usr/sbin/nft list chain inet gateway_vpn input": "iifname \"gateway-vpn-lan\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"\n",
+		"/usr/sbin/sshd -t":                                                          "",
+		"/usr/bin/ss -H -ltn sport = :22":                                            "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n",
+		"/usr/sbin/nft list chain inet gateway_vpn input":                            "iifname @local_management_interfaces tcp dport 22 accept comment \"gateway-vpn management SSH\"\n",
+		"/usr/sbin/nft --json list set inet gateway_vpn local_management_interfaces": `{"nftables":[{"set":{"family":"inet","table":"gateway_vpn","name":"local_management_interfaces","type":"ifname","elem":["gateway-vpn-lan"]}}]}`,
 	}}
 	probe := &SystemProbe{Executor: executor, Systemctl: "/usr/bin/systemctl", SSHD: "/usr/sbin/sshd", SS: "/usr/bin/ss", NFT: "/usr/sbin/nft"}
 	observation := probe.sshManagementHealthForConfig(context.Background(), configuration)
 	if !observation.Applicable || !observation.Healthy || observation.ErrorCode != "" {
 		t.Fatalf("healthy SSH observation = %+v", observation)
 	}
-	executor.outputs["/usr/sbin/nft list chain inet gateway_vpn input"] = "iifname \"enx-uplink\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"\n"
+	configuration.Network.ManagementInterfaces = []string{"enx-management"}
+	executor.outputs["/usr/sbin/nft --json list set inet gateway_vpn local_management_interfaces"] = `{"nftables":[{"set":{"family":"inet","table":"gateway_vpn","name":"local_management_interfaces","type":"ifname","elem":["gateway-vpn-lan","enx-management"]}}]}`
+	observation = probe.sshManagementHealthForConfig(context.Background(), configuration)
+	if !observation.Applicable || !observation.Healthy || observation.ErrorCode != "" {
+		t.Fatalf("multi-interface SSH observation = %+v", observation)
+	}
+	configuration.Network.ManagementInterfaces = nil
+	executor.outputs["/usr/sbin/nft --json list set inet gateway_vpn local_management_interfaces"] = `{"nftables":[{"set":{"family":"inet","table":"gateway_vpn","name":"local_management_interfaces","type":"ifname","elem":["gateway-vpn-lan","enx-uplink"]}}]}`
 	observation = probe.sshManagementHealthForConfig(context.Background(), configuration)
 	if observation.Healthy || observation.ErrorCode != "SSH_FIREWALL_SCOPE_INVALID" {
 		t.Fatalf("uplink-scoped SSH firewall observation = %+v", observation)
+	}
+	executor.outputs["/usr/sbin/nft --json list set inet gateway_vpn local_management_interfaces"] = `{"nftables":[{"set":{"family":"inet","table":"gateway_vpn","name":"local_management_interfaces","type":"ifname","elem":["gateway-vpn-lan"]}}]}`
+	executor.outputs["/usr/sbin/nft list chain inet gateway_vpn input"] = "iifname \"gateway-vpn-lan\" tcp dport 22 accept comment \"gateway-vpn LAN SSH\"\n"
+	observation = probe.sshManagementHealthForConfig(context.Background(), configuration)
+	if observation.Healthy || observation.ErrorCode != "SSH_FIREWALL_SCOPE_INVALID" {
+		t.Fatalf("legacy direct-interface SSH firewall observation = %+v", observation)
 	}
 }
 

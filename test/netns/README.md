@@ -14,11 +14,15 @@ CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-dataplane-test ./internal/dataplane
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-app-test ./internal/app
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
+CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-updatenet-test ./internal/updatenet
+CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-gatewayfabric-test ./internal/gatewayfabric
 sudo bash ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
 sudo bash ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
 sudo bash ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
 sudo bash ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
 sudo bash ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
+sudo bash ./test/netns/update_service_routes.sh /tmp/gateway-vpn-dataplane-test /tmp/gateway-vpn-updatenet-test
+sudo bash ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-test
 ```
 
 `firewall_guard.sh` создаёт только namespace с уникальным PID suffix, не меняет host ruleset и удаляет namespace через trap. Сценарий проверяет policy routing без unmarked default route, удаление `table inet gateway_vpn`, полный `nft flush ruleset`, durable LAN quarantine, восстановление schema generation и возврат только в `PATH_BLOCKED`.
@@ -30,3 +34,7 @@ sudo bash ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-
 `wireguard_ingress.sh` запускает отдельный kernel integration binary в disposable root namespace. Он создаёт настоящий server/client WireGuard contour, выполняет handshake без внешнего Интернета, проверяет LAN-scoped UDP listener, адрес/peer в ядре, удаление revoked peer и полное fail-closed удаление интерфейса при выключении сервера.
 
 `topology_profiles.sh` связывает durable topology apply/commit/rollback contract с реальным kernel nftables ONE_ARM-контуром. Неподтверждённый либо spoofed `wg-ingress` source блокируется, exact peer allowlist проходит через выбранный direct uplink, а mark map не содержит дубликатов.
+
+`update_service_routes.sh` создаёт отдельные HiLink- и Ethernet-пары, применяет production root backend и доказывает реальные marked TCP packets только для exact public-IP/443 tuple и UID `gateway-vpn`. Root UID, неразрешённый destination и unmarked route остаются заблокированы; Ethernet не получает HiLink management exception.
+
+`management_resources.sh` создаёт disposable Gateway/Keenetic/WireGuard/dedicated-LAN namespaces и реальные TCP-службы. Он доказывает пять access profiles, `SO_BINDTODEVICE`, обязательный host внутри `LOCAL_SUBNET`, отсутствие публикации при недоступном transport/return path и запрет dedicated-management интерфейса с default route.

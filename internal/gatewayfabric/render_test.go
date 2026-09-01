@@ -44,10 +44,12 @@ func TestRenderFirewallTransactionMapsForwardedSubnetAndMasqueradesReplies(t *te
 	plan.Aliases[0].AccessProfile = managementfabric.ProfileDedicatedLAN
 	plan.Aliases[0].PublishedAlias = "10.96.1.0/24"
 	plan.Aliases[0].LocalDestination = "192.168.50.0/24"
+	plan.Aliases[0].EgressInterface = "mgmt0"
 	plan.ACL[0].ResourceKind = managementfabric.ResourceLocalSubnet
 	plan.ACL[0].AccessProfile = managementfabric.ProfileDedicatedLAN
 	plan.ACL[0].PublishedAlias = "10.96.1.0/24"
 	plan.ACL[0].LocalDestination = "192.168.50.0/24"
+	plan.ACL[0].EgressInterface = "mgmt0"
 	payload, err := RenderFirewallTransaction(plan)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +60,7 @@ func TestRenderFirewallTransactionMapsForwardedSubnetAndMasqueradesReplies(t *te
 		"management_fabric_forward",
 		"iifname @management_fabric_interfaces ct state { established, related }",
 		"oifname @management_fabric_interfaces ct state { established, related }",
-		"ip daddr 192.168.50.0/24 ct state new tcp dport 8443 counter accept",
+		`ip daddr 192.168.50.0/24 ct state new tcp dport 8443 oifname "mgmt0" counter accept`,
 		"management_fabric_postrouting",
 		"counter masquerade",
 		"ct state { established, related }",
@@ -146,12 +148,14 @@ func gatewayPlanFixture(t *testing.T) managementfabric.GatewayHostPlan {
 			PublicationID: "publication:a", ResourceID: "resource:a", LinkID: "link:a", InterfaceName: "gvm1",
 			ResourceKind: managementfabric.ResourceGatewayService, AccessProfile: managementfabric.ProfileGatewayOnly,
 			PublishedAlias: "10.96.1.1/32", LocalDestination: "192.168.200.1",
+			EgressInterface: "lo",
 		}},
 		ACL: []managementfabric.RenderedACLRule{{
 			RuleID: "acl:a", AdminID: "admin:a", ResourceID: "resource:a", PublicationID: "publication:a", LinkID: "link:a", InputInterface: "gvm1",
 			ResourceKind: managementfabric.ResourceGatewayService, AccessProfile: managementfabric.ProfileGatewayOnly,
 			Source: "10.81.0.10/32", PublishedAlias: "10.96.1.1/32", LocalDestination: "192.168.200.1",
-			Protocol: managementfabric.ProtocolTCP, PortStart: 8443, PortEnd: 8443, TrustMode: managementfabric.TrustRoutedHub,
+			EgressInterface: "lo",
+			Protocol:        managementfabric.ProtocolTCP, PortStart: 8443, PortEnd: 8443, TrustMode: managementfabric.TrustRoutedHub,
 		}},
 	}
 }

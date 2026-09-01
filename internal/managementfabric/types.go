@@ -313,6 +313,132 @@ type ResourceSpec struct {
 	AccessProfile             string
 	LocalDestination          string
 	AdvancedScopeAcknowledged bool
+	Ports                     []ResourcePort
+	ProbeInterface            string
+	ProbeGateway              string
+	HealthProbeAddress        string
+}
+
+type ResourcePort struct {
+	Protocol  string `json:"protocol"`
+	PortStart int    `json:"port_start"`
+	PortEnd   int    `json:"port_end"`
+}
+
+type Resource struct {
+	ID                        string         `json:"id"`
+	SiteID                    string         `json:"site_id"`
+	Name                      string         `json:"name"`
+	Kind                      string         `json:"kind"`
+	AccessProfile             string         `json:"access_profile"`
+	LocalDestination          string         `json:"local_destination"`
+	Enabled                   bool           `json:"enabled"`
+	AdvancedScopeAcknowledged bool           `json:"advanced_scope_acknowledged"`
+	DesiredRouteGeneration    int64          `json:"desired_route_generation"`
+	AppliedRouteGeneration    int64          `json:"applied_route_generation"`
+	HealthState               string         `json:"health_state"`
+	HealthReasonCode          string         `json:"health_reason_code,omitempty"`
+	LastProbeAt               string         `json:"last_probe_at,omitempty"`
+	LastProbeRouteGeneration  int64          `json:"last_probe_route_generation"`
+	ProbeInterface            string         `json:"probe_interface,omitempty"`
+	ProbeGateway              string         `json:"probe_gateway,omitempty"`
+	HealthProbeAddress        string         `json:"health_probe_address"`
+	ExternalPrerequisites     []string       `json:"external_prerequisites"`
+	Ports                     []ResourcePort `json:"ports"`
+	CreatedAt                 string         `json:"created_at"`
+	UpdatedAt                 string         `json:"updated_at"`
+}
+
+type ResourceInput struct {
+	ID                        string         `json:"id"`
+	Name                      string         `json:"name"`
+	Kind                      string         `json:"kind"`
+	AccessProfile             string         `json:"access_profile"`
+	LocalDestination          string         `json:"local_destination"`
+	HealthProbeAddress        string         `json:"health_probe_address"`
+	Enabled                   bool           `json:"enabled"`
+	AdvancedScopeAcknowledged bool           `json:"advanced_scope_acknowledged"`
+	Ports                     []ResourcePort `json:"ports"`
+}
+
+type ResourcePublication struct {
+	ID                     string `json:"id"`
+	ResourceID             string `json:"resource_id"`
+	LinkID                 string `json:"link_id"`
+	PublishedAlias         string `json:"published_alias"`
+	Enabled                bool   `json:"enabled"`
+	DesiredRouteGeneration int64  `json:"desired_route_generation"`
+	AppliedRouteGeneration int64  `json:"applied_route_generation"`
+	DesiredACLGeneration   int64  `json:"desired_acl_generation"`
+	AppliedACLGeneration   int64  `json:"applied_acl_generation"`
+	State                  string `json:"state"`
+	LastErrorCode          string `json:"last_error_code,omitempty"`
+	CreatedAt              string `json:"created_at"`
+	UpdatedAt              string `json:"updated_at"`
+}
+
+type ResourcePublicationInput struct {
+	ID             string `json:"id"`
+	ResourceID     string `json:"resource_id"`
+	LinkID         string `json:"link_id"`
+	PublishedAlias string `json:"published_alias"`
+	Enabled        bool   `json:"enabled"`
+}
+
+type ResourceACL struct {
+	ID         string `json:"id"`
+	AdminID    string `json:"admin_id"`
+	ResourceID string `json:"resource_id"`
+	Protocol   string `json:"protocol"`
+	PortStart  int    `json:"port_start"`
+	PortEnd    int    `json:"port_end"`
+	Enabled    bool   `json:"enabled"`
+	Generation int64  `json:"generation"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+}
+
+type ResourceACLInput struct {
+	ID         string `json:"id"`
+	AdminID    string `json:"admin_id"`
+	ResourceID string `json:"resource_id"`
+	Protocol   string `json:"protocol"`
+	PortStart  int    `json:"port_start"`
+	PortEnd    int    `json:"port_end"`
+	Enabled    bool   `json:"enabled"`
+}
+
+// ResourceProbeSpec is rebuilt by the privileged controller from SQLite.
+// The Web/API boundary supplies only ResourceID and cannot choose a route,
+// interface, executable, address, protocol or port.
+type ResourceProbeSpec struct {
+	ResourceID              string
+	Kind                    string
+	AccessProfile           string
+	LocalDestination        string
+	HealthProbeAddress      string
+	RouteGeneration         int64
+	Ports                   []ResourcePort
+	AllowedInterfaces       []string
+	ExpectedWireGuardPrefix string
+}
+
+type ResourceProbeCheck struct {
+	Protocol   string `json:"protocol"`
+	Port       int    `json:"port"`
+	State      string `json:"state"`
+	ReasonCode string `json:"reason_code,omitempty"`
+}
+
+type ResourceProbeResult struct {
+	ResourceID      string               `json:"resource_id"`
+	RouteGeneration int64                `json:"route_generation"`
+	State           string               `json:"state"`
+	ReasonCode      string               `json:"reason_code"`
+	Interface       string               `json:"interface,omitempty"`
+	Gateway         string               `json:"gateway,omitempty"`
+	CheckedAt       string               `json:"checked_at"`
+	Checks          []ResourceProbeCheck `json:"checks"`
 }
 
 type ACLSpec struct {

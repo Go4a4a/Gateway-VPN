@@ -14,6 +14,7 @@ type PeerUIDFunc func(net.Conn) (uint32, error)
 type PeerAuthorizingListener struct {
 	net.Listener
 	AllowedUID uint32
+	AllowRoot  bool
 	PeerUID    PeerUIDFunc
 }
 
@@ -27,7 +28,7 @@ func (listener *PeerAuthorizingListener) Accept() (net.Conn, error) {
 			return nil, err
 		}
 		uid, err := listener.PeerUID(connection)
-		if err == nil && uid == listener.AllowedUID {
+		if err == nil && (uid == listener.AllowedUID || (listener.AllowRoot && uid == 0)) {
 			return connection, nil
 		}
 		_ = connection.Close()

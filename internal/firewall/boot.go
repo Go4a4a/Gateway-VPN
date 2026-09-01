@@ -16,7 +16,7 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 6
+	SchemaGeneration = 7
 )
 
 type BootConfig struct {
@@ -177,6 +177,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 
     chain prerouting {
 		type filter hook prerouting priority mangle;
+		meta nfproto ipv4 iifname @hilink_interfaces ct state { established, related } meta mark set ct mark comment "gateway-vpn restore service response mark"
         meta nfproto ipv4 iifname @user_ingress_interfaces meta mark set iifname map @active_direct_marks comment "gateway-vpn selected direct uplink mark"
 	}
 
@@ -224,6 +225,7 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
         type filter hook output priority filter; policy drop;
         oifname "lo" accept comment "gateway-vpn loopback"
         ct state invalid drop
+		meta nfproto ipv4 oifname @hilink_interfaces meta mark != 0 ct mark set meta mark comment "gateway-vpn preserve service request mark"
         oifname @hilink_interfaces ct state { established, related } counter name service_upload accept comment "gateway-vpn direct service upload"
         ct state { established, related } accept
         oifname %s udp sport 67 udp dport 68 accept comment "gateway-vpn LAN DHCP reply"

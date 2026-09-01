@@ -105,6 +105,12 @@ type fakeManagementFabricAdmin struct {
 	syncs      int
 	configures int
 	rotations  int
+	probes     int
+}
+
+func (admin *fakeManagementFabricAdmin) ProbeManagementResource(_ context.Context, id string) (managementfabric.ResourceProbeResult, error) {
+	admin.probes++
+	return managementfabric.ResourceProbeResult{ResourceID: id, RouteGeneration: 1, State: "HEALTHY", ReasonCode: "RESOURCE_PROBE_PASSED", CheckedAt: "2026-09-01T12:00:00Z"}, nil
 }
 
 func (admin *fakeManagementFabricAdmin) ManagementFabricStatus(context.Context) (networkapply.ManagementFabricStatus, error) {
@@ -191,6 +197,89 @@ func TestManagementFabricAPIIsAuthenticatedRedactedAndParameterFree(t *testing.T
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || admin.syncs != 2 {
 		t.Fatalf("parameter-free Management Fabric sync = %d syncs:%d %s", response.Code, admin.syncs, response.Body.String())
+	}
+}
+
+func TestManagementResourceAPIRequiresCSRFProbeHostAndDestructiveLifecycle(t *testing.T) {
+	server, ctx := testServer(t)
+	repository := managementfabric.NewRepository(server.dependencies.Database, nil)
+	if _, err := repository.EnsureLocalSite(ctx, "site:resources", "Resources"); err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeManagementFabricAdmin{}
+	server.dependencies.ManagementFabric, server.dependencies.ManagementFabricAdmin = repository, admin
+	payload := `{"id":"resource:web","name":"Keenetic LAN","kind":"LOCAL_SUBNET","access_profile":"VIA_KEENETIC_WAN_ROUTED","local_destination":"192.168.50.0/24","health_probe_address":"192.168.50.10","enabled":true,"advanced_scope_acknowledged":true,"ports":[{"protocol":"TCP","port_start":8443,"port_end":8443}]}`
+
+	unauthenticated := httptest.NewRecorder()
+	server.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources", strings.NewReader(payload)))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated resource create = %d", unauthenticated.Code)
+	}
+	cookie, csrf := login(t, server)
+	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources", strings.NewReader(payload))
+	withoutCSRF.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, withoutCSRF)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("resource create without CSRF = %d %s", response.Code, response.Body.String())
+	}
+	missingProbe := httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources", strings.NewReader(strings.Replace(payload, `"health_probe_address":"192.168.50.10"`, `"health_probe_address":""`, 1)))
+	missingProbe.AddCookie(cookie)
+	missingProbe.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, missingProbe)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("LOCAL_SUBNET without probe host = %d %s", response.Code, response.Body.String())
+	}
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources", strings.NewReader(payload))
+	create.AddCookie(cookie)
+	create.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, create)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"health_probe_address":"192.168.50.10"`) {
+		t.Fatalf("resource create = %d %s", response.Code, response.Body.String())
+	}
+	parameterizedProbe := httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources/resource:web/probe", strings.NewReader(`{"interface":"eth0","gateway":"192.168.1.1"}`))
+	parameterizedProbe.AddCookie(cookie)
+	parameterizedProbe.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, parameterizedProbe)
+	if response.Code != http.StatusBadRequest || admin.probes != 0 {
+		t.Fatalf("parameterized resource probe = %d probes=%d %s", response.Code, admin.probes, response.Body.String())
+	}
+	probe := httptest.NewRequest(http.MethodPost, "/api/v1/management-fabric/resources/resource:web/probe", nil)
+	probe.AddCookie(cookie)
+	probe.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, probe)
+	if response.Code != http.StatusOK || admin.probes != 1 || !strings.Contains(response.Body.String(), `"resource_id":"resource:web"`) {
+		t.Fatalf("parameter-free resource probe = %d probes=%d %s", response.Code, admin.probes, response.Body.String())
+	}
+	deleteEnabled := httptest.NewRequest(http.MethodDelete, "/api/v1/management-fabric/resources/resource:web", nil)
+	deleteEnabled.AddCookie(cookie)
+	deleteEnabled.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, deleteEnabled)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("resource delete without confirmation = %d %s", response.Code, response.Body.String())
+	}
+	disabledPayload := strings.Replace(payload, `"enabled":true`, `"enabled":false`, 1)
+	update := httptest.NewRequest(http.MethodPut, "/api/v1/management-fabric/resources/resource:web", strings.NewReader(disabledPayload))
+	update.AddCookie(cookie)
+	update.Header.Set("X-CSRF-Token", csrf)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, update)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"enabled":false`) {
+		t.Fatalf("resource disable = %d %s", response.Code, response.Body.String())
+	}
+	deleteDisabled := httptest.NewRequest(http.MethodDelete, "/api/v1/management-fabric/resources/resource:web", nil)
+	deleteDisabled.AddCookie(cookie)
+	deleteDisabled.Header.Set("X-CSRF-Token", csrf)
+	deleteDisabled.Header.Set("X-Confirm-Destructive", "delete-disabled-resource")
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, deleteDisabled)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("confirmed disabled resource delete = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -296,7 +385,8 @@ func TestManagementAdminRelayWebUIIsExplicitAndSecretFree(t *testing.T) {
 		"/management-fabric.js": {
 			"Контур wg-admin на Gateway", "Добавить inner peer", "Relay ID из VPS Hub",
 			"/api/v1/management-fabric/admin-contour", "/api/v1/management-fabric/admin-relays",
-			"/api/v1/management-fabric/admin-tunnels", "/trust-mode",
+			"/api/v1/management-fabric/admin-tunnels", "/trust-mode", "Проверочный адрес внутри подсети",
+			"health_probe_address", "firewall и обратный путь", "/api/v1/management-fabric/resources",
 		},
 		"/styles.css": {
 			".settings-form label.check", "grid-template-columns:auto minmax(0,1fr) auto",
@@ -1548,7 +1638,7 @@ func TestSoftwareUpdatePolicyAndRestorePointAPIAreTypedAuditedAndProtected(t *te
 		t.Fatalf("default software update policy = %d %s", policyResponse.Code, policyResponse.Body.String())
 	}
 
-	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"stable","automatic_check_enabled":true,"automatic_download_enabled":false,"automatic_apply_enabled":true,"check_interval_hours":24,"jitter_minutes":30,"maintenance_window_enabled":false,"maintenance_start_minute_utc":180,"maintenance_duration_minutes":120,"retention_maximum_points":4,"retention_maximum_bytes":8589934592,"retention_maximum_age_days":365,"retention_minimum_old_points":2}`))
+	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"stable","automatic_check_enabled":true,"automatic_download_enabled":false,"automatic_apply_enabled":true,"check_interval_hours":24,"jitter_minutes":30,"maintenance_window_enabled":false,"maintenance_start_minute_utc":180,"maintenance_duration_minutes":120,"maximum_apply_delay_hours":72,"retention_maximum_points":4,"retention_maximum_bytes":8589934592,"retention_maximum_age_days":365,"retention_minimum_old_points":2}`))
 	invalid.Header.Set("Content-Type", "application/json")
 	invalid.Header.Set("X-CSRF-Token", csrf)
 	invalid.AddCookie(cookie)
@@ -1558,7 +1648,7 @@ func TestSoftwareUpdatePolicyAndRestorePointAPIAreTypedAuditedAndProtected(t *te
 		t.Fatalf("unsafe automatic apply policy = %d %s", invalidResponse.Code, invalidResponse.Body.String())
 	}
 
-	valid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"testing","automatic_check_enabled":true,"automatic_download_enabled":true,"automatic_apply_enabled":false,"check_interval_hours":12,"jitter_minutes":20,"maintenance_window_enabled":true,"maintenance_start_minute_utc":240,"maintenance_duration_minutes":90,"retention_maximum_points":6,"retention_maximum_bytes":12884901888,"retention_maximum_age_days":730,"retention_minimum_old_points":3}`))
+	valid := httptest.NewRequest(http.MethodPut, "/api/v1/settings/software-update", strings.NewReader(`{"channel":"testing","automatic_check_enabled":true,"automatic_download_enabled":true,"automatic_apply_enabled":false,"check_interval_hours":12,"jitter_minutes":20,"maintenance_window_enabled":true,"maintenance_start_minute_utc":240,"maintenance_duration_minutes":90,"maximum_apply_delay_hours":96,"retention_maximum_points":6,"retention_maximum_bytes":12884901888,"retention_maximum_age_days":730,"retention_minimum_old_points":3}`))
 	valid.Header.Set("Content-Type", "application/json")
 	valid.Header.Set("X-CSRF-Token", csrf)
 	valid.AddCookie(cookie)

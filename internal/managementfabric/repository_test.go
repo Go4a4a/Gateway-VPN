@@ -186,6 +186,8 @@ func TestValidateFabricRequiresTypedBoundedSameSiteACL(t *testing.T) {
 		Resources: []ResourceSpec{{
 			ID: "resource:host", SiteID: "site:a", Kind: ResourceLocalHost,
 			AccessProfile: ProfileDedicatedLAN, LocalDestination: "192.168.50.10",
+			Ports:          []ResourcePort{{Protocol: ProtocolTCP, PortStart: 443, PortEnd: 443}},
+			ProbeInterface: "mgmt0",
 		}},
 		Publications: []PublicationSpec{{
 			ID: "publication:a", ResourceID: "resource:host", LinkID: "link:a",

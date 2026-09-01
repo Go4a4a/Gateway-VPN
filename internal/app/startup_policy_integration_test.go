@@ -149,6 +149,7 @@ func startupIntegrationFirewall(database *sql.DB, modems *modem.Repository) *dat
 		Uplinks:           uplinks,
 		Executor:          executor,
 		IP:                "/usr/sbin/ip",
+		Sysctl:            "/usr/sbin/sysctl",
 		LANPrefix:         "192.168.200.0/24",
 		WireGuardPrefix:   "10.80.0.0/24",
 		BootstrapDNS:      []string{"1.1.1.1"},

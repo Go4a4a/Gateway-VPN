@@ -36,6 +36,43 @@ func TestSignedChannelManifestSelectsExactPinnedRoleArtifact(t *testing.T) {
 	}
 }
 
+func TestChannelManifestAcceptsOnlyWindowsAMD64DeployArtifact(t *testing.T) {
+	manifest := validManifest(t, nil)
+	manifest.Artifacts = append(manifest.Artifacts, Artifact{
+		Role: RoleDeploy, OS: "windows", Arch: "amd64",
+		Filename: "gateway-vpn-deploy-1.2.0-windows-amd64.exe",
+		SHA256:   strings.Repeat("4", 64), Bytes: 8192,
+		MediaType: "application/vnd.microsoft.portable-executable",
+	})
+	SortArtifacts(manifest.Artifacts)
+	if err := ValidateManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := SelectArtifact(manifest, RoleDeploy, "windows", "amd64")
+	if err != nil || artifact.Filename != "gateway-vpn-deploy-1.2.0-windows-amd64.exe" {
+		t.Fatalf("SelectArtifact(windows) = %+v,%v", artifact, err)
+	}
+	for _, mutate := range []func(*Artifact){
+		func(value *Artifact) { value.Role = RoleBootstrap },
+		func(value *Artifact) { value.Arch = "arm64" },
+		func(value *Artifact) { value.Filename = "gateway-vpn-deploy-1.2.0-windows-amd64" },
+		func(value *Artifact) { value.MediaType = "application/octet-stream" },
+	} {
+		candidate := manifest
+		candidate.Artifacts = append([]Artifact(nil), manifest.Artifacts...)
+		for index := range candidate.Artifacts {
+			if candidate.Artifacts[index].OS == "windows" {
+				mutate(&candidate.Artifacts[index])
+				break
+			}
+		}
+		SortArtifacts(candidate.Artifacts)
+		if err := ValidateManifest(candidate); err == nil {
+			t.Fatal("unsafe Windows channel artifact was accepted")
+		}
+	}
+}
+
 func TestChannelManifestRejectsTamperDowngradeStaleAndUnknownFields(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

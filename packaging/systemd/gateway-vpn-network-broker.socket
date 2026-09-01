@@ -14,7 +14,7 @@ ConditionPathIsSymbolicLink=!/run/gateway-vpn-install-authorized
 ListenStream=/run/gateway-vpn/network-broker.sock
 SocketUser=gateway-vpn
 SocketGroup=gateway-vpn
-SocketMode=0600
+SocketMode=0660
 DirectoryMode=0755
 RemoveOnStop=yes
 

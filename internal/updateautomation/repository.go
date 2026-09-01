@@ -26,6 +26,7 @@ const (
 	PhaseFailed          = "FAILED"
 	PhaseSuppressed      = "SUPPRESSED"
 	PhaseManualPending   = "MANUAL_PENDING"
+	PhaseManualAttention = "MANUAL_ATTENTION"
 	PhaseOutcomeUnknown  = "OUTCOME_UNKNOWN"
 )
 
@@ -34,7 +35,7 @@ var (
 		PhaseIdle: {}, PhaseDisabled: {}, PhaseChecking: {}, PhaseCandidate: {},
 		PhaseDownloading: {}, PhaseStaged: {}, PhaseWaitingWindow: {},
 		PhaseApplyIntent: {}, PhaseApplyDispatched: {}, PhaseSucceeded: {},
-		PhaseFailed: {}, PhaseSuppressed: {}, PhaseManualPending: {}, PhaseOutcomeUnknown: {},
+		PhaseFailed: {}, PhaseSuppressed: {}, PhaseManualPending: {}, PhaseManualAttention: {}, PhaseOutcomeUnknown: {},
 	}
 	codePattern     = regexp.MustCompile(`^[A-Z0-9_]{0,64}$`)
 	updateIDPattern = regexp.MustCompile(`^update-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{24}$`)
@@ -59,6 +60,8 @@ type Status struct {
 	CandidatePublishedAt string `json:"candidate_published_at,omitempty"`
 	StagedUpdateID       string `json:"staged_update_id,omitempty"`
 	StagedVersion        string `json:"staged_version,omitempty"`
+	StagedAt             string `json:"staged_at,omitempty"`
+	ApplyDeadlineAt      string `json:"apply_deadline_at,omitempty"`
 	ApplyIntentAt        string `json:"apply_intent_at,omitempty"`
 	ApplyObservedAt      string `json:"apply_observed_at,omitempty"`
 	UpdatedAt            string `json:"updated_at"`
@@ -76,7 +79,7 @@ func (status Status) validate() error {
 	if !codePattern.MatchString(status.LastResultCode) || !codePattern.MatchString(status.LastErrorCode) {
 		return errors.New("software update scheduler result code is invalid")
 	}
-	for _, value := range []string{status.PolicyUpdatedAt, status.NextCheckAt, status.NextApplyAt, status.LastAttemptAt, status.LastCompletedAt, status.CandidatePublishedAt, status.ApplyIntentAt, status.ApplyObservedAt, status.UpdatedAt, status.leaseExpiresAt} {
+	for _, value := range []string{status.PolicyUpdatedAt, status.NextCheckAt, status.NextApplyAt, status.LastAttemptAt, status.LastCompletedAt, status.CandidatePublishedAt, status.StagedAt, status.ApplyDeadlineAt, status.ApplyIntentAt, status.ApplyObservedAt, status.UpdatedAt, status.leaseExpiresAt} {
 		if value == "" {
 			continue
 		}
@@ -97,6 +100,17 @@ func (status Status) validate() error {
 	}
 	if status.StagedUpdateID == "" != (status.StagedVersion == "") || status.StagedUpdateID != "" && !updateIDPattern.MatchString(status.StagedUpdateID) {
 		return errors.New("software update scheduler staged operation is invalid")
+	}
+	stagingEmpty := status.StagedUpdateID == ""
+	if stagingEmpty != (status.StagedAt == "") || stagingEmpty != (status.ApplyDeadlineAt == "") {
+		return errors.New("software update scheduler staging deadline evidence is incomplete")
+	}
+	if status.StagedUpdateID != "" {
+		staged, stagedErr := time.Parse(time.RFC3339Nano, status.StagedAt)
+		deadline, deadlineErr := time.Parse(time.RFC3339Nano, status.ApplyDeadlineAt)
+		if stagedErr != nil || deadlineErr != nil || !deadline.After(staged) {
+			return errors.New("software update scheduler staging deadline is invalid")
+		}
 	}
 	if (status.ApplyIntentAt != "" || status.ApplyObservedAt != "") && status.StagedUpdateID == "" {
 		return errors.New("software update scheduler apply evidence has no staged operation")
@@ -212,14 +226,16 @@ UPDATE software_update_scheduler SET
     next_check_at=?, next_apply_at=?, last_attempt_at=?, last_completed_at=?,
     last_result_code=?, last_error_code=?, consecutive_failures=?,
     candidate_version=?, candidate_reference=?, candidate_published_at=?,
-    staged_update_id=?, staged_version=?, apply_intent_at=?, apply_observed_at=?,
+	    staged_update_id=?, staged_version=?, staged_at=?, apply_deadline_at=?,
+	    apply_intent_at=?, apply_observed_at=?,
     updated_at=?
 WHERE singleton_id=1 AND lease_owner=?`,
 		status.Phase, status.PolicyUpdatedAt, status.Channel, status.JitterOffsetMinutes,
 		nullable(status.NextCheckAt), nullable(status.NextApplyAt), nullable(status.LastAttemptAt), nullable(status.LastCompletedAt),
 		status.LastResultCode, status.LastErrorCode, status.ConsecutiveFailures,
 		status.CandidateVersion, status.CandidateReference, nullable(status.CandidatePublishedAt),
-		status.StagedUpdateID, status.StagedVersion, nullable(status.ApplyIntentAt), nullable(status.ApplyObservedAt),
+		status.StagedUpdateID, status.StagedVersion, nullable(status.StagedAt), nullable(status.ApplyDeadlineAt),
+		nullable(status.ApplyIntentAt), nullable(status.ApplyObservedAt),
 		status.UpdatedAt, owner,
 	)
 	if err != nil {
@@ -241,20 +257,22 @@ type statusQuery interface {
 func readStatus(ctx context.Context, query statusQuery) (Status, error) {
 	var status Status
 	var policyUpdatedAt, nextCheckAt, nextApplyAt, lastAttemptAt, lastCompletedAt sql.NullString
-	var candidatePublishedAt, applyIntentAt, applyObservedAt, leaseExpiresAt sql.NullString
+	var candidatePublishedAt, stagedAt, applyDeadlineAt, applyIntentAt, applyObservedAt, leaseExpiresAt sql.NullString
 	err := query.QueryRowContext(ctx, `
 SELECT phase,policy_updated_at,channel,jitter_offset_minutes,
        next_check_at,next_apply_at,last_attempt_at,last_completed_at,
        last_result_code,last_error_code,consecutive_failures,
        candidate_version,candidate_reference,candidate_published_at,
-       staged_update_id,staged_version,apply_intent_at,apply_observed_at,
+	       staged_update_id,staged_version,staged_at,apply_deadline_at,
+	       apply_intent_at,apply_observed_at,
        lease_owner,lease_expires_at,updated_at
 FROM software_update_scheduler WHERE singleton_id=1`).Scan(
 		&status.Phase, &policyUpdatedAt, &status.Channel, &status.JitterOffsetMinutes,
 		&nextCheckAt, &nextApplyAt, &lastAttemptAt, &lastCompletedAt,
 		&status.LastResultCode, &status.LastErrorCode, &status.ConsecutiveFailures,
 		&status.CandidateVersion, &status.CandidateReference, &candidatePublishedAt,
-		&status.StagedUpdateID, &status.StagedVersion, &applyIntentAt, &applyObservedAt,
+		&status.StagedUpdateID, &status.StagedVersion, &stagedAt, &applyDeadlineAt,
+		&applyIntentAt, &applyObservedAt,
 		&status.leaseOwner, &leaseExpiresAt, &status.UpdatedAt,
 	)
 	if err != nil {
@@ -266,6 +284,8 @@ FROM software_update_scheduler WHERE singleton_id=1`).Scan(
 	status.LastAttemptAt = lastAttemptAt.String
 	status.LastCompletedAt = lastCompletedAt.String
 	status.CandidatePublishedAt = candidatePublishedAt.String
+	status.StagedAt = stagedAt.String
+	status.ApplyDeadlineAt = applyDeadlineAt.String
 	status.ApplyIntentAt = applyIntentAt.String
 	status.ApplyObservedAt = applyObservedAt.String
 	status.leaseExpiresAt = leaseExpiresAt.String

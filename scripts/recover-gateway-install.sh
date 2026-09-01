@@ -25,23 +25,32 @@ fi
 MARKER_BYTES=$(stat -c '%s' "$MARKER")
 [[ "$MARKER_BYTES" =~ ^[0-9]+$ && "$MARKER_BYTES" -gt 0 && "$MARKER_BYTES" -le 2048 ]] || { echo "Gateway recovery marker size is invalid" >&2; exit 1; }
 MARKER_FIELD_COUNT=$(wc -l <"$MARKER")
-[[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
-[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$MARKER") == "$MARKER_FIELD_COUNT" ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
+[[ "$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]] || { echo "Gateway recovery marker field count is invalid" >&2; exit 1; }
+[[ $(grep -Ec '^(version|old_ipv4_forward|old_ipv4_src_valid_mark|old_ipv6_all_disable|old_ipv6_default_disable|old_ipv6_all_forwarding|preserve_state_root|lan_interface|lan_members|lan_member_was_up|lan_address|preserve_lan_address|lan_was_up|ssh_was_enabled|ssh_was_active|ssh_socket_was_enabled|ssh_socket_was_active|log_reader_user|log_reader_was_member|boot_network_policy|grub_policy)=' "$MARKER") == "$MARKER_FIELD_COUNT" ]] || { echo "Gateway recovery marker schema is invalid" >&2; exit 1; }
 MARKER_KEYS=(version old_ipv4_forward old_ipv6_all_disable old_ipv6_default_disable old_ipv6_all_forwarding preserve_state_root lan_interface lan_members lan_member_was_up lan_address preserve_lan_address lan_was_up ssh_was_enabled ssh_was_active)
-if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
   MARKER_KEYS+=(boot_network_policy grub_policy)
 fi
-if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
   MARKER_KEYS+=(log_reader_user log_reader_was_member)
 fi
-if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
-  MARKER_KEYS+=(ssh_socket_was_enabled ssh_socket_was_active)
+if [[ "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
+	MARKER_KEYS+=(ssh_socket_was_enabled ssh_socket_was_active)
+fi
+if [[ "$MARKER_FIELD_COUNT" == 21 ]]; then
+	MARKER_KEYS+=(old_ipv4_src_valid_mark)
 fi
 for marker_key in "${MARKER_KEYS[@]}"; do
   [[ $(grep -c "^${marker_key}=" "$MARKER") == 1 ]] || { echo "Gateway recovery marker contains duplicate or missing field: $marker_key" >&2; exit 1; }
 done
 VERSION=$(sed -n 's/^version=//p' "$MARKER")
 OLD_IPV4_FORWARD=$(sed -n 's/^old_ipv4_forward=//p' "$MARKER")
+OLD_IPV4_SRC_VALID_MARK=0
+SOURCE_MARK_STATE_KNOWN=0
+if [[ "$MARKER_FIELD_COUNT" == 21 ]]; then
+	OLD_IPV4_SRC_VALID_MARK=$(sed -n 's/^old_ipv4_src_valid_mark=//p' "$MARKER")
+	SOURCE_MARK_STATE_KNOWN=1
+fi
 OLD_IPV6_ALL_DISABLE=$(sed -n 's/^old_ipv6_all_disable=//p' "$MARKER")
 OLD_IPV6_DEFAULT_DISABLE=$(sed -n 's/^old_ipv6_default_disable=//p' "$MARKER")
 OLD_IPV6_ALL_FORWARDING=$(sed -n 's/^old_ipv6_all_forwarding=//p' "$MARKER")
@@ -61,20 +70,21 @@ LOG_READER_WAS_MEMBER=1
 SSH_SOCKET_STATE_KNOWN=0
 SSH_SOCKET_WAS_ENABLED=0
 SSH_SOCKET_WAS_ACTIVE=0
-if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
   BOOT_NETWORK_POLICY=$(sed -n 's/^boot_network_policy=//p' "$MARKER")
   GRUB_POLICY=$(sed -n 's/^grub_policy=//p' "$MARKER")
 fi
-if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
   LOG_READER_USER=$(sed -n 's/^log_reader_user=//p' "$MARKER")
   LOG_READER_WAS_MEMBER=$(sed -n 's/^log_reader_was_member=//p' "$MARKER")
 fi
-if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then
+if [[ "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then
   SSH_SOCKET_STATE_KNOWN=1
   SSH_SOCKET_WAS_ENABLED=$(sed -n 's/^ssh_socket_was_enabled=//p' "$MARKER")
   SSH_SOCKET_WAS_ACTIVE=$(sed -n 's/^ssh_socket_was_active=//p' "$MARKER")
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$OLD_IPV4_FORWARD" =~ ^[01]$ && "$OLD_IPV6_ALL_DISABLE" =~ ^[01]$ && "$OLD_IPV6_DEFAULT_DISABLE" =~ ^[01]$ && "$OLD_IPV6_ALL_FORWARDING" =~ ^[01]$ && "$PRESERVE_STATE_ROOT" =~ ^[01]$ && "$LAN_INTERFACE" =~ ^[A-Za-z0-9_.:-]{1,15}$ && "$LAN_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|30)$ && "$PRESERVE_LAN_ADDRESS" =~ ^[01]$ && "$LAN_WAS_UP" =~ ^[01]$ && "$SSH_WAS_ENABLED" =~ ^[01]$ && "$SSH_WAS_ACTIVE" =~ ^[01]$ ]] || { echo "Gateway recovery marker values are invalid" >&2; exit 1; }
+((SOURCE_MARK_STATE_KNOWN == 0)) || [[ "$OLD_IPV4_SRC_VALID_MARK" =~ ^[01]$ ]] || { echo "Gateway recovery source-mark state is invalid" >&2; exit 1; }
 [[ "$BOOT_NETWORK_POLICY" == gateway-nonblocking || "$BOOT_NETWORK_POLICY" == keep ]] || { echo "Gateway recovery boot-network policy is invalid" >&2; exit 1; }
 [[ "$GRUB_POLICY" == automatic-hidden || "$GRUB_POLICY" == menu-5s || "$GRUB_POLICY" == keep ]] || { echo "Gateway recovery GRUB policy is invalid" >&2; exit 1; }
 [[ -z "$LOG_READER_USER" || "$LOG_READER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$LOG_READER_USER" != root && "$LOG_READER_WAS_MEMBER" =~ ^[01]$ ]] || { echo "Gateway recovery log-reader values are invalid" >&2; exit 1; }
@@ -198,10 +208,16 @@ sysctl -q -w "net.ipv6.conf.all.disable_ipv6=$OLD_IPV6_ALL_DISABLE" || record_fa
 sysctl -q -w "net.ipv6.conf.default.disable_ipv6=$OLD_IPV6_DEFAULT_DISABLE" || record_failure "restore IPv6 default disable state"
 sysctl -q -w "net.ipv6.conf.all.forwarding=$OLD_IPV6_ALL_FORWARDING" || record_failure "restore IPv6 forwarding state"
 sysctl -q -w "net.ipv4.ip_forward=$OLD_IPV4_FORWARD" || record_failure "restore IPv4 forwarding state"
+if ((SOURCE_MARK_STATE_KNOWN)); then
+	sysctl -q -w "net.ipv4.conf.all.src_valid_mark=$OLD_IPV4_SRC_VALID_MARK" || record_failure "restore IPv4 source-mark validation state"
+fi
 [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6) == "$OLD_IPV6_ALL_DISABLE" ]] || record_failure "verify IPv6 all disable state"
 [[ $(cat /proc/sys/net/ipv6/conf/default/disable_ipv6) == "$OLD_IPV6_DEFAULT_DISABLE" ]] || record_failure "verify IPv6 default disable state"
 [[ $(cat /proc/sys/net/ipv6/conf/all/forwarding) == "$OLD_IPV6_ALL_FORWARDING" ]] || record_failure "verify IPv6 forwarding state"
 [[ $(cat /proc/sys/net/ipv4/ip_forward) == "$OLD_IPV4_FORWARD" ]] || record_failure "verify IPv4 forwarding state"
+if ((SOURCE_MARK_STATE_KNOWN)); then
+	[[ $(cat /proc/sys/net/ipv4/conf/all/src_valid_mark) == "$OLD_IPV4_SRC_VALID_MARK" ]] || record_failure "verify IPv4 source-mark validation state"
+fi
 
 rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network || record_failure "remove owned networkd policy"
 rm -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf || record_failure "remove owned boot-network policy"

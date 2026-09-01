@@ -140,6 +140,7 @@ func runNetworkBroker(args []string) int {
 		Uplinks:           uplinkRepository,
 		Executor:          executor,
 		IP:                "/usr/sbin/ip",
+		Sysctl:            "/usr/sbin/sysctl",
 		LANPrefix:         configuration.Network.LANAddress,
 		WireGuardPrefix:   "10.80.0.0/24",
 		BootstrapDNS:      append([]string(nil), configuration.Mihomo.BootstrapDNS...),
@@ -380,7 +381,7 @@ func productionNetworkEngine(ctx context.Context, configPath, transactionRoot st
 		TUNName: configuration.Mihomo.TunName, LANName: configuration.Network.LANInterface,
 	}
 	topologyRouting := &dataplane.RoutingBackend{
-		Uplinks: uplinkRepository, Executor: executor, IP: paths.IP,
+		Uplinks: uplinkRepository, Executor: executor, IP: paths.IP, Sysctl: "/usr/sbin/sysctl",
 		LANPrefix: configuration.Network.LANAddress, WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS:      append([]string(nil), configuration.Mihomo.BootstrapDNS...),
 		RoutingTableStart: configuration.Modems.RoutingTableStart,

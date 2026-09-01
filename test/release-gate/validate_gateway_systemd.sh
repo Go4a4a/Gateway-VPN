@@ -90,7 +90,7 @@ nft --json list set inet gateway_vpn firewall_schema_generation \
 ! nft list set inet gateway_vpn active_tun_interfaces | grep -Fq 'elements ='
 ! nft list set inet gateway_vpn active_direct_interfaces | grep -Fq 'elements ='
 ! nft list set inet gateway_vpn active_path_generation | grep -Fq 'elements ='
-nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 
 report=$(< /var/lib/gateway-vpn/install-report.json)
 [[ $report == *'"version": "'"$VERSION"'"'* ]]

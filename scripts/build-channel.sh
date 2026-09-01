@@ -9,11 +9,19 @@ SIGNING_PUBLIC_KEY=${4:-}
 GITHUB_REPOSITORY=${5:-}
 RELEASE_TAG=${6:-}
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ && "$CHANNEL" =~ ^[a-z][a-z0-9-]{0,31}$ && "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$ ]] || {
-  echo "Usage: build-channel.sh VERSION CHANNEL PRIVATE_KEY PUBLIC_KEY OWNER/REPO RELEASE_TAG ROLE=ARTIFACT [...]" >&2
+  echo "Usage: build-channel.sh VERSION CHANNEL PRIVATE_KEY PUBLIC_KEY OWNER/REPO RELEASE_TAG LABEL=ARTIFACT [...]" >&2
   exit 2
 }
 shift 6
-(($# >= 2)) || { echo "At least Gateway and bootstrap ROLE=ARTIFACT inputs are required" >&2; exit 2; }
+(($# == 5)) || { echo "Exactly bootstrap, deploy, deploy-windows, gateway, and vps LABEL=ARTIFACT inputs are required" >&2; exit 2; }
+for required_label in bootstrap deploy deploy-windows gateway vps; do
+  found=0
+  for artifact in "$@"; do
+    [[ "$artifact" == "$required_label="* ]] || continue
+    ((found += 1))
+  done
+  ((found == 1)) || { echo "Exactly one $required_label channel artifact is required" >&2; exit 2; }
+done
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT/dist"}
@@ -85,3 +93,16 @@ chmod 0644 "$TEMP_COMMAND"
 mv -T "$TEMP_COMMAND" "$COMMAND_FILE"
 trap - EXIT
 echo "Exact one-command Gateway installer written to $COMMAND_FILE"
+
+WINDOWS_COMMAND_FILE="$OUTPUT_DIR/install-deploy-windows-$VERSION.command.txt"
+[[ ! -e "$WINDOWS_COMMAND_FILE" ]] || { echo "Generated Windows deploy command already exists: $WINDOWS_COMMAND_FILE" >&2; exit 1; }
+TEMP_WINDOWS_COMMAND=$(mktemp "$OUTPUT_DIR/.install-deploy-windows-command.XXXXXX")
+trap 'rm -f "$TEMP_WINDOWS_COMMAND"' EXIT
+"$CONTROL" channel-windows-deploy-command \
+  --manifest "$MANIFEST" --signature "$SIGNATURE" --public-key "$PUBLISHED_KEY" \
+  --channel "$CHANNEL" --release-version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+  --github-repository "$GITHUB_REPOSITORY" --release-tag "$RELEASE_TAG" >"$TEMP_WINDOWS_COMMAND"
+chmod 0644 "$TEMP_WINDOWS_COMMAND"
+mv -T "$TEMP_WINDOWS_COMMAND" "$WINDOWS_COMMAND_FILE"
+trap - EXIT
+echo "Exact copy/paste Windows deploy command written to $WINDOWS_COMMAND_FILE"

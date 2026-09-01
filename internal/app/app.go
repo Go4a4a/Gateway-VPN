@@ -49,6 +49,7 @@ import (
 	"gateway-vpn/internal/traffic"
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/updateautomation"
+	"gateway-vpn/internal/updatenet"
 	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
@@ -377,6 +378,26 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 			remoteUpdates, keyErr = updateremote.New(updateremote.DefaultRepository, buildinfo.Version, updates)
 			if keyErr != nil {
 				systemLogger.Error("remote signed update source is invalid", "error", keyErr)
+			} else if dataPlane.UpdateTransport == nil {
+				keyErr = errors.New("signed update service route ladder is unavailable")
+				systemLogger.Error("remote signed update transport is invalid", "error", keyErr)
+				remoteUpdates = nil
+			} else if transportErr := remoteUpdates.UseTransport(dataPlane.UpdateTransport); transportErr != nil {
+				keyErr = transportErr
+				systemLogger.Error("remote signed update transport is invalid", "error", transportErr)
+				remoteUpdates = nil
+			} else {
+				dataPlane.UpdateTransport.OnAttempt = func(attempt updatenet.Attempt) {
+					attributes := []any{"route_kind", attempt.RouteKind, "uplink_id", attempt.UplinkID, "result_code", attempt.ResultCode}
+					if attempt.SubscriptionID != "" {
+						attributes = append(attributes, "subscription_id", attempt.SubscriptionID, "node_id", attempt.NodeID)
+					}
+					if attempt.ResultCode == "HTTPS_SUCCEEDED" {
+						systemLogger.Info("signed update service route succeeded", attributes...)
+					} else {
+						systemLogger.Debug("signed update service route attempt failed", attributes...)
+					}
+				}
 			}
 		}
 	} else if keyErr == nil || !errors.Is(keyErr, os.ErrNotExist) {

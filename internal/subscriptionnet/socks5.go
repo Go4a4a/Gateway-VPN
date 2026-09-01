@@ -55,6 +55,13 @@ func newSOCKS5Dialer(listenerAddress string) (subscription.DialContextFunc, erro
 	}, nil
 }
 
+// NewSOCKS5Dialer exposes the same loopback-only, unauthenticated Mihomo
+// service dialer to other control-plane route ladders. It does not select a
+// proxy and must be used while the shared selector operation lock is held.
+func NewSOCKS5Dialer(listenerAddress string) (subscription.DialContextFunc, error) {
+	return newSOCKS5Dialer(listenerAddress)
+}
+
 func socks5Connect(connection net.Conn, host string, port uint16) error {
 	if _, err := connection.Write([]byte{5, 1, 0}); err != nil {
 		return errors.New("subscription proxy greeting failed")
@@ -127,6 +134,12 @@ func proxyResolver(dial subscription.DialContextFunc, bootstrapDNS []string) sub
 			return connection, nil
 		},
 	}}
+}
+
+// NewProxyResolver keeps DNS inside the already selected Mihomo service route
+// and never falls back to the host resolver.
+func NewProxyResolver(dial subscription.DialContextFunc, bootstrapDNS []string) subscription.Resolver {
+	return proxyResolver(dial, bootstrapDNS)
 }
 
 // dnsTCPPacketConn presents a DNS-over-TCP stream as the packet-shaped Conn

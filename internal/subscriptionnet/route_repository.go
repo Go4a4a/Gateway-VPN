@@ -32,6 +32,7 @@ type VPNRoute struct {
 	EvidenceRank       int
 	SelectedForPath    bool
 	ActiveForTarget    bool
+	ActiveForService   bool
 	TargetSubscription bool
 }
 
@@ -48,8 +49,23 @@ func NewRouteRepository(database *sql.DB) *RouteRepository {
 // first, followed by the remaining nodes of that subscription and then nodes
 // of other subscriptions. Stable IDs, not display names, drive ordering.
 func (repository *RouteRepository) ListVPNRoutes(ctx context.Context, targetSubscriptionID string) ([]VPNRoute, error) {
-	if repository == nil || repository.database == nil || strings.TrimSpace(targetSubscriptionID) == "" {
+	if strings.TrimSpace(targetSubscriptionID) == "" {
 		return nil, errors.New("route database and target subscription id are required")
+	}
+	return repository.listVPNRoutes(ctx, targetSubscriptionID)
+}
+
+// ListServiceVPNRoutes returns the same revalidated service-only candidates
+// without inventing a target subscription. The currently active VPN node is
+// preferred, followed by enabled access-method priority and stable node/uplink
+// ordering. This inventory never changes the selected user data path.
+func (repository *RouteRepository) ListServiceVPNRoutes(ctx context.Context) ([]VPNRoute, error) {
+	return repository.listVPNRoutes(ctx, "")
+}
+
+func (repository *RouteRepository) listVPNRoutes(ctx context.Context, targetSubscriptionID string) ([]VPNRoute, error) {
+	if repository == nil || repository.database == nil {
+		return nil, errors.New("route database is required")
 	}
 	var activeKind, activeModemID, activeSubscriptionID, activeNodeID sql.NullString
 	if err := repository.database.QueryRowContext(ctx, `
@@ -73,10 +89,11 @@ LEFT JOIN subscription_uplink_paths AS p
 LEFT JOIN uplink_path_nodes AS pn
        ON pn.path_id=p.id AND pn.node_id=n.id
 WHERE u.enabled=1 AND u.state='UPLINK_READY'
+  AND (a.enabled=1 OR s.id=?)
   AND n.enabled=1
   AND COALESCE(pref.selection_override, n.selection_override, 'auto')<>'exclude'
 ORDER BY s.id, n.id, u.priority, u.id
-LIMIT ?`, maximumVPNRouteCandidates+1)
+LIMIT ?`, targetSubscriptionID, maximumVPNRouteCandidates+1)
 	if err != nil {
 		return nil, fmt.Errorf("list VPN subscription refresh routes: %w", err)
 	}
@@ -104,6 +121,9 @@ LIMIT ?`, maximumVPNRouteCandidates+1)
 		item.ActiveForTarget = activeKind.String == "SUBSCRIPTION" &&
 			item.TargetSubscription && activeModemID.String == item.ModemID &&
 			activeSubscriptionID.String == item.SubscriptionID && activeNodeID.String == item.NodeID
+		item.ActiveForService = activeKind.String == "SUBSCRIPTION" &&
+			activeModemID.String == item.ModemID && activeSubscriptionID.String == item.SubscriptionID &&
+			activeNodeID.String == item.NodeID
 		item.EvidenceRank = routeEvidenceRank(qualification.String)
 		names, err := mihomo.StablePathNames(item.ModemID, item.SubscriptionID)
 		if err != nil {
@@ -119,9 +139,11 @@ LIMIT ?`, maximumVPNRouteCandidates+1)
 	if len(routes) > maximumVPNRouteCandidates {
 		return nil, fmt.Errorf("VPN subscription refresh route count exceeds hard limit %d", maximumVPNRouteCandidates)
 	}
-	sort.SliceStable(routes, func(left, right int) bool {
-		return lessVPNRoute(routes[left], routes[right])
-	})
+	if targetSubscriptionID == "" {
+		sort.SliceStable(routes, func(left, right int) bool { return lessServiceVPNRoute(routes[left], routes[right]) })
+	} else {
+		sort.SliceStable(routes, func(left, right int) bool { return lessVPNRoute(routes[left], routes[right]) })
+	}
 	return routes, nil
 }
 
@@ -129,8 +151,25 @@ LIMIT ?`, maximumVPNRouteCandidates+1)
 // operation lock is held. An EXCLUDE/payload/modem change between inventory
 // creation and selection therefore cannot authorize a stale service route.
 func (repository *RouteRepository) ValidateVPNRoute(ctx context.Context, route VPNRoute) error {
+	return repository.validateVPNRoute(ctx, route, false)
+}
+
+// ValidateServiceVPNRoute additionally requires the access method to remain
+// enabled. Generic Gateway update traffic must never use a subscription that
+// the administrator disabled after inventory creation. Subscription refresh
+// keeps the separate ValidateVPNRoute contract so a disabled subscription can
+// still refresh its own LKG through its isolated service-only probe group.
+func (repository *RouteRepository) ValidateServiceVPNRoute(ctx context.Context, route VPNRoute) error {
+	return repository.validateVPNRoute(ctx, route, true)
+}
+
+func (repository *RouteRepository) validateVPNRoute(ctx context.Context, route VPNRoute, requireMethodEnabled bool) error {
 	if repository == nil || repository.database == nil || route.ModemID == "" || route.SubscriptionID == "" || route.NodeID == "" || route.ExternalName == "" {
 		return errors.New("complete VPN subscription refresh route is required")
+	}
+	requireEnabled := 0
+	if requireMethodEnabled {
+		requireEnabled = 1
 	}
 	var externalName string
 	err := repository.database.QueryRowContext(ctx, `
@@ -142,8 +181,9 @@ JOIN nodes AS n ON n.id=? AND n.version_id=s.active_version_id
 LEFT JOIN subscription_node_preferences AS pref
        ON pref.subscription_id=s.id AND pref.fingerprint=n.fingerprint
 WHERE u.id=? AND u.enabled=1 AND u.state='UPLINK_READY'
+  AND (?=0 OR a.enabled=1)
   AND n.enabled=1
-  AND COALESCE(pref.selection_override, n.selection_override, 'auto')<>'exclude'`, route.SubscriptionID, route.NodeID, route.ModemID).Scan(&externalName)
+  AND COALESCE(pref.selection_override, n.selection_override, 'auto')<>'exclude'`, route.SubscriptionID, route.NodeID, route.ModemID, requireEnabled).Scan(&externalName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errors.New("VPN subscription refresh route became stale or excluded")
 	}
@@ -166,6 +206,37 @@ func lessVPNRoute(left, right VPNRoute) bool {
 		return left.MethodEnabled
 	}
 	if !left.TargetSubscription && left.MethodPriority != right.MethodPriority {
+		return left.MethodPriority < right.MethodPriority
+	}
+	if left.SelectedForPath != right.SelectedForPath {
+		return left.SelectedForPath
+	}
+	if left.PreferredRank != right.PreferredRank {
+		return left.PreferredRank < right.PreferredRank
+	}
+	if left.EvidenceRank != right.EvidenceRank {
+		return left.EvidenceRank < right.EvidenceRank
+	}
+	if left.ModemPriority != right.ModemPriority {
+		return left.ModemPriority < right.ModemPriority
+	}
+	if left.SubscriptionID != right.SubscriptionID {
+		return left.SubscriptionID < right.SubscriptionID
+	}
+	if left.NodeID != right.NodeID {
+		return left.NodeID < right.NodeID
+	}
+	return left.ModemID < right.ModemID
+}
+
+func lessServiceVPNRoute(left, right VPNRoute) bool {
+	if left.ActiveForService != right.ActiveForService {
+		return left.ActiveForService
+	}
+	if left.MethodEnabled != right.MethodEnabled {
+		return left.MethodEnabled
+	}
+	if left.MethodPriority != right.MethodPriority {
 		return left.MethodPriority < right.MethodPriority
 	}
 	if left.SelectedForPath != right.SelectedForPath {

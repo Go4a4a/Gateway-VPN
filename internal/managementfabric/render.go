@@ -85,6 +85,8 @@ type RenderedAlias struct {
 	AccessProfile    string `json:"access_profile"`
 	PublishedAlias   string `json:"published_alias"`
 	LocalDestination string `json:"local_destination"`
+	EgressInterface  string `json:"egress_interface,omitempty"`
+	NextHop          string `json:"next_hop,omitempty"`
 }
 
 type RenderedACLRule struct {
@@ -99,6 +101,8 @@ type RenderedACLRule struct {
 	Source           string `json:"source"`
 	PublishedAlias   string `json:"published_alias"`
 	LocalDestination string `json:"local_destination"`
+	EgressInterface  string `json:"egress_interface,omitempty"`
+	NextHop          string `json:"next_hop,omitempty"`
 	Protocol         string `json:"protocol"`
 	PortStart        int    `json:"port_start"`
 	PortEnd          int    `json:"port_end"`
@@ -204,6 +208,7 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 			LinkID: publication.LinkID, InterfaceName: link.InterfaceName,
 			ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
 			PublishedAlias: publication.PublishedAlias, LocalDestination: publication.LocalDestination,
+			EgressInterface: resource.ProbeInterface, NextHop: resource.ProbeGateway,
 		})
 		result.Routes = append(result.Routes, RenderedRoute{
 			Owner: "gateway-vpn", LinkID: link.ID, InterfaceName: link.InterfaceName,
@@ -233,6 +238,7 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 							ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
 							Source: tunnel.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
 							LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
+							EgressInterface: resource.ProbeInterface, NextHop: resource.ProbeGateway,
 							PortStart: rule.PortStart, PortEnd: rule.PortEnd, TrustMode: TrustEndToEndRelay,
 							TunnelID: tunnel.ID, RelayID: relay.ID,
 						})
@@ -245,6 +251,7 @@ func RenderFabric(spec FabricSpec) (RenderedFabric, error) {
 					ResourceKind: resource.Kind, AccessProfile: resource.AccessProfile,
 					Source: admin.AssignedAddress + "/32", PublishedAlias: publication.PublishedAlias,
 					LocalDestination: publication.LocalDestination, Protocol: rule.Protocol,
+					EgressInterface: resource.ProbeInterface, NextHop: resource.ProbeGateway,
 					PortStart: rule.PortStart, PortEnd: rule.PortEnd, TrustMode: TrustRoutedHub,
 				})
 			}
@@ -288,14 +295,14 @@ func validateRenderedFabric(plan RenderedFabric) error {
 	}
 	aliases := make(map[string]RenderedAlias, len(plan.Aliases))
 	for _, alias := range plan.Aliases {
-		if !validResourceKind(alias.ResourceKind) || !validAccessProfile(alias.AccessProfile) {
+		if !validResourceKind(alias.ResourceKind) || !validAccessProfile(alias.AccessProfile) || !validRenderedResourcePath(alias.AccessProfile, alias.EgressInterface, alias.NextHop) {
 			return errors.New("rendered management alias has an invalid resource projection")
 		}
 		aliases[alias.PublicationID] = alias
 	}
 	for _, rule := range plan.ACL {
 		alias, exists := aliases[rule.PublicationID]
-		if !exists || rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile {
+		if !exists || rule.ResourceKind != alias.ResourceKind || rule.AccessProfile != alias.AccessProfile || rule.EgressInterface != alias.EgressInterface || rule.NextHop != alias.NextHop {
 			return errors.New("rendered management ACL resource projection changed")
 		}
 	}
@@ -311,6 +318,23 @@ func validateRenderedFabric(plan RenderedFabric) error {
 		}
 	}
 	return nil
+}
+
+func validRenderedResourcePath(profile, interfaceName, nextHop string) bool {
+	if profile == ProfileGatewayOnly {
+		return interfaceName == "lo" && nextHop == ""
+	}
+	if !validLinuxInterface(interfaceName) || profile != ProfileKeeneticWANRouted && nextHop != "" {
+		return false
+	}
+	if profile == ProfileWireGuardRouter && interfaceName != "wg-ingress" {
+		return false
+	}
+	if profile == ProfileKeeneticWANRouted {
+		address, err := netip.ParseAddr(nextHop)
+		return err == nil && address.Is4() && address.IsPrivate()
+	}
+	return true
 }
 
 func slotFromInterface(name string) int64 {

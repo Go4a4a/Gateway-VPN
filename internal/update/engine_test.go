@@ -30,7 +30,7 @@ func TestUpdateEngineAppliesSignedCandidateAndFinalizesAfterWindow(t *testing.T)
 		t.Fatalf("recovery target = %q", target)
 	}
 	journal, exists, err := fixture.engine.Store.LoadActive()
-	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 32 || journal.NewSchemaVersion != 32 || journal.CandidateDBSHA256 == "" || journal.RestorePointID != result.RestorePoint {
+	if err != nil || !exists || journal.State != StateStabilizing || journal.OldSchemaVersion != 34 || journal.NewSchemaVersion != 34 || journal.CandidateDBSHA256 == "" || journal.RestorePointID != result.RestorePoint {
 		t.Fatalf("active journal = %+v,%v,%v", journal, exists, err)
 	}
 	if _, exists, err := fixture.stager.Status(); err != nil || exists {
@@ -72,7 +72,7 @@ func TestUpdateEngineHealthFailureRestoresOldBinaryAndSnapshot(t *testing.T) {
 
 func TestUpdateEngineRejectsDifferentExistingArtifactWithSameVersion(t *testing.T) {
 	fixture := newEngineFixture(t)
-	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 32)
+	otherRoot, _, _ := unsignedReleaseFixture(t, "1.2.0", 1, 34)
 	if err := os.WriteFile(filepath.Join(otherRoot, "bin", "gateway-vpn"), []byte("different signed candidate"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -519,10 +519,10 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	if err := os.WriteFile(configPath, []byte(testBootstrapConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 32)
+	newRelease, publicKey, signingKey := signedReleaseFixture(t, "1.2.0", 1, 34)
 	keyPath := writePublicKeyFixture(t, stateDir, publicKey)
 	policy := fixturePolicy(publicKey)
-	policy.CurrentSchemaVersion = 32
+	policy.CurrentSchemaVersion = 34
 	newReleaseMetadata, err := ReadReleaseMetadata(newRelease)
 	if err != nil {
 		t.Fatal(err)
@@ -539,7 +539,7 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		t.Fatal(err)
 	}
 	releaseRoot := filepath.Join(t.TempDir(), "gateway-vpn")
-	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 32)
+	oldFixture, _, _ := unsignedReleaseFixture(t, "1.1.0", 1, 34)
 	if _, err := SignRelease(oldFixture, signingKey); err != nil {
 		t.Fatal(err)
 	}

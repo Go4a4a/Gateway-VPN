@@ -214,6 +214,17 @@ WHERE singleton_id=1 AND desired_generation=?`, plan.Generation, stamp, plan.Gen
 	linkIDs := make(map[string]struct{}, len(plan.Links))
 	resourceIDs := make(map[string]struct{}, len(plan.Aliases))
 	publicationIDs := make(map[string]struct{}, len(plan.Aliases))
+	if _, err := tx.ExecContext(ctx, `
+UPDATE management_resources
+SET applied_route_generation=desired_route_generation,updated_at=?`, stamp); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE management_resource_publications
+SET applied_route_generation=desired_route_generation,applied_acl_generation=desired_acl_generation,
+    state=CASE WHEN state='DISABLED' THEN 'DISABLED' ELSE 'PENDING' END,last_error_code='',updated_at=?`, stamp); err != nil {
+		return err
+	}
 	for _, link := range plan.Links {
 		linkIDs[link.LinkID] = struct{}{}
 		result, err = tx.ExecContext(ctx, `
@@ -233,7 +244,7 @@ WHERE id=? AND enabled=1`, link.UplinkID, stamp, link.LinkID)
 		publicationIDs[alias.PublicationID] = struct{}{}
 	}
 	for id := range resourceIDs {
-		if _, err := tx.ExecContext(ctx, `UPDATE management_resources SET applied_route_generation=desired_route_generation,health_state='UNKNOWN',updated_at=? WHERE id=? AND enabled=1`, stamp, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE management_resources SET applied_route_generation=desired_route_generation,updated_at=? WHERE id=? AND enabled=1`, stamp, id); err != nil {
 			return err
 		}
 	}

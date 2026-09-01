@@ -63,6 +63,7 @@ ip -n "$GW" link set wan0 up
 ip -n "$GW" link add gateway-vpn-tun type dummy
 ip -n "$GW" link set gateway-vpn-tun up
 ip netns exec "$GW" sysctl -q -w net.ipv4.ip_forward=1
+ip netns exec "$GW" sysctl -q -w net.ipv4.conf.all.src_valid_mark=1
 
 ip -n "$MODEM" link set lo up
 ip -n "$MODEM" address add 192.168.8.1/24 dev modem0

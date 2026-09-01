@@ -22,12 +22,16 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	version := "1.2.0"
 	bootstrapPath := filepath.Join(directory, expectedArtifactFilename(RoleBootstrap, version))
 	deployPath := filepath.Join(directory, expectedArtifactFilename(RoleDeploy, version))
+	windowsDeployPath := filepath.Join(directory, expectedArtifactFilenameForPlatform(RoleDeploy, version, "windows", "amd64"))
 	gatewayPath := filepath.Join(directory, expectedArtifactFilename(RoleGateway, version))
 	vpsPath := filepath.Join(directory, expectedArtifactFilename(RoleVPS, version))
 	if err := os.WriteFile(bootstrapPath, []byte("bootstrap-v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(deployPath, []byte("deploy-v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(windowsDeployPath, []byte("deploy-windows-v1"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(gatewayPath, []byte("gateway-release-v1"), 0o644); err != nil {
@@ -44,6 +48,10 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	windowsDeploy, err := ArtifactFromFile(RoleDeploy, "windows", "amd64", windowsDeployPath, version)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gateway, err := ArtifactFromFile(RoleGateway, "linux", "amd64", gatewayPath, version)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +63,7 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	manifest := Manifest{
 		FormatVersion: ChannelFormatVersion, Channel: "stable", ReleaseVersion: version,
 		GeneratedAt: "2026-08-25T00:00:00Z", SourceCommit: strings.Repeat("a", 40),
-		Artifacts: []Artifact{bootstrap, deploy, gateway, vps},
+		Artifacts: []Artifact{bootstrap, deploy, windowsDeploy, gateway, vps},
 	}
 	SortArtifacts(manifest.Artifacts)
 	content, signature, err := SignManifest(manifest, privateKey)
@@ -176,6 +184,30 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 		PublicEndpoint: "1.1.1.1:51821", AdminPublicKey: adminKey, InstallDependencies: true,
 	}); err == nil {
 		t.Fatal("deploy command accepted the same SSH host for both roles")
+	}
+	windowsCommand, err := WindowsDeployCommand(manifest, WindowsDeployCommandOptions{
+		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0",
+		ManifestSHA256: manifestDigest, SignerKeySHA256: fingerprint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		windowsDeploy.SHA256, manifestDigest, fingerprint,
+		"gateway-vpn-deploy-1.2.0-windows-amd64.exe", "Get-FileHash",
+		"--interactive", "$ErrorActionPreference='Stop'", "Remove-Item -LiteralPath $root",
+		"$global:LASTEXITCODE=$code", "This PowerShell window remains open for diagnostics",
+		"[Net.ServicePointManager]::SecurityProtocol=$previousSecurityProtocol",
+	} {
+		if !strings.Contains(windowsCommand, required) {
+			t.Errorf("Windows deploy command missing %q", required)
+		}
+	}
+	if strings.Contains(strings.ToLower(windowsCommand), "password") || strings.Contains(strings.ToLower(windowsCommand), "private-key") || strings.Index(windowsCommand, "Get-FileHash -LiteralPath $launcher") > strings.Index(windowsCommand, "& $launcher") {
+		t.Fatal("Windows deploy command leaks credentials or executes before exact SHA-256 verification")
+	}
+	if strings.Contains(windowsCommand, "exit $code") || !strings.HasPrefix(windowsCommand, "& { ") {
+		t.Fatal("Windows deploy command can close or pollute the administrator PowerShell session")
 	}
 	adminConfigCommand, err := DeployCommand(manifest, DeployCommandOptions{
 		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0", ManifestSHA256: manifestDigest,

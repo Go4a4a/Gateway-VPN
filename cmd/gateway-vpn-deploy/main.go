@@ -1,5 +1,5 @@
-// Command gateway-vpn-deploy performs the signed two-host installation from an
-// administrative Linux workstation. Private WireGuard and SSH keys are never
+// Command gateway-vpn-deploy performs the signed two-host installation from a
+// supported administrative workstation. Private WireGuard and SSH keys are never
 // included in the deployment report or remote command arguments.
 package main
 
@@ -65,16 +65,17 @@ func run(args []string) int {
 	readinessInterval := flags.Duration("readiness-interval", 5*time.Second, "delay between readiness attempts")
 	timeout := flags.Duration("timeout", 45*time.Minute, "overall deployment timeout")
 	apply := flags.Bool("apply", false, "authorize the two-host installation after all read-only preflights")
+	interactive := flags.Bool("interactive", false, "run the explained console wizard and require exact INSTALL confirmation")
 	jsonOutput := flags.Bool("json", false, "emit only the final redacted JSON report")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2
 	}
-	if !*apply || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *manifestSHA256 == "" || *signerKeySHA256 == "" || *version == "" || *commit == "" || *repository == "" || *releaseTag == "" || *gatewaySSH == "" || *vpsSSH == "" || *knownHosts == "" || *lanInterface == "" || *publicEndpoint == "" || (*adminPublicKey == "") == (*adminConfig == "") {
+	if *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *manifestSHA256 == "" || *signerKeySHA256 == "" || *version == "" || *commit == "" || *repository == "" || *releaseTag == "" {
 		usage(flags)
 		return 2
 	}
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		fmt.Fprintln(os.Stderr, "this signed deploy artifact requires a Linux/amd64 administrative host")
+	if runtime.GOARCH != "amd64" || (runtime.GOOS != "linux" && runtime.GOOS != "windows") {
+		fmt.Fprintln(os.Stderr, "this signed deploy artifact requires a Linux/amd64 or Windows 10/11 x64 administrative host")
 		return 1
 	}
 	manifest, err := loadVerifiedManifest(*manifestPath, *signaturePath, *publicKeyPath, *manifestSHA256, *signerKeySHA256, *channel, *version, *commit)
@@ -85,6 +86,29 @@ func run(args []string) int {
 	if err := verifyRunningDeployArtifact(manifest); err != nil {
 		fmt.Fprintf(os.Stderr, "verify running deploy artifact: %v\n", err)
 		return 1
+	}
+	if *interactive {
+		options := interactiveDeployOptions{
+			GatewaySSH: gatewaySSH, GatewayPort: gatewayPort,
+			VPSSSH: vpsSSH, VPSPort: vpsPort, KnownHosts: knownHosts,
+			GatewayIdentity: gatewayIdentity, VPSIdentity: vpsIdentity,
+			LANInterface: lanInterface, LANAddress: lanAddress, EnableDHCP: enableDHCP,
+			PublicEndpoint: publicEndpoint, AdminPublicKey: adminPublicKey, AdminConfig: adminConfig,
+			InstallDependencies: installDependencies, AllowGatewaySSH: allowGatewaySSH,
+		}
+		if err := runInteractiveDeployWizard(os.Stdin, os.Stderr, options); err != nil {
+			fmt.Fprintf(os.Stderr, "interactive deployment cancelled: %v\n", err)
+			return 2
+		}
+		*apply = true
+	}
+	if !*apply || *gatewaySSH == "" || *vpsSSH == "" || *knownHosts == "" || *lanInterface == "" || *publicEndpoint == "" || (*adminPublicKey == "") == (*adminConfig == "") {
+		usage(flags)
+		return 2
+	}
+	if runtime.GOOS == "windows" && (*gatewayIdentity == "" || *vpsIdentity == "") {
+		fmt.Fprintln(os.Stderr, "Windows deploy requires an explicitly selected SSH identity for both Gateway and VPS")
+		return 2
 	}
 	resolvedAdminPublicKey := *adminPublicKey
 	var localAdminIdentity *deploy.AdminIdentity
@@ -248,5 +272,5 @@ func mustDecodeHex(value string) []byte {
 }
 
 func usage(flags *flag.FlagSet) {
-	fmt.Fprintln(flags.Output(), "usage: gateway-vpn-deploy --manifest FILE --signature FILE --public-key FILE --manifest-sha256 SHA256 --signer-key-sha256 SHA256 --channel CHANNEL --release-version VERSION --source-commit COMMIT --github-repository OWNER/REPO --release-tag TAG --gateway-ssh USER@HOST --vps-ssh USER@HOST --known-hosts FILE --lan-interface IFACE --public-endpoint HOST:51821 (--admin-config FILE|--admin-public-key KEY) --apply [options]")
+	fmt.Fprintln(flags.Output(), "usage: gateway-vpn-deploy --manifest FILE --signature FILE --public-key FILE --manifest-sha256 SHA256 --signer-key-sha256 SHA256 --channel CHANNEL --release-version VERSION --source-commit COMMIT --github-repository OWNER/REPO --release-tag TAG [--interactive | --gateway-ssh USER@HOST --vps-ssh USER@HOST --known-hosts FILE --lan-interface IFACE --public-endpoint HOST:51821 (--admin-config FILE|--admin-public-key KEY) --apply] [options]")
 }

@@ -22,7 +22,7 @@ func (values *artifactSpecs) String() string { return strings.Join(*values, ",")
 
 func (values *artifactSpecs) Set(value string) error {
 	if value == "" {
-		return errors.New("artifact must use ROLE=FILE")
+		return errors.New("artifact must use LABEL=FILE")
 	}
 	*values = append(*values, value)
 	return nil
@@ -39,7 +39,7 @@ func runChannelSign(args []string) int {
 	outputDirectory := flags.String("output-dir", "", "existing directory for channel files")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	var artifacts artifactSpecs
-	flags.Var(&artifacts, "artifact", "role artifact as ROLE=FILE; repeat for each role")
+	flags.Var(&artifacts, "artifact", "artifact as LABEL=FILE; deploy-windows selects Windows/amd64")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *version == "" || *commit == "" || *privateKeyPath == "" || *outputDirectory == "" || len(artifacts) == 0 {
 		return 2
 	}
@@ -63,17 +63,18 @@ func runChannelSign(args []string) int {
 	built := make([]distribution.Artifact, 0, len(artifacts))
 	seen := make(map[string]bool, len(artifacts))
 	for _, specification := range artifacts {
-		role, filename, ok := strings.Cut(specification, "=")
-		if !ok || role == "" || filename == "" || seen[role] {
-			fmt.Fprintln(os.Stderr, "each channel artifact must use one unique ROLE=FILE")
+		label, filename, ok := strings.Cut(specification, "=")
+		role, operatingSystem, architecture, identityErr := channelArtifactIdentity(label)
+		if !ok || filename == "" || identityErr != nil || seen[label] {
+			fmt.Fprintln(os.Stderr, "each channel artifact must use one unique supported LABEL=FILE")
 			return 2
 		}
-		artifact, err := distribution.ArtifactFromFile(role, "linux", "amd64", filename, *version)
+		artifact, err := distribution.ArtifactFromFile(role, operatingSystem, architecture, filename, *version)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "inspect %s artifact: %v\n", role, err)
+			fmt.Fprintf(os.Stderr, "inspect %s artifact: %v\n", label, err)
 			return 1
 		}
-		seen[role] = true
+		seen[label] = true
 		built = append(built, artifact)
 	}
 	distribution.SortArtifacts(built)
@@ -111,7 +112,7 @@ func runChannelVerify(args []string) int {
 	flags.SetOutput(os.Stderr)
 	manifestPath, signaturePath, publicKeyPath, channel, version, commit, maximumAge, jsonOutput := channelVerificationFlags(flags)
 	var artifacts artifactSpecs
-	flags.Var(&artifacts, "artifact", "local role artifact as ROLE=FILE; when present every signed artifact is re-hashed")
+	flags.Var(&artifacts, "artifact", "local artifact as LABEL=FILE; when present every signed artifact is re-hashed")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" {
 		return 2
 	}
@@ -141,21 +142,33 @@ func verifyLocalChannelArtifacts(manifest distribution.Manifest, specifications 
 	}
 	seen := make(map[string]bool, len(specifications))
 	for _, specification := range specifications {
-		role, filename, ok := strings.Cut(specification, "=")
-		if !ok || role == "" || filename == "" || seen[role] {
-			return errors.New("each local channel artifact must use one unique ROLE=FILE")
+		label, filename, ok := strings.Cut(specification, "=")
+		role, operatingSystem, architecture, identityErr := channelArtifactIdentity(label)
+		if !ok || filename == "" || identityErr != nil || seen[label] {
+			return errors.New("each local channel artifact must use one unique supported LABEL=FILE")
 		}
-		seen[role] = true
-		actual, err := distribution.ArtifactFromFile(role, "linux", "amd64", filename, manifest.ReleaseVersion)
+		seen[label] = true
+		actual, err := distribution.ArtifactFromFile(role, operatingSystem, architecture, filename, manifest.ReleaseVersion)
 		if err != nil {
-			return fmt.Errorf("inspect %s artifact: %w", role, err)
+			return fmt.Errorf("inspect %s artifact: %w", label, err)
 		}
-		expected, err := distribution.SelectArtifact(manifest, role, "linux", "amd64")
+		expected, err := distribution.SelectArtifact(manifest, role, operatingSystem, architecture)
 		if err != nil || actual != expected {
-			return fmt.Errorf("%s artifact does not match signed filename, size, and SHA-256", role)
+			return fmt.Errorf("%s artifact does not match signed filename, size, and SHA-256", label)
 		}
 	}
 	return nil
+}
+
+func channelArtifactIdentity(label string) (string, string, string, error) {
+	switch label {
+	case distribution.RoleBootstrap, distribution.RoleDeploy, distribution.RoleGateway, distribution.RoleVPS:
+		return label, "linux", "amd64", nil
+	case "deploy-windows":
+		return distribution.RoleDeploy, "windows", "amd64", nil
+	default:
+		return "", "", "", errors.New("unsupported channel artifact label")
+	}
 }
 
 func runChannelInstallCommand(args []string) int {
@@ -300,6 +313,36 @@ func runChannelDeployCommand(args []string) int {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate exact two-host deploy command: %v\n", err)
+		return 1
+	}
+	fmt.Println(command)
+	return 0
+}
+
+func runChannelWindowsDeployCommand(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpnctl channel-windows-deploy-command", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	manifestPath, signaturePath, publicKeyPath, channel, version, commit, maximumAge, _ := channelVerificationFlags(flags)
+	repository := flags.String("github-repository", "", "GitHub OWNER/REPOSITORY")
+	releaseTag := flags.String("release-tag", "", "immutable GitHub Release tag; defaults to vVERSION")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *manifestPath == "" || *signaturePath == "" || *publicKeyPath == "" || *channel == "" || *version == "" || *commit == "" || *repository == "" {
+		return 2
+	}
+	manifest, content, fingerprint, err := verifyChannelFiles(*manifestPath, *signaturePath, *publicKeyPath, *channel, *version, *commit, *maximumAge)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "verify signed channel before Windows deploy command generation: %v\n", err)
+		return 1
+	}
+	tag := *releaseTag
+	if tag == "" {
+		tag = "v" + manifest.ReleaseVersion
+	}
+	digest, _ := distribution.ManifestSHA256(content)
+	command, err := distribution.WindowsDeployCommand(manifest, distribution.WindowsDeployCommandOptions{
+		Repository: *repository, ReleaseTag: tag, ManifestSHA256: digest, SignerKeySHA256: fingerprint,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "generate exact Windows deploy command: %v\n", err)
 		return 1
 	}
 	fmt.Println(command)

@@ -37,10 +37,14 @@ ASSETS=(
   "$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64"
   "$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64.spdx.json"
   "$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64.intoto.json"
+  "$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.exe"
+  "$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.spdx.json"
+  "$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.intoto.json"
   "$ROOT/dist/channel-$CHANNEL.json"
   "$ROOT/dist/channel-$CHANNEL.sig"
   "$ROOT/dist/update-signing.pub"
   "$ROOT/dist/install-gateway-$VERSION.command.txt"
+  "$ROOT/dist/install-deploy-windows-$VERSION.command.txt"
 )
 for asset in "${ASSETS[@]}"; do
   [[ -f "$asset" && ! -L "$asset" ]] || { echo "Required exact release asset is missing or unsafe: $asset" >&2; exit 1; }
@@ -64,6 +68,7 @@ done
     --channel "$CHANNEL" --release-version "$VERSION" --source-commit "$COMMIT" \
     --artifact "bootstrap=$ROOT/dist/gateway-vpn-bootstrap-$VERSION-linux-amd64" \
     --artifact "deploy=$ROOT/dist/gateway-vpn-deploy-$VERSION-linux-amd64" \
+    --artifact "deploy-windows=$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.exe" \
     --artifact "gateway=$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz" \
     --artifact "vps=$ROOT/dist/gateway-vpn-vps-$VERSION-linux-amd64.tar.gz"
 )

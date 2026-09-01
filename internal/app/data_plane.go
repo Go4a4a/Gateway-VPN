@@ -37,6 +37,7 @@ import (
 	"gateway-vpn/internal/state"
 	"gateway-vpn/internal/subscription"
 	"gateway-vpn/internal/subscriptionnet"
+	"gateway-vpn/internal/updatenet"
 	"gateway-vpn/internal/uplink"
 )
 
@@ -57,6 +58,7 @@ type dataPlaneComponents struct {
 	Discoveries     *hilink.DiscoveryRegistry
 	MihomoClient    *mihomo.Client
 	Uplinks         *uplink.Repository
+	UpdateTransport *updatenet.Ladder
 }
 
 func initializeDataPlane(ctx context.Context, database *sql.DB, configuration config.Config, subscriptions *subscription.Repository, modems *modem.Repository, paths *pathmatrix.Repository, targets *bypass.Repository, matchers *subscription.MatcherRepository, states *state.Repository, broker *networkapply.BrokerClient) (dataPlaneComponents, error) {
@@ -243,7 +245,13 @@ func initializeDataPlane(ctx context.Context, database *sql.DB, configuration co
 		},
 		Config: candidateruntime.DefaultPeriodicConfig(),
 	}
-	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, RefreshDispatch: refreshDispatch, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, EthernetRunner: ethernetRunner, Discoveries: discoveries, MihomoClient: client, Uplinks: uplinks}, nil
+	updateTransport := &updatenet.Ladder{
+		Routes: subscriptionnet.NewRouteRepository(database), Policy: accessPolicies,
+		Uplinks: uplinks, Broker: broker, Selector: client,
+		ProbeAddress: configuration.Mihomo.ProbeAddress, BootstrapDNS: append([]string(nil), configuration.Mihomo.BootstrapDNS...),
+		OperationLock: operationLock,
+	}
+	return dataPlaneComponents{Refresh: refresh, RefreshWorker: worker, RefreshDispatch: refreshDispatch, Transactions: transactions, Reconciler: reconciler, Routing: broker, WireGuard: broker, PathProbe: candidateRuntime, HealthRunner: healthRunner, DirectRunner: directRunner, ProbeScheduler: probeScheduler, ModemRunner: modemRunner, EthernetRunner: ethernetRunner, Discoveries: discoveries, MihomoClient: client, Uplinks: uplinks, UpdateTransport: updateTransport}, nil
 }
 
 func readBoundedSecret(filename string, maximum int64) (string, error) {

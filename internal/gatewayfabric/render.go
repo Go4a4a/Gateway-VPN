@@ -86,8 +86,9 @@ func RenderFirewallTransaction(plan managementfabric.GatewayHostPlan) ([]byte, e
 			fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_input %s counter accept comment %s\n", filterBase, comment)
 			continue
 		}
-		fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_forward %s counter accept comment %s\n", filterBase, comment)
-		fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_postrouting %s counter masquerade comment %s\n", filterBase, comment)
+		forwardBase := filterBase + " oifname " + strconv.Quote(rule.EgressInterface)
+		fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_forward %s counter accept comment %s\n", forwardBase, comment)
+		fmt.Fprintf(&output, "add rule inet gateway_vpn management_fabric_postrouting %s counter masquerade comment %s\n", forwardBase, comment)
 	}
 	return []byte(output.String()), nil
 }

@@ -198,7 +198,7 @@ done
 
 systemctl reset-failed gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-watchdog.service gateway-vpn-update-rollback.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-network-broker.service gateway-vpn.service gateway-vpn-dnsmasq.service 2>/dev/null || true
 [[ $(readlink /opt/gateway-vpn/current) == releases/v$OLD_VERSION && $(readlink /opt/gateway-vpn/recovery) == releases/v$OLD_VERSION ]] || { echo "Old release pointers were not restored" >&2; exit 1; }
-nft list chain inet gateway_vpn forward | grep -Fq 'gateway-vpn PATH_BLOCKED'
+nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 
 START_UNITS=(gateway-vpn-firewall.service gateway-vpn-firewall-guard.service gateway-vpn-update-recovery.service gateway-vpn-network-recovery.service gateway-vpn-network-broker.socket gateway-vpn-watchdog.service gateway-vpn.service gateway-vpn-update-finalize.timer)
 [[ ! -f /etc/gateway-vpn/dnsmasq.conf ]] || START_UNITS+=(gateway-vpn-dnsmasq.service)

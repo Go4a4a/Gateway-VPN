@@ -40,12 +40,19 @@ type routingExecutor struct {
 	afterRules   string
 	afterRoutes  string
 	routeGetErr  error
+	sourceMark   string
 }
 
 func (executor *routingExecutor) Run(_ context.Context, request platformexec.Request) (platformexec.Result, error) {
 	executor.requests = append(executor.requests, request)
 	arguments := strings.Join(request.Arguments, " ")
 	switch arguments {
+	case "-n net.ipv4.conf.all.src_valid_mark":
+		value := executor.sourceMark
+		if value == "" {
+			value = "1"
+		}
+		return platformexec.Result{Stdout: value + "\n"}, nil
 	case "-N -json -4 rule show":
 		executor.cycle++
 		if executor.cycle == 1 {
@@ -122,8 +129,35 @@ func TestRoutingBackendNoopStillVerifiesMarkedLookupWithoutClosingGate(t *testin
 	if gate.blocks != 0 {
 		t.Fatalf("no-op path gate blocks = %d", gate.blocks)
 	}
-	if len(executor.requests) != 3 {
+	if len(executor.requests) != 4 {
 		t.Fatalf("no-op request count = %d, want observe+verify only", len(executor.requests))
+	}
+}
+
+func TestRoutingBackendUnavailableSourceMarkClosesGateBeforeObservation(t *testing.T) {
+	repository, closeDatabase := readyRoutingModem(t)
+	defer closeDatabase()
+	gate := &routingGate{}
+	executor := &routingExecutor{sourceMark: "0"}
+	backend := testRoutingBackend(repository, executor, gate)
+	if err := backend.SyncRouting(context.Background()); err == nil || !strings.Contains(err.Error(), "source-mark") {
+		t.Fatalf("SyncRouting(source mark disabled) error = %v", err)
+	}
+	if gate.blocks != 1 {
+		t.Fatalf("source-mark failure path gate blocks = %d, want 1", gate.blocks)
+	}
+	if len(executor.requests) != 1 || executor.requests[0].Executable != "/usr/sbin/sysctl" {
+		t.Fatalf("source-mark failure reached routing observation: %+v", executor.requests)
+	}
+}
+
+func TestRoutingBackendRequiresFixedSysctlExecutable(t *testing.T) {
+	repository, closeDatabase := readyRoutingModem(t)
+	defer closeDatabase()
+	backend := testRoutingBackend(repository, &routingExecutor{}, nil)
+	backend.Sysctl = ""
+	if _, err := backend.CheckRouting(context.Background()); err == nil || !strings.Contains(err.Error(), "fixed Ubuntu sysctl") {
+		t.Fatalf("CheckRouting(missing sysctl) error = %v", err)
 	}
 }
 
@@ -184,7 +218,7 @@ func readyRoutingModem(t *testing.T) (*uplink.Repository, func()) {
 
 func testRoutingBackend(repository *uplink.Repository, executor platformexec.Executor, gate PathBlocker) RoutingBackend {
 	return RoutingBackend{
-		Uplinks: repository, Executor: executor, IP: "/usr/sbin/ip",
+		Uplinks: repository, Executor: executor, IP: "/usr/sbin/ip", Sysctl: "/usr/sbin/sysctl",
 		LANPrefix: "192.168.200.1/24", WireGuardPrefix: "10.80.0.0/24",
 		BootstrapDNS: []string{"1.1.1.1"}, RoutingTableStart: 1101, FwmarkStart: 0x1101, Gate: gate,
 	}

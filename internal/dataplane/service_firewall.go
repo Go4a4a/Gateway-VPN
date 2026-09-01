@@ -23,6 +23,7 @@ import (
 	"gateway-vpn/internal/netbind"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/subscription"
+	"gateway-vpn/internal/uplink"
 	wireguardpkg "gateway-vpn/internal/wireguard"
 )
 
@@ -40,6 +41,16 @@ const (
 	bootstrapHTTPTimeout     = "2m"
 )
 
+var nonPublicUpdateIPv4Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 type BootstrapAuthorization struct {
 	ModemID        string   `json:"modem_id"`
 	SubscriptionID string   `json:"subscription_id"`
@@ -54,6 +65,16 @@ type MihomoEndpointAuthorization struct {
 type DirectProbeAuthorization struct {
 	ModemID   string   `json:"modem_id"`
 	TargetID  string   `json:"target_id"`
+	Addresses []string `json:"addresses"`
+	Port      uint16   `json:"port"`
+}
+
+// UpdateServiceAuthorization is the complete, bounded root request needed for
+// one direct signed-update HTTPS connection. The privileged backend derives
+// interface, fwmark and readiness from the stable uplink id; no URL, command,
+// path, mark or interface crosses the broker boundary.
+type UpdateServiceAuthorization struct {
+	UplinkID  string   `json:"uplink_id"`
 	Addresses []string `json:"addresses"`
 	Port      uint16   `json:"port"`
 }
@@ -124,8 +145,38 @@ func (backend *ServiceFirewallBackend) AuthorizeBootstrap(ctx context.Context, a
 	if err != nil {
 		return err
 	}
-	if err := backend.authorizeTransientHTTPS(ctx, currentModem, addresses, authorization.Port); err != nil {
+	if err := backend.authorizeTransientHTTPS(ctx, currentModem.InterfaceName, currentModem.Fwmark, addresses, authorization.Port); err != nil {
 		return fmt.Errorf("authorize modem-bound subscription endpoint: %w", err)
+	}
+	return nil
+}
+
+func (backend *ServiceFirewallBackend) AuthorizeUpdateService(ctx context.Context, authorization UpdateServiceAuthorization) error {
+	if backend == nil {
+		return errors.New("service firewall backend is nil")
+	}
+	if strings.TrimSpace(authorization.UplinkID) == "" || authorization.Port != 443 || len(authorization.Addresses) == 0 || len(authorization.Addresses) > 16 {
+		return errors.New("bounded signed-update HTTPS authorization is required")
+	}
+	addresses, err := validatedUpdateAddresses(authorization.Addresses)
+	if err != nil {
+		return err
+	}
+	backend.mutex.Lock()
+	defer backend.mutex.Unlock()
+	if err := backend.syncRoutingLocked(ctx); err != nil {
+		return err
+	}
+	current, err := backend.Routing.Uplinks.Get(ctx, authorization.UplinkID)
+	if err != nil || !current.Enabled || current.State != uplink.StateReady || !validInterfaceName(current.CurrentIfname) || current.Fwmark <= 0 || current.Fwmark > int64(^uint32(0)) {
+		return errors.New("signed-update uplink is not ready")
+	}
+	policy, err := backend.AccessPolicy.GetPolicy(ctx)
+	if err != nil || !policy.DirectServiceRefresh {
+		return errors.New("direct service fallback is disabled by policy")
+	}
+	if err := backend.authorizeTransientHTTPS(ctx, current.CurrentIfname, uint32(current.Fwmark), addresses, authorization.Port); err != nil {
+		return fmt.Errorf("authorize uplink-bound signed update endpoint: %w", err)
 	}
 	return nil
 }
@@ -169,16 +220,16 @@ func (backend *ServiceFirewallBackend) AuthorizeDirectProbe(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	if err := backend.authorizeTransientHTTPS(ctx, currentModem, addresses, authorization.Port); err != nil {
+	if err := backend.authorizeTransientHTTPS(ctx, currentModem.InterfaceName, currentModem.Fwmark, addresses, authorization.Port); err != nil {
 		return fmt.Errorf("authorize modem-bound direct probe endpoint: %w", err)
 	}
 	return nil
 }
 
-func (backend *ServiceFirewallBackend) authorizeTransientHTTPS(ctx context.Context, currentModem modem.Modem, addresses []string, port uint16) error {
+func (backend *ServiceFirewallBackend) authorizeTransientHTTPS(ctx context.Context, interfaceName string, fwmark uint32, addresses []string, port uint16) error {
 	var commands strings.Builder
 	for _, address := range addresses {
-		element := serviceTuple(currentModem.InterfaceName, currentModem.Fwmark, address, port)
+		element := serviceTuple(interfaceName, fwmark, address, port)
 		fmt.Fprintf(&commands, "destroy element inet %s %s { %s }\n", firewall.TableName, bootstrapHTTPSet, element)
 		fmt.Fprintf(&commands, "add element inet %s %s { %s timeout %s }\n", firewall.TableName, bootstrapHTTPSet, element, bootstrapHTTPTimeout)
 	}
@@ -206,6 +257,22 @@ func validatedPublicAddresses(rawAddresses []string) ([]string, error) {
 	sort.Strings(addresses)
 	if len(addresses) == 0 {
 		return nil, errors.New("endpoint address set is empty")
+	}
+	return addresses, nil
+}
+
+func validatedUpdateAddresses(rawAddresses []string) ([]string, error) {
+	addresses, err := validatedPublicAddresses(rawAddresses)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range addresses {
+		address := netip.MustParseAddr(raw).Unmap()
+		for _, prefix := range nonPublicUpdateIPv4Prefixes {
+			if prefix.Contains(address) {
+				return nil, errors.New("signed-update endpoint must contain only routable public IPv4 addresses")
+			}
+		}
 	}
 	return addresses, nil
 }
@@ -391,30 +458,34 @@ func (backend *ServiceFirewallBackend) validate() error {
 	return nil
 }
 
-type serviceModem struct {
+type serviceUplink struct {
 	interfaceName string
 	managementIP  string
 	fwmark        uint32
 }
 
 func (backend *ServiceFirewallBackend) syncServiceContext(ctx context.Context) error {
-	stored, err := backend.Modems.List(ctx)
+	stored, err := backend.Routing.Uplinks.List(ctx)
 	if err != nil {
-		return fmt.Errorf("read modem service contexts: %w", err)
+		return fmt.Errorf("read uplink service contexts: %w", err)
 	}
-	ready := make([]serviceModem, 0, len(stored))
+	ready := make([]serviceUplink, 0, len(stored))
 	for _, item := range stored {
-		if !item.Enabled || item.State != modem.StateReady {
+		if !item.Enabled || item.State != uplink.StateReady {
 			continue
 		}
-		if !validInterfaceName(item.InterfaceName) || item.Fwmark == 0 {
-			return fmt.Errorf("modem %s has invalid service routing context", item.ID)
+		if !validInterfaceName(item.CurrentIfname) || item.Fwmark <= 0 || item.Fwmark > int64(^uint32(0)) {
+			return fmt.Errorf("uplink %s has invalid service routing context", item.ID)
 		}
-		management, err := netip.ParseAddr(item.Gateway)
-		if err != nil || !management.Is4() {
-			return fmt.Errorf("modem %s has invalid management endpoint", item.ID)
+		managementIP := ""
+		if item.Type == uplink.TypeHiLink {
+			management, err := netip.ParseAddr(item.Gateway)
+			if err != nil || !management.Is4() {
+				return fmt.Errorf("HiLink uplink %s has invalid management endpoint", item.ID)
+			}
+			managementIP = management.String()
 		}
-		ready = append(ready, serviceModem{interfaceName: item.InterfaceName, managementIP: management.String(), fwmark: item.Fwmark})
+		ready = append(ready, serviceUplink{interfaceName: item.CurrentIfname, managementIP: managementIP, fwmark: uint32(item.Fwmark)})
 	}
 	sort.Slice(ready, func(i, j int) bool {
 		if ready[i].interfaceName == ready[j].interfaceName {
@@ -547,7 +618,7 @@ func (backend *ServiceFirewallBackend) applyTransaction(ctx context.Context, pay
 	return nil
 }
 
-func renderServiceContext(generation [2]uint32, modems []serviceModem, bootstrapDNS []string) string {
+func renderServiceContext(generation [2]uint32, uplinks []serviceUplink, bootstrapDNS []string) string {
 	sets := []string{
 		serviceContextGeneration, hilinkInterfacesSet, hilinkManagementSet,
 		wireGuardEndpointSet, wireGuardGenerationSet, bootstrapDNSSet, bootstrapHTTPSet,
@@ -562,9 +633,11 @@ func renderServiceContext(generation [2]uint32, modems []serviceModem, bootstrap
 		builder.WriteByte('\n')
 	}
 	fmt.Fprintf(&builder, "add element inet %s %s { %d, %d }\n", firewall.TableName, serviceContextGeneration, generation[0], generation[1])
-	for _, current := range modems {
+	for _, current := range uplinks {
 		fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, hilinkInterfacesSet, strconv.Quote(current.interfaceName))
-		fmt.Fprintf(&builder, "add element inet %s %s { %s . %s }\n", firewall.TableName, hilinkManagementSet, strconv.Quote(current.interfaceName), current.managementIP)
+		if current.managementIP != "" {
+			fmt.Fprintf(&builder, "add element inet %s %s { %s . %s }\n", firewall.TableName, hilinkManagementSet, strconv.Quote(current.interfaceName), current.managementIP)
+		}
 		for _, dns := range bootstrapDNS {
 			fmt.Fprintf(&builder, "add element inet %s %s { %s }\n", firewall.TableName, bootstrapDNSSet, serviceTuple(current.interfaceName, current.fwmark, dns, 0))
 		}
@@ -572,11 +645,11 @@ func renderServiceContext(generation [2]uint32, modems []serviceModem, bootstrap
 	return builder.String()
 }
 
-func serviceGeneration(modems []serviceModem, dns []string) [2]uint32 {
+func serviceGeneration(uplinks []serviceUplink, dns []string) [2]uint32 {
 	values := append([]string(nil), dns...)
 	sort.Strings(values)
 	var builder strings.Builder
-	for _, current := range modems {
+	for _, current := range uplinks {
 		fmt.Fprintf(&builder, "%s\x00%08x\x00%s\n", current.interfaceName, current.fwmark, current.managementIP)
 	}
 	for _, value := range values {

@@ -29,6 +29,7 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 - Каждый adopted uplink получает стабильный `uplink_id`, display number, priority, routing table, fwmark и route generation; выданные значения не переиспользуются после удаления.
 - Root reconciler владеет только routes/rules protocol `186`, закрывает direct/TUN gate перед изменением и проверяет каждый context через `ip route get … mark …`.
 - DHCP, bootstrap DNS/HTTPS, subscription refresh, Mihomo proxy sockets, direct probes и WireGuard endpoint используют только точный tuple `interface × fwmark × routing table × destination`.
+- Для root-authorized service sockets исходящий fwmark сохраняется в conntrack, а на ответе восстанавливается до policy lookup. Обязательный `net.ipv4.conf.all.src_valid_mark=1` позволяет Ubuntu `rp_filter` проверять ответ по той же uplink-specific таблице без отключения reverse-path validation и без default route в `main`.
 - Ни один HiLink/Ethernet uplink default route не добавляется в `main`; смена interface/gateway очищает прежние service/endpoint generations.
 - Management subnet каждого HiLink/Ethernet uplink обязана быть уникальной и не пересекаться с transit LAN, `wg-mgmt`, `wg-ingress`, behind-peer networks и другими uplinks.
 - Uplink без carrier/lease/gateway может быть временно offline и возвращается в candidate pool только после fresh observation/requalification. Наличие одного uplink не блокирует Gateway само по себе.
@@ -44,13 +45,13 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 
 ## Firewall и fail-closed
 
-- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `6`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
+- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `7`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
 - Direct и TUN gate взаимно исключаются. Direct открывается только для точного fresh `uplink + generation`; при active subscription прямой пользовательский выход закрыт.
 - Настройка startup blocking управляет только поведением до первого доказанного path. Она не отключает firewall integrity/quarantine: повреждённое или неизвестное состояние всегда закрывается.
 - IPv6 отключён sysctl и блокируется owned `inet` ruleset; IPv6 forwarding равен `0`.
 - SSH/SFTP TCP/22 разрешается только с `gateway-vpn-lan` (и отдельной management policy через `wg-mgmt`), никогда с HiLink/Ethernet uplink.
 - `wg-ingress` UDP принимается только на server-configured listener interfaces из `wireguard_ingress_listeners`. Disabled/failed server не оставляет интерфейс или wildcard listener.
-- Firewall guard проверяет base drop chains, generation 6, точный набор локальных management-интерфейсов, четыре traffic counters, ingress listener set и пустой fail-closed Management Fabric contour. При flush/corruption он сначала quarantines transit LAN, восстанавливает только owned blocked ruleset и возвращает link после повторной проверки.
+- Firewall guard проверяет base drop chains, generation 7, exact conntrack mark preserve/restore rules, точный набор локальных management-интерфейсов, четыре traffic counters, ingress listener set и пустой fail-closed Management Fabric contour. При flush/corruption он сначала quarantines transit LAN, восстанавливает только owned blocked ruleset и возвращает link после повторной проверки.
 
 ## WireGuard и Management Fabric
 

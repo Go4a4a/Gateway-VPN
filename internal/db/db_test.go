@@ -121,7 +121,7 @@ func TestOpenReadOnlyCannotCreateOrMutateDatabase(t *testing.T) {
 		t.Fatal("read-only database accepted UPDATE")
 	}
 	version, err := ReadSchemaVersion(ctx, readOnly)
-	if err != nil || version != 32 {
+	if err != nil || version != 34 {
 		t.Fatalf("ReadSchemaVersion(read-only) = %d, %v", version, err)
 	}
 	if err := ForeignKeyCheck(ctx, readOnly); err != nil {
@@ -145,7 +145,7 @@ func TestReadSchemaVersionDoesNotCreateMigrationTable(t *testing.T) {
 		t.Fatalf("migration table count = %d, %v", count, err)
 	}
 	latest, err := LatestSchemaVersion()
-	if err != nil || latest != 32 {
+	if err != nil || latest != 34 {
 		t.Fatalf("LatestSchemaVersion() = %d, %v", latest, err)
 	}
 }
@@ -257,8 +257,8 @@ func TestMigrateCreatesInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 32 {
-		t.Fatalf("SchemaVersion() = %d, want 32", version)
+	if version != 34 {
+		t.Fatalf("SchemaVersion() = %d, want 34", version)
 	}
 	for _, column := range []string{"service_download_bytes", "service_upload_bytes"} {
 		var count int
@@ -302,8 +302,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if count != 32 {
-		t.Fatalf("migration count = %d, want 32", count)
+	if count != 34 {
+		t.Fatalf("migration count = %d, want 34", count)
 	}
 }
 
@@ -435,7 +435,7 @@ FROM settings WHERE key='watchdog'`).Scan(&version, &interval, &loggingMode, &ma
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM json_each((SELECT json_extract(value_json, '$.component_recovery_modes') FROM settings WHERE key='watchdog'))").Scan(&modeCount); err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
+	if version != 34 || interval != 42 || loggingMode != "RESTART" || managementFabricMode != "RESTART" || wireGuardAdminMode != "RESTART" || modeCount != 19 {
 		t.Fatalf("watchdog migrations = version:%d interval:%d modes:%s/%s/%s count:%d", version, interval, loggingMode, managementFabricMode, wireGuardAdminMode, modeCount)
 	}
 }
@@ -489,6 +489,52 @@ FROM management_admin_vps_peers WHERE id='admin-peer:a'`).Scan(&version, &trustM
 	}
 	if err := ForeignKeyCheck(ctx, database); err != nil {
 		t.Fatalf("migration 29 foreign keys: %v", err)
+	}
+}
+
+func TestMigration33PreservesPolicyAndAddsBoundedAutomaticApplyEvidence(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := migrateFS(ctx, database, migrationsThrough(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	const stagedAt = "2026-09-01T03:30:00Z"
+	if _, err := database.ExecContext(ctx, `
+UPDATE settings
+SET value_json=json_set(value_json, '$.check_interval_hours', 12, '$.channel', 'testing')
+WHERE key='software_update_policy';
+UPDATE software_update_scheduler
+SET phase='STAGED', channel='testing', staged_update_id='update-20260901T033000Z-0123456789abcdef01234567',
+    staged_version='1.2.0', last_completed_at=?, updated_at=?
+WHERE singleton_id=1`, stagedAt, stagedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, database); err != nil {
+		t.Fatal(err)
+	}
+	var schemaVersion, policySchema, checkHours, maximumDelay int
+	var channel, phase, storedStagedAt, deadline string
+	if err := database.QueryRowContext(ctx, `
+SELECT (SELECT MAX(version) FROM schema_migrations),
+       json_extract(value_json, '$.schema_version'),
+       json_extract(value_json, '$.check_interval_hours'),
+       json_extract(value_json, '$.maximum_apply_delay_hours'),
+       json_extract(value_json, '$.channel'),
+       (SELECT phase FROM software_update_scheduler WHERE singleton_id=1),
+       (SELECT staged_at FROM software_update_scheduler WHERE singleton_id=1),
+       (SELECT apply_deadline_at FROM software_update_scheduler WHERE singleton_id=1)
+FROM settings WHERE key='software_update_policy'`).Scan(&schemaVersion, &policySchema, &checkHours, &maximumDelay, &channel, &phase, &storedStagedAt, &deadline); err != nil {
+		t.Fatal(err)
+	}
+	if schemaVersion != 34 || policySchema != 2 || checkHours != 12 || maximumDelay != 72 || channel != "testing" || phase != "STAGED" || storedStagedAt != "2026-09-01T03:30:00.000Z" || deadline != "2026-09-04T03:30:00.000Z" {
+		t.Fatalf("migration 33 projection=%d/%d/%d/%d %s %s %s %s", schemaVersion, policySchema, checkHours, maximumDelay, channel, phase, storedStagedAt, deadline)
+	}
+	if _, err := database.ExecContext(ctx, "UPDATE software_update_scheduler SET phase='MANUAL_ATTENTION' WHERE singleton_id=1"); err != nil {
+		t.Fatalf("migration 33 rejected manual-attention phase: %v", err)
 	}
 }
 

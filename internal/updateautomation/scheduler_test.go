@@ -130,16 +130,17 @@ func (recorder *fakeState) AppendEvent(_ context.Context, input state.EventInput
 }
 
 type schedulerFixture struct {
-	database  *sql.DB
-	clock     time.Time
-	policy    *updatepkg.AutomationPolicyRepository
-	stager    *fakeStager
-	remote    *fakeRemote
-	apply     *fakeApply
-	path      *fakePath
-	states    *fakeState
-	readiness *fakeReadiness
-	scheduler *Scheduler
+	database               *sql.DB
+	clock                  time.Time
+	policy                 *updatepkg.AutomationPolicyRepository
+	stager                 *fakeStager
+	remote                 *fakeRemote
+	apply                  *fakeApply
+	path                   *fakePath
+	states                 *fakeState
+	readiness              *fakeReadiness
+	scheduler              *Scheduler
+	maximumApplyDelayHours int
 }
 
 func newSchedulerFixture(t *testing.T) *schedulerFixture {
@@ -173,10 +174,15 @@ func newSchedulerFixture(t *testing.T) *schedulerFixture {
 func (fixture *schedulerFixture) setPolicy(t *testing.T, check, download, apply bool) updatepkg.AutomationPolicy {
 	t.Helper()
 	defaults := updatepkg.DefaultAutomationPolicy()
+	maximumApplyDelayHours := fixture.maximumApplyDelayHours
+	if maximumApplyDelayHours == 0 {
+		maximumApplyDelayHours = defaults.MaximumApplyDelayHours
+	}
 	policy, err := fixture.policy.Update(context.Background(), updatepkg.AutomationPolicyInput{
 		Channel: "stable", AutomaticCheckEnabled: check, AutomaticDownloadEnabled: download,
 		AutomaticApplyEnabled: apply, CheckIntervalHours: 1, JitterMinutes: 10,
 		MaintenanceWindowEnabled: apply, MaintenanceStartMinuteUTC: 180, MaintenanceDurationMinutes: 120,
+		MaximumApplyDelayHours: maximumApplyDelayHours,
 		RetentionMaximumPoints: defaults.RetentionMaximumPoints, RetentionMaximumBytes: defaults.RetentionMaximumBytes,
 		RetentionMaximumAgeDays: defaults.RetentionMaximumAgeDays, RetentionMinimumOldPoints: defaults.RetentionMinimumOldPoints,
 	})
@@ -284,7 +290,7 @@ func TestSchedulerNeverAdoptsManualPendingRelease(t *testing.T) {
 
 func TestSchedulerSuppressesMaintenanceAndDoesNotRetryAmbiguousApplyIntent(t *testing.T) {
 	fixture := newSchedulerFixture(t)
-	fixture.setPolicy(t, true, true, true)
+	policy := fixture.setPolicy(t, true, true, true)
 	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +316,9 @@ func TestSchedulerSuppressesMaintenanceAndDoesNotRetryAmbiguousApplyIntent(t *te
 		status.Phase = PhaseApplyIntent
 		status.StagedUpdateID = fixture.stager.operation.UpdateID
 		status.StagedVersion = fixture.stager.operation.GatewayVersion
+		if err := setStagingEvidence(status, fixture.stager.operation, policy); err != nil {
+			return err
+		}
 		status.ApplyIntentAt = fixture.clock.Format(time.RFC3339Nano)
 		status.UpdatedAt = fixture.clock.Format(time.RFC3339Nano)
 		return nil
@@ -363,6 +372,45 @@ func TestSchedulerHonorsDeferredDeadlineAndAutomaticApplyReadiness(t *testing.T)
 	}
 	if fixture.readiness.calls != 2 || fixture.path.calls != 1 || fixture.apply.applyCalls != 1 {
 		t.Fatalf("due deferred apply not dispatched: readiness/path/apply=%d/%d/%d", fixture.readiness.calls, fixture.path.calls, fixture.apply.applyCalls)
+	}
+}
+
+func TestSchedulerStopsUnattendedRetriesAtMaximumApplyDelay(t *testing.T) {
+	fixture := newSchedulerFixture(t)
+	fixture.maximumApplyDelayHours = 1
+	fixture.setPolicy(t, true, true, true)
+	fixture.remote.available = availableFixture()
+	fixture.remote.operation = automaticOperationFixture()
+	fixture.readiness.reason = ReadinessFullPathUnavailable
+	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.makeDue(t)
+	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := fixture.scheduler.Repository.Get(context.Background())
+	if err != nil || staged.Phase != PhaseStaged || staged.StagedAt != fixture.remote.operation.CreatedAt || staged.ApplyDeadlineAt != fixture.clock.Add(time.Hour).Format(time.RFC3339Nano) {
+		t.Fatalf("staged deadline status=%+v error=%v", staged, err)
+	}
+	fixture.clock = fixture.clock.Add(time.Hour)
+	fixture.readiness.reason = ""
+	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := fixture.scheduler.Repository.Get(context.Background())
+	if err != nil || expired.Phase != PhaseManualAttention || expired.LastErrorCode != "AUTO_APPLY_DEADLINE_EXPIRED" || expired.NextApplyAt != "" || fixture.readiness.calls != 1 || fixture.path.calls != 0 || fixture.apply.applyCalls != 0 {
+		t.Fatalf("expired status=%+v readiness/path/apply=%d/%d/%d error=%v", expired, fixture.readiness.calls, fixture.path.calls, fixture.apply.applyCalls, err)
+	}
+	if len(fixture.states.events) == 0 || fixture.states.events[len(fixture.states.events)-1].Type != "AUTOMATIC_UPDATE_APPLY_DEADLINE_EXPIRED" || fixture.states.events[len(fixture.states.events)-1].Severity != "WARNING" {
+		t.Fatalf("deadline audit events=%+v", fixture.states.events)
+	}
+	fixture.clock = fixture.clock.Add(24 * time.Hour)
+	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.readiness.calls != 1 || fixture.path.calls != 0 || fixture.apply.applyCalls != 0 {
+		t.Fatalf("manual-attention state retried readiness/path/apply=%d/%d/%d", fixture.readiness.calls, fixture.path.calls, fixture.apply.applyCalls)
 	}
 }
 

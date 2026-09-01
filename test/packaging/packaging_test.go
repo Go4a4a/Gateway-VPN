@@ -20,7 +20,7 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 6 }", "user_ingress_interfaces", "local_management_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 7 }", "user_ingress_interfaces", "local_management_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
@@ -124,7 +124,7 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
-	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "openssh-server", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "preserve_state_root=%s", "lan_members=%s", "ssh_was_enabled=%s", "ssh_was_active=%s", "90-gateway-vpn-ipv4-forwarding.conf", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
+	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "openssh-server", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "old_ipv4_src_valid_mark=%s", "preserve_state_root=%s", "lan_members=%s", "ssh_was_enabled=%s", "ssh_was_active=%s", "90-gateway-vpn-ipv4-forwarding.conf", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer missing %q", required)
 		}
@@ -201,8 +201,10 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"candidate_runtime_ready",
 		"status_age <= 30 && control_age >= -5 && control_age <= 30",
 		"Candidate Gateway runtime did not converge to a fresh healthy state",
-		`if [[ $OLD_MARKER_FIELD_COUNT == 20 ]]; then`,
-		`$OLD_MARKER_FIELD_COUNT != 20 && $MERGED_FIELD_COUNT == 18`,
+		`if [[ $OLD_MARKER_FIELD_COUNT == 20 || $OLD_MARKER_FIELD_COUNT == 21 ]]; then`,
+		`new_marker_value old_ipv4_src_valid_mark`,
+		`($OLD_MARKER_FIELD_COUNT == 20 || $OLD_MARKER_FIELD_COUNT == 21) && $MERGED_FIELD_COUNT == 21`,
+		`($OLD_MARKER_FIELD_COUNT != 20 && $OLD_MARKER_FIELD_COUNT != 21) && $MERGED_FIELD_COUNT == 18`,
 		"Merged host-upgrade install marker does not preserve the original OS state",
 		"/var/lib/gateway-vpn-privileged/update-rollback/pending.json",
 		"update-lifecycle-check",
@@ -325,6 +327,10 @@ func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectN
 		`grep -Fq "\"version\": \"$RELEASE_VERSION\"" /var/lib/gateway-vpn/install-report.json`,
 		`grep -Fq "\"lan_interface\": \"$LAN_INTERFACE\"" /var/lib/gateway-vpn/install-report.json`,
 		`grep -Fq "\"lan_address\": \"$LAN_ADDRESS\"" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"wireguard_endpoint_host\": \"$WIREGUARD_ENDPOINT_HOST\"" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"wireguard_subnet\": \"$WIREGUARD_SUBNET\"" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"wireguard_listen_port\": $WIREGUARD_LISTEN_PORT" /var/lib/gateway-vpn/install-report.json`,
+		`grep -Fq "\"wireguard_client_dns\": \"$WIREGUARD_CLIENT_DNS\"" /var/lib/gateway-vpn/install-report.json`,
 		"HOST_UPGRADE_REQUIRED=0",
 		"INNER_UPGRADE_HINT=0",
 		`$(readlink -f /proc/$$/fd/9) == "$lock"`,
@@ -335,6 +341,15 @@ func TestGatewayInstallerAllowsOnlyStrictCompletedOrSignedUpgradeToBypassDirectN
 		if !strings.Contains(installer, required) {
 			t.Errorf("Gateway installer completed-install DNS exception missing %q", required)
 		}
+	}
+	hint := strings.Index(installer, "COMPLETED_INSTALL_HINT=0")
+	ntp := strings.Index(installer, "if [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) != yes ]]; then")
+	dns := strings.Index(installer, "if ! getent ahostsv4 github.com >/dev/null; then")
+	if hint < 0 || ntp < 0 || dns < 0 || hint >= ntp || ntp >= dns {
+		t.Fatal("strict completed-install hint must be established before both NTP and DNS offline exceptions")
+	}
+	if !strings.Contains(installer, "COMPLETED_INSTALL_HINT == 1 || HOST_UPGRADE_REQUIRED == 1") {
+		t.Fatal("same-version same-policy completed install cannot bypass unavailable NTP")
 	}
 }
 
@@ -409,10 +424,10 @@ func TestChannelBuilderPinsBootstrapBeforeSudoAndProducesExactCommand(t *testing
 	root := repositoryRoot(t)
 	builder := read(t, filepath.Join(root, "scripts", "build-channel.sh"))
 	for _, required := range []string{
-		"channel-sign", "channel-verify", "channel-install-command",
+		"channel-sign", "channel-verify", "channel-install-command", "channel-windows-deploy-command",
 		"channel-$CHANNEL.json", "channel-$CHANNEL.sig", "update-signing.pub",
 		"--github-repository", "--release-tag", "--source-commit", "--interactive",
-		"install-gateway-$VERSION.command.txt", "clean committed worktree",
+		"install-gateway-$VERSION.command.txt", "install-deploy-windows-$VERSION.command.txt", "clean committed worktree",
 	} {
 		if !strings.Contains(builder, required) {
 			t.Errorf("channel builder missing %q", required)
@@ -448,8 +463,8 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	for _, required := range []string{
 		"build-release.sh", "build-vps-release.sh", "build-deploy.sh", "build-channel.sh",
 		"release-key-verify", "release-verify", "--initial-install", "vps-release-verify", "channel-verify",
-		"--artifact \"bootstrap=", "--artifact \"deploy=", "--artifact \"gateway=", "--artifact \"vps=",
-		"bootstrap=$ROOT/dist/", "deploy=$ROOT/dist/", "gateway=$ROOT/dist/", "vps=$ROOT/dist/",
+		"--artifact \"bootstrap=", "--artifact \"deploy=", "--artifact \"deploy-windows=", "--artifact \"gateway=", "--artifact \"vps=",
+		"bootstrap=$ROOT/dist/", "deploy=$ROOT/dist/", "deploy-windows=$ROOT/dist/", "gateway=$ROOT/dist/", "vps=$ROOT/dist/",
 		"regular non-symlink files", "PRIVATE_MODE", "absent dist directory", "clean committed worktree",
 	} {
 		if !strings.Contains(bundle, required) {
@@ -473,7 +488,8 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 		"GH_TOKEN", "REMOTE_COMMIT", "--verify-tag --draft", "go run ./cmd/gateway-vpnctl", "--artifact \"bootstrap=",
 		"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz",
 		"gateway-vpn-vps-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64",
-		"gateway-vpn-deploy-$VERSION-linux-amd64", "channel-$CHANNEL.json", "update-signing.pub",
+		"gateway-vpn-deploy-$VERSION-linux-amd64", "gateway-vpn-deploy-$VERSION-windows-amd64.exe",
+		"install-deploy-windows-$VERSION.command.txt", "channel-$CHANNEL.json", "update-signing.pub",
 		"Draft created only", "enable GitHub release immutability",
 	} {
 		if !strings.Contains(publisher, required) {
@@ -558,8 +574,8 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	}
 	usesPattern := regexp.MustCompile(`(?m)^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$`)
 	matches := usesPattern.FindAllStringSubmatch(workflow, -1)
-	if len(matches) != 4 {
-		t.Fatalf("expected four full-SHA official Action references, got %d", len(matches))
+	if len(matches) != 6 {
+		t.Fatalf("expected six full-SHA official Action references, got %d", len(matches))
 	}
 	if strings.Count(workflow, "uses:") != len(matches) {
 		t.Fatal("GitHub CI contains an unpinned Action reference")
@@ -573,7 +589,7 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 func TestDeployLauncherBuilderAndCommandArePinnedAndPrivateKeyFree(t *testing.T) {
 	root := repositoryRoot(t)
 	builder := read(t, filepath.Join(root, "scripts", "build-deploy.sh"))
-	for _, required := range []string{"gateway-vpn-deploy-$VERSION-linux-amd64", "./cmd/gateway-vpn-deploy", "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64", "clean committed worktree", "spdxVersion", "provenance", "sha256sum --binary"} {
+	for _, required := range []string{"gateway-vpn-deploy-$VERSION-linux-amd64", "gateway-vpn-deploy-$VERSION-windows-amd64.exe", "./cmd/gateway-vpn-deploy", "CGO_ENABLED=0", "GOOS=linux", "GOOS=windows", "GOARCH=amd64", "clean committed worktree", "spdxVersion", "provenance", "sha256sum --binary"} {
 		if !strings.Contains(builder, required) {
 			t.Errorf("deploy builder missing %q", required)
 		}
@@ -582,7 +598,7 @@ func TestDeployLauncherBuilderAndCommandArePinnedAndPrivateKeyFree(t *testing.T)
 		t.Fatal("deploy builder unexpectedly accepts private key material")
 	}
 	commandSource := read(t, filepath.Join(root, "internal", "distribution", "install_command.go"))
-	for _, required := range []string{"func DeployCommand", "RoleDeploy", "test \\\"$actual\\\"", "--gateway-ssh", "--vps-ssh", "--known-hosts", "--admin-public-key", "--apply"} {
+	for _, required := range []string{"func DeployCommand", "func WindowsDeployCommand", "RoleDeploy", "test \\\"$actual\\\"", "Get-FileHash", "--interactive", "--gateway-ssh", "--vps-ssh", "--known-hosts", "--admin-public-key", "--apply"} {
 		if !strings.Contains(commandSource, required) {
 			t.Errorf("deploy command generator missing %q", required)
 		}
@@ -804,7 +820,7 @@ func TestVPSUpdatePackagingHasIndependentLiveAndBootRecoveryBoundaries(t *testin
 func TestSafeApplyPrivilegesAreIsolatedBehindSocketAndIndependentTimer(t *testing.T) {
 	root := repositoryRoot(t)
 	socket := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-network-broker.socket"))
-	for _, required := range []string{"ListenStream=/run/gateway-vpn/network-broker.sock", "SocketUser=gateway-vpn", "SocketMode=0600"} {
+	for _, required := range []string{"ListenStream=/run/gateway-vpn/network-broker.sock", "SocketUser=gateway-vpn", "SocketGroup=gateway-vpn", "SocketMode=0660"} {
 		if !strings.Contains(socket, required) {
 			t.Errorf("broker socket missing %q", required)
 		}
@@ -935,7 +951,7 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	recovery := read(t, filepath.Join(root, "scripts", "recover-gateway-install.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`, "boot_network_policy", "grub_policy", "old_ipv4_forward", "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "restore_systemd_unit_state ssh.service", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "flock -n 9", "Gateway recovery marker field count is invalid", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21`, "boot_network_policy", "grub_policy", "old_ipv4_forward", "old_ipv4_src_valid_mark", "SOURCE_MARK_STATE_KNOWN", `net.ipv4.conf.all.src_valid_mark=$OLD_IPV4_SRC_VALID_MARK`, "preserve_state_root", "preserve_lan_address", "lan_members", "lan_member_was_up", "ssh_was_enabled", "ssh_was_active", "restore_systemd_unit_state ssh.service", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress", "active marker retained for retry", "if ((FAILED))", "rolled-back-"} {
 		if !strings.Contains(recovery, required) {
 			t.Errorf("Gateway recovery missing %q", required)
 		}
@@ -971,10 +987,34 @@ func TestGatewayFirstInstallRecoveryIsDurableOwnedAndSerialized(t *testing.T) {
 		}
 	}
 	uninstaller := read(t, filepath.Join(root, "scripts", "uninstall.sh"))
-	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`, "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "90-gateway-vpn.cfg", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "restore_systemd_unit_state ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress"} {
+	for _, required := range []string{"/run/lock/gateway-vpn-install.lock", "Recover the interrupted Gateway install", `"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21`, "old_ipv4_src_valid_mark", "SOURCE_MARK_STATE_KNOWN", `net.ipv4.conf.all.src_valid_mark=$OLD_IPV4_SRC_VALID_MARK`, "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "lan_members", "systemd-networkd-wait-online.service.d/gateway-vpn.conf", "90-gateway-vpn.cfg", "update-grub", "grub-script-check", "ip link set dev \"$member\" nomaster", "ip link delete dev \"$LAN_INTERFACE\" type bridge", "restore_systemd_unit_state ssh.service", "nft delete table inet gateway_vpn", "ip link delete dev wg-mgmt", "ip link delete dev wg-ingress"} {
 		if !strings.Contains(uninstaller, required) {
 			t.Errorf("Gateway uninstall missing %q", required)
 		}
+	}
+}
+
+func TestGatewayInstallMarkerLifecycleGateCoversCurrentAndLegacySchemas(t *testing.T) {
+	root := repositoryRoot(t)
+	harness := read(t, filepath.Join(root, "test", "release-gate", "validate_gateway_install_marker_lifecycle.sh"))
+	for _, required := range []string{
+		"GATEWAY_VPN_RELEASE_GATE",
+		"--release-gate-only",
+		"14 || $1 == 16 || $1 == 18 || $1 == 20 || $1 == 21",
+		"old_ipv4_src_valid_mark",
+		"ssh_socket_was_enabled|ssh_socket_was_active",
+		"log_reader_user|log_reader_was_member",
+		"boot_network_policy|grub_policy",
+		"GATEWAY_INSTALL_MARKER_ACTIVATE_PASS",
+		"GATEWAY_INSTALL_MARKER_CLEANUP_PASS",
+		"net.ipv4.conf.all.src_valid_mark = 1",
+	} {
+		if !strings.Contains(harness, required) {
+			t.Errorf("Gateway install-marker lifecycle gate missing %q", required)
+		}
+	}
+	if strings.Contains(harness, "rm -rf /var/lib/gateway-vpn-privileged") {
+		t.Fatal("release-gate marker helper can destroy the transaction evidence root")
 	}
 }
 
@@ -1000,9 +1040,9 @@ func TestGatewayOpenSSHSocketAndLogAccessAreTransactionallyRestored(t *testing.T
 	}
 	for name, script := range map[string]string{"recovery": recovery, "uninstaller": uninstaller} {
 		for _, required := range []string{
-			`"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20`,
+			`"$MARKER_FIELD_COUNT" == 14 || "$MARKER_FIELD_COUNT" == 16 || "$MARKER_FIELD_COUNT" == 18 || "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21`,
 			"SSH_SOCKET_STATE_KNOWN=0",
-			`if [[ "$MARKER_FIELD_COUNT" == 20 ]]; then`,
+			`if [[ "$MARKER_FIELD_COUNT" == 20 || "$MARKER_FIELD_COUNT" == 21 ]]; then`,
 			`if [[ "$load_state" == not-found ]]; then`,
 			`((desired_enabled == 0 && desired_active == 0)) && return 0`,
 			`restore_systemd_unit_state ssh.socket "$SSH_SOCKET_WAS_ENABLED" "$SSH_SOCKET_WAS_ACTIVE" "OpenSSH socket"`,
@@ -1030,6 +1070,7 @@ func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
 	for _, required := range []string{
 		"GATEWAY_VPN_UNINSTALL_UNIT", "ROOT=/var/lib/gateway-vpn-uninstall", "ACTIVE=$ROOT/active", "uninstall-[a-f0-9]{32}",
 		"release-verify", "tooling-ready", "gateway-vpn_sha256", "sha256sum --binary", "gateway-vpn PATH_BLOCKED",
+		`"$TOOLING/gateway-vpn" firewall-boot --config /etc/gateway-vpn/config.yaml --apply`,
 		"GATEWAY_VPN_UNINSTALL_GUARDIAN=1", "completed-$OPERATION_ID", "sync -f \"$RECEIPT_TMP\"",
 		"/var/lib/gateway-vpn/update-staging/pending-update.json", `"$TOOLING/gateway-vpn" update-lifecycle-check`,
 		"/var/lib/gateway-vpn-privileged/update-rollback/pending.json", "/var/lib/gateway-vpn/recovery/pending-restore.json",
@@ -1070,6 +1111,9 @@ func TestGatewayWebUIUninstallIsDurableTypedAndBootRecoverable(t *testing.T) {
 	}
 	if !strings.Contains(uninstaller, "Gateway did not enter PATH_BLOCKED before uninstall") || !strings.Contains(uninstaller, "rm -rf /var/log/gateway-vpn") || !strings.Contains(uninstaller, "/var/lib/gateway-vpn-privileged/update-rollback/pending.json") || strings.Contains(uninstaller, "gateway-vpn-state-$(date") {
 		t.Fatal("CLI uninstall does not match fail-closed preserve/purge contract")
+	}
+	if !strings.Contains(uninstaller, `"$UPDATE_LIFECYCLE_CHECKER" firewall-boot --config /etc/gateway-vpn/config.yaml --apply`) || strings.Contains(uninstaller, `/usr/sbin/nft --file /etc/gateway-vpn/nftables/boot.nft`) {
+		t.Fatal("CLI uninstall does not atomically replace the owned fail-closed table")
 	}
 	for _, required := range []string{"assert_no_update_restore_transaction", "CONTROL_PLANE_WAS_ACTIVE", "update-lifecycle-check"} {
 		if !strings.Contains(uninstaller, required) {
@@ -1123,6 +1167,7 @@ func TestGatewayInstallerAcceptsOnlyAuthenticatedTerminalUninstallRemnants(t *te
 
 	for _, required := range []string{
 		"UNINSTALL_TERMINAL_REMNANTS=0",
+		`if [[ ! -e /opt/gateway-vpn/current && ! -L /opt/gateway-vpn/current ]] &&`,
 		"Previous Gateway uninstall receipt root is unsafe",
 		"completed-uninstall-*",
 		"Previous Gateway uninstall terminal receipt is unavailable or unsafe",
@@ -1151,6 +1196,36 @@ func TestGatewayInstallerAcceptsOnlyAuthenticatedTerminalUninstallRemnants(t *te
 	}
 	if strings.Contains(installer, "if ((UNINSTALL_TERMINAL_REMNANTS)); then\n      continue") {
 		t.Fatal("Gateway installer terminal receipt exception is broad enough to bypass unrelated managed-path conflicts")
+	}
+}
+
+func TestGatewayInstallerClassifiesInstalledAndPartialPointersBeforeTerminalRemnants(t *testing.T) {
+	root := repositoryRoot(t)
+	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
+	upgrader := read(t, filepath.Join(root, "scripts", "upgrade-gateway-host.sh"))
+
+	guard := `if [[ ! -e /opt/gateway-vpn/current && ! -L /opt/gateway-vpn/current ]] &&
+   [[ -e /etc/systemd/system/gateway-vpn-uninstall.service || -L /etc/systemd/system/gateway-vpn-uninstall.service || -e /usr/libexec/gateway-vpn-uninstall-job || -L /usr/libexec/gateway-vpn-uninstall-job ]]; then`
+	if strings.Count(installer, guard) != 1 {
+		t.Fatal("terminal uninstall remnants are not gated on complete absence of the current install pointer")
+	}
+	for _, required := range []string{
+		`if [[ -e "$DEST" || -L /opt/gateway-vpn/current || -L /opt/gateway-vpn/recovery || -e /var/lib/gateway-vpn/install-report.json ]]; then`,
+		`[[ -d "$DEST" && ! -L "$DEST" && -L /opt/gateway-vpn/current && $(readlink /opt/gateway-vpn/current) == "releases/v$RELEASE_VERSION"`,
+		`/opt/gateway-vpn/current /opt/gateway-vpn/recovery`,
+		`[[ ! -e "$conflict" && ! -L "$conflict" ]] || { echo "Conflicting Gateway managed path exists: $conflict"`,
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Gateway installer can bypass partial current-pointer validation: missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`[[ -L /opt/gateway-vpn/current && -L /opt/gateway-vpn/recovery ]]`,
+		`[[ -d $OLD_RELEASE && ! -L $OLD_RELEASE`,
+	} {
+		if !strings.Contains(upgrader, required) {
+			t.Errorf("Gateway host upgrade can accept a dangling or incomplete current pointer: missing %q", required)
+		}
 	}
 }
 
@@ -1238,7 +1313,7 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft delete table inet gateway_vpn",
 		"nft flush ruleset",
 		"firewall_schema_generation",
-		`\[[[:space:]]*6[[:space:]]*\]`,
+		`\[[[:space:]]*7[[:space:]]*\]`,
 		"active_tun_interfaces",
 		"useradd --system --no-create-home --shell /usr/sbin/nologin",
 		"gateway-vpn-mihomo",

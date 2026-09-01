@@ -205,6 +205,9 @@ func (scheduler *Scheduler) RunOnce(ctx context.Context) (resultErr error) {
 		return err
 	}
 	if status.StagedUpdateID != "" {
+		if policy.AutomaticApplyEnabled && deadlineDue(status.ApplyDeadlineAt, now) {
+			return scheduler.maybeApply(operationContext, policy, status, now)
+		}
 		if status.NextApplyAt != "" && !deadlineDue(status.NextApplyAt, now) {
 			return scheduler.leaseResult(leaseError)
 		}
@@ -235,6 +238,13 @@ func (scheduler *Scheduler) syncPolicy(ctx context.Context, policy updatepkg.Aut
 		status.LastErrorCode = ""
 		status.LastResultCode = "POLICY_CHANGED"
 		status.NextApplyAt = ""
+		if status.StagedUpdateID != "" && status.StagedAt != "" {
+			staged, err := time.Parse(time.RFC3339Nano, status.StagedAt)
+			if err != nil {
+				return errors.New("stored automatic staging time is invalid")
+			}
+			status.ApplyDeadlineAt = staged.Add(time.Duration(policy.MaximumApplyDelayHours) * time.Hour).Format(time.RFC3339Nano)
+		}
 		if status.StagedUpdateID == "" {
 			status.ApplyIntentAt = ""
 			status.ApplyObservedAt = ""
@@ -295,6 +305,8 @@ func (scheduler *Scheduler) reconcile(ctx context.Context, policy updatepkg.Auto
 				current.Phase = PhaseManualPending
 				current.StagedUpdateID = ""
 				current.StagedVersion = ""
+				current.StagedAt = ""
+				current.ApplyDeadlineAt = ""
 				current.ApplyIntentAt = ""
 				current.ApplyObservedAt = ""
 				current.NextApplyAt = ""
@@ -309,11 +321,17 @@ func (scheduler *Scheduler) reconcile(ctx context.Context, policy updatepkg.Auto
 			result, err := scheduler.outcomeUnknown(ctx, status, now, "AUTO_APPLY_OUTCOME_UNKNOWN")
 			return result, true, err
 		}
+		if status.StagedUpdateID == operation.UpdateID && status.Phase == PhaseManualAttention {
+			return status, true, nil
+		}
 		if operation.SourceChannel != policy.Channel || !policy.AutomaticDownloadEnabled {
 			result, err := scheduler.Repository.UpdateOwned(ctx, scheduler.Owner, func(current *Status) error {
 				current.Phase = PhaseManualPending
 				current.StagedUpdateID = operation.UpdateID
 				current.StagedVersion = operation.GatewayVersion
+				if err := setStagingEvidence(current, operation, policy); err != nil {
+					return err
+				}
 				current.NextApplyAt = ""
 				current.LastResultCode = "AUTO_STAGE_POLICY_MISMATCH"
 				current.LastErrorCode = "AUTO_STAGE_POLICY_MISMATCH"
@@ -330,6 +348,9 @@ func (scheduler *Scheduler) reconcile(ctx context.Context, policy updatepkg.Auto
 			current.Phase = PhaseStaged
 			current.StagedUpdateID = operation.UpdateID
 			current.StagedVersion = operation.GatewayVersion
+			if err := setStagingEvidence(current, operation, policy); err != nil {
+				return err
+			}
 			current.CandidateVersion = operation.GatewayVersion
 			current.CandidateReference = operation.SourceReference
 			current.ApplyIntentAt = ""
@@ -448,6 +469,9 @@ func (scheduler *Scheduler) checkAndMaybeStage(ctx context.Context, policy updat
 		current.Phase = PhaseStaged
 		current.StagedUpdateID = operation.UpdateID
 		current.StagedVersion = operation.GatewayVersion
+		if err := setStagingEvidence(current, operation, policy); err != nil {
+			return err
+		}
 		current.CandidateVersion = operation.GatewayVersion
 		current.CandidateReference = operation.SourceReference
 		current.LastCompletedAt = completed.Format(time.RFC3339Nano)
@@ -472,6 +496,24 @@ func (scheduler *Scheduler) maybeApply(ctx context.Context, policy updatepkg.Aut
 			current.UpdatedAt = now.Format(time.RFC3339Nano)
 			return nil
 		})
+		return err
+	}
+	if deadlineDue(status.ApplyDeadlineAt, now) {
+		_, err := scheduler.Repository.UpdateOwned(ctx, scheduler.Owner, func(current *Status) error {
+			current.Phase = PhaseManualAttention
+			current.NextApplyAt = ""
+			current.LastCompletedAt = now.Format(time.RFC3339Nano)
+			current.LastResultCode = "MANUAL_ATTENTION_REQUIRED"
+			current.LastErrorCode = "AUTO_APPLY_DEADLINE_EXPIRED"
+			current.UpdatedAt = now.Format(time.RFC3339Nano)
+			return nil
+		})
+		if err == nil {
+			_ = scheduler.State.AppendEvent(ctx, state.EventInput{Severity: "WARNING", Type: "AUTOMATIC_UPDATE_APPLY_DEADLINE_EXPIRED", Details: map[string]any{
+				"update_id": status.StagedUpdateID, "gateway_version": status.StagedVersion,
+				"staged_at": status.StagedAt, "apply_deadline_at": status.ApplyDeadlineAt,
+			}})
+		}
 		return err
 	}
 	if !insideMaintenanceWindow(policy, now) {
@@ -650,6 +692,8 @@ func (scheduler *Scheduler) finish(ctx context.Context, _ Status, policy updatep
 		current.CandidatePublishedAt = ""
 		current.StagedUpdateID = ""
 		current.StagedVersion = ""
+		current.StagedAt = ""
+		current.ApplyDeadlineAt = ""
 		current.ApplyIntentAt = ""
 		current.ApplyObservedAt = ""
 		current.NextApplyAt = ""
@@ -756,6 +800,19 @@ func validAvailableCandidate(available updateremote.Available, channel string) b
 	}
 	status := Status{Phase: PhaseCandidate, Channel: channel, CandidateVersion: available.CandidateVersion, CandidateReference: available.SourceReference, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	return status.validateCandidateOnly() == nil
+}
+
+func setStagingEvidence(status *Status, operation updatepkg.Operation, policy updatepkg.AutomationPolicy) error {
+	if status == nil || operation.UpdateID == "" || operation.GatewayVersion == "" {
+		return errors.New("automatic staging evidence is incomplete")
+	}
+	staged, err := time.Parse(time.RFC3339Nano, operation.CreatedAt)
+	if err != nil || staged.IsZero() {
+		return errors.New("automatic staging timestamp is invalid")
+	}
+	status.StagedAt = staged.UTC().Format(time.RFC3339Nano)
+	status.ApplyDeadlineAt = staged.UTC().Add(time.Duration(policy.MaximumApplyDelayHours) * time.Hour).Format(time.RFC3339Nano)
+	return nil
 }
 
 func insideMaintenanceWindow(policy updatepkg.AutomationPolicy, now time.Time) bool {

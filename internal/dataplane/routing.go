@@ -31,6 +31,7 @@ type RoutingBackend struct {
 	Uplinks           *uplink.Repository
 	Executor          platformexec.Executor
 	IP                string
+	Sysctl            string
 	LANPrefix         string
 	WireGuardPrefix   string
 	BootstrapDNS      []string
@@ -48,6 +49,9 @@ type RoutingCheckResult struct {
 func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 	if err := backend.validate(); err != nil {
 		return err
+	}
+	if err := backend.verifySourceMarkRouting(ctx); err != nil {
+		return errors.Join(err, backend.Gate.BlockPath(context.WithoutCancel(ctx)))
 	}
 	desired, readyUplinks, err := backend.desiredPlan(ctx)
 	if err != nil {
@@ -90,6 +94,9 @@ func (backend RoutingBackend) SyncRouting(ctx context.Context) error {
 // verification as SyncRouting, but cannot mutate routes or open a data path.
 func (backend RoutingBackend) CheckRouting(ctx context.Context) (RoutingCheckResult, error) {
 	if err := backend.validateReadOnly(); err != nil {
+		return RoutingCheckResult{}, err
+	}
+	if err := backend.verifySourceMarkRouting(ctx); err != nil {
 		return RoutingCheckResult{}, err
 	}
 	desired, readyUplinks, err := backend.desiredPlan(ctx)
@@ -152,6 +159,9 @@ func (backend RoutingBackend) validateReadOnly() error {
 	if backend.Uplinks == nil || backend.Executor == nil || backend.IP != "/usr/sbin/ip" {
 		return errors.New("fixed Ubuntu iproute2 backend and uplink inventory are required")
 	}
+	if backend.Sysctl != "/usr/sbin/sysctl" {
+		return errors.New("source-mark routing check requires the fixed Ubuntu sysctl executable")
+	}
 	if backend.RoutingTableStart < 256 || backend.FwmarkStart == 0 {
 		return errors.New("valid modem routing allocation ranges are required")
 	}
@@ -169,6 +179,17 @@ func (backend RoutingBackend) validateReadOnly() error {
 		if err != nil || !address.Is4() || address.IsUnspecified() || address.IsMulticast() {
 			return errors.New("bootstrap DNS must contain usable IPv4 addresses")
 		}
+	}
+	return nil
+}
+
+func (backend RoutingBackend) verifySourceMarkRouting(ctx context.Context) error {
+	result, err := backend.Executor.Run(ctx, platformexec.Request{
+		Executable: backend.Sysctl,
+		Arguments:  []string{"-n", "net.ipv4.conf.all.src_valid_mark"},
+	})
+	if err != nil || strings.TrimSpace(result.Stdout) != "1" {
+		return errors.New("IPv4 source-mark reverse-path validation is unavailable")
 	}
 	return nil
 }

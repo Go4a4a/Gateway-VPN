@@ -36,6 +36,7 @@ type BrokerServer struct {
 	PathPlane        PathAdmin
 	Routing          RoutingAdmin
 	Bootstrap        BootstrapAdmin
+	UpdateService    UpdateServiceAdmin
 	WireGuard        WireGuardAdmin
 	Ingress          WireGuardIngressAdmin
 	Logging          LoggingAdmin
@@ -79,6 +80,10 @@ type BootstrapAdmin interface {
 	AuthorizeBootstrap(context.Context, dataplane.BootstrapAuthorization) error
 	AuthorizeDirectProbe(context.Context, dataplane.DirectProbeAuthorization) error
 	AuthorizeMihomoEndpoints(context.Context, dataplane.MihomoEndpointAuthorization) error
+}
+
+type UpdateServiceAdmin interface {
+	AuthorizeUpdateService(context.Context, dataplane.UpdateServiceAuthorization) error
 }
 
 // WireGuardAdmin exposes only an input-free convergence operation. Endpoint,
@@ -188,6 +193,7 @@ type RemovalAdmin interface {
 type ManagementFabricAdmin interface {
 	Apply(context.Context) error
 	NeedsApply(context.Context) (bool, string, error)
+	ProbeResource(context.Context, string) (managementfabric.ResourceProbeResult, error)
 	ConfigureAdminContour(context.Context, managementfabric.AdminContourRequest) (managementfabric.AdminContour, error)
 	RotateAdminContourIdentity(context.Context) (managementfabric.AdminContour, error)
 }
@@ -297,6 +303,9 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 		return nil, errors.New("network apply engine is required")
 	}
 	server := &BrokerServer{Engine: engine, DataPlane: dataPlane, PathPlane: pathPlane, Routing: routingAdmin, Bootstrap: bootstrapAdmin, WireGuard: wireGuardAdmin, Logging: loggingAdmin, Journal: journalAdmin, Diagnostics: diagnosticsAdmin, Restore: restoreAdmin, Update: updateAdmin, Traffic: trafficAdmin, Recovery: recoveryAdmin}
+	if updateService, ok := bootstrapAdmin.(UpdateServiceAdmin); ok {
+		server.UpdateService = updateService
+	}
 	if restorePoints, ok := updateAdmin.(UpdateRestorePointAdmin); ok {
 		server.UpdateRestore = restorePoints
 	}
@@ -323,6 +332,9 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 		mux.HandleFunc("POST /v1/bootstrap/authorize", server.authorizeBootstrap)
 		mux.HandleFunc("POST /v1/direct-probe/authorize", server.authorizeDirectProbe)
 		mux.HandleFunc("POST /v1/mihomo/endpoints/authorize", server.authorizeMihomoEndpoints)
+		if server.UpdateService != nil {
+			mux.HandleFunc("POST /v1/update-service/authorize", server.authorizeUpdateService)
+		}
 	}
 	if wireGuardAdmin != nil {
 		mux.HandleFunc("POST /v1/wireguard/sync", server.syncWireGuard)
@@ -372,6 +384,7 @@ func NewBrokerServerWithFullRuntime(engine *Engine, dataPlane DataPlaneAdmin, pa
 	mux.HandleFunc("POST /v1/uninstall/dispatch", server.dispatchUninstall)
 	mux.HandleFunc("POST /v1/management-fabric/sync", server.syncManagementFabric)
 	mux.HandleFunc("POST /v1/management-fabric/status", server.managementFabricStatus)
+	mux.HandleFunc("POST /v1/management-fabric/resources/probe", server.probeManagementResource)
 	mux.HandleFunc("POST /v1/management-fabric/admin-contour/configure", server.configureAdminContour)
 	mux.HandleFunc("POST /v1/management-fabric/admin-contour/rotate", server.rotateAdminContour)
 	mux.HandleFunc("POST /v1/backup/export", server.exportPortableBackup)
@@ -497,6 +510,27 @@ func (server *BrokerServer) managementFabricStatus(writer http.ResponseWriter, r
 	status.ObservationGeneration = generation
 	status.Links = links
 	writeBrokerJSON(writer, http.StatusOK, status)
+}
+
+func (server *BrokerServer) probeManagementResource(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		ResourceID string `json:"resource_id"`
+	}
+	if err := decodeBrokerJSON(request, &input); err != nil || input.ResourceID == "" || len(input.ResourceID) > 128 {
+		writeBrokerError(writer, http.StatusBadRequest, "RESOURCE_PROBE_REQUEST_INVALID")
+		return
+	}
+	if server.ManagementFabric == nil {
+		writeBrokerError(writer, http.StatusServiceUnavailable, "MANAGEMENT_FABRIC_UNAVAILABLE")
+		return
+	}
+	result, err := server.ManagementFabric.ProbeResource(request.Context(), input.ResourceID)
+	if err != nil {
+		server.logPrivilegedFailure("management_resource_probe", err)
+		writeBrokerError(writer, http.StatusConflict, "RESOURCE_PROBE_FAILED")
+		return
+	}
+	writeBrokerJSON(writer, http.StatusOK, result)
 }
 
 func (server *BrokerServer) configureAdminContour(writer http.ResponseWriter, request *http.Request) {
@@ -896,6 +930,19 @@ func (server *BrokerServer) authorizeBootstrap(writer http.ResponseWriter, reque
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func (server *BrokerServer) authorizeUpdateService(writer http.ResponseWriter, request *http.Request) {
+	var input dataplane.UpdateServiceAuthorization
+	if server.UpdateService == nil || decodeBrokerJSON(request, &input) != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "INVALID_REQUEST")
+		return
+	}
+	if err := server.UpdateService.AuthorizeUpdateService(request.Context(), input); err != nil {
+		writeBrokerError(writer, http.StatusBadRequest, "UPDATE_SERVICE_AUTHORIZATION_FAILED")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func (server *BrokerServer) authorizeDirectProbe(writer http.ResponseWriter, request *http.Request) {
 	var input dataplane.DirectProbeAuthorization
 	if err := decodeBrokerJSON(request, &input); err != nil {
@@ -1258,8 +1305,11 @@ func NewBrokerClient(socketPath string) (*BrokerClient, error) {
 			return dialer.DialContext(ctx, "unix", socketPath)
 		},
 		DisableCompression: true,
-		MaxIdleConns:       2,
-		IdleConnTimeout:    30 * time.Second,
+		// The broker is a local Unix-socket privilege boundary and is routinely
+		// restarted by recovery. A fresh connection per typed request avoids
+		// reusing an idle connection to the previous process and revalidates
+		// SO_PEERCRED on every request.
+		DisableKeepAlives: true,
 	}
 	return &BrokerClient{client: &http.Client{Transport: transport, Timeout: 45 * time.Second}}, nil
 }
@@ -1337,6 +1387,12 @@ func (client *BrokerClient) ManagementFabricStatus(ctx context.Context) (Managem
 	var status ManagementFabricStatus
 	err := client.call(ctx, "/v1/management-fabric/status", struct{}{}, http.StatusOK, &status)
 	return status, err
+}
+
+func (client *BrokerClient) ProbeManagementResource(ctx context.Context, resourceID string) (managementfabric.ResourceProbeResult, error) {
+	var result managementfabric.ResourceProbeResult
+	err := client.call(ctx, "/v1/management-fabric/resources/probe", map[string]string{"resource_id": resourceID}, http.StatusOK, &result)
+	return result, err
 }
 
 func (client *BrokerClient) ConfigureAdminContour(ctx context.Context, input managementfabric.AdminContourRequest) (managementfabric.AdminContour, error) {
@@ -1543,6 +1599,10 @@ func (client *BrokerClient) AuthorizeBootstrap(ctx context.Context, authorizatio
 
 func (client *BrokerClient) AuthorizeSubscriptionBootstrap(ctx context.Context, modemID, subscriptionID string, addresses []string, port uint16) error {
 	return client.AuthorizeBootstrap(ctx, dataplane.BootstrapAuthorization{ModemID: modemID, SubscriptionID: subscriptionID, Addresses: append([]string(nil), addresses...), Port: port})
+}
+
+func (client *BrokerClient) AuthorizeUpdateService(ctx context.Context, uplinkID string, addresses []string, port uint16) error {
+	return client.call(ctx, "/v1/update-service/authorize", dataplane.UpdateServiceAuthorization{UplinkID: uplinkID, Addresses: append([]string(nil), addresses...), Port: port}, http.StatusNoContent, nil)
 }
 
 func (client *BrokerClient) AuthorizeDirectProbe(ctx context.Context, modemID, targetID string, addresses []string, port uint16) error {
