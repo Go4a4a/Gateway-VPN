@@ -392,8 +392,15 @@
 | DEV-247 | 2026-09-01 | Windows launcher использует только system `ssh.exe`, но не `ControlMaster`: один долгоживущий process/TCP на host выполняет фиксированный bounded framed Bash protocol с pinned `known_hosts`, explicit identity, no agent/password/TTY и context cancellation | Реальный Windows 10/OpenSSH 9.5 gate получил `getsockname failed: Not a socket`; официальный Win32-OpenSSH scope исключает Client ControlMaster. Новые TCP connections после Gateway fail-closed apply недопустимы, поэтому отдельные `ssh.exe` на каждую фазу не являются безопасной заменой |
 | DEV-248 | 2026-09-01 | Windows release публикует copy/paste PowerShell command, а не `.ps1`: exact EXE и raw manifest скачиваются во временный GUID directory и оба сверяются по externally pinned SHA-256 до запуска signed interactive wizard; ExecutionPolicy не меняется | Пользователь уже столкнулся с запрещённым execution policy и исчезающими `.ps1` окнами. Copy/paste в открытый PowerShell остаётся одной командой, не сохраняет credentials и гарантированно удаляет downloaded trust inputs |
 | DEV-249 | 2026-09-01 | Обновить `golang.org/x/crypto` с `v0.47.0` до `v0.55.0`, сохранив уже совместимые `x/sys v0.47.0` и `x/text v0.41.0`; единственный module-only `GO-2026-5932` принять как недостижимый, пока проект не импортирует unmaintained `openpgp`, а `govulncheck` подтверждает 0 symbol/package vulnerabilities | `v0.55.0` закрывает все version-fixable advisories прежнего module graph. У `GO-2026-5932` нет fixed version; отказ от всего `x/crypto` лишил бы проект Argon2id и SSH/knownhosts, тогда как call-graph scanner доказывает отсутствие affected package в сборке |
+| DEV-250 | 2026-09-01 | Одноразовые Docker resources, project `.cache`, validation bundles и lifecycle-стенды после тестов автоматически не удалять и Docker VHDX не сжимать; cleanup выполнять только по отдельному явному запросу пользователя. `open-webui`, его image и volume сохранять всегда без противоположного прямого указания | Пользователь самостоятельно следит за дисковым местом и хочет повторно использовать уже полученные images/caches/evidence; автоматический prune создаёт лишние повторные загрузки и длительные пересборки |
 
 ## Журнал разработки
+
+### Сессия 144 — запрет автоматической очистки одноразовых ресурсов — 2026-09-01
+
+**Решение пользователя:** после тестов сохранять Docker containers/images/volumes/build cache, `.cache`, validation bundles и lifecycle-стенды. Размер можно контролировать и сообщать, но удаление/prune/compaction выполняются только после отдельной команды пользователя. Правило добавлено в корневой `AGENTS.md`; `open-webui` остаётся безусловно защищённым ресурсом. Уже созданные module caches, pinned Go/Node images и Mihomo validation input сохранены.
+
+**Следующий шаг:** зафиксировать эту workflow-инструкцию отдельным локальным commit и собирать окончательный dependency-hardened exact candidate уже из новой clean source identity; автоматическую cleanup после gate не выполнять.
 
 ### Сессия 143 — dependency hardening `x/crypto v0.55.0` и полный source/security gate — 2026-09-01
 
