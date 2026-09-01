@@ -83,7 +83,7 @@ func Open(ctx context.Context, options OpenOptions) (*sql.DB, error) {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
-		if err := ensureExactMode(directory, 0o700, true, os.Chmod); err != nil {
+		if err := ensureDatabaseDirectoryMode(directory); err != nil {
 			return nil, fmt.Errorf("secure database directory: %w", err)
 		}
 		if info, err := os.Lstat(absolute); err == nil {
@@ -118,6 +118,25 @@ func Open(ctx context.Context, options OpenOptions) (*sql.DB, error) {
 		}
 	}
 	return database, nil
+}
+
+// ensureDatabaseDirectoryMode keeps the normal private 0700 policy while
+// preserving the production state root's deliberate 0710 mode. The latter
+// grants the gateway-vpn service group traverse-only access so isolated data
+// plane users can reach their own protected subtrees without being able to
+// list or modify the state root.
+func ensureDatabaseDirectoryMode(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("database path has an unsafe type")
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() == 0o710 && info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == 0 {
+		return nil
+	}
+	return ensureExactMode(path, 0o700, true, os.Chmod)
 }
 
 func ensureExactMode(path string, expected os.FileMode, directory bool, chmod func(string, os.FileMode) error) error {

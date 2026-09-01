@@ -16,6 +16,7 @@ CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-updatenet-test ./internal/updatenet
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-gatewayfabric-test ./internal/gatewayfabric
+CGO_ENABLED=0 go build -o /tmp/gateway-vpn-mihomo-peer ./test/netns/cmd/mihomo-peer
 sudo bash ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
 sudo bash ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
 sudo bash ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
@@ -23,6 +24,9 @@ sudo bash ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
 sudo bash ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
 sudo bash ./test/netns/update_service_routes.sh /tmp/gateway-vpn-dataplane-test /tmp/gateway-vpn-updatenet-test
 sudo bash ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-test
+sudo bash ./test/netns/mihomo_tun.sh /absolute/path/to/pinned/mihomo \
+  /tmp/gateway-vpn-mihomo-peer v1.19.30 PINNED_LOWERCASE_SHA256 \
+  /new/absolute/evidence-directory
 ```
 
 `firewall_guard.sh` создаёт только namespace с уникальным PID suffix, не меняет host ruleset и удаляет namespace через trap. Сценарий проверяет policy routing без unmarked default route, удаление `table inet gateway_vpn`, полный `nft flush ruleset`, durable LAN quarantine, восстановление schema generation и возврат только в `PATH_BLOCKED`.
@@ -38,3 +42,5 @@ sudo bash ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-te
 `update_service_routes.sh` создаёт отдельные HiLink- и Ethernet-пары, применяет production root backend и доказывает реальные marked TCP packets только для exact public-IP/443 tuple и UID `gateway-vpn`. Root UID, неразрешённый destination и unmarked route остаются заблокированы; Ethernet не получает HiLink management exception.
 
 `management_resources.sh` создаёт disposable Gateway/Keenetic/WireGuard/dedicated-LAN namespaces и реальные TCP-службы. Он доказывает пять access profiles, `SO_BINDTODEVICE`, обязательный host внутри `LOCAL_SUBNET`, отсутствие публикации при недоступном transport/return path и запрет dedicated-management интерфейса с default route.
+
+`mihomo_tun.sh` требует отдельно переданные exact version/SHA-256 pinned Mihomo и test-only Go peer. В трёх namespace он поднимает второй экземпляр того же Mihomo как локальный SOCKS5 endpoint и полностью локальные HTTP/UDP/DNS services. Gateway instance использует `stack: mixed`, `auto-route`, `auto-redirect`, `strict-route`, DNS hijack и SOCKS node с `interface-name`/`routing-mark`; прямой `LAN → uplink` блокируется независимым nft rule. Gate доказывает TCP, UDP и DNS через TUN, loopback-only API, отсутствие unmarked route, отсутствие direct leak после `SIGKILL` и повторный запуск после пропущенного userspace cleanup. Последний optional argument — новый absolute evidence directory; при его наличии configs/logs не удаляются после завершения или ошибки. Этот тест не заменяет реальную HAPP-подписку, Huawei/Keenetic capture, mobile operator path или hardware endurance.

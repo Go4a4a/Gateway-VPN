@@ -69,6 +69,64 @@ func TestEnsureExactModeCorrectsUnsafeModeAndRejectsUnsafeType(t *testing.T) {
 	}
 }
 
+func TestDatabaseDirectoryModePreservesProductionTraverseOnlyAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose verifiable POSIX modes")
+	}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDatabaseDirectoryMode(directory); err != nil {
+		t.Fatalf("ensureDatabaseDirectoryMode(0710) error = %v", err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o710 {
+		t.Fatalf("production state root mode = %04o, want 0710", got)
+	}
+
+	if err := os.Chmod(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDatabaseDirectoryMode(directory); err != nil {
+		t.Fatalf("ensureDatabaseDirectoryMode(0750) error = %v", err)
+	}
+	info, err = os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("unsafe state root mode convergence = %04o, want 0700", got)
+	}
+}
+
+func TestOpenKeepsProductionStateRootTraversable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose verifiable POSIX modes")
+	}
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o710); err != nil {
+		t.Fatal(err)
+	}
+	database, err := Open(context.Background(), OpenOptions{Path: filepath.Join(directory, "state.db")})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o710 {
+		t.Fatalf("state root mode after Open = %04o, want 0710", got)
+	}
+}
+
 func TestOpenConfiguresSafetyPragmas(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "state.db")})

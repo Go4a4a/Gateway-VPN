@@ -70,10 +70,11 @@ func TestRestoreProjectionPreservesRootOnlySecretsAndStateRootMode(t *testing.T)
 	if _, err := fixture.engine.RollbackToRestorePoint(context.Background(), targetPoint); err != nil {
 		t.Fatal(err)
 	}
-	// Opening the live SQLite database intentionally normalizes its parent to
-	// the control-plane 0700 contract before projection preparation begins.
-	if mode := mustRestoreStat(t, fixture.stateDir).Mode().Perm(); mode != 0o700 {
-		t.Fatalf("state root mode = %o, want 700", mode)
+	// Opening the live SQLite database preserves the production state root's
+	// traverse-only service-group access. Secrets below it remain independently
+	// protected by their exact ownership and 0600/0700 modes.
+	if mode := mustRestoreStat(t, fixture.stateDir).Mode().Perm(); mode != 0o710 {
+		t.Fatalf("state root mode = %o, want 710", mode)
 	}
 	for _, relative := range []string{"secrets/management/root-only.key", "secrets/wireguard-ingress/root-only.key"} {
 		info := mustRestoreStat(t, filepath.Join(fixture.stateDir, filepath.FromSlash(relative)))
