@@ -1248,6 +1248,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(writer, request)

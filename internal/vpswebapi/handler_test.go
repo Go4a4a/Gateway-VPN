@@ -45,6 +45,20 @@ type apiSession struct {
 	CSRF   string
 }
 
+func TestVPSSecurityHeadersAreAppliedToStaticAndAPIResponses(t *testing.T) {
+	server, _ := vpsAPIFixture(t)
+	for _, path := range []string{"/", "/api/v1/auth/session"} {
+		response := authorizedRequest(server, apiSession{}, http.MethodGet, path, nil, "")
+		if response.Header().Get("X-Frame-Options") != "DENY" ||
+			response.Header().Get("X-Content-Type-Options") != "nosniff" ||
+			response.Header().Get("Referrer-Policy") != "no-referrer" ||
+			response.Header().Get("Cache-Control") != "no-store" ||
+			!strings.Contains(response.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Fatalf("security headers for %s = %v", path, response.Header())
+		}
+	}
+}
+
 func TestVPSHubBackupDownloadStagePreviewAndAuthorizedApply(t *testing.T) {
 	server, trigger := vpsAPIFixture(t)
 	session := loginVPSHub(t, server, "administrator password 123")
