@@ -34,7 +34,7 @@
 | Область | Состояние | Комментарий |
 |---|---|---|
 | Архитектурный план | `DONE / COMPLETE_RESTORE_POINT_ROLLBACK_AMENDED_2026-08-31` | Закреплены generic uplinks/topology/Management Fabric, remote signed sources, independent recovery, two-stage acceptance и complete restore-point retention/manual safety rollback |
-| Репозиторий | `EF7712F_EXACT_BOTH_ROLES_PASS / PUBLIC_BASE_IMMUTABLE` | Public `v0.1.0-successor.5723940` и Release `378316577` неизменны. Candidate source identity — `ef7712f75189ef9646eb2acab7006f2eeda9d9dd`; отдельный journal commit не изменяет эту exact identity. После фиксации текущего журнала ветка `main` будет на 27 commits впереди `origin/main`. Push/tag/Release не выполнялись |
+| Репозиторий | `EF7712F_EXACT_BOTH_ROLES_PASS / PUBLIC_BASE_IMMUTABLE` | Public `v0.1.0-successor.5723940` и Release `378316577` неизменны. Candidate source identity — `ef7712f75189ef9646eb2acab7006f2eeda9d9dd`; отдельные journal commits не изменяют эту exact identity. После фиксации текущего журнала ветка `main` будет на 28 commits впереди `origin/main`. Push/tag/Release не выполнялись |
 | Этап 0: hardware spike | `NOT_RUN` | Нужны Linux Gateway, Keenetic и хотя бы один HiLink; для отдельной проверки multi-modem failover нужны минимум два модема с разными management-подсетями |
 | Этап 1: bootstrap | `UNIVERSAL_WIZARD_V3_SSH_WG_INGRESS_LOCAL_PASS / EXACT_SCHEMA25_REINSTALL_PASS / PRODUCTION_RELEASE_PENDING / HARDWARE_PENDING` | Мастер единообразно объясняет выборы для каждого компонента, выбирает несколько LAN-портов, DHCP/CIDR/dependencies, default-on либо явный opt-out SSH/SFTP, optional входящий WireGuard, no-wait и GRUB, выводит exact mutation plan. Candidate `ga7a783b` прошёл public-baseline host upgrade, repeated preserve uninstall и reinstall после new-PID1 recovery; production-signed clean-host/hardware gate остаётся |
 | Data plane / Mihomo | `CODE_PASS / LINUX_NOT_RUN` | Atomic Linux symlink runtime, pinned API/TUN verify, broker restart/fail-closed и transaction recovery покрыты tests/compile; реальный Mihomo/Linux apply не запускался |
@@ -397,6 +397,18 @@
 | DEV-252 | 2026-09-01 | Отдельное ручное обновление Mihomo использует signed domain-bound maintenance manifest, но всегда устанавливает полный immutable Gateway release через единственный существующий update/snapshot/stability/rollback contour; второй privileged updater, mutable binary и upstream `latest` запрещены | Обычный Gateway release уже обязан содержать проверенную Mihomo. Отдельная карточка нужна для удобства и compatibility discovery, но отдельная мутация core удвоила бы root/recovery paths и могла оставить несогласованные binary/config/API/DB состояния |
 
 ## Журнал разработки
+
+### Сессия 149 — повторная проверка сохранённого candidate и граница clean-Windows gate — 2026-09-01
+
+**Контракт Mihomo без изменения архитектуры:** подтверждено, что обычное полное обновление Gateway VPN уже несёт одну закреплённую и проверенную версию Mihomo. Если core менять не требуется, следующий Gateway release сохраняет прежнюю версию; если требуется — включает новую. Отдельный maintenance manifest является только ручным discovery/compatibility представлением того же полного immutable Gateway release, а не указателем на изменяемую GitHub-папку или произвольный upstream `latest`. Это уже соответствует `DEV-252`, PLAN и OPERATIONS; новый updater либо новое решение не вводились.
+
+**Повторная проверка evidence:** после journal commit `9882d6aaef1a80fe4e5f960ca8ff9d450064702b` рабочее дерево оставалось чистым. В обеих сохранённых независимых сборках `clone-a` и `clone-b` повторно вычислены SHA-256 шести delivery inputs candidate `0.1.0-successor.gef7712f.crypto2`: Gateway, VPS, bootstrap, Linux deploy, Windows deploy и `channel-stable.json`. Все 12 сравнений совпали с hashes сессии 148; rebuild, production key и сеть не использовались.
+
+**Clean Windows readiness:** локальный Windows host по-прежнему имеет работающий Hyper-V compute service, но Windows Sandbox отсутствует (`WindowsSandbox.exe` отсутствует; optional feature не обнаружена текущим read-only inventory), а отдельной clean Windows VM/ISO/VHD нет. Поэтому существующий Windows 10 native source/Win32 OpenSSH gate нельзя честно переименовать в clean-VM end-to-end. Включение Sandbox изменяет компонент Windows и требует reboot; полный two-target command дополнительно загружает exact role artifacts из immutable GitHub Release, которого для этого candidate ещё нет.
+
+**Не выполнялось:** Windows component enable/reboot, production `.gvkey`, push, tag, GitHub Release, cleanup и физические/hardware/endurance проверки.
+
+**Следующий шаг:** получить отдельное разрешение на включение Windows Sandbox с перезагрузкой либо предоставить другую clean Windows 10/11 x64 VM; для полного GitHub delivery gate отдельно разрешить exact production signing/tag/Release candidate `gef7712f.crypto2`. После этого выполнить hash-before-exec PowerShell и настоящий two-target Windows deploy; без этих разрешений перейти можно только к физической установке пользователем, не закрывая clean-VM gate заранее.
 
 ### Сессия 148 — post-fix reproducible exact candidate и обе systemd-роли — 2026-09-01
 
