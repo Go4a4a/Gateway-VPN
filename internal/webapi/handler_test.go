@@ -1832,6 +1832,45 @@ func TestRemoteSignedUpdateCheckAndStageUseTypedSources(t *testing.T) {
 	}
 }
 
+func TestMihomoMaintenanceCheckAndStageUseSeparateSignedSource(t *testing.T) {
+	server, ctx := testServer(t)
+	operation := updatepkg.Operation{
+		FormatVersion: 1, UpdateID: "update-20260901T020304Z-abcdef0123456789abcdef01", State: "STAGED",
+		CreatedAt: "2026-09-01T02:03:04Z", GatewayVersion: "1.2.1", MihomoVersion: "v1.20.0",
+		SignerKeySHA256: strings.Repeat("a", 64), ManifestSHA256: strings.Repeat("b", 64),
+		UncompressedBytes: 16384, FileCount: 8, SourceKind: updatepkg.SourceMihomoGitHub,
+		SourceChannel: "stable", SourceReference: "Go4a4a/Gateway-VPN#v1.2.1:mihomo",
+	}
+	remote := &fakeRemoteUpdateSource{mihomoAvailable: updateremote.MihomoAvailable{
+		Available: true, Channel: "stable", CurrentGatewayVersion: "1.2.0", CurrentMihomoVersion: "v1.19.30",
+		CandidateGatewayVersion: "1.2.1", CandidateMihomoVersion: "v1.20.0", ReleaseTag: "v1.2.1",
+		ArtifactBytes: 16384, ArtifactSHA256: strings.Repeat("c", 64), SourceReference: "Go4a4a/Gateway-VPN#v1.2.1:mihomo",
+		SourceCommit: strings.Repeat("d", 40), Urgency: "recommended", Summary: "Исправление совместимости протоколов.",
+	}, operation: operation}
+	server.dependencies.RemoteUpdates = remote
+	cookie, csrf := login(t, server)
+	check := httptest.NewRequest(http.MethodGet, "/api/v1/system/update/mihomo/available?channel=stable", nil)
+	check.AddCookie(cookie)
+	checkResponse := httptest.NewRecorder()
+	server.ServeHTTP(checkResponse, check)
+	if checkResponse.Code != http.StatusOK || remote.checkMihomo != "stable" || !strings.Contains(checkResponse.Body.String(), `"candidate_mihomo_version":"v1.20.0"`) {
+		t.Fatalf("Mihomo check = %d channel=%q %s", checkResponse.Code, remote.checkMihomo, checkResponse.Body.String())
+	}
+	stage := httptest.NewRequest(http.MethodPost, "/api/v1/system/update/remote", strings.NewReader(`{"source":"MIHOMO_GITHUB_CHANNEL","channel":"stable","exact_url":""}`))
+	stage.Header.Set("Content-Type", "application/json")
+	stage.Header.Set("X-CSRF-Token", csrf)
+	stage.AddCookie(cookie)
+	stageResponse := httptest.NewRecorder()
+	server.ServeHTTP(stageResponse, stage)
+	if stageResponse.Code != http.StatusCreated || remote.stageMihomo != "stable" || !strings.Contains(stageResponse.Body.String(), `"source_kind":"MIHOMO_GITHUB_CHANNEL"`) {
+		t.Fatalf("Mihomo stage = %d channel=%q %s", stageResponse.Code, remote.stageMihomo, stageResponse.Body.String())
+	}
+	var details string
+	if err := server.dependencies.Database.QueryRowContext(ctx, "SELECT details_json FROM events WHERE type='SIGNED_UPDATE_STAGED' ORDER BY occurred_at DESC LIMIT 1").Scan(&details); err != nil || !strings.Contains(details, `"source_kind":"MIHOMO_GITHUB_CHANNEL"`) {
+		t.Fatalf("Mihomo staged audit = %q,%v", details, err)
+	}
+}
+
 func TestDiagnosticBundleAPIRedactsBuilderFailure(t *testing.T) {
 	server, _ := testServer(t)
 	server.dependencies.Diagnostics = &fakeDiagnosticBundler{err: errors.New("private path /root/secret and token=diagnostic-secret")}
@@ -3308,12 +3347,15 @@ type fakeUpdateApplyTrigger struct {
 }
 
 type fakeRemoteUpdateSource struct {
-	available    updateremote.Available
-	operation    updatepkg.Operation
-	err          error
-	checkChannel string
-	stageChannel string
-	stageExact   string
+	available       updateremote.Available
+	mihomoAvailable updateremote.MihomoAvailable
+	operation       updatepkg.Operation
+	err             error
+	checkChannel    string
+	checkMihomo     string
+	stageChannel    string
+	stageMihomo     string
+	stageExact      string
 }
 
 func (source *fakeRemoteUpdateSource) Check(_ context.Context, channel string) (updateremote.Available, error) {
@@ -3321,8 +3363,18 @@ func (source *fakeRemoteUpdateSource) Check(_ context.Context, channel string) (
 	return source.available, source.err
 }
 
+func (source *fakeRemoteUpdateSource) CheckMihomo(_ context.Context, channel string) (updateremote.MihomoAvailable, error) {
+	source.checkMihomo = channel
+	return source.mihomoAvailable, source.err
+}
+
 func (source *fakeRemoteUpdateSource) StageChannel(_ context.Context, channel string) (updatepkg.Operation, error) {
 	source.stageChannel = channel
+	return source.operation, source.err
+}
+
+func (source *fakeRemoteUpdateSource) StageMihomoChannel(_ context.Context, channel string) (updatepkg.Operation, error) {
+	source.stageMihomo = channel
 	return source.operation, source.err
 }
 

@@ -13,6 +13,8 @@ RELEASE_TAG=${4:-}
   echo "Usage: create-github-release-draft.sh VERSION CHANNEL OWNER/REPO vVERSION" >&2
   exit 2
 }
+shift 4
+(($# == 0)) || { echo "Unexpected GitHub draft publisher argument" >&2; exit 2; }
 
 for command in git gh go; do
   command -v "$command" >/dev/null || { echo "Missing publisher command: $command" >&2; exit 1; }
@@ -46,6 +48,19 @@ ASSETS=(
   "$ROOT/dist/install-gateway-$VERSION.command.txt"
   "$ROOT/dist/install-deploy-windows-$VERSION.command.txt"
 )
+MIHOMO_CHANNELS=()
+for mihomo_channel in stable testing; do
+  mihomo_manifest="$ROOT/dist/mihomo-channel-$mihomo_channel.json"
+  mihomo_signature="$ROOT/dist/mihomo-channel-$mihomo_channel.sig"
+  if [[ -e "$mihomo_manifest" || -e "$mihomo_signature" ]]; then
+    [[ -f "$mihomo_manifest" && ! -L "$mihomo_manifest" && -f "$mihomo_signature" && ! -L "$mihomo_signature" ]] || {
+      echo "Mihomo maintenance channel must contain one safe manifest/signature pair" >&2
+      exit 1
+    }
+    ASSETS+=("$mihomo_manifest" "$mihomo_signature")
+    MIHOMO_CHANNELS+=("$mihomo_channel")
+  fi
+done
 for asset in "${ASSETS[@]}"; do
   [[ -f "$asset" && ! -L "$asset" ]] || { echo "Required exact release asset is missing or unsafe: $asset" >&2; exit 1; }
 done
@@ -71,6 +86,15 @@ done
     --artifact "deploy-windows=$ROOT/dist/gateway-vpn-deploy-$VERSION-windows-amd64.exe" \
     --artifact "gateway=$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz" \
     --artifact "vps=$ROOT/dist/gateway-vpn-vps-$VERSION-linux-amd64.tar.gz"
+  for mihomo_channel in "${MIHOMO_CHANNELS[@]}"; do
+    go run ./cmd/gateway-vpnctl mihomo-channel-verify \
+      --manifest "$ROOT/dist/mihomo-channel-$mihomo_channel.json" \
+      --signature "$ROOT/dist/mihomo-channel-$mihomo_channel.sig" \
+      --public-key "$ROOT/dist/update-signing.pub" \
+      --release-dir "$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64" \
+      --artifact "$ROOT/dist/gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz" \
+      --channel "$mihomo_channel" --release-version "$VERSION" --source-commit "$COMMIT"
+  done
 )
 
 REMOTE_COMMIT=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)

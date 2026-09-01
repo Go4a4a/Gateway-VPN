@@ -43,6 +43,9 @@ func TestPrivateKeyCommandsRejectNonLinuxHost(t *testing.T) {
 		{"channel sign", func() int {
 			return runChannelSign([]string{"--release-version", "1.0.0", "--source-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--private-key", "C:/secure/private.pem", "--output-dir", "C:/release", "--artifact", "gateway=C:/release/gateway.tar.gz"})
 		}},
+		{"Mihomo channel sign", func() int {
+			return runMihomoChannelSign([]string{"--channel", "stable", "--release-dir", "C:/release", "--artifact", "C:/release/gateway-vpn-gateway-1.0.1-linux-amd64.tar.gz", "--source-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--urgency", "recommended", "--summary", "Approved Mihomo maintenance release.", "--compatible-gateway-version", "1.0.0", "--private-key", "C:/secure/private.pem", "--output-dir", "C:/release"})
+		}},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {

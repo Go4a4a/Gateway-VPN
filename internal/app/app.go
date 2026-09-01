@@ -387,6 +387,7 @@ func Initialize(ctx context.Context, configuration config.Config, configurationP
 				systemLogger.Error("remote signed update transport is invalid", "error", transportErr)
 				remoteUpdates = nil
 			} else {
+				remoteUpdates.CurrentMihomoVersion = buildinfo.MihomoVersion
 				dataPlane.UpdateTransport.OnAttempt = func(attempt updatenet.Attempt) {
 					attributes := []any{"route_kind", attempt.RouteKind, "uplink_id", attempt.UplinkID, "result_code", attempt.ResultCode}
 					if attempt.SubscriptionID != "" {

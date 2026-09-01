@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/distribution"
+	"gateway-vpn/internal/mihomochannel"
 	updatepkg "gateway-vpn/internal/update"
 )
 
@@ -61,12 +62,30 @@ type Available struct {
 	SourceCommit     string `json:"source_commit,omitempty"`
 }
 
+type MihomoAvailable struct {
+	Available               bool   `json:"available"`
+	Channel                 string `json:"channel"`
+	CurrentGatewayVersion   string `json:"current_gateway_version"`
+	CurrentMihomoVersion    string `json:"current_mihomo_version"`
+	CandidateGatewayVersion string `json:"candidate_gateway_version,omitempty"`
+	CandidateMihomoVersion  string `json:"candidate_mihomo_version,omitempty"`
+	ReleaseTag              string `json:"release_tag,omitempty"`
+	PublishedAt             string `json:"published_at,omitempty"`
+	ArtifactBytes           int64  `json:"artifact_bytes,omitempty"`
+	ArtifactSHA256          string `json:"artifact_sha256,omitempty"`
+	SourceReference         string `json:"source_reference,omitempty"`
+	SourceCommit            string `json:"source_commit,omitempty"`
+	Urgency                 string `json:"urgency,omitempty"`
+	Summary                 string `json:"summary,omitempty"`
+}
+
 type Manager struct {
-	Repository     string
-	CurrentVersion string
-	Stager         *updatepkg.Stager
-	Client         *http.Client
-	APIBase        string
+	Repository           string
+	CurrentVersion       string
+	CurrentMihomoVersion string
+	Stager               *updatepkg.Stager
+	Client               *http.Client
+	APIBase              string
 }
 
 type githubRelease struct {
@@ -86,6 +105,12 @@ type githubAsset struct {
 type resolvedRelease struct {
 	Available
 	artifactURL string
+}
+
+type resolvedMihomoRelease struct {
+	MihomoAvailable
+	artifactURL string
+	manifest    mihomochannel.Manifest
 }
 
 func New(repository, currentVersion string, stager *updatepkg.Stager) (*Manager, error) {
@@ -114,8 +139,52 @@ func (manager *Manager) Check(ctx context.Context, channel string) (Available, e
 	return resolved.Available, err
 }
 
+func (manager *Manager) CheckMihomo(ctx context.Context, channel string) (MihomoAvailable, error) {
+	resolved, err := manager.resolveMihomo(ctx, channel)
+	return resolved.MihomoAvailable, err
+}
+
 func (manager *Manager) StageChannel(ctx context.Context, channel string) (updatepkg.Operation, error) {
 	return manager.stageChannel(ctx, channel, updatepkg.SourceGitHubChannel)
+}
+
+func (manager *Manager) StageMihomoChannel(ctx context.Context, channel string) (updatepkg.Operation, error) {
+	if _, pending, err := manager.Stager.Status(); err != nil {
+		return updatepkg.Operation{}, err
+	} else if pending {
+		return updatepkg.Operation{}, updatepkg.ErrUpdatePending
+	}
+	resolved, err := manager.resolveMihomo(ctx, channel)
+	if err != nil {
+		return updatepkg.Operation{}, err
+	}
+	if !resolved.Available {
+		return updatepkg.Operation{}, errors.New("the selected signed channel has no compatible Mihomo maintenance release")
+	}
+	operation, err := manager.downloadAndStage(ctx, resolved.artifactURL, resolved.ArtifactBytes, resolved.ArtifactSHA256, updatepkg.Source{
+		Kind: updatepkg.SourceMihomoGitHub, Channel: channel, Reference: resolved.SourceReference,
+	})
+	if err != nil {
+		return updatepkg.Operation{}, err
+	}
+	stagedRoot, stagedRootErr := manager.Stager.ReleaseRoot(operation.UpdateID)
+	verified, verifyErr := updatepkg.VerifyRelease(stagedRoot, manager.Stager.Policy)
+	identityMismatch := stagedRootErr != nil || verifyErr != nil ||
+		operation.GatewayVersion != resolved.CandidateGatewayVersion || operation.MihomoVersion != resolved.CandidateMihomoVersion ||
+		verified.Release.GatewayVersion != resolved.manifest.GatewayReleaseVersion ||
+		verified.Release.MihomoVersion != resolved.manifest.MihomoVersion ||
+		verified.Release.BuildCommit != resolved.manifest.SourceCommit ||
+		verified.Release.OS != resolved.manifest.OS || verified.Release.Arch != resolved.manifest.Arch ||
+		verified.Release.HostContractSHA256 != resolved.manifest.HostContractSHA256 ||
+		verified.Release.GatewayAPIContract != resolved.manifest.GatewayAPIContract ||
+		verified.Release.MihomoAPIContract != resolved.manifest.MihomoAPIContract
+	if identityMismatch {
+		if discardErr := manager.Stager.Discard(context.Background(), operation.UpdateID); discardErr != nil {
+			return updatepkg.Operation{}, errors.New("mismatched Mihomo maintenance release could not be removed from staging")
+		}
+		return updatepkg.Operation{}, errors.New("staged release identity does not match the signed Mihomo channel")
+	}
+	return operation, nil
 }
 
 // StageAutomaticChannel uses the exact same signed discovery, download and
@@ -169,40 +238,9 @@ func (manager *Manager) resolve(ctx context.Context, channel string) (resolvedRe
 	if err := manager.validate(); err != nil {
 		return resolvedRelease{}, err
 	}
-	endpoint := strings.TrimRight(manager.APIBase, "/") + "/repos/" + manager.Repository + "/releases?per_page=50"
-	content, err := manager.fetchBytes(ctx, endpoint, maximumAPIBytes, "application/vnd.github+json")
+	releases, err := manager.releaseInventory(ctx)
 	if err != nil {
-		return resolvedRelease{}, fmt.Errorf("query GitHub release inventory: %w", err)
-	}
-	var releases []githubRelease
-	// GitHub adds fields over time, so decode into a raw slice first and then
-	// strictly decode only the small allowlisted projection per entry.
-	var raw []json.RawMessage
-	if err := json.Unmarshal(content, &raw); err != nil || len(raw) > 100 {
-		return resolvedRelease{}, errors.New("GitHub release inventory is invalid or oversized")
-	}
-	for _, item := range raw {
-		var value map[string]json.RawMessage
-		if err := json.Unmarshal(item, &value); err != nil {
-			continue
-		}
-		var release githubRelease
-		_ = json.Unmarshal(value["tag_name"], &release.TagName)
-		_ = json.Unmarshal(value["draft"], &release.Draft)
-		_ = json.Unmarshal(value["prerelease"], &release.Prerelease)
-		_ = json.Unmarshal(value["published_at"], &release.PublishedAt)
-		var assetRaw []map[string]json.RawMessage
-		if err := json.Unmarshal(value["assets"], &assetRaw); err != nil || len(assetRaw) > distribution.MaximumArtifacts+8 {
-			continue
-		}
-		for _, rawAsset := range assetRaw {
-			var asset githubAsset
-			_ = json.Unmarshal(rawAsset["name"], &asset.Name)
-			_ = json.Unmarshal(rawAsset["size"], &asset.Size)
-			_ = json.Unmarshal(rawAsset["browser_download_url"], &asset.BrowserDownloadURL)
-			release.Assets = append(release.Assets, asset)
-		}
-		releases = append(releases, release)
+		return resolvedRelease{}, err
 	}
 	result := resolvedRelease{Available: Available{Channel: channel, CurrentVersion: manager.CurrentVersion}}
 	for _, release := range releases {
@@ -220,6 +258,80 @@ func (manager *Manager) resolve(ctx context.Context, channel string) (resolvedRe
 		}
 	}
 	return result, nil
+}
+
+func (manager *Manager) resolveMihomo(ctx context.Context, channel string) (resolvedMihomoRelease, error) {
+	if channel != "stable" && channel != "testing" {
+		return resolvedMihomoRelease{}, errors.New("Mihomo update channel must be stable or testing")
+	}
+	if err := manager.validateMihomo(); err != nil {
+		return resolvedMihomoRelease{}, err
+	}
+	releases, err := manager.releaseInventory(ctx)
+	if err != nil {
+		return resolvedMihomoRelease{}, err
+	}
+	result := resolvedMihomoRelease{MihomoAvailable: MihomoAvailable{
+		Channel: channel, CurrentGatewayVersion: manager.CurrentVersion, CurrentMihomoVersion: manager.CurrentMihomoVersion,
+	}}
+	for _, release := range releases {
+		candidate, ok := manager.verifyMihomoRelease(ctx, channel, release)
+		if !ok {
+			continue
+		}
+		if !result.Available {
+			result = candidate
+			continue
+		}
+		order, compareErr := updatepkg.CompareMihomoVersions(candidate.CandidateMihomoVersion, result.CandidateMihomoVersion)
+		gatewayOrder := 0
+		if compareErr == nil && order == 0 {
+			gatewayOrder, compareErr = updatepkg.CompareGatewayVersions(candidate.CandidateGatewayVersion, result.CandidateGatewayVersion)
+		}
+		if compareErr == nil && (order > 0 || order == 0 && gatewayOrder > 0) {
+			result = candidate
+		}
+	}
+	return result, nil
+}
+
+func (manager *Manager) releaseInventory(ctx context.Context) ([]githubRelease, error) {
+	endpoint := strings.TrimRight(manager.APIBase, "/") + "/repos/" + manager.Repository + "/releases?per_page=50"
+	content, err := manager.fetchBytes(ctx, endpoint, maximumAPIBytes, "application/vnd.github+json")
+	if err != nil {
+		return nil, fmt.Errorf("query GitHub release inventory: %w", err)
+	}
+	var releases []githubRelease
+	// GitHub adds fields over time, so decode into a raw slice first and then
+	// strictly decode only the small allowlisted projection per entry.
+	var raw []json.RawMessage
+	if err := json.Unmarshal(content, &raw); err != nil || len(raw) > 100 {
+		return nil, errors.New("GitHub release inventory is invalid or oversized")
+	}
+	for _, item := range raw {
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(item, &value); err != nil {
+			continue
+		}
+		var release githubRelease
+		_ = json.Unmarshal(value["tag_name"], &release.TagName)
+		_ = json.Unmarshal(value["draft"], &release.Draft)
+		_ = json.Unmarshal(value["prerelease"], &release.Prerelease)
+		_ = json.Unmarshal(value["published_at"], &release.PublishedAt)
+		var assetRaw []map[string]json.RawMessage
+		if err := json.Unmarshal(value["assets"], &assetRaw); err != nil || len(assetRaw) > distribution.MaximumArtifacts+12 {
+			continue
+		}
+		for _, rawAsset := range assetRaw {
+			var asset githubAsset
+			_ = json.Unmarshal(rawAsset["name"], &asset.Name)
+			_ = json.Unmarshal(rawAsset["size"], &asset.Size)
+			_ = json.Unmarshal(rawAsset["browser_download_url"], &asset.BrowserDownloadURL)
+			release.Assets = append(release.Assets, asset)
+		}
+		releases = append(releases, release)
+	}
+	return releases, nil
 }
 
 func (manager *Manager) verifyReleaseChannel(ctx context.Context, channel string, release githubRelease) (resolvedRelease, bool) {
@@ -272,6 +384,51 @@ func (manager *Manager) verifyReleaseChannel(ctx context.Context, channel string
 		ArtifactBytes: artifact.Bytes, ArtifactSHA256: artifact.SHA256,
 		SourceReference: reference, SourceCommit: manifest.SourceCommit,
 	}, artifactURL: asset.BrowserDownloadURL}, true
+}
+
+func (manager *Manager) verifyMihomoRelease(ctx context.Context, channel string, release githubRelease) (resolvedMihomoRelease, bool) {
+	if release.Draft || channel == "stable" && release.Prerelease || len(release.Assets) == 0 {
+		return resolvedMihomoRelease{}, false
+	}
+	manifestAsset, manifestOK := findAsset(release.Assets, "mihomo-channel-"+channel+".json")
+	signatureAsset, signatureOK := findAsset(release.Assets, "mihomo-channel-"+channel+".sig")
+	if !manifestOK || !signatureOK || manifestAsset.Size <= 0 || manifestAsset.Size > mihomochannel.MaximumManifestBytes || signatureAsset.Size <= 0 || signatureAsset.Size > mihomochannel.MaximumSignatureBytes {
+		return resolvedMihomoRelease{}, false
+	}
+	manifestContent, err := manager.fetchBytes(ctx, manifestAsset.BrowserDownloadURL, mihomochannel.MaximumManifestBytes, "application/json")
+	if err != nil {
+		return resolvedMihomoRelease{}, false
+	}
+	signatureContent, err := manager.fetchBytes(ctx, signatureAsset.BrowserDownloadURL, mihomochannel.MaximumSignatureBytes, "application/octet-stream")
+	if err != nil {
+		return resolvedMihomoRelease{}, false
+	}
+	manifest, err := mihomochannel.VerifyManifest(manifestContent, signatureContent, manager.Stager.Policy.PublicKey, mihomochannel.VerificationPolicy{
+		ExpectedChannel: channel, CurrentGatewayVersion: manager.CurrentVersion, CurrentMihomoVersion: manager.CurrentMihomoVersion,
+		ExpectedOS: "linux", ExpectedArch: "amd64", ExpectedHostContractSHA256: manager.Stager.Policy.CurrentHostContractSHA256,
+		ExpectedGatewayAPIContract: manager.Stager.Policy.GatewayAPIContract, ExpectedMihomoAPIContract: manager.Stager.Policy.MihomoAPIContract,
+	})
+	if err != nil || release.TagName != "v"+manifest.GatewayReleaseVersion {
+		return resolvedMihomoRelease{}, false
+	}
+	asset, ok := findAsset(release.Assets, manifest.Artifact.Filename)
+	if !ok || asset.Size != manifest.Artifact.Bytes || asset.Size <= 0 || asset.Size > updatepkg.MaximumArchiveBytes {
+		return resolvedMihomoRelease{}, false
+	}
+	if _, err := validateRemoteURL(asset.BrowserDownloadURL); err != nil {
+		return resolvedMihomoRelease{}, false
+	}
+	if _, err := time.Parse(time.RFC3339, release.PublishedAt); err != nil {
+		return resolvedMihomoRelease{}, false
+	}
+	reference := manager.Repository + "#" + release.TagName + ":mihomo"
+	return resolvedMihomoRelease{MihomoAvailable: MihomoAvailable{
+		Available: true, Channel: channel, CurrentGatewayVersion: manager.CurrentVersion, CurrentMihomoVersion: manager.CurrentMihomoVersion,
+		CandidateGatewayVersion: manifest.GatewayReleaseVersion, CandidateMihomoVersion: manifest.MihomoVersion,
+		ReleaseTag: release.TagName, PublishedAt: release.PublishedAt, ArtifactBytes: manifest.Artifact.Bytes,
+		ArtifactSHA256: manifest.Artifact.SHA256, SourceReference: reference, SourceCommit: manifest.SourceCommit,
+		Urgency: manifest.Urgency, Summary: manifest.Summary,
+	}, artifactURL: asset.BrowserDownloadURL, manifest: manifest}, true
 }
 
 func (manager *Manager) downloadAndStage(ctx context.Context, rawURL string, expectedBytes int64, expectedSHA string, source updatepkg.Source) (updatepkg.Operation, error) {
@@ -397,6 +554,16 @@ func (manager *Manager) validate() error {
 	api, err := validateRemoteURL(strings.TrimRight(manager.APIBase, "/"))
 	if err != nil || api.RawQuery != "" {
 		return errors.New("remote updater API base is invalid")
+	}
+	return nil
+}
+
+func (manager *Manager) validateMihomo() error {
+	if err := manager.validate(); err != nil {
+		return err
+	}
+	if updatepkg.ValidateMihomoVersion(manager.CurrentMihomoVersion) != nil || manager.Stager.Policy.CurrentHostContractSHA256 == "" || manager.Stager.Policy.GatewayAPIContract == "" || manager.Stager.Policy.MihomoAPIContract == "" {
+		return errors.New("Mihomo updater compatibility contract is unavailable")
 	}
 	return nil
 }

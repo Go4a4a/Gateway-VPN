@@ -576,7 +576,13 @@ tun:
 - manifest содержит версию core, платформу, hash, config schema generation и ожидаемый API contract;
 - перед обновлением выполняются `mihomo -t`, `/version`, `/connections`, `/traffic`, provider health-check и TUN smoke tests;
 - breaking change конфигурации или API блокирует обновление до появления адаптера и migration tests;
-- предыдущий проверенный binary сохраняется для rollback.
+- предыдущий проверенный binary сохраняется только как часть предыдущего полного release/restore point для согласованного rollback.
+
+Любой обычный полный release Gateway VPN уже содержит выбранную для него проверенную Mihomo: новый release может сохранить прежнюю core либо включить новую. Gateway никогда не получает Mihomo из отдельной mutable папки, не заменяет `/opt/.../libexec/mihomo` на месте и не обращается к upstream `latest` во время эксплуатации.
+
+Для обновления, выпускаемого преимущественно ради новой Mihomo, используется **Mihomo maintenance release**. Это обычный полный immutable Gateway release с новой версией Gateway, точным исходным commit и встроенной проверенной Mihomo. Дополнительная подписанная пара `mihomo-channel-stable/testing.json + .sig` является только отдельным discovery/compatibility manifest: она указывает на тот же полный Gateway archive, содержит новую Mihomo, сопровождающую версию Gateway, точный список протестированных исходных Gateway versions, host/API contracts, hash/size, важность и краткое описание. Сам archive одновременно проходит обычную полную Ed25519 release-проверку.
+
+WebUI показывает отдельную карточку **Обновление Mihomo** с установленной и одобренной версиями Mihomo, сопровождающей версией Gateway и ручными действиями **Проверить** / **Загрузить и проверить**. Установка выполняется только существующей общей update transaction: complete snapshot, immutable release directory, initial health gate, 24-часовое stability window и автоматический rollback согласованной release+DB пары. Второй привилегированный updater, отдельный mutable binary и автоматическое принятие любой upstream-версии запрещены. Mihomo maintenance staging считается ручным и не может быть подхвачен общим automatic scheduler; автоматические проверки по умолчанию выключены.
 
 ---
 
@@ -2363,6 +2369,8 @@ Gateway является единственным владельцем update tr
 1. официальный подписанный GitHub Release из каналов `Stable` или `Testing`;
 2. ручная загрузка подписанного `.tar.gz` через WebUI;
 3. advanced-вариант с прямым HTTPS URL конкретного immutable release artifact.
+
+Отдельная карточка Mihomo использует специализированный подписанный maintenance manifest в том же immutable GitHub Release, но не создаёт четвёртый тип устанавливаемого artifact: manifest всегда указывает на полный Gateway archive из пункта 1. Manifest принимается только для точной текущей Gateway version из списка совместимости, более новой Mihomo, совпадающих OS/architecture/host/API contracts, exact release tag/commit и archive SHA-256/size. После загрузки full release verifier повторно сверяет эти поля; при несовпадении candidate удаляется из staging без live mutation.
 
 Проверка наличия, загрузка и применение настраиваются раздельно. По умолчанию все три автоматические ступени выключены; ручная проверка и ручное подписанное обновление остаются доступны. автоматическое применение включается пользователем отдельно, имеет maintenance window, максимальную задержку и запрет запуска при другой durable operation. Путь загрузки control plane может последовательно использовать все разрешённые служебные маршруты через доступные Ethernet/HiLink uplinks, VPN-серверы и direct service fallback. Это не открывает прямой пользовательский трафик и не отменяет обязательную проверку подписи.
 

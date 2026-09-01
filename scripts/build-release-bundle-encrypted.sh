@@ -12,16 +12,27 @@ GITHUB_REPOSITORY=${6:-}
 RELEASE_TAG=${7:-}
 [[ -n "$VERSION" && -n "$CHANNEL" && -n "$MIHOMO_VERSION" && -n "$MIHOMO_BINARY" && -n "$ENCRYPTED_KEY_FILE" &&
   -n "$GITHUB_REPOSITORY" && -n "$RELEASE_TAG" ]] || {
-  echo "Usage: build-release-bundle-encrypted.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY KEY.gvkey OWNER/REPO vVERSION [--passphrase-file /secure/tmp/passphrase]" >&2
+  echo "Usage: build-release-bundle-encrypted.sh VERSION CHANNEL MIHOMO_VERSION MIHOMO_BINARY KEY.gvkey OWNER/REPO vVERSION" >&2
+  echo "       [--passphrase-file /secure/tmp/passphrase] [Mihomo maintenance options accepted by build-release-bundle.sh]" >&2
   exit 2
 }
 shift 7
 PASSPHRASE_FILE=
+BUNDLE_EXTRA_ARGS=()
 while (($# > 0)); do
   case "$1" in
     --passphrase-file)
       [[ -z "$PASSPHRASE_FILE" && -n ${2:-} ]] || { echo "Invalid --passphrase-file" >&2; exit 2; }
       PASSPHRASE_FILE=$2
+      shift 2
+      ;;
+    --mihomo-maintenance)
+      BUNDLE_EXTRA_ARGS+=("$1")
+      shift
+      ;;
+    --mihomo-channel|--mihomo-urgency|--mihomo-summary|--compatible-gateway-version)
+      [[ -n ${2:-} ]] || { echo "Missing value for $1" >&2; exit 2; }
+      BUNDLE_EXTRA_ARGS+=("$1" "$2")
       shift 2
       ;;
     *) echo "Unexpected encrypted release bundle argument" >&2; exit 2 ;;
@@ -81,5 +92,6 @@ BUNDLE_ARGS=(
   "$UNLOCKED/release-signing.pem" "$UNLOCKED/update-signing.pub"
   "$GITHUB_REPOSITORY" "$RELEASE_TAG"
 )
+BUNDLE_ARGS+=("${BUNDLE_EXTRA_ARGS[@]}")
 "$ROOT/scripts/build-release-bundle.sh" "${BUNDLE_ARGS[@]}"
 echo "Encrypted key file remained at rest; temporary plaintext signing identity was removed from tmpfs"

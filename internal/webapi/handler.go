@@ -211,7 +211,9 @@ type UpdateRestorePointController interface {
 
 type RemoteUpdateSource interface {
 	Check(context.Context, string) (updateremote.Available, error)
+	CheckMihomo(context.Context, string) (updateremote.MihomoAvailable, error)
 	StageChannel(context.Context, string) (updatepkg.Operation, error)
+	StageMihomoChannel(context.Context, string) (updatepkg.Operation, error)
 	StageExact(context.Context, string) (updatepkg.Operation, error)
 }
 
@@ -498,6 +500,7 @@ func New(dependencies Dependencies) (*Server, error) {
 	mux.Handle("DELETE /api/v1/system/update", server.protected(http.HandlerFunc(server.discardUpdate)))
 	mux.Handle("POST /api/v1/system/update/apply", server.protected(http.HandlerFunc(server.applyUpdate)))
 	mux.Handle("GET /api/v1/system/update/available", server.protected(http.HandlerFunc(server.availableUpdate)))
+	mux.Handle("GET /api/v1/system/update/mihomo/available", server.protected(http.HandlerFunc(server.availableMihomoUpdate)))
 	mux.Handle("POST /api/v1/system/update/remote", server.protected(http.HandlerFunc(server.stageRemoteUpdate)))
 	mux.Handle("GET /api/v1/system/update/automation", server.protected(http.HandlerFunc(server.updateAutomationStatus)))
 	mux.Handle("GET /api/v1/settings/software-update", server.protected(http.HandlerFunc(server.softwareUpdatePolicy)))
@@ -4641,6 +4644,29 @@ func (server *Server) availableUpdate(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusOK, available)
 }
 
+func (server *Server) availableMihomoUpdate(writer http.ResponseWriter, request *http.Request) {
+	if server.dependencies.RemoteUpdates == nil {
+		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Проверка одобренных обновлений Mihomo не подключена")
+		return
+	}
+	channel := request.URL.Query().Get("channel")
+	if channel == "" {
+		channel = "stable"
+	}
+	if channel != "stable" && channel != "testing" {
+		writeError(writer, http.StatusBadRequest, "UPDATE_CHANNEL_INVALID", "Канал Mihomo должен быть stable или testing")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
+	defer cancel()
+	available, err := server.dependencies.RemoteUpdates.CheckMihomo(ctx, channel)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "MIHOMO_UPDATE_CHECK_FAILED", "Не удалось получить и проверить подписанный manifest совместимости Mihomo")
+		return
+	}
+	writeJSON(writer, http.StatusOK, available)
+}
+
 func (server *Server) stageRemoteUpdate(writer http.ResponseWriter, request *http.Request) {
 	if server.dependencies.RemoteUpdates == nil {
 		writeError(writer, http.StatusNotImplemented, "NOT_AVAILABLE", "Удалённая загрузка подписанных обновлений не подключена")
@@ -4683,6 +4709,12 @@ func (server *Server) stageRemoteUpdate(writer http.ResponseWriter, request *htt
 			return
 		}
 		operation, err = server.dependencies.RemoteUpdates.StageChannel(ctx, input.Channel)
+	case "MIHOMO_GITHUB_CHANNEL":
+		if (input.Channel != "stable" && input.Channel != "testing") || input.ExactURL != "" {
+			writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Для обновления Mihomo выберите stable или testing без URL")
+			return
+		}
+		operation, err = server.dependencies.RemoteUpdates.StageMihomoChannel(ctx, input.Channel)
 	case "EXACT_HTTPS":
 		if input.Channel != "" || input.ExactURL == "" {
 			writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Для advanced-источника укажите один exact HTTPS URL")
@@ -4690,7 +4722,7 @@ func (server *Server) stageRemoteUpdate(writer http.ResponseWriter, request *htt
 		}
 		operation, err = server.dependencies.RemoteUpdates.StageExact(ctx, input.ExactURL)
 	default:
-		writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Поддерживаются только официальный канал и exact HTTPS")
+		writeError(writer, http.StatusBadRequest, "UPDATE_SOURCE_INVALID", "Поддерживаются официальный Gateway-канал, одобренный Mihomo-канал и exact HTTPS")
 		return
 	}
 	if errors.Is(err, updatepkg.ErrUpdatePending) {

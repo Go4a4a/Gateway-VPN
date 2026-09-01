@@ -274,17 +274,24 @@ func TestSchedulerStagesOnlyOwnedChannelAndDispatchesInsideUTCWindow(t *testing.
 }
 
 func TestSchedulerNeverAdoptsManualPendingRelease(t *testing.T) {
-	fixture := newSchedulerFixture(t)
-	fixture.setPolicy(t, true, true, true)
-	fixture.stager.operation = automaticOperationFixture()
-	fixture.stager.operation.SourceKind = updatepkg.SourceGitHubChannel
-	fixture.stager.pending = true
-	if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	status, err := fixture.scheduler.Repository.Get(context.Background())
-	if err != nil || status.Phase != PhaseManualPending || status.StagedUpdateID != "" || fixture.remote.checks != 0 || fixture.remote.downloads != 0 || fixture.apply.applyCalls != 0 || fixture.path.calls != 0 {
-		t.Fatalf("manual pending status=%+v calls=%d/%d/%d/%d error=%v", status, fixture.remote.checks, fixture.remote.downloads, fixture.apply.applyCalls, fixture.path.calls, err)
+	for _, sourceKind := range []string{updatepkg.SourceGitHubChannel, updatepkg.SourceMihomoGitHub, updatepkg.SourceUpload, updatepkg.SourceExactHTTPS} {
+		t.Run(sourceKind, func(t *testing.T) {
+			fixture := newSchedulerFixture(t)
+			fixture.setPolicy(t, true, true, true)
+			fixture.stager.operation = automaticOperationFixture()
+			fixture.stager.operation.SourceKind = sourceKind
+			if sourceKind == updatepkg.SourceUpload || sourceKind == updatepkg.SourceExactHTTPS {
+				fixture.stager.operation.SourceChannel = ""
+			}
+			fixture.stager.pending = true
+			if err := fixture.scheduler.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			status, err := fixture.scheduler.Repository.Get(context.Background())
+			if err != nil || status.Phase != PhaseManualPending || status.StagedUpdateID != "" || fixture.remote.checks != 0 || fixture.remote.downloads != 0 || fixture.apply.applyCalls != 0 || fixture.path.calls != 0 {
+				t.Fatalf("manual pending status=%+v calls=%d/%d/%d/%d error=%v", status, fixture.remote.checks, fixture.remote.downloads, fixture.apply.applyCalls, fixture.path.calls, err)
+			}
+		})
 	}
 }
 

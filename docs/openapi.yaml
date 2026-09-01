@@ -1215,11 +1215,21 @@ paths:
           in: query
           schema: {type: string, enum: [stable, testing], default: stable}
       responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
+  /api/v1/system/update/mihomo/available:
+    get:
+      tags: [System]
+      operationId: checkSignedMihomoMaintenanceChannel
+      summary: Проверить отдельный подписанный manifest одобренной совместимой версии Mihomo без загрузки release
+      parameters:
+        - name: channel
+          in: query
+          schema: {type: string, enum: [stable, testing], default: stable}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}
   /api/v1/system/update/remote:
     post:
       tags: [System]
       operationId: stageRemoteSignedUpdate
-      summary: Загрузить и проверить release из signed GitHub channel либо exact HTTPS URL
+      summary: Загрузить и проверить release из signed Gateway/Mihomo GitHub channel либо exact HTTPS URL
       parameters: [{$ref: '#/components/parameters/CSRF'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'201': {$ref: '#/components/responses/JSON'}, default: {$ref: '#/components/responses/Error'}}

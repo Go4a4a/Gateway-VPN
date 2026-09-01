@@ -27,6 +27,7 @@ const (
 	pendingFilename       = "pending-update.json"
 	SourceUpload          = "WEBUI_UPLOAD"
 	SourceGitHubChannel   = "GITHUB_CHANNEL"
+	SourceMihomoGitHub    = "MIHOMO_GITHUB_CHANNEL"
 	SourceAutomaticGitHub = "AUTOMATIC_GITHUB_CHANNEL"
 	SourceExactHTTPS      = "EXACT_HTTPS"
 )
@@ -349,10 +350,10 @@ func validOperation(operation Operation) bool {
 }
 
 func validSource(source Source) bool {
-	if source.Kind != SourceUpload && source.Kind != SourceGitHubChannel && source.Kind != SourceAutomaticGitHub && source.Kind != SourceExactHTTPS {
+	if source.Kind != SourceUpload && source.Kind != SourceGitHubChannel && source.Kind != SourceMihomoGitHub && source.Kind != SourceAutomaticGitHub && source.Kind != SourceExactHTTPS {
 		return false
 	}
-	if source.Kind == SourceGitHubChannel || source.Kind == SourceAutomaticGitHub {
+	if source.Kind == SourceGitHubChannel || source.Kind == SourceMihomoGitHub || source.Kind == SourceAutomaticGitHub {
 		if source.Channel != "stable" && source.Channel != "testing" {
 			return false
 		}

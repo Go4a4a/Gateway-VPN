@@ -27,7 +27,7 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	go func() { done <- runContext(ctx, address, false, false, false) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	var networkBody, topologyBody, updatePolicyBody, updateAutomationBody, restorePointsBody []byte
+	var networkBody, topologyBody, updatePolicyBody, updateAutomationBody, restorePointsBody, mihomoUpdateBody []byte
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		networkBody, err = getPreview(client, "http://"+address+"/api/v1/settings/network")
@@ -40,7 +40,10 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 					if err == nil {
 						restorePointsBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/restore-points")
 						if err == nil {
-							break
+							mihomoUpdateBody, err = getPreview(client, "http://"+address+"/api/v1/system/update/mihomo/available?channel=stable")
+							if err == nil {
+								break
+							}
 						}
 					}
 				}
@@ -94,6 +97,18 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 	}
 	if len(restorePoints.Items) != 2 {
 		t.Fatalf("restore point inventory = %s", restorePointsBody)
+	}
+	var mihomoUpdate struct {
+		Available               bool   `json:"available"`
+		CurrentMihomoVersion    string `json:"current_mihomo_version"`
+		CandidateMihomoVersion  string `json:"candidate_mihomo_version"`
+		CandidateGatewayVersion string `json:"candidate_gateway_version"`
+	}
+	if err := json.Unmarshal(mihomoUpdateBody, &mihomoUpdate); err != nil {
+		t.Fatal(err)
+	}
+	if !mihomoUpdate.Available || mihomoUpdate.CurrentMihomoVersion != "v1.19.30" || mihomoUpdate.CandidateMihomoVersion != "v1.20.0" || mihomoUpdate.CandidateGatewayVersion != "1.1.1" {
+		t.Fatalf("Mihomo maintenance update = %s", mihomoUpdateBody)
 	}
 
 	cancel()

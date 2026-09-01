@@ -544,6 +544,14 @@ var requiredHostContractFiles = []string{
 	"scripts/uninstall.sh",
 }
 
+// RequiredHostContractFiles returns a copy of the immutable host lifecycle
+// paths that every signed Gateway release must carry. Release tooling and
+// cross-package compatibility tests use the same authoritative list rather
+// than duplicating a security-sensitive packaging contract.
+func RequiredHostContractFiles() []string {
+	return append([]string(nil), requiredHostContractFiles...)
+}
+
 var hostContractDirectories = []string{
 	"packaging/dnsmasq",
 	"packaging/grub",
@@ -711,6 +719,24 @@ func ValidateGatewayVersion(value string) error {
 		return errors.New("Gateway VPN version is not strict SemVer 2.0.0")
 	}
 	return nil
+}
+
+// ValidateMihomoVersion exposes the exact version grammar used by signed
+// Gateway releases to the independently signed Mihomo maintenance channel.
+func ValidateMihomoVersion(value string) error {
+	if !mihomoVersionPattern.MatchString(value) {
+		return errors.New("Mihomo version is not strict SemVer 2.0.0")
+	}
+	return nil
+}
+
+// CompareMihomoVersions compares two strict Mihomo versions while accepting
+// the conventional leading v used by upstream releases.
+func CompareMihomoVersions(left, right string) (int, error) {
+	if ValidateMihomoVersion(left) != nil || ValidateMihomoVersion(right) != nil {
+		return 0, errors.New("Mihomo version is invalid")
+	}
+	return compareVersions(strings.TrimPrefix(left, "v"), strings.TrimPrefix(right, "v"))
 }
 
 // CompareGatewayVersions compares two strict SemVer versions. It is exported

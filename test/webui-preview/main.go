@@ -48,6 +48,7 @@ import (
 	"gateway-vpn/internal/subscription"
 	updatepkg "gateway-vpn/internal/update"
 	"gateway-vpn/internal/updateautomation"
+	"gateway-vpn/internal/updateremote"
 	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/watchdog"
 	"gateway-vpn/internal/webapi"
@@ -59,6 +60,30 @@ const previewPassword = "gateway-vpn-preview-only"
 type previewRefresher struct{}
 
 type previewDirectProbe struct{}
+
+type previewRemoteUpdates struct {
+	now time.Time
+}
+
+func (source previewRemoteUpdates) Check(context.Context, string) (updateremote.Available, error) {
+	return updateremote.Available{Available: true, Channel: "stable", CurrentVersion: "1.1.0", CandidateVersion: "1.2.0", ReleaseTag: "v1.2.0", PublishedAt: source.now.Format(time.RFC3339), ArtifactBytes: 84 << 20, ArtifactSHA256: strings.Repeat("a", 64), SourceReference: "Go4a4a/Gateway-VPN#v1.2.0", SourceCommit: strings.Repeat("b", 40)}, nil
+}
+
+func (source previewRemoteUpdates) CheckMihomo(context.Context, string) (updateremote.MihomoAvailable, error) {
+	return updateremote.MihomoAvailable{Available: true, Channel: "stable", CurrentGatewayVersion: "1.1.0", CurrentMihomoVersion: "v1.19.30", CandidateGatewayVersion: "1.1.1", CandidateMihomoVersion: "v1.20.0", ReleaseTag: "v1.1.1", PublishedAt: source.now.Format(time.RFC3339), ArtifactBytes: 86 << 20, ArtifactSHA256: strings.Repeat("c", 64), SourceReference: "Go4a4a/Gateway-VPN#v1.1.1:mihomo", SourceCommit: strings.Repeat("d", 40), Urgency: "recommended", Summary: "Проверенное обновление совместимости Mihomo с полным автоматическим rollback."}, nil
+}
+
+func (previewRemoteUpdates) StageChannel(context.Context, string) (updatepkg.Operation, error) {
+	return updatepkg.Operation{}, errors.New("preview remote staging is intentionally disabled")
+}
+
+func (previewRemoteUpdates) StageMihomoChannel(context.Context, string) (updatepkg.Operation, error) {
+	return updatepkg.Operation{}, errors.New("preview Mihomo staging is intentionally disabled")
+}
+
+func (previewRemoteUpdates) StageExact(context.Context, string) (updatepkg.Operation, error) {
+	return updatepkg.Operation{}, errors.New("preview exact staging is intentionally disabled")
+}
 
 type previewRestorePoints struct {
 	mutex sync.Mutex
@@ -827,7 +852,8 @@ func runContext(parent context.Context, address string, restorePending, updatePe
 			StartedAt: previewNow.Add(-48 * time.Hour).Format(time.RFC3339Nano), UpdatedAt: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 			OldVersion: "1.0.0", NewVersion: "1.1.0", StabilityDeadline: previewNow.Add(-24 * time.Hour).Format(time.RFC3339Nano),
 		}},
-		UpdatePolicy: &updatepkg.AutomationPolicyRepository{Database: database, Now: func() time.Time { return previewNow }},
+		UpdatePolicy:  &updatepkg.AutomationPolicyRepository{Database: database, Now: func() time.Time { return previewNow }},
+		RemoteUpdates: previewRemoteUpdates{now: previewNow},
 		UpdateAutomation: previewUpdateAutomation{status: updateautomation.Status{
 			Phase: updateautomation.PhaseWaitingWindow, Channel: "stable", JitterOffsetMinutes: 17,
 			NextCheckAt: previewNow.Add(6 * time.Hour).Format(time.RFC3339Nano), NextApplyAt: previewNow.Add(10 * time.Hour).Format(time.RFC3339Nano),

@@ -462,6 +462,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	bundle := read(t, filepath.Join(root, "scripts", "build-release-bundle.sh"))
 	for _, required := range []string{
 		"build-release.sh", "build-vps-release.sh", "build-deploy.sh", "build-channel.sh",
+		"--mihomo-maintenance", "--mihomo-channel", "--mihomo-urgency", "--mihomo-summary", "--compatible-gateway-version", "build-mihomo-channel.sh",
 		"release-key-verify", "release-verify", "--initial-install", "vps-release-verify", "channel-verify",
 		"--artifact \"bootstrap=", "--artifact \"deploy=", "--artifact \"deploy-windows=", "--artifact \"gateway=", "--artifact \"vps=",
 		"bootstrap=$ROOT/dist/", "deploy=$ROOT/dist/", "deploy-windows=$ROOT/dist/", "gateway=$ROOT/dist/", "vps=$ROOT/dist/",
@@ -486,6 +487,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	publisher := read(t, filepath.Join(root, "scripts", "create-github-release-draft.sh"))
 	for _, required := range []string{
 		"GH_TOKEN", "REMOTE_COMMIT", "--verify-tag --draft", "go run ./cmd/gateway-vpnctl", "--artifact \"bootstrap=",
+		"mihomo-channel-$mihomo_channel.json", "mihomo-channel-$mihomo_channel.sig", "mihomo-channel-verify", "one safe manifest/signature pair", "MIHOMO_CHANNELS",
 		"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz",
 		"gateway-vpn-vps-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64",
 		"gateway-vpn-deploy-$VERSION-linux-amd64", "gateway-vpn-deploy-$VERSION-windows-amd64.exe",
@@ -536,6 +538,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	buildEncrypted := read(t, filepath.Join(root, "scripts", "build-release-bundle-encrypted.sh"))
 	for _, required := range []string{
 		"stat -f -c %T /dev/shm", "== tmpfs", "set +x", "release-keyfile-unlock", "build-release-bundle.sh", "trap cleanup EXIT", "--passphrase-file",
+		"--mihomo-maintenance", "--mihomo-channel", "--mihomo-urgency", "--mihomo-summary", "--compatible-gateway-version", "BUNDLE_EXTRA_ARGS",
 		`PASSPHRASE_FILE="$SECRET_ROOT/passphrase"`, `UNLOCKED="$SECRET_ROOT/unlocked"`, `CONTROL="$BUILD_ROOT/gateway-vpnctl"`, "/tmp/gateway-vpn-key-helper.",
 	} {
 		if !strings.Contains(buildEncrypted, required) {

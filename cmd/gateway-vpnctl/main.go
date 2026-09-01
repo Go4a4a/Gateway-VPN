@@ -66,6 +66,12 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "channel-verify" {
 		return runChannelVerify(args[1:])
 	}
+	if len(args) > 0 && args[0] == "mihomo-channel-sign" {
+		return runMihomoChannelSign(args[1:])
+	}
+	if len(args) > 0 && args[0] == "mihomo-channel-verify" {
+		return runMihomoChannelVerify(args[1:])
+	}
 	if len(args) > 0 && args[0] == "channel-install-command" {
 		return runChannelInstallCommand(args[1:])
 	}
@@ -101,7 +107,7 @@ func run(args []string) int {
 		return 0
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|database-verify|release-keygen|release-key-verify|release-key-backup|release-keyfile-create|release-keyfile-verify|release-keyfile-backup|release-keyfile-unlock|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|channel-windows-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
+	fmt.Fprintln(os.Stderr, "usage: gateway-vpnctl [--version|status|database-verify|release-keygen|release-key-verify|release-key-backup|release-keyfile-create|release-keyfile-verify|release-keyfile-backup|release-keyfile-unlock|release-host-contract|release-sign|release-verify|vps-release-sign|vps-release-verify|channel-sign|channel-verify|mihomo-channel-sign|mihomo-channel-verify|channel-install-command|channel-vps-install-command|channel-deploy-command|channel-windows-deploy-command|gateway-install-preflight|deploy-wireguard-inspect|deploy-wireguard-prepare|deploy-wireguard-finalize]")
 	return 2
 }
 

@@ -10,6 +10,8 @@ Gateway устанавливается на Ubuntu Server 24.04 LTS x86_64. VPS 
 
 Release закрепляет конкретный Mihomo binary и его SHA-256. Ed25519 identity создаётся один раз на trusted Linux builder; private key не помещается в репозиторий, GitHub, Gateway или VPS.
 
+Каждый полный Gateway VPN release уже несёт одну проверенную Mihomo внутри `libexec/mihomo`. Обычный release может оставить прежнюю Mihomo либо обновить её; установленный Gateway не скачивает core из отдельной папки и не заменяет binary на месте.
+
 Штатный production-вариант — один переносимый файл `gateway-vpn-production.gvkey`. Внутри него private/public Ed25519 и fingerprint целиком зашифрованы AES-256-GCM; ключ шифрования выводится Argon2id (`64 MiB`, 3 iteration, parallelism 2) из passphrase длиной не менее 10 Unicode-символов и не более 256 UTF-8 байт. Header аутентифицирован, неизвестный format/KDF/cipher отклоняется до использования заявленных файлом KDF-параметров. Файл создаётся exclusive, `fsync`-ится, тут же расшифровывается и cryptographically self-verifies; existing destination никогда не перезаписывается. Для production рекомендуется запоминаемая фраза длиной 14 и более символов.
 
 Для постоянного хранения не требуется Linux-раздел или специальная флешка: `.gvkey` можно хранить как обычный файл вне Git worktree, в том числе на Windows. Нужна byte-identical verified backup-копия в независимом месте и отдельно сохранённая сильная passphrase. Потеря и primary, и backup лишит проект возможности выпускать доверенные обновления; потеря passphrase эквивалентна потере ключа. Passphrase нельзя помещать рядом с `.gvkey`, в shell history, argv, environment, GitHub Secrets этого репозитория или журнал.
@@ -68,6 +70,22 @@ Builder требует clean committed Git tree и создаёт:
   OWNER/REPOSITORY v0.1.0
 ```
 
+Если полный release выпускается прежде всего ради новой проверенной Mihomo, к той же сборке явно добавляется maintenance channel. Например, `1.0.1` с Mihomo `v1.20.0`, проверенная как обновление exact установленной версии `1.0.0`:
+
+```bash
+./scripts/build-release-bundle-encrypted.sh \
+  1.0.1 stable v1.20.0 /secure/build-input/mihomo \
+  /publisher-primary/gateway-vpn-production.gvkey \
+  OWNER/REPOSITORY v1.0.1 \
+  --mihomo-maintenance \
+  --mihomo-channel stable \
+  --mihomo-urgency recommended \
+  --mihomo-summary 'Проверенное обновление совместимости Mihomo.' \
+  --compatible-gateway-version 1.0.0
+```
+
+`--compatible-gateway-version` повторяется для каждой **точной** версии Gateway, с которой реально проверялся переход; диапазон и предположение «совместимо со всеми старыми» запрещены. Сборка создаёт полный `gateway-vpn-gateway-1.0.1-linux-amd64.tar.gz` и дополнительную пару `mihomo-channel-stable.json/.sig`, которая указывает именно на этот archive. В исходники репозитория или отдельную GitHub-папку Mihomo binary не добавляется.
+
 Fetcher принимает только официальный compatible `mihomo-linux-amd64-v1-vX.Y.Z.gz` с GitHub MetaCubeX, ограничивает download/decompression, сначала проверяет опубликованный archive SHA-256 и только затем запускает bounded version probe. Bundle builder вычисляет и закрепляет SHA-256 распакованного binary, а build/channel timestamp канонически берётся из commit time. Поэтому повторная сборка exact commit с теми же Go/Mihomo inputs не зависит от времени запуска.
 
 Подписанный Gateway tree включает binaries, закреплённый Mihomo, `scripts/install-gateway.sh`, `scripts/uninstall.sh`, `config.example.yaml`, весь regular-file `packaging/`, документацию, SBOM/provenance, `release.json`, полный manifest и detached signature. Установленная `/opt/gateway-vpn/releases/v<version>` является точной копией этого дерева и снова проходит `release-verify`; выборочная копия файлов недопустима.
@@ -89,6 +107,8 @@ Fetcher принимает только официальный compatible `mihom
 ```
 
 Builder тем же trusted key создаёт и тут же перепроверяет `channel-stable.json` и `channel-stable.sig`, копирует публичный `update-signing.pub` и пишет `install-gateway-0.1.0.command.txt`. В GitHub Release с точным tag `v0.1.0` загружаются role artifacts, bootstrap, оба channel-файла и public key без переименования. `latest`, branch archive и mutable URL не используются.
+
+Если сборка содержит Mihomo maintenance channel, publisher автоматически находит только полные безопасные пары `mihomo-channel-stable/testing.json + .sig`, повторно проверяет signature, exact commit, сопровождающий Gateway tree и archive и добавляет пару в тот же draft. Наличие только manifest либо только signature блокирует публикацию.
 
 ### GitHub CI и immutable draft
 
@@ -797,6 +817,10 @@ WebUI требует свежую password re-authentication и введённу
 ## Подписанное обновление и atomic rollback
 
 Во вкладке **Система и безопасность → Подписанное обновление** принимается только versioned `.tar.gz`, подписанный доверенным Ed25519-ключом `/etc/gateway-vpn/update-signing.pub`. Источником может быть официальный signed GitHub Release выбранного канала `Stable`/`Testing`, ручная загрузка файла либо advanced exact immutable HTTPS URL. `main`, branch/commit URL, `latest`, `git pull`, URL credentials и private/link-local/loopback destination не поддерживаются. Redirect, DNS resolution, content type, download size, signed channel hash и конечный artifact повторно проверяются; URL/query не попадают в audit.
+
+Карточка **Обновление Mihomo** является отдельным понятным представлением того же безопасного механизма. Кнопка **Проверить обновление Mihomo** скачивает только небольшой подписанный maintenance manifest и показывает установленную Mihomo, candidate Mihomo, сопровождающую Gateway version, важность и описание. **Загрузить и проверить Mihomo** скачивает полный Gateway archive; установленная система ещё не меняется. Обычное обновление всего Gateway точно так же уже содержит нужную для него Mihomo — никаких последующих загрузок core из отдельной папки не требуется.
+
+Maintenance manifest принимается только при точном включении текущей Gateway version в compatibility list, более новой Mihomo, совпадении Linux/amd64, host contract и Gateway/Mihomo API contracts. После скачивания archive обычный release verifier повторно сверяет signature, tree, commit, обе версии и contracts. Несовпадение удаляется из staging. Установка, snapshot, 24-часовая стабилизация и rollback полностью общие с Gateway update; второй updater отсутствует. Ручное Mihomo staging automatic worker не применяет.
 
 До изменения live-системы staging ограничивает archive/entry/path/depth/size, запрещает symlink, hardlink, device, sparse и concatenated/trailing gzip data, проверяет signature, signer SHA-256, полный file manifest, SHA-256 каждого файла, строгий SemVer, Git commit/build date, OS/arch, DB/config и Gateway/Mihomo API contracts. Дополнительно candidate `host_contract_sha256`, вычисленный по всем packaged systemd unit/socket/timer files, обязан совпасть с текущим release: WebUI pointer-update не оставляет на host несовместимые старые units. Несовпадение безопасно отклоняется до mutation и означает, что нужен отдельный signed installer-upgrade artifact. Один verified staging не доказывает установку и может быть безопасно удалён.
 
