@@ -60,7 +60,10 @@ for unit in \
   gateway-vpn-update-finalize.timer ssh.service; do
   systemctl is-active --quiet "$unit"
 done
-! systemctl is-active --quiet gateway-vpn-mihomo.service
+if systemctl is-active --quiet gateway-vpn-mihomo.service; then
+  echo "Mihomo unexpectedly active without a validated generation" >&2
+  exit 1
+fi
 [[ -z $(systemctl --failed --no-legend --plain) ]]
 [[ $(systemctl show gateway-vpn-update-recovery.service -p Result --value) == success ]]
 [[ $(systemctl show gateway-vpn-network-recovery.service -p Result --value) == success ]]
@@ -87,9 +90,12 @@ ss -H -lun 'sport = :67' | awk '{print $4}' | grep -Fxq "0.0.0.0%$LAN_INTERFACE:
 
 nft --json list set inet gateway_vpn firewall_schema_generation \
   | grep -Eq '"elem"[[:space:]]*:[[:space:]]*\[[[:space:]]*'"$FIREWALL_GENERATION"'[[:space:]]*\]'
-! nft list set inet gateway_vpn active_tun_interfaces | grep -Fq 'elements ='
-! nft list set inet gateway_vpn active_direct_interfaces | grep -Fq 'elements ='
-! nft list set inet gateway_vpn active_path_generation | grep -Fq 'elements ='
+for empty_set in active_tun_interfaces active_direct_interfaces active_path_generation; do
+  if nft list set inet gateway_vpn "$empty_set" | grep -Fq 'elements ='; then
+    echo "Gateway fail-closed set is unexpectedly populated: $empty_set" >&2
+    exit 1
+  fi
+done
 nft list chain inet gateway_vpn forward | grep -F 'gateway-vpn PATH_BLOCKED' >/dev/null
 
 report=$(< /var/lib/gateway-vpn/install-report.json)

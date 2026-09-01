@@ -86,7 +86,10 @@ case "$ACTION" in
     [[ $(sed -n 's/^version=//p' "$MARKER") == "$VERSION" ]]
     [[ $(grep -c '^version=' "$MARKER") == 1 ]]
     if [[ $EXPECTED_SOURCE == absent ]]; then
-      ! grep -q '^old_ipv4_src_valid_mark=' "$MARKER"
+      if grep -q '^old_ipv4_src_valid_mark=' "$MARKER"; then
+        echo "Legacy marker unexpectedly contains source-mark state" >&2
+        exit 1
+      fi
     else
       [[ $(grep -c '^old_ipv4_src_valid_mark=' "$MARKER") == 1 ]]
       [[ $(sed -n 's/^old_ipv4_src_valid_mark=//p' "$MARKER") == "$EXPECTED_SOURCE" ]]
@@ -120,10 +123,16 @@ case "$ACTION" in
     [[ ! -e /opt/gateway-vpn/current && ! -L /opt/gateway-vpn/current ]]
     [[ ! -e /opt/gateway-vpn/recovery && ! -L /opt/gateway-vpn/recovery ]]
     if [[ -d /opt/gateway-vpn/releases && ! -L /opt/gateway-vpn/releases ]]; then
-      ! find /opt/gateway-vpn/releases -mindepth 1 -maxdepth 1 -type d -name 'v*' -print -quit | grep -q .
+      if find /opt/gateway-vpn/releases -mindepth 1 -maxdepth 1 -type d -name 'v*' -print -quit | grep -q .; then
+        echo "Gateway release directory remains after cleanup" >&2
+        exit 1
+      fi
     fi
     [[ ! -e /etc/systemd/system/gateway-vpn.service && ! -L /etc/systemd/system/gateway-vpn.service ]]
-    ! nft list table inet gateway_vpn >/dev/null 2>&1
+    if nft list table inet gateway_vpn >/dev/null 2>&1; then
+      echo "Gateway nftables table remains after cleanup" >&2
+      exit 1
+    fi
     if [[ $KIND == recovery ]]; then
       [[ ! -e /var/lib/gateway-vpn && ! -L /var/lib/gateway-vpn ]]
       [[ ! -e $TRANSACTIONS/active && ! -L $TRANSACTIONS/active ]]

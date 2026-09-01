@@ -1285,6 +1285,38 @@ func TestSystemdReleaseGateUsesCanonicalGenericUplinkState(t *testing.T) {
 	}
 }
 
+func TestCriticalBashNegativeAssertionsCannotBeMaskedByErrexit(t *testing.T) {
+	root := repositoryRoot(t)
+	files := map[string][]string{
+		filepath.Join(root, "scripts", "uninstall.sh"): {
+			`! systemctl is-enabled --quiet "$unit"`,
+			`! systemctl is-active --quiet "$unit"`,
+		},
+		filepath.Join(root, "test", "release-gate", "validate_gateway_systemd.sh"): {
+			"! systemctl is-active --quiet gateway-vpn-mihomo.service",
+			"! nft list set inet gateway_vpn active_tun_interfaces",
+			"! nft list set inet gateway_vpn active_direct_interfaces",
+			"! nft list set inet gateway_vpn active_path_generation",
+		},
+		filepath.Join(root, "test", "release-gate", "validate_gateway_install_marker_lifecycle.sh"): {
+			"! grep -q '^old_ipv4_src_valid_mark='",
+			"! find /opt/gateway-vpn/releases",
+			"! nft list table inet gateway_vpn",
+		},
+		filepath.Join(root, "test", "release-gate", "validate_gateway_restore_point_systemd.sh"): {
+			"! grep -Fq '# restore-point-gate: newer'",
+		},
+	}
+	for filename, forbidden := range files {
+		contents := read(t, filename)
+		for _, fragment := range forbidden {
+			if strings.Contains(contents, fragment) {
+				t.Errorf("%s contains a standalone negated assertion that Bash errexit can mask: %q", filepath.Base(filename), fragment)
+			}
+		}
+	}
+}
+
 func TestFirewallGuardIsIndependentPrivilegedQuarantineService(t *testing.T) {
 	root := repositoryRoot(t)
 	guard := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-firewall-guard.service"))

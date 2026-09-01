@@ -191,14 +191,20 @@ restore_systemd_unit_state() {
     systemctl is-enabled --quiet "$unit"
   else
     systemctl disable "$unit" >/dev/null
-    ! systemctl is-enabled --quiet "$unit"
+    if systemctl is-enabled --quiet "$unit"; then
+      echo "$label unit remained enabled during uninstall" >&2
+      return 1
+    fi
   fi
   if ((desired_active)); then
     systemctl start "$unit" >/dev/null
     systemctl is-active --quiet "$unit"
   else
     systemctl stop "$unit" >/dev/null
-    ! systemctl is-active --quiet "$unit"
+    if systemctl is-active --quiet "$unit"; then
+      echo "$label unit remained active during uninstall" >&2
+      return 1
+    fi
   fi
 }
 

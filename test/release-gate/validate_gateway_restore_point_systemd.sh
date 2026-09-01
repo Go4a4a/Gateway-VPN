@@ -234,7 +234,10 @@ SUCCESS_ROLLBACK=$(journal_field update_id)
 [[ $(readlink /opt/gateway-vpn/recovery) == "releases/v$CURRENT_VERSION" ]]
 assert_projection_marker historical
 grep -Fq '# restore-point-gate: historical' "$CONFIGURATION"
-! grep -Fq '# restore-point-gate: newer' "$CONFIGURATION"
+if grep -Fq '# restore-point-gate: newer' "$CONFIGURATION"; then
+  echo "Newer projection survived historical restore-point rollback" >&2
+  exit 1
+fi
 [[ ! -e /var/lib/gateway-vpn/subscriptions/newer-sub ]]
 nft list table inet amnezia_restore_sentinel | cmp -s - /run/foreign-nft.before
 ip -details -o link show dev amzrst0 | cmp -s - /run/foreign-link.before
