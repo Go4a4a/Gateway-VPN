@@ -40,6 +40,30 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 	}
 }
 
+func TestReadmeKeepsVolatileReleaseStatusInProjectJournal(t *testing.T) {
+	root := repositoryRoot(t)
+	readme := read(t, filepath.Join(root, "README.md"))
+	for _, required := range []string{
+		"docs/PROJECT_STATUS.md",
+		"bounded component watchdog",
+		"текущий exact disposable-signed install/reinstall/uninstall/update/rollback rehearsal обеих ролей",
+		"clean-Windows two-target deploy",
+	} {
+		if !strings.Contains(readme, required) {
+			t.Errorf("README current-state boundary missing %q", required)
+		}
+	}
+	for _, forbidden := range []*regexp.Regexp{
+		regexp.MustCompile(`(?i)schema-v?\d+`),
+		regexp.MustCompile(`(?i)\d+-component watchdog`),
+		regexp.MustCompile(`(?i)rehearsal[^.\n]*(ещё выполня|in progress|pending)`),
+	} {
+		if forbidden.MatchString(readme) {
+			t.Errorf("README contains volatile or stale release-state snapshot %q", forbidden.String())
+		}
+	}
+}
+
 func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T) {
 	root := repositoryRoot(t)
 	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-watchdog.service"))
