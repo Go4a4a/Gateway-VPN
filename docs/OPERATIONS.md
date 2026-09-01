@@ -650,7 +650,7 @@ sudo journalctl --namespace=gateway-vpn -u gateway-vpn.service --since=-15min
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** отдельно показываются локальное состояние процессов/SQLite/firewall, доступность глобального Интернета, active maintenance и durable restart/reboot budgets. Потеря модемов, операторов, подписок, targets, VPS или всего внешнего Интернета отображается как connectivity outage и сама по себе никогда не запускает restart либо reboot.
 
-Safe-default policy проверяет фиксированный allowlist из 17 компонентов каждые 15 секунд: WebUI/API/control, SQLite, firewall guard/ruleset, broker/networkd, DNS/DHCP, optional SSH/SFTP, Mihomo/TUN, WireGuard management/ingress, policy routing, background workers, desired/observed convergence, verified backup/WAL, host resources и logging/export pipeline. Она требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает read-only monitoring, systemd crash restart, fail-closed firewall guard и audit.
+Safe-default policy проверяет фиксированный signed allowlist компонентов каждые 15 секунд: WebUI/API/control, SQLite, firewall guard/ruleset, broker/networkd, DNS/DHCP, optional SSH/SFTP, Mihomo/TUN, WireGuard management/ingress, policy routing, background workers, desired/observed convergence, verified backup/WAL, host resources и logging/export pipeline. Она требует три последовательные ошибки и два успеха, сначала вызывает idempotent reconcile, затем закрывает data path и только после этого может перезапустить фиксированный unit. По умолчанию разрешено не более пяти restart одного компонента за 15 минут с cooldown 30 секунд. Отключение automatic recovery не отключает read-only monitoring, systemd crash restart, fail-closed firewall guard и audit.
 
 Во вкладке **Система и безопасность → Самоконтроль 24/7** для каждого fixed component выбирается только допустимый `Только наблюдать`, `Reconcile без restart` или `Reconcile и bounded restart`. WebUI не принимает имя unit, executable, interface, route или command. Отдельно настраиваются worker-stale, WireGuard-handshake, backup-age, SQLite-WAL, disk и memory thresholds. Resource pressure отображается, но не делает host reboot допустимым. Старый WireGuard handshake при корректных interface/address/peer/fwmark/routes классифицируется как внешний outage и подавляет локальные recovery/reboot действия.
 
@@ -957,7 +957,7 @@ Management-туннель настраивается во вкладке **Уд�
 
 ## Successor Management Fabric и локальные ресурсы
 
-Этот раздел фиксирует эксплуатационный contract расширения 2026-08-30. Текущий schema-25 release поддерживает только совместимый первый link выше; нельзя считать перечисленные ниже функции доступными, пока `PROJECT_STATUS.md` не покажет реализованные migrations/runtime/netns/systemd/browser gates.
+Этот раздел фиксирует эксплуатационный contract расширения 2026-08-30. Текущий successor с Gateway schema 34 и VPS Agent schema 4 включает перечисленные ниже функции; их production-доступность всё равно подтверждается только соответствующими migrations/runtime/netns/systemd/browser gates в `PROJECT_STATUS.md`.
 
 В Gateway WebUI группа **Удалённый доступ** разделена на четыре страницы:
 

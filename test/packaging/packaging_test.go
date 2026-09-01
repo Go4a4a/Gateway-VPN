@@ -64,6 +64,25 @@ func TestReadmeKeepsVolatileReleaseStatusInProjectJournal(t *testing.T) {
 	}
 }
 
+func TestOperationalDocsDoNotKeepObsoleteArchitectureSnapshots(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, relative := range []string{
+		filepath.Join("docs", "OPERATIONS.md"),
+		filepath.Join("docs", "SECURITY.md"),
+	} {
+		document := read(t, filepath.Join(root, relative))
+		for _, forbidden := range []*regexp.Regexp{
+			regexp.MustCompile(`(?i)\b17-component`),
+			regexp.MustCompile(`(?i)fixed signed 17`),
+			regexp.MustCompile(`(?i)schema-25 release supports only`),
+		} {
+			if forbidden.MatchString(document) {
+				t.Errorf("%s contains obsolete architecture snapshot %q", relative, forbidden.String())
+			}
+		}
+	}
+}
+
 func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T) {
 	root := repositoryRoot(t)
 	unit := read(t, filepath.Join(root, "packaging", "systemd", "gateway-vpn-watchdog.service"))
