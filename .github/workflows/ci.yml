@@ -58,6 +58,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          non_executable=$(git ls-files --stage | awk '$1 != "100755" && $4 ~ /\.sh$/ { print $4 }')
+          if [[ -n "$non_executable" ]]; then
+            printf 'tracked shell entrypoints must use Git mode 100755:\n%s\n' "$non_executable" >&2
+            exit 1
+          fi
           node --check internal/webapi/static/app.js
           node --check internal/webapi/static/logging-ui.js
           node --check internal/webapi/static/wireguard-ingress.js
