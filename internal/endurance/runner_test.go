@@ -57,7 +57,10 @@ func TestRunnerWritesDurableSmokeArtifactsWithoutClaimingEndurance(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &fakeRunnerClient{start: time.Now().UTC(), interval: policy.Interval, diagnostic: diagnosticFixture(t, validRetentionSnapshot(), false)}
+	// Sample timestamps must share the fixture diagnostic timeline. Using the
+	// wall clock makes the otherwise valid seven-day retention boundary expire.
+	sampleStart := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	client := &fakeRunnerClient{start: sampleStart, interval: policy.Interval, diagnostic: diagnosticFixture(t, validRetentionSnapshot(), false)}
 	report, err := (Runner{Client: client, Policy: policy, Environment: EnvironmentDeveloperLinux, OutputDirectory: directory}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
