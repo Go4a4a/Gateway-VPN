@@ -28,8 +28,20 @@ func TestPreviewServesNetworkAndTopologyContracts(t *testing.T) {
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	var networkBody, topologyBody, updatePolicyBody, updateAutomationBody, restorePointsBody, mihomoUpdateBody []byte
-	deadline := time.Now().Add(10 * time.Second)
+	// The preview performs the full schema seed and Argon2 bootstrap before it
+	// starts serving. Race instrumentation can make that setup substantially
+	// slower than a normal unit run, so keep a bounded but realistic readiness
+	// window instead of treating scheduler overhead as an API failure.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case runErr := <-done:
+			if runErr != nil {
+				t.Fatalf("preview exited before readiness: %v", runErr)
+			}
+			t.Fatal("preview exited before readiness")
+		default:
+		}
 		networkBody, err = getPreview(client, "http://"+address+"/api/v1/settings/network")
 		if err == nil {
 			topologyBody, err = getPreview(client, "http://"+address+"/api/v1/network/topology")
