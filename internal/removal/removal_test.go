@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,9 @@ func TestRequestValidationIsTypedAndBounded(t *testing.T) {
 }
 
 func TestWriteMarkerIsDurableTypedAndExclusive(t *testing.T) {
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		t.Skip("durable uninstall marker ownership contract requires root")
+	}
 	root := filepath.Join(t.TempDir(), "uninstall")
 	request := Request{OperationID: "uninstall-0123456789abcdef0123456789abcdef", Mode: ModePurgeData}
 	if err := writeMarker(root, request); err != nil {

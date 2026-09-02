@@ -35,6 +35,7 @@ func TestVPSRestoreApplySameIdentitySnapshotsQuarantinesAndCommits(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	applier.rootOwnerUID = os.Getuid()
 	applier.Now = func() time.Time { return time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC) }
 	result, err := applier.Apply(ctx)
 	if err != nil {
@@ -108,6 +109,7 @@ VALUES('peer:source','site:source','Source Gateway',?,'10.89.0.0/30','10.89.0.1'
 	if err != nil {
 		t.Fatal(err)
 	}
+	applier.rootOwnerUID = os.Getuid()
 	result, err := applier.Apply(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +183,7 @@ func TestVPSRestoreApplyFailureRollsBackLiveStateAndRequiresFreshAuthorization(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	applier.rootOwnerUID = os.Getuid()
 	applier.AfterAppliedItem = func(index int) error {
 		if index == 2 {
 			return errors.New("injected apply failure")
@@ -231,6 +234,7 @@ func TestVPSRestoreBootRecoveryRollsBackInterruptedSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	applier.rootOwnerUID = os.Getuid()
 	if err := applier.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +293,7 @@ func TestVPSRestoreBootRecoveryRollsBackInterruptedSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recoveryApplier.rootOwnerUID = os.Getuid()
 	recovered, err := recoveryApplier.Recover(ctx)
 	if err != nil || !recovered {
 		t.Fatalf("Recover() = %t, %v", recovered, err)

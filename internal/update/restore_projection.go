@@ -90,7 +90,7 @@ func (engine *Engine) prepareRestoreProjection(ctx context.Context, pointID, tra
 	if err := copyExclusiveFile(filepath.Join(root, "config", "config.yaml"), projection.Configuration, 0o640, MaximumFileBytes); err != nil {
 		return restoreProjection{}, fmt.Errorf("prepare restore configuration: %w", err)
 	}
-	if err := setFileOwnership(projection.Configuration, 0, engine.StateGID); err != nil {
+	if err := setFileOwnership(projection.Configuration, engine.rootOwnerUID, engine.StateGID); err != nil {
 		return restoreProjection{}, err
 	}
 	for _, item := range restoreStateTrees {
@@ -176,7 +176,7 @@ func (engine *Engine) applyRestoreTreeSecurity(root, sourcePrefix string) error 
 		relative = filepath.ToSlash(relative)
 		uid, gid := engine.StateUID, engine.StateGID
 		if sourcePrefix == "state/secrets" && restoreRootSecret(relative) {
-			uid, gid = 0, 0
+			uid, gid = engine.rootOwnerUID, engine.rootOwnerGID
 		}
 		mode := os.FileMode(0o600)
 		if info.IsDir() {
@@ -320,7 +320,7 @@ func (engine *Engine) applyRestoreProjection(ctx context.Context, projection res
 	if err := replaceFile(projection.Configuration, projection.configurationLive); err != nil {
 		return errors.New("restore configuration atomic replacement failed")
 	}
-	if err := setFileOwnership(projection.configurationLive, 0, engine.StateGID); err != nil {
+	if err := setFileOwnership(projection.configurationLive, engine.rootOwnerUID, engine.StateGID); err != nil {
 		return err
 	}
 	if err := os.Chmod(projection.configurationLive, 0o640); err != nil {

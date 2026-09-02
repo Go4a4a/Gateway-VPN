@@ -233,8 +233,9 @@ func (collector Collector) CollectAndWrite(ctx context.Context) (Snapshot, error
 	}
 	content = append(content, '\n')
 	// The root-owned timer is the only writer. The Agent receives read access
-	// through its group; it must never own this privileged snapshot.
-	if err := atomicWrite(collector.Paths.Output, content, 0, collector.AgentGID); err != nil {
+	// through its group; it must never own this privileged snapshot. Preserve
+	// the creator UID (root in production) and change only the group.
+	if err := atomicWrite(collector.Paths.Output, content, -1, collector.AgentGID); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil

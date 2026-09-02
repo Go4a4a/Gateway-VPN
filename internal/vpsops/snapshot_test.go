@@ -48,7 +48,11 @@ func TestCollectorWritesBoundedSanitizedDisplayOnlySnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := vpsops.Paths{Output: filepath.Join(operations, "snapshot.json"), FabricStatus: fabric, Journalctl: filepath.Join(root, "journalctl"), Systemctl: filepath.Join(root, "systemctl"), IP: filepath.Join(root, "ip"), NFT: filepath.Join(root, "nft"), WG: filepath.Join(root, "wg"), Uname: filepath.Join(root, "uname")}
-	collector := vpsops.Collector{Executor: fixtureExecutor{}, Paths: paths, AgentGID: 1000, Now: func() time.Time { return time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC) }}
+	agentGID := os.Getgid()
+	if agentGID < 0 {
+		agentGID = 0
+	}
+	collector := vpsops.Collector{Executor: fixtureExecutor{}, Paths: paths, AgentGID: agentGID, Now: func() time.Time { return time.Date(2026, 8, 30, 20, 0, 0, 0, time.UTC) }}
 	snapshot, err := collector.CollectAndWrite(context.Background())
 	if err != nil {
 		t.Fatal(err)

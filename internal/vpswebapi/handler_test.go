@@ -558,7 +558,11 @@ func newVPSAPIFixture(t *testing.T, fabric FabricApplyTrigger) (*Server, *fakeRe
 	if fabric != nil {
 		fabricStatusPath = filepath.Join(stateDirectory, vpsfabric.WatchdogStatusFilename)
 		status := vpsfabric.NewWatchdogStatus("HEALTHY", "HEALTHY", true, false, now)
-		if err := vpsfabric.WriteWatchdogStatus(fabricStatusPath, status, 0, 0); err != nil {
+		uid, gid := os.Getuid(), os.Getgid()
+		if uid < 0 || gid < 0 {
+			uid, gid = 0, 0
+		}
+		if err := vpsfabric.WriteWatchdogStatus(fabricStatusPath, status, uid, gid); err != nil {
 			t.Fatal(err)
 		}
 	}

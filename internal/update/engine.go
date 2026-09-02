@@ -37,17 +37,21 @@ type ManagedRuntimeState struct {
 }
 
 type Engine struct {
-	Stager          *Stager
-	RestorePoints   *RestorePointStore
-	Store           JournalStore
-	Runtime         HostRuntime
-	ReleaseRoot     string
-	StateDir        string
-	DatabasePath    string
-	ConfigPath      string
-	CurrentVersion  string
-	StateUID        int
-	StateGID        int
+	Stager         *Stager
+	RestorePoints  *RestorePointStore
+	Store          JournalStore
+	Runtime        HostRuntime
+	ReleaseRoot    string
+	StateDir       string
+	DatabasePath   string
+	ConfigPath     string
+	CurrentVersion string
+	StateUID       int
+	StateGID       int
+	// rootOwnerUID/GID are fixed to root in production. They are kept private
+	// so tests can use the current process identity when running without CAP_CHOWN.
+	rootOwnerUID    int
+	rootOwnerGID    int
 	StabilityWindow time.Duration
 	Now             func() time.Time
 	AfterState      func(TransactionState) error

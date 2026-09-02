@@ -554,10 +554,14 @@ func newEngineFixture(t *testing.T) *engineFixture {
 		stateDir: stateDir, databasePath: databasePath, configPath: configPath, clock: clock, signingKey: signingKey,
 	}
 	transactionRoot := filepath.Join(t.TempDir(), "gateway-vpn-privileged", "update-transactions")
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		uid, gid = 0, 0
+	}
 	fixture.engine = &Engine{
 		Stager: stager, Store: JournalStore{Root: transactionRoot}, Runtime: runtime,
 		ReleaseRoot: releaseRoot, StateDir: stateDir, DatabasePath: databasePath, ConfigPath: configPath,
-		CurrentVersion: "1.1.0", StateUID: 0, StateGID: 0, StabilityWindow: time.Hour,
+		CurrentVersion: "1.1.0", StateUID: uid, StateGID: gid, rootOwnerUID: uid, rootOwnerGID: gid, StabilityWindow: time.Hour,
 		Now:          func() time.Time { return fixture.clock },
 		setOwnership: func(string, int, int) error { return nil },
 	}

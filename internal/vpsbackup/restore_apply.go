@@ -74,11 +74,14 @@ type generatedIdentity struct {
 }
 
 type RestoreApplier struct {
-	Manager          *RestoreManager
-	TransactionRoot  string
-	WireGuardConfig  string
-	AgentUID         int
-	AgentGID         int
+	Manager         *RestoreManager
+	TransactionRoot string
+	WireGuardConfig string
+	AgentUID        int
+	AgentGID        int
+	// rootOwnerUID remains zero in production and is replaceable only by
+	// same-package tests that run without CAP_CHOWN.
+	rootOwnerUID     int
 	Now              func() time.Time
 	AfterAppliedItem func(int) error
 }
@@ -91,7 +94,7 @@ func NewRestoreApplier(manager *RestoreManager, transactionRoot string, agentUID
 	if filepath.Clean(manager.StateDirectory) != productionStateRoot {
 		wireGuardConfig = filepath.Join(manager.StateDirectory, "wg-mgmt.conf")
 	}
-	return &RestoreApplier{Manager: manager, TransactionRoot: filepath.Clean(transactionRoot), WireGuardConfig: wireGuardConfig, AgentUID: agentUID, AgentGID: agentGID}, nil
+	return &RestoreApplier{Manager: manager, TransactionRoot: filepath.Clean(transactionRoot), WireGuardConfig: wireGuardConfig, AgentUID: agentUID, AgentGID: agentGID, rootOwnerUID: 0}, nil
 }
 
 func (applier *RestoreApplier) Apply(ctx context.Context) (ApplyResult, error) {
@@ -280,7 +283,7 @@ func (applier *RestoreApplier) prepareCandidates(ctx context.Context, verified V
 		}
 		uid, gid := applier.AgentUID, applier.AgentGID
 		if item.Name == "config" {
-			uid, gid = 0, applier.AgentGID
+			uid, gid = applier.rootOwnerUID, applier.AgentGID
 			if err := os.Chmod(item.Candidate, 0o640); err != nil {
 				return vpsagent.Identity{}, err
 			}

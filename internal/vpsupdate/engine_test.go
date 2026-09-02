@@ -80,6 +80,9 @@ func TestEngineHealthFailureRestoresOldReleaseAndDatabase(t *testing.T) {
 	}
 	assertPointer(t, fixture.releaseRoot, "current", "releases/v1.1.0")
 	assertProbeTable(t, fixture.databasePath, false)
+	if len(fixture.runtime.started) == 0 {
+		t.Fatal("rollback did not restart the previous release")
+	}
 	if got := fixture.runtime.started[len(fixture.runtime.started)-1]; got != "1.1.0" {
 		t.Fatalf("last started version = %q", got)
 	}
@@ -377,10 +380,14 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	configPath := filepath.Join(root, "etc", "gateway-vpn-vps", "config.yaml")
 	writeFile(t, configPath, "version: 1\n", 0o640)
 	runtime := &fakeRuntime{}
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		uid, gid = 0, 0
+	}
 	fixture := &engineFixture{stager: stager, runtime: runtime, operation: operation, policy: vpsrelease.VerificationPolicy{PublicKey: publicKey, ExpectedOS: "linux", ExpectedArch: "amd64", ExpectedProfile: "ubuntu-24.04"}, privateKey: privateKey, releaseRoot: releaseRoot, databasePath: databasePath, clock: clock}
 	fixture.engine = &Engine{
-		Stager: stager, Store: JournalStore{Root: filepath.Join(root, "gateway-vpn-vps-privileged", "update-transactions")}, Status: StatusStore{Path: filepath.Join(stateDirectory, "update-status.json"), UID: 0, GID: 0}, Runtime: runtime,
-		ReleaseRoot: releaseRoot, StateDirectory: stateDirectory, DatabasePath: databasePath, ConfigPath: configPath, TrustedKeyPath: keyPath, Profile: "ubuntu-24.04", RunningVersion: "1.1.0", RunningSchema: 4, AgentUID: 0, AgentGID: 0,
+		Stager: stager, Store: JournalStore{Root: filepath.Join(root, "gateway-vpn-vps-privileged", "update-transactions")}, Status: StatusStore{Path: filepath.Join(stateDirectory, "update-status.json"), UID: uid, GID: gid}, Runtime: runtime,
+		ReleaseRoot: releaseRoot, StateDirectory: stateDirectory, DatabasePath: databasePath, ConfigPath: configPath, TrustedKeyPath: keyPath, Profile: "ubuntu-24.04", RunningVersion: "1.1.0", RunningSchema: 4, AgentUID: uid, AgentGID: gid,
 		StabilityWindow: time.Hour, Now: func() time.Time { return fixture.clock },
 	}
 	return fixture
