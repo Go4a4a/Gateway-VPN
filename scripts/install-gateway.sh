@@ -22,6 +22,7 @@ LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS="192.168.200.1/24"
 INITIAL_TOPOLOGY_TOKEN=""
+TOPOLOGY_PROFILE="ETHERNET_HILINK"
 LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
@@ -230,9 +231,12 @@ RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 # mutate state.  The later invocation remains intentionally close to the full
 # LAN preflight as a defence-in-depth recheck immediately before apply.
 if [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]]; then
-  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE")
+  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --allow-nondefault --lan-interface "$LAN_INTERFACE")
   [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_CHECK_ARGS+=(--lan-members "$LAN_MEMBERS")
-  "$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}"
+  TOPOLOGY_CHECK_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}" )
+  printf '%s\n' "$TOPOLOGY_CHECK_OUTPUT"
+  TOPOLOGY_PROFILE=$(sed -n 's/.*profile=\([^ ]*\).*/\1/p' <<<"$TOPOLOGY_CHECK_OUTPUT")
+  [[ "$TOPOLOGY_PROFILE" =~ ^(ETHERNET_HILINK|ETHERNET_ETHERNET|ONE_ARM_WIREGUARD|MIXED)$ ]] || { echo "Initial topology profile output is invalid" >&2; exit 1; }
 elif ((HOST_UPGRADE_INNER == 0)); then
   echo "Initial topology token is missing" >&2
   exit 2
@@ -531,9 +535,12 @@ if ip -4 route show default dev "$LAN_INTERFACE" | grep -q .; then
 fi
 "$RELEASE_DIR/bin/gateway-vpnctl" gateway-install-preflight --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS"
 if [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]]; then
-  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE")
+  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --allow-nondefault --lan-interface "$LAN_INTERFACE")
   [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_CHECK_ARGS+=(--lan-members "$LAN_MEMBERS")
-  "$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}"
+  TOPOLOGY_CHECK_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}" )
+  printf '%s\n' "$TOPOLOGY_CHECK_OUTPUT"
+  TOPOLOGY_PROFILE=$(sed -n 's/.*profile=\([^ ]*\).*/\1/p' <<<"$TOPOLOGY_CHECK_OUTPUT")
+  [[ "$TOPOLOGY_PROFILE" =~ ^(ETHERNET_HILINK|ETHERNET_ETHERNET|ONE_ARM_WIREGUARD|MIXED)$ ]] || { echo "Initial topology profile output is invalid" >&2; exit 1; }
 fi
 if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
   echo "Active UFW/firewalld conflicts with the owned Gateway VPN ruleset" >&2
@@ -1025,6 +1032,15 @@ if ((ENABLE_WIREGUARD_INGRESS)); then
     sleep 0.5
   done
   ((WIREGUARD_INGRESS_READY == 1)) || { echo "Initial WireGuard ingress did not remain healthy after service restart" >&2; exit 1; }
+fi
+if [[ "$TOPOLOGY_PROFILE" != ETHERNET_HILINK ]]; then
+  TOPOLOGY_APPLY_ARGS=(initial-topology-apply --config /etc/gateway-vpn/config.yaml --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --apply)
+  [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_APPLY_ARGS+=(--lan-members "$LAN_MEMBERS")
+  ((ENABLE_WIREGUARD_INGRESS == 0)) || TOPOLOGY_APPLY_ARGS+=(--enable-wireguard-ingress)
+  "$DEST/bin/gateway-vpn" "${TOPOLOGY_APPLY_ARGS[@]}"
+  systemctl is-active --quiet gateway-vpn.service || { echo "Gateway service did not remain active after initial topology apply" >&2; exit 1; }
+  systemctl is-active --quiet gateway-vpn-watchdog.service || { echo "Gateway watchdog did not remain active after initial topology apply" >&2; exit 1; }
+  "$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml
 fi
 if ((ENABLE_DHCP)); then
   systemctl is-active --quiet gateway-vpn-dnsmasq.service || { echo "Installed Gateway DHCP service is not active" >&2; exit 1; }

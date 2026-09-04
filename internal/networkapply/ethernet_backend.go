@@ -659,8 +659,15 @@ func readEthernetSnapshot(snapshotDirectory string, manifest Manifest) (ethernet
 }
 
 func (backend UbuntuBackend) ethernetOwnedPath(uplinkID string) string {
+	return EthernetNetworkPath(uplinkID, backend.Paths.EthernetNetworkDir)
+}
+
+// EthernetNetworkPath returns the deterministic Gateway-owned networkd path
+// for an Ethernet uplink.  First-install provisioning uses the same naming
+// rule as the WebUI safe-apply backend so recovery can reason about one file.
+func EthernetNetworkPath(uplinkID, directory string) string {
 	digest := sha256.Sum256([]byte(uplinkID))
-	return filepath.Join(backend.Paths.EthernetNetworkDir, "15-gateway-vpn-ethernet-"+hex.EncodeToString(digest[:8])+".network")
+	return filepath.Join(directory, "15-gateway-vpn-ethernet-"+hex.EncodeToString(digest[:8])+".network")
 }
 
 func renderEthernetNetwork(item uplink.Uplink) (string, error) {
@@ -703,6 +710,13 @@ func renderEthernetNetwork(item uplink.Uplink) (string, error) {
 	}
 	builder.WriteString("Address=" + prefix.String() + "\n\n[Route]\nGateway=" + gateway.String() + "\nTable=" + strconv.FormatInt(item.RoutingTableID, 10) + "\n")
 	return builder.String(), nil
+}
+
+// RenderEthernetNetwork exposes the canonical renderer to the signed
+// first-install profile handoff.  It intentionally accepts only the durable
+// uplink model and therefore cannot render arbitrary networkd input.
+func RenderEthernetNetwork(item uplink.Uplink) (string, error) {
+	return renderEthernetNetwork(item)
 }
 
 func (backend UbuntuBackend) networkctlReconfigure(ctx context.Context, ifname string) error {

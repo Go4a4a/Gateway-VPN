@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/netutil"
+	"gateway-vpn/internal/uplink"
 )
 
 const (
@@ -74,8 +75,9 @@ type TopologyListenInterface struct {
 }
 
 // TopologyMutation is the complete desired post-install interface contour.
-// Uplink address settings remain owned by their existing durable records; the
-// profile assigns ingress and management roles and projects them atomically.
+// Existing uplink address settings remain owned by durable records; optional
+// EthernetUplinks carry new first-install intent that is created atomically by
+// the topology safe-apply backend after snapshot and path blocking.
 type TopologyMutation struct {
 	ExpectedDesiredGeneration int64                     `json:"expected_desired_generation"`
 	Profile                   string                    `json:"profile"`
@@ -90,6 +92,21 @@ type TopologyMutation struct {
 	IngressTopologyMode       string                    `json:"ingress_topology_mode"`
 	IngressListenInterfaces   []TopologyListenInterface `json:"ingress_listen_interfaces"`
 	AcknowledgedPrerequisites []string                  `json:"acknowledged_prerequisites"`
+	EthernetUplinks           []TopologyEthernetUplink  `json:"ethernet_uplinks,omitempty"`
+}
+
+// TopologyEthernetUplink is bounded, non-secret Ethernet intent carried by a
+// first-install/profile transaction. It is applied and rolled back together
+// with roles, networkd and firewall state.
+type TopologyEthernetUplink struct {
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	NetworkInterfaceID string   `json:"network_interface_id"`
+	AddressMode        string   `json:"address_mode"`
+	IPv4CIDR           string   `json:"ipv4_cidr,omitempty"`
+	Gateway            string   `json:"gateway,omitempty"`
+	DNS                []string `json:"dns,omitempty"`
+	MTU                int64    `json:"mtu,omitempty"`
 }
 
 type EthernetMutation struct {
@@ -367,9 +384,47 @@ func validateTopologyMutation(candidate TopologyMutation) error {
 			return errors.New("shared one-arm interface cannot also be a plaintext LAN member")
 		}
 	}
+	if len(candidate.EthernetUplinks) > 16 {
+		return errors.New("too many topology Ethernet uplinks")
+	}
+	seenUplinkIDs := make(map[string]struct{}, len(candidate.EthernetUplinks))
+	seenUplinkInterfaces := make(map[string]struct{}, len(candidate.EthernetUplinks))
+	for _, item := range candidate.EthernetUplinks {
+		if !safeObjectID(item.ID) {
+			return errors.New("topology Ethernet uplink id is invalid")
+		}
+		if _, duplicate := seenUplinkIDs[item.ID]; duplicate {
+			return errors.New("topology Ethernet uplink id is duplicated")
+		}
+		if !safeObjectID(item.NetworkInterfaceID) {
+			return errors.New("topology Ethernet uplink interface id is invalid")
+		}
+		if _, duplicate := seenUplinkInterfaces[item.NetworkInterfaceID]; duplicate {
+			return errors.New("topology Ethernet uplink interface is duplicated")
+		}
+		if err := uplink.ValidateEthernetInput(uplink.CreateEthernetInput{
+			ID: item.ID, Name: item.Name, NetworkInterfaceID: item.NetworkInterfaceID,
+			AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway,
+			DNS: item.DNS, MTU: item.MTU,
+		}); err != nil {
+			return fmt.Errorf("topology Ethernet uplink %s: %w", item.ID, err)
+		}
+		seenUplinkIDs[item.ID] = struct{}{}
+		seenUplinkInterfaces[item.NetworkInterfaceID] = struct{}{}
+	}
+	if candidate.Profile == TopologyEthernetHiLink && len(candidate.EthernetUplinks) != 0 {
+		return errors.New("HiLink topology cannot carry Ethernet uplink intent")
+	}
+	if candidate.Profile == TopologyOneArmWireGuard && len(candidate.EthernetUplinks) > 0 && (len(candidate.EthernetUplinks) != 1 || candidate.EthernetUplinks[0].NetworkInterfaceID != shared) {
+		return errors.New("one-arm topology Ethernet intent must contain one uplink on the shared interface")
+	}
 	if candidate.Profile == TopologyOneArmWireGuard {
 		if candidate.LANInterfaceName != "wg-ingress" || shared == "" || len(lan) != 0 || len(management) != 1 || !candidate.IngressEnabled || candidate.IngressTopologyMode != "ONE_ARM" || candidate.DHCPDNSEnabled {
 			return errors.New("one-arm profile requires exactly one shared management/uplink interface, enabled ONE_ARM ingress and no LAN DHCP/DNS")
+		}
+	} else if candidate.Profile == TopologyMixed && shared != "" && len(lan) == 0 {
+		if candidate.LANInterfaceName != "wg-ingress" || !candidate.IngressEnabled || candidate.IngressTopologyMode != "ONE_ARM" || candidate.DHCPDNSEnabled {
+			return errors.New("shared-only mixed profile requires enabled ONE_ARM ingress and no LAN DHCP/DNS")
 		}
 	} else {
 		if candidate.LANInterfaceName != topologyManagedLANName || len(lan) == 0 || !candidate.DHCPDNSEnabled {
@@ -455,6 +510,10 @@ func cloneTopologyMutation(value TopologyMutation) TopologyMutation {
 	value.WGEndpointInterfaceIDs = append([]string(nil), value.WGEndpointInterfaceIDs...)
 	value.IngressListenInterfaces = append([]TopologyListenInterface(nil), value.IngressListenInterfaces...)
 	value.AcknowledgedPrerequisites = append([]string(nil), value.AcknowledgedPrerequisites...)
+	value.EthernetUplinks = append([]TopologyEthernetUplink(nil), value.EthernetUplinks...)
+	for index := range value.EthernetUplinks {
+		value.EthernetUplinks[index].DNS = append([]string(nil), value.EthernetUplinks[index].DNS...)
+	}
 	return value
 }
 

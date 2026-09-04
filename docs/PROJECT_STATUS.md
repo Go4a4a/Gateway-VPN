@@ -1,12 +1,28 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-09-05
-**Общее состояние:** `INITIAL_TOPOLOGY_PRECHECK_ORDERING_FIX_CI_PASS / PROFILE_SAFE_APPLY_BACKEND_NEXT / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
-**Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. В current source typed initial-topology token теперь проверяется сразу после проверки подписанного релиза, до WireGuard/SSH/пакетных host probes и apply boundary; перед дальнейшим apply сохранена defence-in-depth повторная проверка. Linux netns fixture для direct/bridge handoff, mismatched/unknown/unsupported токенов, snapshots link/address/route/rule без изменения namespace и backend rollback tests прошёл в GitHub Actions run `33924870349` (Linux job `101195028597`, все jobs success). Новый immutable candidate ещё не собирался и current clean Windows two-target gate не засчитан. Следующий software-блок — завершить и отдельно проверить first-install/profile safe-apply backend для `ETHERNET_ETHERNET`, `ONE_ARM_WIREGUARD` и `MIXED`; затем остаются физические Ubuntu Gateway/VPS, HiLink/Keenetic и 24/72-часовые endurance gates.
+**Общее состояние:** `INITIAL_TOPOLOGY_PRECHECK_ORDERING_FIX_CI_PASS / PROFILE_SAFE_APPLY_BACKEND_LOCAL_PASS / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
+**Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. В current source typed initial-topology token проверяется сразу после проверки подписанного релиза, до WireGuard/SSH/пакетных host probes и apply boundary; перед дальнейшим apply сохранена defence-in-depth повторная проверка. First-install/profile safe-apply backend теперь формирует Ethernet intent в durable topology manifest, создаёт новые uplinks и networkd policies только после snapshot и block-path, проверяет convergence и удаляет записи, роли и policies при rollback. Linux netns fixture для direct/bridge handoff, mismatched/unknown/unsupported токенов, snapshots link/address/route/rule без изменения namespace и backend rollback tests прошёл в GitHub Actions run `33924870349` (Linux job `101195028597`, все jobs success). Новый immutable candidate ещё не собирался и current clean Windows two-target gate не засчитан. После source validation остаются физические Ubuntu Gateway/VPS, HiLink/Keenetic и 24/72-часовые endurance gates.
 
 **Оценка прогресса:** относительно прежнего schema-25 scope программная реализация остаётся примерно `98%`; относительно текущего расширенного обязательного scope программная часть ориентировочно `98%`. Готовность к первой установке на физический стенд — примерно `97%`, полная production-готовность — примерно `84%`. Durable signed-update scheduler, service-route ladder, отдельный signed Mihomo maintenance discovery поверх полного immutable Gateway release, signed Gateway/VPS foundations, complete Gateway restore-point rollback, live Management Fabric observations, exact schema-34 lifecycle matrix и Windows portable delivery source имеют local evidence. Первый clean Windows guest выявил и точно локализовал mapped-key ACL defect без изменения targets; source fix локально проверен, но требует нового immutable candidate и повторения guest gate. Privileged Docker и local Windows 10 не заменяют физические Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic captures, hardware-validated firmware/USB recovery и RTC S5, а также несокращаемые 24/72-часовые endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
+
+### Сессия 2026-09-05 — transaction-owned first-install/profile Ethernet apply
+
+**Сделано:**
+
+- убрано небезопасное предварительное создание Ethernet uplinks и networkd-файлов из `initial-topology-apply`; команда теперь только разрешает stable interface IDs и формирует `TopologyMutation.EthernetUplinks`;
+- `networkapply` создаёт новые Ethernet uplinks, роли и принадлежащие Gateway networkd policies только внутри общего `Stage → Snapshot → BlockPath → Apply → Confirm` контура;
+- rollback удаляет созданные uplinks, `ETHERNET_UPLINK` роли и networkd policies, а также reconfigure-ит все затронутые новые интерфейсы;
+- разрешено безопасное использование уже существующего Ethernet uplink для WebUI topology mutation; one-arm initial role exception ограничена generation 1 и shared interface;
+- добавлен regression-тест, подтверждающий отсутствие mutation до apply и полное удаление двух созданных uplinks/ролей/policies после rollback.
+
+**Проверено:** `go test ./internal/networkapply -count=1`, полный `go test ./... -count=1 -p 1`, `go vet ./...` и `git diff --check` — PASS. Тесты выполнялись с project-local `.cache/go-build` и `.cache/go`; одноразовые ресурсы и Docker-кэши не очищались.
+
+**Ограничения:** физический Ethernet/HiLink/Keenetic/VPS запуск, USB/power-cut и 24/72-часовой endurance по-прежнему не выполнены. Новый production-signed candidate, exact tag и GitHub release в этой сессии не создавались.
+
+**Следующий шаг:** source/release-level validation и подготовка изменений к отдельному review/commit; после отдельного разрешения — новый immutable testing candidate и повторный clean-Windows gate.
 
 ### Сессия 2026-09-05 — Linux initial-topology preflight fixture и ранняя проверка до mutation
 

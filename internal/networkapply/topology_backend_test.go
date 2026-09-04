@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"gateway-vpn/internal/store"
+	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/wgingress"
 )
 
@@ -184,6 +186,83 @@ VALUES('wg-ingress-default',1,1,'ACTIVE','now');
 	joined := strings.Join(preview.ManagementInterfaces, ",")
 	if joined != "wg-ingress,enp3s0" {
 		t.Fatalf("one-arm management interfaces = %q", joined)
+	}
+}
+
+func TestUbuntuBackendTopologyEthernetIntentIsTransactionOwnedAndRollbackRemovesIt(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	backend, executor, _, transactionDirectory := ubuntuBackendFixture(t)
+	gate := &topologyGateFake{}
+	routing := &topologyRoutingFake{}
+	runtime := &topologyContextFake{}
+	configureTopologyBackendFixture(t, ctx, &backend, database, gate, routing, runtime, &topologyIngressFake{})
+	// The shared topology fixture already contains a HiLink row at the legacy
+	// 1101/0x1101 counters; start newly-created Ethernet records above it.
+	backend.RoutingTableStart = 2001
+	backend.FwmarkStart = 0x2201
+	if _, err := database.ExecContext(ctx, `
+UPDATE settings SET value_json='3' WHERE key='next_uplink_display_number';
+UPDATE settings SET value_json='2001' WHERE key='next_uplink_routing_table';
+UPDATE settings SET value_json='8705' WHERE key='next_uplink_fwmark';
+`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+INSERT INTO network_interfaces(id,stable_identity_kind,stable_identity_hash,current_ifname,carrier_state,created_at,updated_at)
+VALUES
+ ('netif:wan1','PERMANENT_MAC','wan1-hash','enp3s0','UP','now','now'),
+ ('netif:wan2','PERMANENT_MAC','wan2-hash','enp4s0','UP','now','now');
+`); err != nil {
+		t.Fatal(err)
+	}
+	manifest := topologyTestManifest()
+	manifest.Topology.Profile = TopologyEthernetEthernet
+	manifest.Topology.EthernetUplinks = []TopologyEthernetUplink{
+		{ID: "initial-ethernet-a", Name: "Ethernet enp3s0", NetworkInterfaceID: "netif:wan1", AddressMode: "DHCP"},
+		{ID: "initial-ethernet-b", Name: "Ethernet enp4s0", NetworkInterfaceID: "netif:wan2", AddressMode: "DHCP"},
+	}
+
+	if err := backend.Snapshot(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatalf("Snapshot(topology with Ethernet intent) error = %v", err)
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		if _, err := (uplink.NewRepository(database, 2001, 0x2201)).Get(ctx, item.ID); err == nil {
+			t.Fatalf("uplink %s was created before apply", item.ID)
+		}
+		if _, err := os.Stat(backend.ethernetOwnedPath(item.ID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("networkd policy %s exists before apply: %v", item.ID, err)
+		}
+	}
+	if err := backend.Apply(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatalf("Apply(topology with Ethernet intent) error = %v", err)
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		created, err := (uplink.NewRepository(database, 2001, 0x2201)).Get(ctx, item.ID)
+		if err != nil || created.Type != uplink.TypeEthernet || created.NetworkInterfaceID != item.NetworkInterfaceID {
+			t.Fatalf("applied uplink %s = %+v, %v", item.ID, created, err)
+		}
+		if _, err := os.Stat(backend.ethernetOwnedPath(item.ID)); err != nil {
+			t.Fatalf("networkd policy %s missing after apply: %v", item.ID, err)
+		}
+	}
+	if !executor.called(backend.Paths.Networkctl, "reconfigure", "enp3s0") || !executor.called(backend.Paths.Networkctl, "reconfigure", "enp4s0") {
+		t.Fatal("topology apply did not reconfigure every newly-created Ethernet uplink")
+	}
+
+	if err := backend.Rollback(ctx, manifest, transactionDirectory); err != nil {
+		t.Fatalf("Rollback(topology with Ethernet intent) error = %v", err)
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		if _, err := (uplink.NewRepository(database, 2001, 0x2201)).Get(ctx, item.ID); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("rolled-back uplink %s still exists: %v", item.ID, err)
+		}
+		if _, err := os.Stat(backend.ethernetOwnedPath(item.ID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rolled-back networkd policy %s still exists: %v", item.ID, err)
+		}
+		var roles int
+		if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM interface_role_assignments WHERE uplink_id=?`, item.ID).Scan(&roles); err != nil || roles != 0 {
+			t.Fatalf("rolled-back Ethernet roles for %s = %d, %v", item.ID, roles, err)
+		}
 	}
 }
 

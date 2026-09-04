@@ -23,6 +23,7 @@ import (
 	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/store"
+	"gateway-vpn/internal/uplink"
 	"gateway-vpn/internal/wgingress"
 
 	"go.yaml.in/yaml/v3"
@@ -75,6 +76,7 @@ type topologySnapshot struct {
 	PreviousLANIfname   string                   `json:"previous_lan_ifname"`
 	PreviousLANCIDR     string                   `json:"previous_lan_cidr"`
 	CandidateGeneration int64                    `json:"candidate_generation"`
+	EthernetUplinkIDs   []string                 `json:"ethernet_uplink_ids,omitempty"`
 }
 
 type topologyInterface struct {
@@ -168,6 +170,9 @@ func (backend UbuntuBackend) snapshotTopology(ctx context.Context, manifest Mani
 		Profile: current, PreviousLANIfname: configuration.Network.LANInterface,
 		PreviousLANCIDR:     configuration.Network.LANAddress,
 		CandidateGeneration: current.DesiredGeneration + 1,
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		snapshot.EthernetUplinkIDs = append(snapshot.EthernetUplinkIDs, item.ID)
 	}
 	snapshot.Roles, err = backend.snapshotTopologyRoles(ctx)
 	if err != nil {
@@ -322,6 +327,9 @@ func (backend UbuntuBackend) applyTopology(ctx context.Context, manifest Manifes
 	if err := backend.TopologyGate.BlockPath(ctx); err != nil {
 		return errors.New("close user data path before topology apply failed")
 	}
+	if err := backend.applyTopologyEthernet(ctx, manifest.Topology); err != nil {
+		return err
+	}
 	if err := backend.applyTopologyDatabase(ctx, manifest, snapshot); err != nil {
 		return err
 	}
@@ -331,6 +339,23 @@ func (backend UbuntuBackend) applyTopology(ctx context.Context, manifest Manifes
 	for _, id := range manifest.Topology.LANInterfaceIDs {
 		candidate := filepath.Join(candidateDirectory, topologyMemberCandidateName(id))
 		if err := installRegular(candidate, backend.topologyMemberPath(id), 0o644, -1); err != nil {
+			return err
+		}
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		configured, getErr := (uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)).Get(ctx, item.ID)
+		if getErr != nil {
+			return getErr
+		}
+		content, renderErr := renderEthernetNetwork(configured)
+		if renderErr != nil {
+			return renderErr
+		}
+		candidatePath := filepath.Join(candidateDirectory, "ethernet-"+item.ID+".network")
+		if err := atomicWrite(candidatePath, []byte(content), 0o600); err != nil {
+			return err
+		}
+		if err := installRegular(candidatePath, backend.ethernetOwnedPath(item.ID), 0o644, -1); err != nil {
 			return err
 		}
 	}
@@ -370,6 +395,11 @@ func (backend UbuntuBackend) applyTopology(ctx context.Context, manifest Manifes
 			return err
 		}
 	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		if err := backend.networkctlReconfigure(ctx, interfaces[item.NetworkInterfaceID].Ifname); err != nil {
+			return err
+		}
+	}
 	if manifest.Topology.DHCPDNSEnabled {
 		if err := backend.controlService(ctx, "restart", "gateway-vpn-dnsmasq.service"); err != nil {
 			return err
@@ -387,6 +417,39 @@ func (backend UbuntuBackend) applyTopology(ctx context.Context, manifest Manifes
 		return errors.New("verify fail-closed topology candidate failed")
 	}
 	return backend.controlService(ctx, "restart", "gateway-vpn.service")
+}
+
+func (backend UbuntuBackend) applyTopologyEthernet(ctx context.Context, mutation *TopologyMutation) error {
+	if mutation == nil || len(mutation.EthernetUplinks) == 0 {
+		return nil
+	}
+	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
+	for _, item := range mutation.EthernetUplinks {
+		input := uplink.CreateEthernetInput{ID: item.ID, Name: item.Name, NetworkInterfaceID: item.NetworkInterfaceID, AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway, DNS: append([]string(nil), item.DNS...), MTU: item.MTU}
+		var created uplink.Uplink
+		var err error
+		if mutation.ExpectedDesiredGeneration == 1 && item.NetworkInterfaceID == mutation.SharedOneArmInterfaceID {
+			created, err = repository.CreateInitialEthernet(ctx, input)
+		} else {
+			created, err = repository.CreateEthernet(ctx, input)
+		}
+		if err != nil {
+			return fmt.Errorf("create topology Ethernet uplink %s: %w", item.ID, err)
+		}
+		content, err := renderEthernetNetwork(created)
+		if err != nil {
+			return err
+		}
+		candidatePath := filepath.Join(backend.Paths.EthernetNetworkDir, ".gateway-vpn-topology-"+item.ID+".network")
+		if err := atomicWrite(candidatePath, []byte(content), 0o600); err != nil {
+			return err
+		}
+		if err := installRegular(candidatePath, backend.ethernetOwnedPath(item.ID), 0o644, -1); err != nil {
+			return err
+		}
+		_ = os.Remove(candidatePath)
+	}
+	return nil
 }
 
 func (backend UbuntuBackend) commitTopology(ctx context.Context, manifest Manifest, transactionDirectory string) error {
@@ -478,6 +541,20 @@ WHERE singleton_id=1 AND desired_generation=? AND state='APPLYING'`, now, snapsh
 	if err := backend.TopologyRouting.SyncRouting(ctx); err != nil {
 		return err
 	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		configured, getErr := (uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)).Get(ctx, item.ID)
+		if getErr != nil || configured.Type != uplink.TypeEthernet || configured.NetworkInterfaceID != item.NetworkInterfaceID || !configured.Enabled {
+			return fmt.Errorf("topology Ethernet uplink %s did not converge", item.ID)
+		}
+		want, renderErr := renderEthernetNetwork(configured)
+		if renderErr != nil {
+			return renderErr
+		}
+		current, readErr := readBoundedRegular(backend.ethernetOwnedPath(item.ID), 1<<20)
+		if readErr != nil || string(current) != want {
+			return fmt.Errorf("topology Ethernet networkd policy %s did not converge", item.ID)
+		}
+	}
 	return backend.controlService(ctx, "restart", "gateway-vpn.service")
 }
 
@@ -546,6 +623,11 @@ func (backend UbuntuBackend) rollbackTopology(ctx context.Context, manifest Mani
 			}
 		} else if err := os.Remove(item.target); err != nil && !errors.Is(err, os.ErrNotExist) {
 			failures = append(failures, err)
+		}
+	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		if err := os.Remove(backend.ethernetOwnedPath(item.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failures = append(failures, fmt.Errorf("remove rolled-back topology Ethernet networkd policy %s: %w", item.ID, err))
 		}
 	}
 	if snapshot.IngressExists {
@@ -631,7 +713,7 @@ func (backend UbuntuBackend) validateTopologyProtectedState(ctx context.Context,
 	if err != nil {
 		return profile, nil, err
 	}
-	if mutation.Profile == TopologyOneArmWireGuard {
+	if mutation.Profile == TopologyOneArmWireGuard || mutation.Profile == TopologyMixed && mutation.SharedOneArmInterfaceID != "" && len(mutation.LANInterfaceIDs) == 0 {
 		server, ingressErr := (wgingress.Repository{Database: backend.Database}).GetServer(ctx)
 		if ingressErr != nil || server.ServerAddress != mutation.LANAddress {
 			return profile, nil, errors.New("one-arm topology LAN address must equal the initialized WireGuard ingress server address")
@@ -643,6 +725,28 @@ func (backend UbuntuBackend) validateTopologyProtectedState(ctx context.Context,
 	interfaces, err := backend.loadTopologyInterfaces(ctx)
 	if err != nil {
 		return profile, nil, err
+	}
+	candidateUplinks := make(map[string]TopologyEthernetUplink, len(mutation.EthernetUplinks))
+	for _, candidate := range mutation.EthernetUplinks {
+		var existing int
+		if err := backend.Database.QueryRowContext(ctx, `SELECT COUNT(*) FROM uplinks WHERE id=? OR network_interface_id=?`, candidate.ID, candidate.NetworkInterfaceID).Scan(&existing); err != nil {
+			return profile, nil, err
+		}
+		if existing != 0 {
+			return profile, nil, fmt.Errorf("candidate Ethernet uplink %s already exists", candidate.ID)
+		}
+		item, exists := interfaces[candidate.NetworkInterfaceID]
+		if !exists || !validInterfaceName(item.Ifname) || item.Carrier == "ABSENT" {
+			return profile, nil, fmt.Errorf("candidate Ethernet interface %s is absent", candidate.NetworkInterfaceID)
+		}
+		for role := range item.Roles {
+			initialSharedRole := mutation.ExpectedDesiredGeneration == 1 && candidate.NetworkInterfaceID == mutation.SharedOneArmInterfaceID && (role == "LAN_MEMBER" || role == "MANAGEMENT")
+			currentSharedRole := candidate.NetworkInterfaceID == mutation.SharedOneArmInterfaceID && role == "SHARED_ONE_ARM"
+			if role != "UNUSED" && !currentSharedRole && !initialSharedRole {
+				return profile, nil, fmt.Errorf("candidate Ethernet interface %s already has role %s", candidate.NetworkInterfaceID, role)
+			}
+		}
+		candidateUplinks[candidate.NetworkInterfaceID] = candidate
 	}
 	assigned := append(append(append([]string(nil), mutation.LANInterfaceIDs...), mutation.ManagementInterfaceIDs...), mutation.WGEndpointInterfaceIDs...)
 	if mutation.SharedOneArmInterfaceID != "" {
@@ -663,7 +767,8 @@ func (backend UbuntuBackend) validateTopologyProtectedState(ctx context.Context,
 		}
 	}
 	if mutation.SharedOneArmInterfaceID != "" {
-		if interfaces[mutation.SharedOneArmInterfaceID].Roles["ETHERNET_UPLINK"] == "" {
+		_, createsSharedUplink := candidateUplinks[mutation.SharedOneArmInterfaceID]
+		if interfaces[mutation.SharedOneArmInterfaceID].Roles["ETHERNET_UPLINK"] == "" && !createsSharedUplink {
 			return profile, nil, errors.New("shared one-arm interface must own an Ethernet uplink")
 		}
 	}
@@ -680,11 +785,11 @@ func (backend UbuntuBackend) validateTopologyProtectedState(ctx context.Context,
 			return profile, nil, errors.New("Ethernet to HiLink profile requires an enabled HiLink uplink")
 		}
 	case TopologyEthernetEthernet, TopologyOneArmWireGuard:
-		if enabledEthernet == 0 {
+		if enabledEthernet+len(mutation.EthernetUplinks) == 0 {
 			return profile, nil, errors.New("selected profile requires an enabled Ethernet uplink")
 		}
 	case TopologyMixed:
-		if enabledHiLink+enabledEthernet == 0 {
+		if enabledHiLink+enabledEthernet+len(mutation.EthernetUplinks) == 0 {
 			return profile, nil, errors.New("mixed profile requires at least one enabled uplink")
 		}
 	}
@@ -786,6 +891,27 @@ func (backend UbuntuBackend) validateTopologySubnetConflicts(ctx context.Context
 		}
 		if candidate.Overlaps(other.Masked()) {
 			return fmt.Errorf("topology LAN overlaps uplink %s", id)
+		}
+	}
+	for _, item := range mutation.EthernetUplinks {
+		input := uplink.CreateEthernetInput{ID: item.ID, Name: item.Name, NetworkInterfaceID: item.NetworkInterfaceID, AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway, DNS: item.DNS, MTU: item.MTU}
+		if err := uplink.ValidateEthernetInput(input); err != nil {
+			return fmt.Errorf("candidate Ethernet uplink %s is invalid: %w", item.ID, err)
+		}
+		if item.AddressMode == uplink.AddressStatic {
+			prefix, _ := netip.ParsePrefix(item.IPv4CIDR)
+			if candidate.Overlaps(prefix.Masked()) || prefix.Overlaps(netip.MustParsePrefix("10.80.0.0/24")) {
+				return fmt.Errorf("candidate Ethernet uplink %s overlaps topology or WireGuard management", item.ID)
+			}
+			for _, other := range mutation.EthernetUplinks {
+				if other.ID == item.ID || other.AddressMode != uplink.AddressStatic {
+					continue
+				}
+				otherPrefix, _ := netip.ParsePrefix(other.IPv4CIDR)
+				if prefix.Overlaps(otherPrefix.Masked()) {
+					return errors.New("candidate Ethernet uplinks have overlapping static subnets")
+				}
+			}
 		}
 	}
 	var ingressSubnet string
@@ -941,6 +1067,21 @@ VALUES(?,?,?,?,?,?,?,?,?)`, role.ID, role.NetworkInterfaceID, role.Role, uplinkI
 			return err
 		}
 	}
+	for _, item := range manifest.Topology.EthernetUplinks {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM interface_role_assignments WHERE role='ETHERNET_UPLINK' AND uplink_id=?`, item.ID); err != nil {
+			return fmt.Errorf("remove rolled-back topology Ethernet role %s: %w", item.ID, err)
+		}
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_state WHERE singleton_id=1 AND active_uplink_id=?`, item.ID).Scan(&active); err != nil {
+			return err
+		}
+		if active != 0 {
+			return fmt.Errorf("cannot roll back active topology Ethernet uplink %s", item.ID)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM uplinks WHERE id=? AND type='ETHERNET'`, item.ID); err != nil {
+			return fmt.Errorf("remove rolled-back topology Ethernet uplink %s: %w", item.ID, err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE topology_profile_state SET active_profile=?,desired_generation=?,applied_generation=?,state=?,last_error_code=?,updated_at=? WHERE singleton_id=1`,
 		snapshot.Profile.ActiveProfile, snapshot.Profile.DesiredGeneration, snapshot.Profile.AppliedGeneration,
@@ -1086,7 +1227,7 @@ func topologyPrerequisites(mutation *TopologyMutation, interfaces map[string]top
 	if mutation.DHCPDNSEnabled {
 		required = append(required, "CONFIGURE_KEENETIC_WAN_DHCP")
 	}
-	if mutation.Profile == TopologyOneArmWireGuard {
+	if mutation.Profile == TopologyOneArmWireGuard || mutation.Profile == TopologyMixed && mutation.SharedOneArmInterfaceID != "" && len(mutation.LANInterfaceIDs) == 0 {
 		required = append(required, "CONFIGURE_KEENETIC_WIREGUARD", "VERIFY_UPSTREAM_RETURN_PATH")
 	}
 	return required
@@ -1117,6 +1258,13 @@ func validateTopologySnapshot(snapshot topologySnapshot, manifest Manifest) erro
 	}
 	if _, err := time.Parse(time.RFC3339Nano, snapshot.Profile.UpdatedAt); err != nil {
 		return errors.New("topology snapshot timestamp is invalid")
+	}
+	wantUplinkIDs := make([]string, 0, len(manifest.Topology.EthernetUplinks))
+	for _, item := range manifest.Topology.EthernetUplinks {
+		wantUplinkIDs = append(wantUplinkIDs, item.ID)
+	}
+	if !sameStringSlice(snapshot.EthernetUplinkIDs, wantUplinkIDs) {
+		return errors.New("topology snapshot Ethernet uplink set does not match manifest")
 	}
 	previousPrefix, err := netip.ParsePrefix(snapshot.PreviousLANCIDR)
 	if err != nil || !netutil.IsUsableIPv4Host(previousPrefix, previousPrefix.Addr()) {
@@ -1189,6 +1337,22 @@ func validateTopologySnapshot(snapshot topologySnapshot, manifest Manifest) erro
 		}
 	}
 	return nil
+}
+
+func sameStringSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]string(nil), left...)
+	right = append([]string(nil), right...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validTopologyProfile(value string) bool {
@@ -1267,6 +1431,9 @@ func topologyAffectedIfnames(interfaces map[string]topologyInterface, mutation *
 	if mutation.SharedOneArmInterfaceID != "" {
 		assigned = append(assigned, mutation.SharedOneArmInterfaceID)
 	}
+	for _, uplink := range mutation.EthernetUplinks {
+		assigned = append(assigned, uplink.NetworkInterfaceID)
+	}
 	assignedSet := stringSet(assigned)
 	for id, item := range interfaces {
 		_, candidate := assignedSet[id]
@@ -1287,6 +1454,9 @@ func topologySnapshotAffectedIfnames(snapshot topologySnapshot, mutation *Topolo
 	assigned := append(append(append([]string(nil), mutation.LANInterfaceIDs...), mutation.ManagementInterfaceIDs...), mutation.WGEndpointInterfaceIDs...)
 	if mutation.SharedOneArmInterfaceID != "" {
 		assigned = append(assigned, mutation.SharedOneArmInterfaceID)
+	}
+	for _, uplink := range mutation.EthernetUplinks {
+		assigned = append(assigned, uplink.NetworkInterfaceID)
 	}
 	affected := stringSet(assigned)
 	for _, role := range snapshot.Roles {

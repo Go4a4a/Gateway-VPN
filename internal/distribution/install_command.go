@@ -132,7 +132,7 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 			}
 		}
 		plan, err := installtopology.DecodeToken(options.InitialTopologyToken)
-		if err != nil || installtopology.ValidateCurrentLAN(plan, options.LANInterface, options.LANMembers) != nil {
+		if err != nil || installtopology.ValidateInstallerBinding(plan, options.LANInterface, options.LANMembers) != nil {
 			return "", errors.New("initial topology does not match the supported Gateway LAN action")
 		}
 	}

@@ -151,10 +151,10 @@ func (plan Plan) UsesOneArmIngress() bool {
 	return strings.TrimSpace(plan.SharedOneArmInterface) != ""
 }
 
-// CurrentLANPlan translates the already-supported installer LAN arguments into
-// the typed initial-topology contract. It intentionally authorizes only the
-// ETHERNET_HILINK profile until the other profiles have a rollback-protected
-// first-install backend.
+// CurrentLANPlan translates the legacy installer LAN arguments into the
+// default typed initial-topology contract. It remains intentionally narrow so
+// callers that only know the historical LAN flags cannot accidentally claim a
+// richer profile.
 func CurrentLANPlan(lanInterface string, lanMembers []string) (Plan, error) {
 	lanInterface = strings.TrimSpace(lanInterface)
 	members := append([]string(nil), lanMembers...)
@@ -173,14 +173,67 @@ func CurrentLANPlan(lanInterface string, lanMembers []string) (Plan, error) {
 	return plan, nil
 }
 
-// ValidateCurrentLAN proves that a topology token describes exactly the LAN
-// arguments the current installer will apply. This fail-closed comparison keeps
-// future topology profiles from being accepted before their backend exists.
-func ValidateCurrentLAN(plan Plan, lanInterface string, lanMembers []string) error {
-	expected, err := CurrentLANPlan(lanInterface, lanMembers)
-	if err != nil {
+// ValidateInstallerBinding proves that a typed plan and the bootstrap's
+// concrete LAN arguments refer to the same physical ports. The Ethernet
+// uplink details remain in the signed token and are applied by the
+// rollback-protected post-install topology transaction; they are deliberately
+// not flattened into legacy LAN flags.
+func ValidateInstallerBinding(plan Plan, lanInterface string, lanMembers []string) error {
+	plan = plan.Canonical()
+	if err := plan.Validate(); err != nil {
 		return err
 	}
+	lanInterface = strings.TrimSpace(lanInterface)
+	members := make([]string, len(lanMembers))
+	for i, value := range lanMembers {
+		members[i] = strings.TrimSpace(value)
+		if members[i] != value {
+			return errors.New("installer LAN member contains surrounding whitespace")
+		}
+	}
+	sort.Strings(members)
+	if len(members) > 16 {
+		return errors.New("installer LAN member list is too large")
+	}
+	if len(members) > 0 && lanInterface != "gateway-vpn-lan" {
+		return errors.New("physical LAN members require gateway-vpn-lan")
+	}
+	if len(members) == 0 && !validInterfaceName(lanInterface) {
+		return errors.New("installer LAN interface is invalid")
+	}
+	var expected []string
+	if plan.Profile == ProfileOneArmWireGuard {
+		if len(members) != 0 || lanInterface != plan.SharedOneArmInterface {
+			return errors.New("one-arm installer LAN binding must use the shared physical interface")
+		}
+		return nil
+	}
+	if plan.UsesEthernetLAN() {
+		expected = append(expected, plan.LANMembers...)
+		if len(members) == 0 {
+			if len(expected) != 1 || lanInterface != expected[0] {
+				return errors.New("installer LAN interface does not match the topology LAN port")
+			}
+			return nil
+		}
+	} else if len(members) != 0 {
+		return errors.New("topology without plaintext LAN cannot receive LAN members")
+	}
+	if len(expected) != len(members) {
+		return errors.New("installer LAN member count does not match the topology")
+	}
+	for i := range expected {
+		if expected[i] != members[i] {
+			return errors.New("installer LAN members do not match the topology")
+		}
+	}
+	return nil
+}
+
+// ValidateCurrentLAN preserves the historical API and deliberately accepts
+// only the default HiLink profile. New callers that carry a full typed plan
+// must use ValidateInstallerBinding.
+func ValidateCurrentLAN(plan Plan, lanInterface string, lanMembers []string) error {
 	plan = plan.Canonical()
 	if err := plan.Validate(); err != nil {
 		return err
@@ -188,15 +241,7 @@ func ValidateCurrentLAN(plan Plan, lanInterface string, lanMembers []string) err
 	if plan.Profile != ProfileEthernetHiLink || plan.SharedOneArmInterface != "" || len(plan.EthernetUplinks) != 0 {
 		return errors.New("initial topology profile does not yet have a first-install safe-apply backend")
 	}
-	if len(plan.LANMembers) != len(expected.LANMembers) {
-		return errors.New("initial topology LAN ports do not match installer LAN arguments")
-	}
-	for index := range expected.LANMembers {
-		if plan.LANMembers[index] != expected.LANMembers[index] {
-			return errors.New("initial topology LAN ports do not match installer LAN arguments")
-		}
-	}
-	return nil
+	return ValidateInstallerBinding(plan, lanInterface, lanMembers)
 }
 
 // EncodeToken produces a deterministic, non-secret argv-safe handoff between

@@ -136,7 +136,7 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		}
 	}
 	plan, err := installtopology.DecodeToken(options.InitialTopologyToken)
-	if err != nil || installtopology.ValidateCurrentLAN(plan, options.LANInterface, options.LANMembers) != nil {
+	if err != nil || installtopology.ValidateInstallerBinding(plan, options.LANInterface, options.LANMembers) != nil {
 		return InstallResult{}, errors.New("initial Gateway topology does not match installer LAN arguments")
 	}
 	if options.EnableWGIngress {

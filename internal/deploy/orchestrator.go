@@ -262,7 +262,7 @@ func validateRequest(request Request) error {
 		return errors.New("admin public key or readiness policy is invalid")
 	}
 	plan, err := installtopology.DecodeToken(request.InitialTopologyToken)
-	if err != nil || installtopology.ValidateCurrentLAN(plan, request.LANInterface, request.LANMembers) != nil {
+	if err != nil || installtopology.ValidateInstallerBinding(plan, request.LANInterface, request.LANMembers) != nil {
 		return errors.New("deploy initial topology does not match the supported Gateway LAN action")
 	}
 	if _, err := gatewayCommand(request, false); err != nil {

@@ -464,6 +464,26 @@ ORDER BY network_interface_id, role, id`)
 }
 
 func (repository *Repository) CreateEthernet(ctx context.Context, input CreateEthernetInput) (Uplink, error) {
+	return repository.createEthernet(ctx, input, false)
+}
+
+// ValidateEthernetInput exposes the same bounded validation used by the
+// durable repository write. Topology manifests use it before entering a
+// privileged network transaction; no database or host mutation occurs here.
+func ValidateEthernetInput(input CreateEthernetInput) error {
+	return validateEthernetInput(input)
+}
+
+// CreateInitialEthernet is used only by the verified first-install topology
+// handoff. A one-arm profile starts from the temporary installer LAN, so the
+// selected shared port may still carry the two generation-1 installer roles.
+// This method permits exactly those role rows and removes them in the same
+// SQLite transaction before publishing the durable Ethernet uplink.
+func (repository *Repository) CreateInitialEthernet(ctx context.Context, input CreateEthernetInput) (Uplink, error) {
+	return repository.createEthernet(ctx, input, true)
+}
+
+func (repository *Repository) createEthernet(ctx context.Context, input CreateEthernetInput, allowInitialLANRoles bool) (Uplink, error) {
 	if err := validateEthernetInput(input); err != nil {
 		return Uplink{}, err
 	}
@@ -485,7 +505,24 @@ WHERE network_interface_id=? AND role NOT IN ('UNUSED', 'SHARED_ONE_ARM')`, inpu
 		return Uplink{}, fmt.Errorf("read interface roles: %w", err)
 	}
 	if conflictingRoles != 0 {
-		return Uplink{}, errors.New("network interface already has an active role")
+		if !allowInitialLANRoles {
+			return Uplink{}, errors.New("network interface already has an active role")
+		}
+		var invalidInitialRoles int
+		if err := transaction.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM interface_role_assignments
+WHERE network_interface_id=? AND role NOT IN ('LAN_MEMBER','MANAGEMENT')
+   OR network_interface_id=? AND role IN ('LAN_MEMBER','MANAGEMENT') AND
+      (desired_generation<>1 OR observed_generation<>1 OR state<>'ACTIVE' OR id NOT LIKE 'role:initial:%')`,
+			input.NetworkInterfaceID, input.NetworkInterfaceID).Scan(&invalidInitialRoles); err != nil {
+			return Uplink{}, fmt.Errorf("validate temporary initial Ethernet roles: %w", err)
+		}
+		if invalidInitialRoles != 0 {
+			return Uplink{}, errors.New("network interface has non-initial active roles")
+		}
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM interface_role_assignments WHERE network_interface_id=? AND role IN ('LAN_MEMBER','MANAGEMENT') AND id LIKE 'role:initial:%'`, input.NetworkInterfaceID); err != nil {
+			return Uplink{}, fmt.Errorf("remove temporary initial LAN roles: %w", err)
+		}
 	}
 	now := repository.now().UTC().Format(time.RFC3339Nano)
 	displayNumber, err := store.AllocateCounter(ctx, transaction, "next_uplink_display_number", 1, now)
