@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,7 @@ type windowsSSHSession struct {
 	stderrDone chan []byte
 	nextID     uint64
 	frameLimit int
+	identity   string
 }
 
 type windowsSSHReadResponse struct {
@@ -105,6 +107,16 @@ func (backend *windowsSSHBackend) Run(ctx context.Context, host Host, remoteComm
 }
 
 func (backend *windowsSSHBackend) startSession(ctx context.Context, host Host) (*windowsSSHSession, error) {
+	stagedIdentity, err := backend.stageIdentity(host.Identity)
+	if err != nil {
+		return nil, RemoteCommandError{ExitCode: -1, Cause: "stage private Windows SSH identity failed", diagnosticCode: "IDENTITY_PERMISSIONS"}
+	}
+	keepStagedIdentity := false
+	defer func() {
+		if !keepStagedIdentity {
+			_ = os.Remove(stagedIdentity)
+		}
+	}()
 	arguments := []string{
 		"-F", platformNullDevice(), "-T",
 		"-o", "BatchMode=yes",
@@ -120,7 +132,7 @@ func (backend *windowsSSHBackend) startSession(ctx context.Context, host Host) (
 		"-o", "ConnectionAttempts=1",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
-		"-i", host.Identity,
+		"-i", stagedIdentity,
 		"-p", strconv.Itoa(host.Port),
 		"--", host.Destination, windowsSSHBrokerCommand(backend.executor.OutputLimit),
 	}
@@ -147,7 +159,7 @@ func (backend *windowsSSHBackend) startSession(ctx context.Context, host Host) (
 	frameLimit := windowsSSHFrameLimit(backend.executor.OutputLimit)
 	session := &windowsSSHSession{
 		command: command, stdin: stdin, stdout: bufio.NewReaderSize(stdout, frameLimit+1),
-		waitDone: make(chan error, 1), stderrDone: make(chan []byte, 1), frameLimit: frameLimit,
+		waitDone: make(chan error, 1), stderrDone: make(chan []byte, 1), frameLimit: frameLimit, identity: stagedIdentity,
 	}
 	go func() { session.waitDone <- command.Wait() }()
 	go func() {
@@ -174,8 +186,14 @@ func (backend *windowsSSHBackend) startSession(ctx context.Context, host Host) (
 		_ = command.Process.Kill()
 		<-session.waitDone
 		stderrOutput := <-session.stderrDone
-		return nil, RemoteCommandError{ExitCode: -1, Cause: fmt.Sprintf("persistent SSH broker handshake failed (frame_bytes=%d read_error=%t diagnostic=%s)", len(line), err != nil, classifyWindowsSSHDiagnostic(stderrOutput))}
+		diagnosticCode := classifyWindowsSSHDiagnostic(stderrOutput)
+		return nil, RemoteCommandError{
+			ExitCode:       -1,
+			Cause:          fmt.Sprintf("persistent SSH broker handshake failed (frame_bytes=%d read_error=%t diagnostic=%s)", len(line), err != nil, diagnosticCode),
+			diagnosticCode: diagnosticCode,
+		}
 	}
+	keepStagedIdentity = true
 	return session, nil
 }
 
@@ -198,6 +216,9 @@ func (backend *windowsSSHBackend) Close(ctx context.Context, _ ...Host) error {
 			}
 		}
 		<-session.stderrDone
+		if err := os.Remove(session.identity); err != nil && !os.IsNotExist(err) && closeErr == nil {
+			closeErr = errors.New("remove staged Windows SSH identity failed")
+		}
 	}
 	return closeErr
 }
@@ -208,6 +229,49 @@ func (backend *windowsSSHBackend) dropSession(key string, session *windowsSSHSes
 	_ = session.command.Process.Kill()
 	<-session.waitDone
 	<-session.stderrDone
+	_ = os.Remove(session.identity)
+}
+
+func (backend *windowsSSHBackend) stageIdentity(sourcePath string) (destinationPath string, returnErr error) {
+	if err := validateSSHFile(sourcePath, false); err != nil {
+		return "", err
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	info, err := source.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 4*1024*1024 {
+		return "", errors.New("Windows SSH identity source changed or is invalid")
+	}
+
+	destination, err := os.CreateTemp(backend.executor.controlDirectory, "identity-")
+	if err != nil {
+		return "", err
+	}
+	destinationPath = destination.Name()
+	defer func() {
+		if closeErr := destination.Close(); returnErr == nil && closeErr != nil {
+			returnErr = closeErr
+		}
+		if returnErr != nil {
+			_ = os.Remove(destinationPath)
+			destinationPath = ""
+		}
+	}()
+
+	written, err := io.Copy(destination, io.LimitReader(source, 4*1024*1024+1))
+	if err != nil || written != info.Size() || written < 1 || written > 4*1024*1024 {
+		return "", errors.New("copy bounded Windows SSH identity failed")
+	}
+	if err := destination.Sync(); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(destinationPath, 0o600); err != nil {
+		return "", err
+	}
+	return destinationPath, nil
 }
 
 func windowsSSHSessionKey(host Host) string {

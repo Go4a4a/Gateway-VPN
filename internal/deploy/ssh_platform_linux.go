@@ -5,6 +5,7 @@ package deploy
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,10 @@ func platformSSHUnavailableError(executable string) error {
 func platformNullDevice() string { return "/dev/null" }
 
 func platformControlDirectoryPrefix() string { return "gateway-vpn-ssh-control-" }
+
+func securePlatformControlDirectory(directory string) error {
+	return os.Chmod(directory, 0o700)
+}
 
 func platformSSHEnvironment() []string {
 	return []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}

@@ -195,7 +195,7 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	for _, required := range []string{
 		windowsDeploy.SHA256, manifestDigest, fingerprint,
 		"gateway-vpn-deploy-1.2.0-windows-amd64.exe", "Get-FileHash",
-		"--interactive", "$ErrorActionPreference='Stop'", "Remove-Item -LiteralPath $root",
+		"--interactive", "--ssh-working-root $root", "$ErrorActionPreference='Stop'", "Remove-Item -LiteralPath $root",
 		"$global:LASTEXITCODE=$code", "This PowerShell window remains open for diagnostics",
 		"[Net.ServicePointManager]::SecurityProtocol=$previousSecurityProtocol",
 		"Test-Path -LiteralPath $ssh", "Get-WindowsCapability", "Add-WindowsCapability",

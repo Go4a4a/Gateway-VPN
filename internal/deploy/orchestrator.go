@@ -326,6 +326,12 @@ func failReport(report Report, phase, code string, err error) (Report, error) {
 	report.State = StateFailed
 	report.FailurePhase = phase
 	report.DiagnosticCodes = append(report.DiagnosticCodes, code)
+	var diagnostic interface{ DiagnosticCode() string }
+	if errors.As(err, &diagnostic) {
+		if detail := diagnostic.DiagnosticCode(); detail != "" && detail != code {
+			report.DiagnosticCodes = append(report.DiagnosticCodes, detail)
+		}
+	}
 	return report, phaseError{phase: phase, cause: err}
 }
 

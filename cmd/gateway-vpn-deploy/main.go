@@ -64,6 +64,7 @@ func run(args []string) int {
 	readinessAttempts := flags.Int("readiness-attempts", 18, "bounded readiness attempts")
 	readinessInterval := flags.Duration("readiness-interval", 5*time.Second, "delay between readiness attempts")
 	timeout := flags.Duration("timeout", 45*time.Minute, "overall deployment timeout")
+	sshWorkingRoot := flags.String("ssh-working-root", "", "absolute project-local root for ephemeral Windows SSH state")
 	apply := flags.Bool("apply", false, "authorize the two-host installation after all read-only preflights")
 	interactive := flags.Bool("interactive", false, "run the explained console wizard and require exact INSTALL confirmation")
 	jsonOutput := flags.Bool("json", false, "emit only the final redacted JSON report")
@@ -136,7 +137,21 @@ func run(args []string) int {
 		AllowGatewaySSH: *allowGatewaySSH, InstallDependencies: *installDependencies,
 		ReadinessAttempts: *readinessAttempts, ReadinessInterval: *readinessInterval,
 	}
-	executor, err := deploy.NewSSHExecutor()
+	var executor *deploy.SSHExecutor
+	if runtime.GOOS == "windows" {
+		workingRoot := *sshWorkingRoot
+		if workingRoot == "" {
+			var workingErr error
+			workingRoot, workingErr = os.Getwd()
+			if workingErr != nil {
+				fmt.Fprintln(os.Stderr, "resolve project-local Windows SSH working root failed")
+				return 1
+			}
+		}
+		executor, err = deploy.NewSSHExecutorAt(workingRoot)
+	} else {
+		executor, err = deploy.NewSSHExecutor()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "create private persistent SSH session failed")
 		return 1
@@ -171,6 +186,9 @@ func run(args []string) int {
 		return 1
 	}
 	if deployErr != nil {
+		if !*jsonOutput {
+			printDeployFailureGuidance(os.Stderr, report)
+		}
 		fmt.Fprintf(os.Stderr, "Gateway VPN deployment stopped in phase %s; no private key material was returned\n", report.FailurePhase)
 		return 1
 	}
@@ -187,6 +205,37 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "Gateway VPN %s is READY; Web UI: %s\n", report.ReleaseVersion, report.WebUIURL)
 	}
 	return 0
+}
+
+func printDeployFailureGuidance(output io.Writer, report deploy.Report) {
+	for _, code := range report.DiagnosticCodes {
+		switch code {
+		case "IDENTITY_PERMISSIONS":
+			fmt.Fprintln(output, "Причина: Windows не смог безопасно подготовить выбранный SSH-ключ. Исходный файл и его права не изменялись; установка не началась.")
+			return
+		case "IDENTITY_FORMAT":
+			fmt.Fprintln(output, "Причина: выбранный файл не распознан как поддерживаемый private SSH key. Установка не началась.")
+			return
+		case "HOST_KEY_REJECTED":
+			fmt.Fprintln(output, "Причина: отпечаток SSH-сервера не совпал с pinned known_hosts. Проверьте адрес сервера и доверенный файл; не отключайте эту проверку.")
+			return
+		case "AUTHENTICATION_REJECTED":
+			fmt.Fprintln(output, "Причина: сервер отклонил выбранный SSH-ключ или пользователя. Проверьте USER@HOST и authorized_keys на целевой машине.")
+			return
+		case "CONNECTION_REFUSED":
+			fmt.Fprintln(output, "Причина: адрес доступен, но указанный SSH-порт отклонил соединение. Проверьте порт и состояние OpenSSH Server на целевой машине.")
+			return
+		case "CONNECTION_TIMEOUT":
+			fmt.Fprintln(output, "Причина: SSH-соединение не установилось за отведённое время. Проверьте адрес, сеть и firewall; установка не началась.")
+			return
+		case "UNSUPPORTED_CLIENT_TRANSPORT":
+			fmt.Fprintln(output, "Причина: системный Windows OpenSSH Client не поддержал требуемый безопасный транспорт. Установка не началась.")
+			return
+		}
+	}
+	if report.FailurePhase == "GATEWAY_SSH_PREFLIGHT" || report.FailurePhase == "VPS_SSH_PREFLIGHT" {
+		fmt.Fprintln(output, "SSH-проверка остановилась до установки. Проверьте USER@HOST, порт, pinned known_hosts и выбранный SSH-ключ.")
+	}
 }
 
 func loadVerifiedManifest(manifestPath, signaturePath, publicKeyPath, expectedManifestSHA256, expectedSignerSHA256, channel, version, commit string) (distribution.Manifest, error) {

@@ -59,8 +59,9 @@ type sshBackend interface {
 }
 
 type RemoteCommandError struct {
-	ExitCode int
-	Cause    string
+	ExitCode       int
+	Cause          string
+	diagnosticCode string
 }
 
 func (err RemoteCommandError) Error() string {
@@ -68,6 +69,24 @@ func (err RemoteCommandError) Error() string {
 		return fmt.Sprintf("remote command failed with exit code %d", err.ExitCode)
 	}
 	return "remote command failed: " + err.Cause
+}
+
+func (err RemoteCommandError) DiagnosticCode() string {
+	if validRemoteDiagnosticCode(err.diagnosticCode) {
+		return err.diagnosticCode
+	}
+	return ""
+}
+
+func validRemoteDiagnosticCode(code string) bool {
+	switch code {
+	case "IDENTITY_PERMISSIONS", "IDENTITY_FORMAT", "HOST_KEY_REJECTED",
+		"AUTHENTICATION_REJECTED", "CONNECTION_REFUSED", "CONNECTION_TIMEOUT",
+		"UNSUPPORTED_CLIENT_TRANSPORT", "SSH_SESSION_FAILED":
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateHost(host Host) error {
@@ -85,16 +104,34 @@ func ValidateHost(host Host) error {
 	return nil
 }
 
-// NewSSHExecutor creates a process-owned OpenSSH session directory. Linux uses
-// ControlMaster; Windows uses one long-lived framed ssh.exe process per host.
-// Both implementations reuse the already authenticated TCP connection after
-// fail-closed firewalls are applied.
+// NewSSHExecutor creates a process-owned OpenSSH session directory in the
+// platform temporary root. Linux uses ControlMaster; Windows uses one
+// long-lived framed ssh.exe process per host. Both implementations reuse the
+// already authenticated TCP connection after fail-closed firewalls are applied.
 func NewSSHExecutor() (*SSHExecutor, error) {
-	directory, err := os.MkdirTemp("", platformControlDirectoryPrefix())
+	return newSSHExecutor("")
+}
+
+// NewSSHExecutorAt keeps every ephemeral SSH object below an explicit trusted
+// working root. The Windows deploy launcher uses this variant so staged key
+// copies and session state never escape its project-local working directory.
+func NewSSHExecutorAt(root string) (*SSHExecutor, error) {
+	if !filepath.IsAbs(root) || strings.ContainsRune(root, '\x00') {
+		return nil, errors.New("absolute SSH working root is required")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, errors.New("SSH working root is unsafe or unavailable")
+	}
+	return newSSHExecutor(root)
+}
+
+func newSSHExecutor(root string) (*SSHExecutor, error) {
+	directory, err := os.MkdirTemp(root, platformControlDirectoryPrefix())
 	if err != nil {
 		return nil, errors.New("create private SSH control directory failed")
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
+	if err := securePlatformControlDirectory(directory); err != nil {
 		_ = os.RemoveAll(directory)
 		return nil, errors.New("secure SSH control directory failed")
 	}

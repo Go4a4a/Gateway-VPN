@@ -16,7 +16,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -114,12 +113,12 @@ func TestWindowsOpenSSHLongLivedSessionReusesOneTCPAndClosesIt(t *testing.T) {
 	if err := os.WriteFile(identity, pem.EncodeToMemory(privateBlock), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protectWindowsSSHTestIdentity(t, identity)
+	broadenWindowsSSHTestIdentity(t, identity)
 	hostPattern := fmt.Sprintf("[127.0.0.1]:%d", port)
 	if err := os.WriteFile(knownHosts, []byte(knownhosts.Line([]string{hostPattern}, hostSigner.PublicKey())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	executor, err := NewSSHExecutor()
+	executor, err := NewSSHExecutorAt(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,20 +222,10 @@ func TestWindowsSSHResponseFramingRejectsSpoofOverflowAndMalformedData(t *testin
 	}
 }
 
-func protectWindowsSSHTestIdentity(t *testing.T, filename string) {
+func broadenWindowsSSHTestIdentity(t *testing.T, filename string) {
 	t.Helper()
-	current, err := user.Current()
-	if err != nil || current.Uid == "" {
-		t.Fatalf("resolve Windows test user SID: %v", err)
-	}
-	commands := [][]string{
-		{filename, "/inheritance:r"},
-		{filename, "/grant:r", "*" + current.Uid + ":(F)", "*S-1-5-18:(F)", "*S-1-5-32-544:(F)"},
-	}
-	for _, arguments := range commands {
-		if output, err := exec.Command(`C:\Windows\System32\icacls.exe`, arguments...).CombinedOutput(); err != nil {
-			t.Fatalf("protect Windows SSH test identity: %v\n%s", err, output)
-		}
+	if output, err := exec.Command(`C:\Windows\System32\icacls.exe`, filename, "/grant", "*S-1-1-0:(R)").CombinedOutput(); err != nil {
+		t.Fatalf("broaden Windows SSH test identity to mapped-folder style ACL: %v\n%s", err, output)
 	}
 }
 

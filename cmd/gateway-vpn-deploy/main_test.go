@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"gateway-vpn/internal/buildinfo"
+	"gateway-vpn/internal/deploy"
 	"gateway-vpn/internal/distribution"
 	updatepkg "gateway-vpn/internal/update"
 )
@@ -130,5 +131,22 @@ func TestWindowsSignedLauncherReachesPinnedSSHPreflightWithoutHostMutation(t *te
 	})
 	if code != 1 {
 		t.Fatalf("closed-port signed Windows deploy smoke code=%d, want safe preflight failure 1", code)
+	}
+}
+
+func TestDeployFailureGuidanceExplainsSSHIdentityWithoutSecrets(t *testing.T) {
+	var output bytes.Buffer
+	printDeployFailureGuidance(&output, deploy.Report{
+		FailurePhase:    "GATEWAY_SSH_PREFLIGHT",
+		DiagnosticCodes: []string{"GATEWAY_SSH_PREFLIGHT_FAILED", "IDENTITY_PERMISSIONS"},
+	})
+	message := output.String()
+	if !strings.Contains(message, "Windows") || !strings.Contains(message, "SSH-ключ") || !strings.Contains(message, "установка не началась") {
+		t.Fatalf("SSH identity guidance is incomplete: %q", message)
+	}
+	for _, forbidden := range []string{"private key contents", "-----BEGIN", "passphrase"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("SSH guidance exposed forbidden material %q: %q", forbidden, message)
+		}
 	}
 }

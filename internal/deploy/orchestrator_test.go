@@ -180,6 +180,29 @@ func TestOrchestratorReportsInstalledNotReadyWithoutFalseSuccess(t *testing.T) {
 	}
 }
 
+func TestFailReportIncludesBoundedActionableTransportDiagnostic(t *testing.T) {
+	report, err := failReport(
+		Report{DiagnosticCodes: []string{}},
+		"GATEWAY_SSH_PREFLIGHT",
+		"GATEWAY_SSH_PREFLIGHT_FAILED",
+		phaseError{phase: "GATEWAY_SSH_PREFLIGHT", cause: RemoteCommandError{
+			ExitCode: -1, Cause: "redacted SSH failure", diagnosticCode: "IDENTITY_PERMISSIONS",
+		}},
+	)
+	if err == nil || report.FailurePhase != "GATEWAY_SSH_PREFLIGHT" || len(report.DiagnosticCodes) != 2 ||
+		report.DiagnosticCodes[0] != "GATEWAY_SSH_PREFLIGHT_FAILED" || report.DiagnosticCodes[1] != "IDENTITY_PERMISSIONS" {
+		t.Fatalf("actionable transport diagnostic missing: report=%+v err=%v", report, err)
+	}
+
+	report, _ = failReport(
+		Report{DiagnosticCodes: []string{}}, "GATEWAY_SSH_PREFLIGHT", "GATEWAY_SSH_PREFLIGHT_FAILED",
+		RemoteCommandError{ExitCode: -1, Cause: "redacted SSH failure", diagnosticCode: "UNTRUSTED_FREE_FORM_VALUE"},
+	)
+	if len(report.DiagnosticCodes) != 1 {
+		t.Fatalf("unrecognized transport diagnostic escaped allowlist: %+v", report.DiagnosticCodes)
+	}
+}
+
 func TestOrchestratorRejectsTheSameSSHEndpoint(t *testing.T) {
 	request := validDeployRequest(t)
 	request.VPS.Destination = "root@gateway.example"
