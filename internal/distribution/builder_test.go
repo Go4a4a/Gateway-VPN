@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"gateway-vpn/internal/installtopology"
 	updatepkg "gateway-vpn/internal/update"
 )
 
@@ -90,6 +91,11 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 		if !strings.Contains(command, required) {
 			t.Errorf("generated command missing %q", required)
 		}
+	}
+	directPlan, _ := installtopology.CurrentLANPlan("enp2s0", nil)
+	directToken, _ := installtopology.EncodeToken(directPlan)
+	if !strings.Contains(command, "--initial-topology-token "+directToken) {
+		t.Fatalf("generated Gateway command missing initial topology token %q", directToken)
 	}
 	if strings.Contains(command, "curl |") || !strings.Contains(command, "command -v wget") || !strings.Contains(command, "run_as_root") || strings.Index(command, "test ") > strings.LastIndex(command, "run_as_root \"$tmp\"") {
 		t.Fatal("generated command can execute the bootstrap before its exact hash matches")
