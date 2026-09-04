@@ -416,6 +416,8 @@
 
 **Неуспешные безопасные попытки:** первая объединённая read-only команда разыменования tag остановилась на ошибке кавычек `--jq`; публикация ещё не выполнялась. Первая post-publication `channel-verify` использовала неверные сокращённые флаги `--version/--commit` и завершилась до проверки; исправленный вызов с `--release-version/--source-commit` прошёл. GitHub CLI `2.23.0` не поддержал `auth logout --user`; штатный logout единственной записи `github.com` затем успешно удалил credential. Эти ошибки не меняли release assets, tag, stable channel или локальный bundle.
 
+**Post-publication handoff precheck:** оба fresh target-контейнера повторно подтверждены `running`; внутри Gateway и VPS `systemd=running`, `ssh=active`, список failed units пуст, application trees ещё отсутствуют. Отдельный Gateway `lan0` существует, остаётся `DOWN` без адреса и готов для выбора мастером; никакая установка либо network mutation этим precheck не выполнялась.
+
 **Следующий шаг:** выполнить опубликованную hash-before-exec one-command в clean Windows Sandbox против уже подготовленных fresh Gateway/VPS targets, ожидая честный `INSTALLED_NOT_READY`/code `3` для изолированного TEST-NET endpoint; после этого переходить к физическим Ubuntu Gateway/VPS, HiLink/Keenetic/RTC и 24/72-часовым gates. Docker/cache/evidence не удалять автоматически.
 
 ### Сессия 179 — аудит оставшегося локального scope перед публикацией — 2026-09-04
