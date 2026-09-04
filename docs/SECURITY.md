@@ -11,6 +11,7 @@
 - API использует явные redacted DTO. Subscription secret refs, URLs/tokens, modem identity hash, serial и private keys не возвращаются.
 - Config loader запрещает symlink, duplicate/unknown YAML fields, multi-document input и небезопасные permissions.
 - TLS private key, bootstrap password и dynamic secrets создаются atomic write + fsync с mode `0600`.
+- Для разработчиков предусмотрен opt-in `.githooks/pre-commit`: включение — `git config core.hooksPath .githooks`, проверка — `git config --get core.hooksPath`, отключение — `git config --unset core.hooksPath`. Hook запускает pinned-policy `gitleaks protect --staged --redact` и проверяет staged snapshot, включая `test/fixtures`. При отсутствии проверенного `gitleaks` hook завершается с понятной ошибкой; отключение hook не ослабляет обязательный GitHub full-history secret gate.
 - Mihomo controller доступен только на loopback и требует secret; полная subscription config не исполняется, разрешённые proxy fields проходят sanitizer.
 - Content probes используют отдельный mixed listener только на numeric loopback и отдельные `probe-path-*` selectors; controlled select и HTTPS request сериализованы. Active data-path group для проверки тела не переключается.
 - Policy mutation сохраняет текущий node в provider только на durable 120-секундный grace. Он не считается candidate без свежего результата новой generation; crash/restart очищает transition в `PATH_BLOCKED` до обычной convergence.

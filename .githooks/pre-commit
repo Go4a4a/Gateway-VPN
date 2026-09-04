@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+ROOT=$(git rev-parse --show-toplevel)
+exec "$ROOT/scripts/pre-commit-secret-scan.sh"

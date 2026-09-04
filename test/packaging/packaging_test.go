@@ -611,7 +611,7 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	}
 	for _, required := range []string{
 		"permissions:\n  contents: read", "runs-on: ubuntu-24.04", "go test -race ./... -count=1",
-		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh", "test/release-gate/*.sh",
+		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n .githooks/pre-commit scripts/*.sh", "test/release-gate/*.sh",
 		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
 		"startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test",
 		"persist-credentials: false", "fetch-depth: 0", "Repository secret history gate",
@@ -642,6 +642,30 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	dependabot := read(t, filepath.Join(root, ".github", "dependabot.yml"))
 	if !strings.Contains(dependabot, "package-ecosystem: github-actions") || !strings.Contains(dependabot, "interval: weekly") {
 		t.Fatal("GitHub Action pins do not have a reviewable update feed")
+	}
+}
+
+func TestOptInPreCommitSecretGuardScansStagedSnapshot(t *testing.T) {
+	root := repositoryRoot(t)
+	hook := read(t, filepath.Join(root, ".githooks", "pre-commit"))
+	scanner := read(t, filepath.Join(root, "scripts", "pre-commit-secret-scan.sh"))
+	for name, content := range map[string]string{"hook": hook, "scanner": scanner} {
+		for _, required := range []string{"#!/usr/bin/env bash", "set -euo pipefail"} {
+			if !strings.Contains(content, required) {
+				t.Errorf("pre-commit %s missing %q", name, required)
+			}
+		}
+	}
+	if !strings.Contains(hook, "pre-commit-secret-scan.sh") {
+		t.Fatal("pre-commit hook does not delegate to the reviewed scanner")
+	}
+	for _, required := range []string{"protect", "--staged", "--redact", "--no-banner", ".gitleaksignore", "test/fixtures", "server-side GitHub full-history secret gate"} {
+		if !strings.Contains(scanner, required) {
+			t.Errorf("pre-commit scanner missing %q", required)
+		}
+	}
+	if strings.Contains(scanner, "test/**") || strings.Contains(scanner, "fixtures/**") || strings.Contains(scanner, "--no-git") {
+		t.Fatal("pre-commit scanner must not exclude fixtures or bypass Git history semantics")
 	}
 }
 

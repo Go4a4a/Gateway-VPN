@@ -95,7 +95,7 @@ jobs:
           node --check internal/webapi/static/wireguard-ingress.js
           node --check internal/webapi/static/contextual-help.js
           node --check internal/vpswebapi/static/app.js
-          bash -n scripts/*.sh test/netns/*.sh test/systemd/*.sh test/release-gate/*.sh
+          bash -n .githooks/pre-commit scripts/*.sh test/netns/*.sh test/systemd/*.sh test/release-gate/*.sh
 
   windows-deploy:
     name: Windows portable deploy contract
