@@ -20,7 +20,7 @@
 ## Режим работы Codex
 
 - штатный уровень мышления для разработки — `High / Высокий`;
-- текущий явно подтверждённый пользователем уровень — `High / Высокий`;
+- текущий явно подтверждённый пользователем уровень — `xhigh / Очень высокий`; пользователь подтвердил повышение перед новым signed candidate и clean-Windows two-target gate;
 - обязательный протокол повышения и возврата уровня хранится в корневом `AGENTS.md`;
 - сообщение Codex о рекомендуемом уровне не является переключением;
 - перед любым повышением или понижением Codex обязан остановить проектную работу, сообщить уровень и причину и дождаться явного подтверждения переключения;
@@ -405,6 +405,16 @@
 | DEV-260 | 2026-09-04 | Route-aware TCP MSS clamping является общей пользовательской сетевой функцией, а не modem-only настройкой: owned chain ограничивается активным verified direct/TUN egress, динамическими LAN/WireGuard ingress и TCP SYN; при MTU 1500 значение остаётся штатным | Узкий modem-only workaround оставил бы те же MTU-проблемы на Ethernet, TUN и разрешённом `wg-ingress`. Ограничение по owned interfaces/egress сохраняет SSH, WebUI, Management Fabric, служебный output и UDP/QUIC вне правила |
 
 ## Журнал разработки
+
+### Сессия 176 — возобновление critical delivery gate на xhigh — 2026-09-04
+
+**Подтверждение режима:** пользователь явно переключил уровень с `High` на `xhigh` и разрешил продолжить работу. Следующий блок остаётся сквозным release-delivery/zero-to-ready gate; уровень не будет понижен без обязательной остановки и отдельного подтверждения.
+
+**Уточнённый management-инвариант:** обсуждение локального доступа через Keenetic не изменило архитектуру. WebUI/API остаются независимы от пользовательского Internet path и доступны через назначенный LAN/management bridge либо явно разрешённый management address профиля `SHARED_ONE_ARM`; `PATH_BLOCKED`, отказ модема, Mihomo или подписок их не закрывают. Dedicated uplink/HiLink не становятся management bind target. Safe network apply сохраняет старый путь до подтверждения нового и откатывается при timeout/reboot. Guest Wi-Fi/VLAN isolation либо внешний firewall Keenetic остаются явным внешним prerequisite, а не поводом расширять Gateway firewall.
+
+**Проверено перед candidate:** `main` чист и синхронизирован на `a52fbdd`; CI #86 для неизменившегося code tree завершён `Success`. Предыдущий production-signed testing bundle относится к tag `v0.1.1-testing.645500a` и не переиспользуется как current candidate.
+
+**Следующий шаг:** после отдельного явного разрешения использовать production `.gvkey`, собрать воспроизводимый testing bundle из exact clean HEAD, создать новый immutable testing tag и GitHub Draft Release. Публикация prerelease остаётся отдельным действием после проверки draft/asset hashes и release-immutability policy.
 
 ### Сессия 175 — полный CI текущего source и локальная повторная проверка — 2026-09-04
 
