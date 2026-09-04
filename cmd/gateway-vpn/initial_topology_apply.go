@@ -155,6 +155,16 @@ func runInitialTopologyApply(args []string) int {
 		fmt.Fprintf(os.Stderr, "build initial topology candidate: %v\n", err)
 		return 1
 	}
+	// A first-install command may confirm automatically only while retaining
+	// the exact management origin used by the installer. ONE_ARM/shared-only
+	// profiles move management to wg-ingress and must later be confirmed by a
+	// real request through that new path (or by an explicitly proven local
+	// console workflow); treating this local root process as that request would
+	// defeat rollback protection.
+	if !initialTopologyAutoConfirmAllowed(oldURL, newURL) {
+		fmt.Fprintf(os.Stderr, "initial topology moves management from %s to %s and requires external new-path confirmation; no network changes were staged\n", oldURL, newURL)
+		return 1
+	}
 	prepared, err := engine.Stage(ctx, networkapply.Candidate{Topology: &mutation, OldURL: oldURL, NewURL: newURL, ManagementDestinationIP: destination})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stage initial topology safe apply: %v\n", err)
@@ -170,6 +180,10 @@ func runInitialTopologyApply(args []string) int {
 	}
 	fmt.Printf("initial topology profile applied and confirmed: profile=%s destination=%s ethernet_uplinks=%d\n", plan.Profile, destination, len(plan.EthernetUplinks))
 	return 0
+}
+
+func initialTopologyAutoConfirmAllowed(oldURL, newURL string) bool {
+	return oldURL != "" && oldURL == newURL
 }
 
 func buildInitialTopologyMutation(ctx context.Context, database *sql.DB, configuration config.Config, plan installtopology.Plan, lanIDs []string, sharedID string, ethernetInterfaceIDs map[string]string, installerLANAddress string, enableIngress bool) (networkapply.TopologyMutation, string, string, string, error) {

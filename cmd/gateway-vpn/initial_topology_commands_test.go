@@ -40,3 +40,18 @@ func TestInitialTopologyCheckIsStrictAndReadOnly(t *testing.T) {
 		t.Fatalf("runInitialTopologyCheck(empty) = %d", code)
 	}
 }
+
+func TestInitialTopologyAutoConfirmRequiresExactRetainedManagementOrigin(t *testing.T) {
+	if !initialTopologyAutoConfirmAllowed("https://192.168.200.1:8443", "https://192.168.200.1:8443") {
+		t.Fatal("unchanged management origin was not eligible for local installer confirmation")
+	}
+	for _, candidate := range [][2]string{
+		{"https://192.168.200.1:8443", "https://10.90.0.1:8443"},
+		{"", ""},
+		{"", "https://192.168.200.1:8443"},
+	} {
+		if initialTopologyAutoConfirmAllowed(candidate[0], candidate[1]) {
+			t.Fatalf("management move was eligible for automatic confirmation: %q -> %q", candidate[0], candidate[1])
+		}
+	}
+}

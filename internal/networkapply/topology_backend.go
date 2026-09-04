@@ -426,28 +426,15 @@ func (backend UbuntuBackend) applyTopologyEthernet(ctx context.Context, mutation
 	repository := uplink.NewRepository(backend.Database, backend.RoutingTableStart, backend.FwmarkStart)
 	for _, item := range mutation.EthernetUplinks {
 		input := uplink.CreateEthernetInput{ID: item.ID, Name: item.Name, NetworkInterfaceID: item.NetworkInterfaceID, AddressMode: item.AddressMode, IPv4CIDR: item.IPv4CIDR, Gateway: item.Gateway, DNS: append([]string(nil), item.DNS...), MTU: item.MTU}
-		var created uplink.Uplink
 		var err error
 		if mutation.ExpectedDesiredGeneration == 1 && item.NetworkInterfaceID == mutation.SharedOneArmInterfaceID {
-			created, err = repository.CreateInitialEthernet(ctx, input)
+			_, err = repository.CreateInitialEthernet(ctx, input)
 		} else {
-			created, err = repository.CreateEthernet(ctx, input)
+			_, err = repository.CreateEthernet(ctx, input)
 		}
 		if err != nil {
 			return fmt.Errorf("create topology Ethernet uplink %s: %w", item.ID, err)
 		}
-		content, err := renderEthernetNetwork(created)
-		if err != nil {
-			return err
-		}
-		candidatePath := filepath.Join(backend.Paths.EthernetNetworkDir, ".gateway-vpn-topology-"+item.ID+".network")
-		if err := atomicWrite(candidatePath, []byte(content), 0o600); err != nil {
-			return err
-		}
-		if err := installRegular(candidatePath, backend.ethernetOwnedPath(item.ID), 0o644, -1); err != nil {
-			return err
-		}
-		_ = os.Remove(candidatePath)
 	}
 	return nil
 }
