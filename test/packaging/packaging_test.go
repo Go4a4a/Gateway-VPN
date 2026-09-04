@@ -178,6 +178,22 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	if strings.Index(installer, "initial-topology-check --token") > strings.Index(installer, "if ((HOST_UPGRADE_REQUIRED))") {
 		t.Fatal("initial topology verification occurs after host-upgrade dispatch")
 	}
+	firstTopology := strings.Index(installer, "TOPOLOGY_CHECK_ARGS=(initial-topology-check --token")
+	if firstTopology < 0 {
+		t.Fatal("installer is missing the early initial-topology validation")
+	}
+	for _, laterMutationOrProbe := range []string{
+		"if ((ENABLE_WIREGUARD_INGRESS)); then\n  \"$RELEASE_DIR/bin/gateway-vpn\" wireguard-ingress-bootstrap",
+		`source /etc/os-release`,
+		`validate_openssh_configuration 1`,
+		`apt-get update`,
+		`gateway-install-preflight --lan-interface`,
+	} {
+		position := strings.Index(installer, laterMutationOrProbe)
+		if position < 0 || firstTopology > position {
+			t.Fatalf("initial topology validation does not precede %q", laterMutationOrProbe)
+		}
+	}
 	for _, required := range []string{
 		"APPLY == 0 || SIMULATION_RESULT != 10",
 		"Refreshing configured APT indexes before installing exact missing Gateway packages",

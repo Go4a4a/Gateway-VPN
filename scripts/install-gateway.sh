@@ -225,6 +225,18 @@ SIGNED_RELEASE_VERSION=$(sed -n 's/^[[:space:]]*"gateway_version": "\([^"]*\)",\
 [[ "$SIGNED_RELEASE_VERSION" == "$RELEASE_VERSION" ]] || { echo "Requested Gateway version does not match signed release metadata" >&2; exit 1; }
 RELEASE_VERSION_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" --version)
 [[ "$RELEASE_VERSION_OUTPUT" == "gateway-vpn $RELEASE_VERSION "* ]] || { echo "Release binary version does not match --version" >&2; exit 1; }
+# Decode and bind the typed initial-topology handoff before any host-facing
+# probe can create a runtime directory, refresh package indexes, or otherwise
+# mutate state.  The later invocation remains intentionally close to the full
+# LAN preflight as a defence-in-depth recheck immediately before apply.
+if [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]]; then
+  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE")
+  [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_CHECK_ARGS+=(--lan-members "$LAN_MEMBERS")
+  "$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}"
+elif ((HOST_UPGRADE_INNER == 0)); then
+  echo "Initial topology token is missing" >&2
+  exit 2
+fi
 if ((ENABLE_WIREGUARD_INGRESS)); then
   "$RELEASE_DIR/bin/gateway-vpn" wireguard-ingress-bootstrap \
     --endpoint-host "$WIREGUARD_ENDPOINT_HOST" --subnet "$WIREGUARD_SUBNET" \
@@ -522,9 +534,6 @@ if [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]]; then
   TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE")
   [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_CHECK_ARGS+=(--lan-members "$LAN_MEMBERS")
   "$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}"
-elif ((HOST_UPGRADE_INNER == 0)); then
-  echo "Initial topology token is missing" >&2
-  exit 2
 fi
 if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
   echo "Active UFW/firewalld conflicts with the owned Gateway VPN ruleset" >&2

@@ -1,12 +1,26 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-09-05
-**Общее состояние:** `F300B25_IMMUTABLE_RELEASE_BASE / INITIAL_TOPOLOGY_TOKEN_HANDOFF_LOCAL_TEST_PASS / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
-**Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. Его первый clean Windows Sandbox gate безопасно остановился до target mutation: diagnostic доказал, что Docker/network/pinned host keys исправны, а Windows OpenSSH отвергал private key только из-за ACL read-only mapped folder. В current source реализована автоматическая project-local ACL-restricted staged identity без изменения исходного файла, structured redacted SSH reason code и понятная диагностика; полный `go test ./...` и `go vet ./...` прошли в существующем Linux builder, Windows-specific broad-ACL integration и изменённые package tests также зелёные. Новый immutable candidate ещё не собирался и current clean gate не засчитан. После нового candidate нужно повторить тот же two-target gate; затем остаются физические Ubuntu Gateway/VPS, HiLink/Keenetic и 24/72-часовые endurance gates.
+**Общее состояние:** `INITIAL_TOPOLOGY_PRECHECK_ORDERING_FIX_LOCAL_PASS / LINUX_FIXTURE_PENDING / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
+**Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. В current source typed initial-topology token теперь проверяется сразу после проверки подписанного релиза, до WireGuard/SSH/пакетных host probes и apply boundary; перед дальнейшим apply сохранена defence-in-depth повторная проверка. Добавлен Linux netns fixture для direct/bridge handoff, отказа при mismatched/unknown/unsupported токенах, snapshots link/address/route/rule без изменения namespace и backend rollback tests. Локальные Go/package/syntax проверки проходят, но Linux fixture ещё не запускался в этой Windows-среде (WSL shim возвращает `E_ACCESSDENIED`), поэтому его результат будет засчитан только в GitHub Linux CI. Новый immutable candidate ещё не собирался и current clean gate не засчитан. После зелёного Linux CI нужно повторить clean Windows two-target gate; затем остаются физические Ubuntu Gateway/VPS, HiLink/Keenetic и 24/72-часовые endurance gates.
 
 **Оценка прогресса:** относительно прежнего schema-25 scope программная реализация остаётся примерно `98%`; относительно текущего расширенного обязательного scope программная часть ориентировочно `98%`. Готовность к первой установке на физический стенд — примерно `97%`, полная production-готовность — примерно `84%`. Durable signed-update scheduler, service-route ladder, отдельный signed Mihomo maintenance discovery поверх полного immutable Gateway release, signed Gateway/VPS foundations, complete Gateway restore-point rollback, live Management Fabric observations, exact schema-34 lifecycle matrix и Windows portable delivery source имеют local evidence. Первый clean Windows guest выявил и точно локализовал mapped-key ACL defect без изменения targets; source fix локально проверен, но требует нового immutable candidate и повторения guest gate. Privileged Docker и local Windows 10 не заменяют физические Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic captures, hardware-validated firmware/USB recovery и RTC S5, а также несокращаемые 24/72-часовые endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
+
+### Сессия 2026-09-05 — Linux initial-topology preflight fixture и ранняя проверка до mutation
+
+**Сделано:**
+
+- установщик `scripts/install-gateway.sh` теперь декодирует и сверяет typed initial-topology token сразу после проверки подписанного release metadata; это происходит до read-only WireGuard preflight, `systemd`/SSH runtime preparation, APT refresh и apply transaction;
+- прежняя проверка возле полного LAN preflight сохранена как defence-in-depth recheck непосредственно перед дальнейшим переходом установки;
+- добавлен `test/netns/initial_topology_preflight.sh`: в disposable Linux network namespace он проверяет direct и bridge handoff, mismatch интерфейса, unknown JSON field и отказ для профиля без first-install backend; для каждого запуска сравниваются JSON snapshots link/address/route/rule до и после;
+- fixture дополнительно проверяет source-order установщика и запускает четыре durable topology apply/commit/rollback теста; evidence сохраняется в project-local `.cache/netns` и не удаляется автоматически;
+- CI и `test/netns/README.md` включают новый fixture.
+
+**Проверено локально:** `go test` для install topology/wizard, Gateway command, distribution, bootstrap/deploy и packaging — PASS; `go vet ./...` для текущего source — PASS; `bash -n` нового fixture и установщика в установленном Git Bash — PASS; `git diff --check` — PASS. Сам root/netns fixture в Windows не запускался: системный WSL shim недоступен (`E_ACCESSDENIED`), Docker daemon также недоступен. Полный Linux fixture должен быть выполнен GitHub CI; hardware/bare-metal evidence этим не заменяется.
+
+**Следующий шаг:** зафиксировать source+journal обычным коммитом и отправить в `origin/main`, дождаться Linux CI с новым fixture. Затем, только после отдельного разрешения пользователя, собрать новый production-signed testing candidate и повторить clean Windows two-target gate. Stable/latest, production key и опубликованный `f300b25` в этой сессии не затрагивались.
 
 ### Сессия 2026-09-05 — typed initial topology handoff (локальный этап)
 

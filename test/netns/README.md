@@ -21,6 +21,7 @@ sudo bash ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn
 sudo bash ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
 sudo bash ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
 sudo bash ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
+sudo bash ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
 sudo bash ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
 sudo bash ./test/netns/update_service_routes.sh /tmp/gateway-vpn-dataplane-test /tmp/gateway-vpn-updatenet-test
 sudo bash ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-test
@@ -36,6 +37,8 @@ sudo bash ./test/netns/mihomo_tun.sh /absolute/path/to/pinned/mihomo \
 `lan_bridge_ssh.sh` проверяет один management bridge с двумя физическими LAN-портами: TCP/22 доступен через оба, недоступен через отдельный uplink, а `disable_ssh_management: true` атомарно удаляет правило TCP/22 и блокирует оба LAN-пути даже при живом wildcard listener.
 
 `wireguard_ingress.sh` запускает отдельный kernel integration binary в disposable root namespace. Он создаёт настоящий server/client WireGuard contour, выполняет handshake без внешнего Интернета, проверяет LAN-scoped UDP listener, адрес/peer в ядре, удаление revoked peer и полное fail-closed удаление интерфейса при выключении сервера.
+
+`initial_topology_preflight.sh` выполняет release binary в отдельном network namespace и проверяет direct/bridge handoff, отказ при несовпадающем интерфейсе, unknown field и пока неподдерживаемом first-install backend. До и после каждого запуска сравнивается полный link/address/route/rule snapshot. Дополнительно fixture проверяет, что первый topology check расположен до WireGuard preflight и apply boundary установщика, и повторяет durable apply/commit/rollback tests. Evidence сохраняется только в project-local `.cache/netns`; bare-metal установку этот gate не заменяет.
 
 `topology_profiles.sh` связывает durable topology apply/commit/rollback contract с реальным kernel nftables ONE_ARM-контуром. Неподтверждённый либо spoofed `wg-ingress` source блокируется, exact peer allowlist проходит через выбранный direct uplink, а mark map не содержит дубликатов.
 

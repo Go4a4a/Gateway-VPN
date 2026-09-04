@@ -166,6 +166,8 @@ jobs:
         run: sudo ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
       - name: Prove WireGuard ingress kernel lifecycle and handshake
         run: sudo ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
+      - name: Prove initial topology handoff is read-only and precedes apply
+        run: sudo ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
       - name: Prove topology rollback and peer-scoped one-arm firewall
         run: sudo ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
       - name: Prove signed-update service routes through exact HiLink and Ethernet contexts
