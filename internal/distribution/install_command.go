@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"gateway-vpn/internal/installtopology"
 	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/wgingress"
 	"gateway-vpn/internal/wireguard"
@@ -31,7 +32,9 @@ type GatewayInstallCommandOptions struct {
 	Interactive             bool
 	LogReaderUser           string
 	LANInterface            string
+	LANMembers              []string
 	LANAddress              string
+	InitialTopologyToken    string
 	InstallDependencies     bool
 	EnableDHCP              bool
 	DisableSSH              bool
@@ -105,7 +108,7 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		return "", errors.New("safe GitHub release inputs are required")
 	}
 	if options.Interactive {
-		if options.LANInterface != "" || options.LANAddress != "" || options.LogReaderUser != "" || options.InstallDependencies || options.EnableDHCP || options.DisableSSH || options.EnableWGIngress || options.WGEndpointHost != "" || options.WGSubnetCIDR != "" || options.WGListenPort != 0 || len(options.WGClientDNS) != 0 || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
+		if options.LANInterface != "" || len(options.LANMembers) != 0 || options.LANAddress != "" || options.LogReaderUser != "" || options.InstallDependencies || options.EnableDHCP || options.DisableSSH || options.EnableWGIngress || options.WGEndpointHost != "" || options.WGSubnetCIDR != "" || options.WGListenPort != 0 || len(options.WGClientDNS) != 0 || options.BootNetworkPolicy != "" || options.GRUBPolicy != "" || options.Apply || options.NonInteractiveRoot || options.DependencyPreflightOnly {
 			return "", errors.New("interactive Gateway command must defer all host policy choices and confirmation to the target terminal")
 		}
 	} else if !interfacePattern.MatchString(options.LANInterface) || !validLANPrefix(options.LANAddress) || !validBootNetworkPolicy(options.BootNetworkPolicy) || !validGRUBPolicy(options.GRUBPolicy) {
@@ -113,6 +116,25 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	}
 	if options.LogReaderUser != "" && (!linuxUserPattern.MatchString(options.LogReaderUser) || options.LogReaderUser == "root") {
 		return "", errors.New("safe non-root Gateway SFTP log reader is required")
+	}
+	if options.Interactive && options.InitialTopologyToken != "" {
+		return "", errors.New("interactive Gateway command must create topology on the target")
+	}
+	if !options.Interactive {
+		if options.InitialTopologyToken == "" {
+			plan, err := installtopology.CurrentLANPlan(options.LANInterface, options.LANMembers)
+			if err != nil {
+				return "", errors.New("safe initial topology is required for automation mode")
+			}
+			options.InitialTopologyToken, err = installtopology.EncodeToken(plan)
+			if err != nil {
+				return "", errors.New("encode initial topology failed")
+			}
+		}
+		plan, err := installtopology.DecodeToken(options.InitialTopologyToken)
+		if err != nil || installtopology.ValidateCurrentLAN(plan, options.LANInterface, options.LANMembers) != nil {
+			return "", errors.New("initial topology does not match the supported Gateway LAN action")
+		}
 	}
 	if !options.Interactive {
 		if options.EnableWGIngress {
@@ -161,7 +183,11 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		installCommand += " --interactive --management-peer \"$management_peer\""
 	} else {
 		installCommand += " --lan-interface " + options.LANInterface + " --lan-address " + options.LANAddress +
+			" --initial-topology-token " + options.InitialTopologyToken +
 			" --boot-network-policy " + options.BootNetworkPolicy + " --grub-policy " + options.GRUBPolicy
+		if len(options.LANMembers) > 0 {
+			installCommand += " --lan-members " + strings.Join(options.LANMembers, ",")
+		}
 	}
 	parts = append(parts, installCommand)
 	if options.EnableDHCP {

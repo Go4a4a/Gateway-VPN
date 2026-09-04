@@ -22,6 +22,7 @@ import (
 	"gateway-vpn/internal/buildinfo"
 	"gateway-vpn/internal/deploy"
 	"gateway-vpn/internal/distribution"
+	"gateway-vpn/internal/installtopology"
 	updatepkg "gateway-vpn/internal/update"
 )
 
@@ -111,6 +112,16 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "Windows deploy requires an explicitly selected SSH identity for both Gateway and VPS")
 		return 2
 	}
+	initialPlan, err := installtopology.CurrentLANPlan(*lanInterface, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "prepare supported initial topology: %v\n", err)
+		return 2
+	}
+	initialTopologyToken, err := installtopology.EncodeToken(initialPlan)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "encode supported initial topology failed")
+		return 1
+	}
 	resolvedAdminPublicKey := *adminPublicKey
 	var localAdminIdentity *deploy.AdminIdentity
 	if *adminConfig != "" {
@@ -132,7 +143,7 @@ func run(args []string) int {
 		Repository: *repository, ReleaseTag: *releaseTag,
 		Gateway:      deploy.Host{Destination: *gatewaySSH, Port: *gatewayPort, Identity: *gatewayIdentity, KnownHosts: *knownHosts},
 		VPS:          deploy.Host{Destination: *vpsSSH, Port: *vpsPort, Identity: *vpsIdentity, KnownHosts: *knownHosts},
-		LANInterface: *lanInterface, LANAddress: *lanAddress, EnableDHCP: *enableDHCP,
+		LANInterface: *lanInterface, LANAddress: *lanAddress, InitialTopologyToken: initialTopologyToken, EnableDHCP: *enableDHCP,
 		PublicEndpoint: *publicEndpoint, AdminPublicKey: resolvedAdminPublicKey,
 		AllowGatewaySSH: *allowGatewaySSH, InstallDependencies: *installDependencies,
 		ReadinessAttempts: *readinessAttempts, ReadinessInterval: *readinessInterval,

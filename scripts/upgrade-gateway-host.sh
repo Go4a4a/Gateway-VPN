@@ -14,6 +14,7 @@ RELEASE_VERSION=""
 LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS=""
+INITIAL_TOPOLOGY_TOKEN=""
 LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
@@ -23,7 +24,7 @@ WIREGUARD_LISTEN_PORT=""
 WIREGUARD_CLIENT_DNS=""
 
 usage() {
-  echo "Usage: upgrade-gateway-host.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --lan-address CIDR --log-reader-user USER --boot-network-policy POLICY --grub-policy POLICY [--lan-members LIST] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress and its four values] [--apply]"
+  echo "Usage: upgrade-gateway-host.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --lan-address CIDR --log-reader-user USER --boot-network-policy POLICY --grub-policy POLICY [--lan-members LIST] [--initial-topology-token TOKEN] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress and its four values] [--apply]"
 }
 
 while (($#)); do
@@ -34,6 +35,7 @@ while (($#)); do
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
     --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
+    --initial-topology-token) INITIAL_TOPOLOGY_TOKEN=${2:?}; shift 2 ;;
     --log-reader-user) LOG_READER_USER=${2:?}; shift 2 ;;
     --boot-network-policy) BOOT_NETWORK_POLICY=${2:?}; shift 2 ;;
     --grub-policy) GRUB_POLICY=${2:?}; shift 2 ;;
@@ -127,6 +129,14 @@ candidate_runtime_ready() {
   grep -Fq '"workers_ok":true' /run/gateway-vpn-watchdog/control.json || return 1
 }
 REPORT_VERSION=$(report_string version)
+REPORT_TOPOLOGY_TOKEN=$(report_string initial_topology_token)
+if [[ -n "$INITIAL_TOPOLOGY_TOKEN" && -n "$REPORT_TOPOLOGY_TOKEN" && "$INITIAL_TOPOLOGY_TOKEN" != "$REPORT_TOPOLOGY_TOKEN" ]]; then
+  echo "Host upgrade topology token differs from the installed topology; use an explicit topology reconfiguration" >&2
+  exit 1
+fi
+if [[ -z "$INITIAL_TOPOLOGY_TOKEN" ]]; then
+  INITIAL_TOPOLOGY_TOKEN="$REPORT_TOPOLOGY_TOKEN"
+fi
 REPORT_LAN_INTERFACE=$(report_string lan_interface)
 REPORT_LAN_MEMBERS=$(report_string lan_members)
 REPORT_LAN_ADDRESS=$(report_string lan_address)
@@ -357,6 +367,7 @@ INNER_ARGS=(
   --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
   --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY" --host-upgrade-inner
 )
+[[ -z "$INITIAL_TOPOLOGY_TOKEN" ]] || INNER_ARGS+=(--initial-topology-token "$INITIAL_TOPOLOGY_TOKEN")
 [[ -z $LAN_MEMBERS ]] || INNER_ARGS+=(--lan-members "$LAN_MEMBERS")
 ((INSTALL_DEPENDENCIES == 0)) || INNER_ARGS+=(--install-dependencies)
 ((ENABLE_DHCP == 0)) || INNER_ARGS+=(--enable-dhcp)

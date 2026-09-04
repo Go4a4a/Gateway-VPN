@@ -1,12 +1,29 @@
 # Gateway VPN — статус и журнал разработки
 
-**Последнее обновление:** 2026-09-04
-**Общее состояние:** `F300B25_IMMUTABLE_RELEASE_BASE / MAIN_WINDOWS_MAPPED_KEY_ACL_FIX_LOCAL_FULL_TEST_PASS / PRECOMMIT_SECRET_GUARD_PASS / CLEAN_WINDOWS_GATE_ROOT_CAUSE_PROVEN_NO_TARGET_MUTATION / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
+**Последнее обновление:** 2026-09-05
+**Общее состояние:** `F300B25_IMMUTABLE_RELEASE_BASE / INITIAL_TOPOLOGY_TOKEN_HANDOFF_LOCAL_TEST_PASS / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
 **Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. Его первый clean Windows Sandbox gate безопасно остановился до target mutation: diagnostic доказал, что Docker/network/pinned host keys исправны, а Windows OpenSSH отвергал private key только из-за ACL read-only mapped folder. В current source реализована автоматическая project-local ACL-restricted staged identity без изменения исходного файла, structured redacted SSH reason code и понятная диагностика; полный `go test ./...` и `go vet ./...` прошли в существующем Linux builder, Windows-specific broad-ACL integration и изменённые package tests также зелёные. Новый immutable candidate ещё не собирался и current clean gate не засчитан. После нового candidate нужно повторить тот же two-target gate; затем остаются физические Ubuntu Gateway/VPS, HiLink/Keenetic и 24/72-часовые endurance gates.
 
 **Оценка прогресса:** относительно прежнего schema-25 scope программная реализация остаётся примерно `98%`; относительно текущего расширенного обязательного scope программная часть ориентировочно `98%`. Готовность к первой установке на физический стенд — примерно `97%`, полная production-готовность — примерно `84%`. Durable signed-update scheduler, service-route ladder, отдельный signed Mihomo maintenance discovery поверх полного immutable Gateway release, signed Gateway/VPS foundations, complete Gateway restore-point rollback, live Management Fabric observations, exact schema-34 lifecycle matrix и Windows portable delivery source имеют local evidence. Первый clean Windows guest выявил и точно локализовал mapped-key ACL defect без изменения targets; source fix локально проверен, но требует нового immutable candidate и повторения guest gate. Privileged Docker и local Windows 10 не заменяют физические Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic captures, hardware-validated firmware/USB recovery и RTC S5, а также несокращаемые 24/72-часовые endurance.
 
 Этот файл является отдельным оперативным журналом проекта. Архитектурные требования находятся в `PLAN_v1.1.md` и без отдельного решения не переписываются задним числом.
+
+### Сессия 2026-09-05 — typed initial topology handoff (локальный этап)
+
+**Сделано:**
+
+- добавлен bounded canonical `installtopology.Plan` для четырёх согласованных профилей; до появления backend safe-apply реально разрешён только `ETHERNET_HILINK`;
+- интерактивный target wizard теперь возвращает выбранный topology plan;
+- topology token проходит через deploy request, signed distribution command, bootstrap и `install-gateway.sh`;
+- перед изменениями shell-установщик повторно вызывает read-only `gateway-vpn initial-topology-check` и сверяет token с `--lan-interface/--lan-members`;
+- добавлены строгие проверки unknown fields, trailing data, размера token, конфликтов ролей и несовпадения токена с применяемым LAN;
+- сохранена обратная совместимость API bootstrap-тестов: если token не передан в библиотечный вызов, он выводится только из уже валидированных LAN-аргументов; сгенерированные команды всегда передают token явно.
+
+**Проверено:** project-local `gofmt`, `go test` для `installtopology`, `installwizard`, `distribution`, `bootstrapinstall`, `deploy`, обоих bootstrap/deploy command packages — PASS; `git diff --check` — PASS. Windows `bash.exe` shim не смог создать WSL-процесс (`E_ACCESSDENIED`), поэтому shell syntax gate перенесён в Linux CI и не засчитан локально.
+
+**Ограничение:** safe-apply backend для `ETHERNET_ETHERNET`, `ONE_ARM_WIREGUARD` и `MIXED` ещё не подключён, поэтому эти профили не предлагаются первой установкой и fail-closed отклоняются от текущего installer action. Token передаётся в текущую install/upgrade transaction, но пока не добавляется в публичный install report, чтобы не менять его schema без отдельной миграции; legacy upgrade без token остаётся совместимым только с сохранением прежней LAN-схемы.
+
+**Следующий шаг:** провести token через оставшиеся generated/upgrade command paths и добавить Linux-side integration fixture, затем выполнить полный local suite/vet перед новым immutable testing candidate. Stable channel и production key не затрагивались.
 
 ## Правила ведения
 

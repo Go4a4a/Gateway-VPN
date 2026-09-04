@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"gateway-vpn/internal/installpreflight"
+	"gateway-vpn/internal/installtopology"
 	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/platformexec"
 	"gateway-vpn/internal/wgingress"
@@ -47,6 +48,7 @@ var (
 )
 
 type Selection struct {
+	Topology            installtopology.Plan
 	LANInterface        string
 	LANMembers          []string
 	LANAddress          string
@@ -229,7 +231,12 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 		return Selection{}, err
 	}
 	session.printAutomaticPolicy()
+	topology := installtopology.Plan{Profile: installtopology.ProfileEthernetHiLink, LANMembers: interfaceNames(selected)}
+	if err := topology.Validate(); err != nil {
+		return Selection{}, fmt.Errorf("validate initial topology selection: %w", err)
+	}
 	return Selection{
+		Topology:     topology,
 		LANInterface: LANInterface, LANMembers: interfaceNames(selected), LANAddress: lanAddress,
 		EnableDHCP: enableDHCP, EnableSSH: enableSSH, InstallDependencies: installDependencies,
 		EnableWGIngress: enableWGIngress, WGEndpointHost: wgEndpointHost, WGSubnetCIDR: wgSubnetCIDR,

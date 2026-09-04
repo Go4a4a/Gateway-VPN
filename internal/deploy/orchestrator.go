@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/distribution"
+	"gateway-vpn/internal/installtopology"
 )
 
 const (
@@ -25,22 +26,24 @@ const (
 )
 
 type Request struct {
-	Manifest            distribution.Manifest
-	ManifestSHA256      string
-	SignerKeySHA256     string
-	Repository          string
-	ReleaseTag          string
-	Gateway             Host
-	VPS                 Host
-	LANInterface        string
-	LANAddress          string
-	EnableDHCP          bool
-	PublicEndpoint      string
-	AdminPublicKey      string
-	AllowGatewaySSH     bool
-	InstallDependencies bool
-	ReadinessAttempts   int
-	ReadinessInterval   time.Duration
+	Manifest             distribution.Manifest
+	ManifestSHA256       string
+	SignerKeySHA256      string
+	Repository           string
+	ReleaseTag           string
+	Gateway              Host
+	VPS                  Host
+	LANInterface         string
+	LANMembers           []string
+	LANAddress           string
+	InitialTopologyToken string
+	EnableDHCP           bool
+	PublicEndpoint       string
+	AdminPublicKey       string
+	AllowGatewaySSH      bool
+	InstallDependencies  bool
+	ReadinessAttempts    int
+	ReadinessInterval    time.Duration
 }
 
 type Report struct {
@@ -258,6 +261,10 @@ func validateRequest(request Request) error {
 	if !validPublicKey(request.AdminPublicKey) || request.ReadinessAttempts < 1 || request.ReadinessAttempts > 60 || request.ReadinessInterval < 0 || request.ReadinessInterval > time.Minute {
 		return errors.New("admin public key or readiness policy is invalid")
 	}
+	plan, err := installtopology.DecodeToken(request.InitialTopologyToken)
+	if err != nil || installtopology.ValidateCurrentLAN(plan, request.LANInterface, request.LANMembers) != nil {
+		return errors.New("deploy initial topology does not match the supported Gateway LAN action")
+	}
 	if _, err := gatewayCommand(request, false); err != nil {
 		return err
 	}
@@ -289,7 +296,7 @@ func gatewayCommand(request Request, apply bool) (string, error) {
 	return distribution.GatewayInstallCommand(request.Manifest, distribution.GatewayInstallCommandOptions{
 		Repository: request.Repository, ReleaseTag: request.ReleaseTag,
 		ManifestSHA256: request.ManifestSHA256, SignerKeySHA256: request.SignerKeySHA256,
-		LANInterface: request.LANInterface, LANAddress: request.LANAddress,
+		LANInterface: request.LANInterface, LANMembers: request.LANMembers, LANAddress: request.LANAddress, InitialTopologyToken: request.InitialTopologyToken,
 		InstallDependencies: request.InstallDependencies, EnableDHCP: request.EnableDHCP,
 		BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep",
 		Apply: apply, NonInteractiveRoot: true, DependencyPreflightOnly: request.InstallDependencies && !apply,

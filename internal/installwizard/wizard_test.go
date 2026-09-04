@@ -48,7 +48,7 @@ func TestInteractiveSelectionListsMultipleInterfacesBlocksDefaultAndFindsFreeCID
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.EnableSSH || !selection.InstallDependencies || selection.BootNetworkPolicy != BootNetworkNonBlocking || selection.GRUBPolicy != GRUBAutomatic {
+	if selection.Topology.Profile != "ETHERNET_HILINK" || selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0,enp3s0" || selection.LANAddress != "192.168.201.1/24" || !selection.EnableDHCP || !selection.EnableSSH || !selection.InstallDependencies || selection.BootNetworkPolicy != BootNetworkNonBlocking || selection.GRUBPolicy != GRUBAutomatic {
 		t.Fatalf("selection = %+v", selection)
 	}
 	for _, expected := range []string{"eno1", "enp2s0", "enp3s0", "enxhilink", "enxhilink2", "текущий выход Ubuntu", "Huawei USB/HiLink", "НУЖНО ВЫБРАТЬ СЕЙЧАС", "БУДЕТ НАСТРОЕНО АВТОМАТИЧЕСКИ", "МОЖНО ИЗМЕНИТЬ ПОСЛЕ УСТАНОВКИ", "без Ethernet carrier"} {
@@ -71,7 +71,7 @@ func TestInteractiveSelectionValidatesCustomCIDRAndDHCPPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || selection.EnableSSH || !selection.EnableDHCP || selection.BootNetworkPolicy != BootNetworkKeep || selection.GRUBPolicy != GRUBKeep {
+	if selection.Topology.Profile != "ETHERNET_HILINK" || selection.LANInterface != LANInterface || strings.Join(selection.LANMembers, ",") != "enp2s0" || selection.LANAddress != "10.42.0.1/24" || selection.InstallDependencies || selection.EnableSSH || !selection.EnableDHCP || selection.BootNetworkPolicy != BootNetworkKeep || selection.GRUBPolicy != GRUBKeep {
 		t.Fatalf("selection = %+v", selection)
 	}
 	if !strings.Contains(output.String(), "требует подсеть /24") {

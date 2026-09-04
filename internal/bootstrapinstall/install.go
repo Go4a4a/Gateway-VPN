@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"gateway-vpn/internal/distribution"
+	"gateway-vpn/internal/installtopology"
 	"gateway-vpn/internal/netutil"
 	"gateway-vpn/internal/wgingress"
 	"gateway-vpn/internal/wireguard"
@@ -75,6 +76,7 @@ type GatewayOptions struct {
 	LANInterface            string
 	LANMembers              []string
 	LANAddress              string
+	InitialTopologyToken    string
 	LogReaderUser           string
 	InstallDependencies     bool
 	EnableDHCP              bool
@@ -123,6 +125,20 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	if !validGatewayBootNetworkPolicy(options.BootNetworkPolicy) || !validGatewayGRUBPolicy(options.GRUBPolicy) {
 		return InstallResult{}, errors.New("explicit valid Gateway boot-network and GRUB policies are required")
 	}
+	if options.InitialTopologyToken == "" {
+		plan, err := installtopology.CurrentLANPlan(options.LANInterface, options.LANMembers)
+		if err != nil {
+			return InstallResult{}, errors.New("explicit valid initial Gateway topology is required")
+		}
+		options.InitialTopologyToken, err = installtopology.EncodeToken(plan)
+		if err != nil {
+			return InstallResult{}, errors.New("encode initial Gateway topology failed")
+		}
+	}
+	plan, err := installtopology.DecodeToken(options.InitialTopologyToken)
+	if err != nil || installtopology.ValidateCurrentLAN(plan, options.LANInterface, options.LANMembers) != nil {
+		return InstallResult{}, errors.New("initial Gateway topology does not match installer LAN arguments")
+	}
 	if options.EnableWGIngress {
 		if err := wgingress.ValidateInitialServerOptions(options.WGEndpointHost, options.WGSubnetCIDR, options.WGListenPort, options.WGClientDNS); err != nil || prefixesOverlapCIDR(options.LANAddress, options.WGSubnetCIDR) {
 			return InstallResult{}, errors.New("explicit valid non-overlapping initial WireGuard ingress options are required")
@@ -140,6 +156,7 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		"--version", prepared.VerifiedRelease.Release.GatewayVersion,
 		"--lan-interface", options.LANInterface,
 		"--lan-address", options.LANAddress,
+		"--initial-topology-token", options.InitialTopologyToken,
 		"--log-reader-user", options.LogReaderUser,
 		"--boot-network-policy", options.BootNetworkPolicy,
 		"--grub-policy", options.GRUBPolicy,

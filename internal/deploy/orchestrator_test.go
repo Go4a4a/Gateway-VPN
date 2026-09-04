@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gateway-vpn/internal/distribution"
+	"gateway-vpn/internal/installtopology"
 )
 
 type fakeRemoteExecutor struct {
@@ -255,12 +256,16 @@ func validDeployRequest(t *testing.T) Request {
 		},
 	}
 	distribution.SortArtifacts(manifest.Artifacts)
+	initialTopologyToken, err := installtopology.EncodeToken(installtopology.Plan{Profile: installtopology.ProfileEthernetHiLink, LANMembers: []string{"enp2s0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Request{
 		Manifest: manifest, ManifestSHA256: strings.Repeat("e", 64), SignerKeySHA256: manifest.SignerKeySHA256,
 		Repository: "owner/gateway-vpn", ReleaseTag: "v1.2.0",
 		Gateway:      Host{Destination: "operator@gateway.example", Port: 22, Identity: identity, KnownHosts: knownHosts},
 		VPS:          Host{Destination: "root@vps.example", Port: 22, Identity: identity, KnownHosts: knownHosts},
-		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", EnableDHCP: true,
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", InitialTopologyToken: initialTopologyToken, EnableDHCP: true,
 		PublicEndpoint: "1.1.1.1:51821", AdminPublicKey: testPublicKey(6),
 		InstallDependencies: true, ReadinessAttempts: 1, ReadinessInterval: 0,
 	}

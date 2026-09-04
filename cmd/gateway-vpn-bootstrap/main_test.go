@@ -5,6 +5,7 @@ import "testing"
 func TestInteractiveModeRejectsBuildTimeHardwareAndApplyPolicy(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"install-gateway", "--interactive", "--lan-interface", "enp2s0"},
+		{"install-gateway", "--interactive", "--lan-members", "enp2s0,enp3s0"},
 		{"install-gateway", "--interactive", "--lan-address", "192.168.200.1/24"},
 		{"install-gateway", "--interactive", "--enable-dhcp"},
 		{"install-gateway", "--interactive", "--disable-ssh"},

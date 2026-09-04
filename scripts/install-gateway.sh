@@ -21,13 +21,14 @@ RELEASE_VERSION=""
 LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS="192.168.200.1/24"
+INITIAL_TOPOLOGY_TOKEN=""
 LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
 HOST_UPGRADE_INNER=0
 
 usage() {
-  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --log-reader-user USER --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress --wireguard-endpoint-host HOST --wireguard-subnet CIDR --wireguard-listen-port PORT --wireguard-client-dns IP[,IP...]] [--apply]"
+  echo "Usage: install-gateway.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --initial-topology-token TOKEN --log-reader-user USER --boot-network-policy gateway-nonblocking|keep --grub-policy automatic-hidden|menu-5s|keep [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress --wireguard-endpoint-host HOST --wireguard-subnet CIDR --wireguard-listen-port PORT --wireguard-client-dns IP[,IP...]] [--apply]"
   echo "Without --apply the installer performs validation and prints the planned destinations."
 }
 
@@ -132,6 +133,7 @@ while (($#)); do
     --lan-interface) LAN_INTERFACE=${2:?}; shift 2 ;;
     --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
+    --initial-topology-token) INITIAL_TOPOLOGY_TOKEN=${2:?}; shift 2 ;;
     --log-reader-user) LOG_READER_USER=${2:?}; shift 2 ;;
     --boot-network-policy) BOOT_NETWORK_POLICY=${2:?}; shift 2 ;;
     --grub-policy) GRUB_POLICY=${2:?}; shift 2 ;;
@@ -152,6 +154,9 @@ while (($#)); do
 done
 
 [[ -n "$RELEASE_DIR" && -n "$TRUSTED_UPDATE_KEY" && -n "$RELEASE_VERSION" && -n "$LAN_INTERFACE" && -n "$LOG_READER_USER" && -n "$BOOT_NETWORK_POLICY" && -n "$GRUB_POLICY" ]] || { usage >&2; exit 2; }
+if ((HOST_UPGRADE_INNER == 0)); then
+  [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]] || { echo "Initial topology token is required for a fresh Gateway installation" >&2; exit 2; }
+fi
 ((DEPENDENCY_PREFLIGHT_ONLY == 0 || (INSTALL_DEPENDENCIES == 1 && APPLY == 0))) || { echo "--dependency-preflight-only is reserved for the non-mutating bootstrap phase" >&2; exit 2; }
 ((HOST_UPGRADE_INNER == 0)) || [[ ${GATEWAY_VPN_HOST_UPGRADE_INNER:-} == 1 ]] || { echo "--host-upgrade-inner is reserved for the signed host-upgrade transaction" >&2; exit 2; }
 ((APPLY == 0)) || [[ $EUID -eq 0 ]] || { echo "--apply requires root" >&2; exit 1; }
@@ -513,6 +518,14 @@ if ip -4 route show default dev "$LAN_INTERFACE" | grep -q .; then
   exit 1
 fi
 "$RELEASE_DIR/bin/gateway-vpnctl" gateway-install-preflight --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS"
+if [[ -n "$INITIAL_TOPOLOGY_TOKEN" ]]; then
+  TOPOLOGY_CHECK_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --lan-interface "$LAN_INTERFACE")
+  [[ -z "$LAN_MEMBERS" ]] || TOPOLOGY_CHECK_ARGS+=(--lan-members "$LAN_MEMBERS")
+  "$RELEASE_DIR/bin/gateway-vpn" "${TOPOLOGY_CHECK_ARGS[@]}"
+elif ((HOST_UPGRADE_INNER == 0)); then
+  echo "Initial topology token is missing" >&2
+  exit 2
+fi
 if systemctl is-active --quiet ufw.service || systemctl is-active --quiet firewalld.service; then
   echo "Active UFW/firewalld conflicts with the owned Gateway VPN ruleset" >&2
   exit 1
@@ -524,6 +537,7 @@ if ((HOST_UPGRADE_REQUIRED)); then
     --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
     --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY"
   )
+  [[ -z "$INITIAL_TOPOLOGY_TOKEN" ]] || HOST_UPGRADE_ARGS+=(--initial-topology-token "$INITIAL_TOPOLOGY_TOKEN")
   [[ -z $LAN_MEMBERS ]] || HOST_UPGRADE_ARGS+=(--lan-members "$LAN_MEMBERS")
   ((INSTALL_DEPENDENCIES == 0)) || HOST_UPGRADE_ARGS+=(--install-dependencies)
   ((ENABLE_DHCP == 0)) || HOST_UPGRADE_ARGS+=(--enable-dhcp)
