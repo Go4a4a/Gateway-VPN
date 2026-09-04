@@ -180,12 +180,22 @@ func TestOrchestratorReportsInstalledNotReadyWithoutFalseSuccess(t *testing.T) {
 	}
 }
 
-func TestOrchestratorRejectsDifferentUsersOnTheSameSSHHost(t *testing.T) {
+func TestOrchestratorRejectsTheSameSSHEndpoint(t *testing.T) {
 	request := validDeployRequest(t)
 	request.VPS.Destination = "root@gateway.example"
 	report, err := (Orchestrator{Executor: &fakeRemoteExecutor{}}).Run(context.Background(), request)
 	if err == nil || report.FailurePhase != "LOCAL_VALIDATION" {
-		t.Fatalf("same physical SSH host accepted: report=%+v err=%v", report, err)
+		t.Fatalf("same SSH endpoint accepted: report=%+v err=%v", report, err)
+	}
+}
+
+func TestOrchestratorAllowsSameSSHHostOnDistinctPortsForIsolatedTargets(t *testing.T) {
+	request := validDeployRequest(t)
+	request.VPS.Destination = "root@gateway.example"
+	request.VPS.Port = 2222
+	report, err := (Orchestrator{Executor: &fakeRemoteExecutor{}, Sleep: func(context.Context, time.Duration) error { return nil }}).Run(context.Background(), request)
+	if err != nil || report.FailurePhase == "LOCAL_VALIDATION" {
+		t.Fatalf("distinct SSH ports were rejected: report=%+v err=%v", report, err)
 	}
 }
 

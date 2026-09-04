@@ -246,7 +246,7 @@ func validateRequest(request Request) error {
 	if _, err := distribution.SelectArtifact(request.Manifest, distribution.RoleDeploy, "linux", "amd64"); err != nil {
 		return err
 	}
-	if request.ManifestSHA256 == "" || request.SignerKeySHA256 != request.Manifest.SignerKeySHA256 || sameSSHHost(request.Gateway.Destination, request.VPS.Destination) {
+	if request.ManifestSHA256 == "" || request.SignerKeySHA256 != request.Manifest.SignerKeySHA256 || sameSSHEndpoint(request.Gateway, request.VPS) {
 		return errors.New("exact signed deploy identity and distinct SSH destinations are required")
 	}
 	if err := ValidateHost(request.Gateway); err != nil {
@@ -271,16 +271,18 @@ func validateRequest(request Request) error {
 	return nil
 }
 
-func sameSSHHost(left, right string) bool {
-	leftHost := left
-	if _, host, found := strings.Cut(left, "@"); found {
-		leftHost = host
+func sameSSHEndpoint(left, right Host) bool {
+	if left.Port != right.Port {
+		return false
 	}
-	rightHost := right
-	if _, host, found := strings.Cut(right, "@"); found {
-		rightHost = host
+	return strings.EqualFold(sshDestinationHost(left.Destination), sshDestinationHost(right.Destination))
+}
+
+func sshDestinationHost(value string) string {
+	if _, host, found := strings.Cut(value, "@"); found {
+		return strings.TrimSuffix(host, ".")
 	}
-	return strings.EqualFold(strings.TrimSuffix(leftHost, "."), strings.TrimSuffix(rightHost, "."))
+	return strings.TrimSuffix(value, ".")
 }
 
 func gatewayCommand(request Request, apply bool) (string, error) {

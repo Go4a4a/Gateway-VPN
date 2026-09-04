@@ -35,42 +35,55 @@ func runInteractiveDeployWizard(input io.Reader, output io.Writer, options inter
 	reader.Buffer(make([]byte, 1024), 4096)
 	fmt.Fprintln(output, "Gateway VPN — безопасная установка Gateway и VPS")
 	fmt.Fprintln(output, "Мастер использует pinned host keys и выбранные SSH key files. Пароли и содержимое private keys не сохраняются.")
+	fmt.Fprintln(output, "Ниже мастер объясняет каждое поле. При первом запуске указываются две Linux-машины: Gateway и VPS; после установки эти значения повторно вводить не нужно.")
 
 	var err error
-	if *options.GatewaySSH, err = promptRequired(reader, output, "Gateway SSH (USER@HOST)", *options.GatewaySSH); err != nil {
+	writeHint(output, "Gateway SSH", "Это адрес Linux-компьютера, который станет Gateway VPN.", "Введите имя пользователя и адрес через @: USER@HOST. Обычно это root@IP или ваш администраторский пользователь.", "Адрес и имя пользователя берутся из данных вашей Ubuntu-машины; пример: root@192.0.2.10.")
+	if *options.GatewaySSH, err = promptSSHDestination(reader, output, "Gateway SSH (USER@HOST)", *options.GatewaySSH); err != nil {
 		return err
 	}
+	writeHint(output, "Порт SSH Gateway", "Это TCP-порт, через который на Gateway работает SSH.", "Обычно используется 22; если провайдер или ваш администратор назначил другой порт, введите его.", "В тестовом стенде порт указан в файле SANDBOX-STEPS.txt.")
 	if *options.GatewayPort, err = promptPort(reader, output, "Gateway SSH port", *options.GatewayPort); err != nil {
 		return err
 	}
-	if *options.VPSSSH, err = promptRequired(reader, output, "VPS SSH (USER@HOST)", *options.VPSSSH); err != nil {
+	writeHint(output, "VPS SSH", "Это адрес отдельного VPS, который будет использоваться для управления и резервного канала.", "Формат такой же: USER@HOST. Не вводите только IP-адрес — укажите имя пользователя перед @.", "Публичный адрес VPS и имя пользователя берутся у VPS-провайдера; пример: root@203.0.113.20.")
+	if *options.VPSSSH, err = promptSSHDestination(reader, output, "VPS SSH (USER@HOST)", *options.VPSSSH); err != nil {
 		return err
 	}
+	writeHint(output, "Порт SSH VPS", "Это TCP-порт SSH на VPS.", "Обычно 22. В тестовом стенде Gateway и VPS могут иметь один IP, но разные порты — это нормально.", "Порт берётся из настроек VPS или из подготовленной инструкции тестового стенда.")
 	if *options.VPSPort, err = promptPort(reader, output, "VPS SSH port", *options.VPSPort); err != nil {
 		return err
 	}
+	writeHint(output, "Pinned known_hosts", "Это файл с заранее проверенными отпечатками SSH-серверов Gateway и VPS.", "Введите полный путь к существующему файлу, а не его содержимое.", "Файл выдаёт администратор или его создаёт подготовительный мастер после проверки отпечатков; пример: C:\\GatewayVPNGate\\targets-evidence\\known_hosts.")
 	if *options.KnownHosts, err = promptRequired(reader, output, "Absolute pinned known_hosts file", *options.KnownHosts); err != nil {
 		return err
 	}
+	writeHint(output, "SSH-ключ Gateway", "Это выбранный private key-файл для входа на Gateway без пароля.", "Укажите полный путь к файлу ключа; не вставляйте сам ключ в окно мастера.", "Выберите тот же ключ, которым вы обычно подключаетесь к Gateway через OpenSSH.")
 	if *options.GatewayIdentity, err = promptRequired(reader, output, "Gateway SSH private-key file", *options.GatewayIdentity); err != nil {
 		return err
 	}
+	writeHint(output, "SSH-ключ VPS", "Это private key-файл для входа на VPS.", "Можно выбрать тот же административный ключ, если он разрешён на обеих машинах, либо отдельный ключ VPS.", "Введите полный путь к файлу; содержимое ключа не сохраняется и не передаётся в отчёт.")
 	if *options.VPSIdentity, err = promptRequired(reader, output, "VPS SSH private-key file", *options.VPSIdentity); err != nil {
 		return err
 	}
+	writeHint(output, "Ethernet Gateway → Keenetic", "Выберите физический Ethernet-интерфейс Gateway, к которому подключён WAN-порт Keenetic.", "Нужно имя интерфейса Linux, например lan0 или enp2s0, а не название сетевой карты в Windows.", "На самом Gateway список можно посмотреть командой `ip -br link`; не выбирайте интерфейс текущей SSH-сессии или модем Huawei.")
 	if *options.LANInterface, err = promptRequired(reader, output, "Gateway Ethernet interface connected to Keenetic WAN", *options.LANInterface); err != nil {
 		return err
 	}
+	writeHint(output, "Transit LAN CIDR", "Это отдельная локальная подсеть между Gateway и WAN-портом Keenetic.", "Введите адрес Gateway с маской, например 192.168.200.1/24; эта сеть не должна совпадать с домашней LAN, VPN или подсетью модема.", "Если не знаете подходящую сеть, оставьте предложенное значение и проверьте, что оно не используется в вашей сети.")
 	if *options.LANAddress, err = promptRequired(reader, output, "Gateway transit LAN CIDR", defaultString(*options.LANAddress, "192.168.200.1/24")); err != nil {
 		return err
 	}
+	writeHint(output, "DHCP на transit LAN", "При включении Gateway будет автоматически выдавать адреса устройствам за Keenetic.", "Выберите yes только если DHCP на этом сегменте должен работать на Gateway; при DHCP Keenetic оставьте no.", "В тестовом стенде обычно выбирается no, чтобы не вмешиваться в чужой DHCP.")
 	if *options.EnableDHCP, err = promptYesNo(reader, output, "Enable validated DHCP on the transit LAN", *options.EnableDHCP); err != nil {
 		return err
 	}
+	writeHint(output, "Публичный адрес VPS", "Это внешний адрес и UDP-порт VPS, куда Gateway установит WireGuard-соединение.", "Введите HOST:PORT, например 203.0.113.20:51821. Не используйте внутренний Docker/домашний адрес и не добавляйте http://.", "Адрес берётся из панели VPS и его firewall; UDP-порт должен быть разрешён у провайдера.")
 	if *options.PublicEndpoint, err = promptRequired(reader, output, "Public VPS endpoint (HOST:51821)", *options.PublicEndpoint); err != nil {
 		return err
 	}
 	if *options.AdminPublicKey == "" && *options.AdminConfig == "" {
+		writeHint(output, "Локальный WireGuard-конфиг администратора", "Мастер создаст здесь конфигурацию для подключения администратора к Gateway через VPS.", "Введите полный путь к новому файлу либо нажмите Enter для предложенного пути.", "Это путь на компьютере, где запущен мастер; сам private key будет создан локально и не попадёт на VPS.")
 		if *options.AdminConfig, err = promptRequired(reader, output, "Local administrator WireGuard config to create", defaultAdminConfigPath()); err != nil {
 			return err
 		}
@@ -78,9 +91,11 @@ func runInteractiveDeployWizard(input io.Reader, output io.Writer, options inter
 	if (*options.AdminPublicKey == "") == (*options.AdminConfig == "") {
 		return errors.New("choose exactly one administrator config or public key")
 	}
+	writeHint(output, "Установка недостающих зависимостей", "Мастер проверит пакеты, которые нужны Gateway и VPS, и установит только разрешённые отсутствующие зависимости.", "Рекомендуется yes. Уже установленные пакеты не удаляются и не обновляются без необходимости.", "Выберите no только если вы заранее установили зависимости вручную.")
 	if *options.InstallDependencies, err = promptYesNoDefault(reader, output, "Install validated missing dependencies", *options.InstallDependencies, true); err != nil {
 		return err
 	}
+	writeHint(output, "SSH-доступ администратора через VPS", "При yes мастер разрешит администраторский SSH-доступ к Gateway через защищённый канал VPS.", "Это удобно, когда Gateway не имеет внешнего IP; при no такой forwarding не включается.", "Выбирайте yes только если хотите управлять Gateway через VPS.")
 	if *options.AllowGatewaySSH, err = promptYesNo(reader, output, "Allow administrator SSH forwarding to Gateway through VPS", *options.AllowGatewaySSH); err != nil {
 		return err
 	}
@@ -96,6 +111,7 @@ func runInteractiveDeployWizard(input io.Reader, output io.Writer, options inter
 	}
 	fmt.Fprintf(output, "  install dependencies=%t; Gateway SSH via VPS=%t\n", *options.InstallDependencies, *options.AllowGatewaySSH)
 	fmt.Fprintln(output, "Сначала обе машины пройдут read-only preflight. Изменения начнутся только после успешных проверок.")
+	writeHint(output, "Финальная проверка", "До этого момента выполняются только read-only проверки. Изменения начнутся только после точного подтверждения.", "Проверьте сводку выше: адреса, порты, интерфейс, подсеть и решения yes/no.", "Если всё верно, введите INSTALL большими латинскими буквами; любое другое слово отменяет запуск.")
 	fmt.Fprint(output, "Для продолжения введите INSTALL: ")
 	if !reader.Scan() {
 		return inputError(reader)
@@ -104,6 +120,13 @@ func runInteractiveDeployWizard(input io.Reader, output io.Writer, options inter
 		return errors.New("exact INSTALL confirmation was not entered")
 	}
 	return nil
+}
+
+func writeHint(output io.Writer, title string, lines ...string) {
+	fmt.Fprintf(output, "\n[%s]\n", title)
+	for _, line := range lines {
+		fmt.Fprintf(output, "  %s\n", line)
+	}
 }
 
 func promptRequired(reader *bufio.Scanner, output io.Writer, label, current string) (string, error) {
@@ -126,6 +149,22 @@ func promptRequired(reader *bufio.Scanner, output io.Writer, label, current stri
 		fmt.Fprintln(output, "Значение обязательно и должно быть одной строкой.")
 	}
 	return "", errors.New("too many invalid answers")
+}
+
+func promptSSHDestination(reader *bufio.Scanner, output io.Writer, label, current string) (string, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		value, err := promptRequired(reader, output, label, current)
+		if err != nil {
+			return "", err
+		}
+		user, host, found := strings.Cut(value, "@")
+		if found && user != "" && host != "" && !strings.Contains(host, "@") {
+			return value, nil
+		}
+		fmt.Fprintln(output, "Введите SSH-адрес в формате USER@HOST, например root@192.0.2.10.")
+		current = ""
+	}
+	return "", errors.New("too many invalid SSH destinations")
 }
 
 func promptPort(reader *bufio.Scanner, output io.Writer, label string, current int) (int, error) {

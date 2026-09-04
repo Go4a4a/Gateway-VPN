@@ -199,6 +199,7 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 		"$global:LASTEXITCODE=$code", "This PowerShell window remains open for diagnostics",
 		"[Net.ServicePointManager]::SecurityProtocol=$previousSecurityProtocol",
 		"Test-Path -LiteralPath $ssh", "Get-WindowsCapability", "Add-WindowsCapability",
+		"$workRoot=(Get-Location).Path", "project-local work directory",
 	} {
 		if !strings.Contains(windowsCommand, required) {
 			t.Errorf("Windows deploy command missing %q", required)
@@ -206,6 +207,9 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 	}
 	if strings.Contains(strings.ToLower(windowsCommand), "password") || strings.Contains(strings.ToLower(windowsCommand), "private-key") || strings.Index(windowsCommand, "Get-FileHash -LiteralPath $launcher") > strings.Index(windowsCommand, "& $launcher") {
 		t.Fatal("Windows deploy command leaks credentials or executes before exact SHA-256 verification")
+	}
+	if strings.Contains(windowsCommand, "GetTempPath") || strings.Contains(windowsCommand, "$env:TEMP") || strings.Contains(windowsCommand, "%TEMP%") {
+		t.Fatal("Windows deploy command uses a system TEMP directory instead of the project-local work directory")
 	}
 	if strings.Contains(windowsCommand, "exit $code") || !strings.HasPrefix(windowsCommand, "& { ") {
 		t.Fatal("Windows deploy command can close or pollute the administrator PowerShell session")
