@@ -530,6 +530,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 	publisher := read(t, filepath.Join(root, "scripts", "create-github-release-draft.sh"))
 	for _, required := range []string{
 		"GH_TOKEN", "REMOTE_COMMIT", "--verify-tag --draft", "go run ./cmd/gateway-vpnctl", "--artifact \"bootstrap=",
+		"RELEASE_CLASS_ARGS", `if [[ "$CHANNEL" != stable ]]`, "--prerelease",
 		"mihomo-channel-$mihomo_channel.json", "mihomo-channel-$mihomo_channel.sig", "mihomo-channel-verify", "one safe manifest/signature pair", "MIHOMO_CHANNELS",
 		"gateway-vpn-gateway-$VERSION-linux-amd64.tar.gz",
 		"gateway-vpn-vps-$VERSION-linux-amd64.tar.gz", "gateway-vpn-bootstrap-$VERSION-linux-amd64",

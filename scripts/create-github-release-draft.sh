@@ -104,8 +104,16 @@ if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; t
   exit 1
 fi
 
+RELEASE_CLASS_ARGS=()
+if [[ "$CHANNEL" != stable ]]; then
+  # A testing/candidate draft must already be classified as a prerelease.
+  # Otherwise a later manual publication could accidentally replace GitHub's
+  # stable/latest release even though the signed channel itself is non-stable.
+  RELEASE_CLASS_ARGS+=(--prerelease)
+fi
+
 gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
-  --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+  --repo "$GITHUB_REPOSITORY" --verify-tag --draft "${RELEASE_CLASS_ARGS[@]}" \
   --title "Gateway VPN $VERSION" \
   --notes "Signed Gateway/VPS/bootstrap/deploy test candidate from exact commit $COMMIT. Review all assets and enable GitHub release immutability before publishing this draft."
 
