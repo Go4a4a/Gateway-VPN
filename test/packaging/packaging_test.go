@@ -170,10 +170,13 @@ func TestWatchdogUsesFixedBoundedRootSurfaceAndControlHangDetection(t *testing.T
 func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
-	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "openssh-server", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "old_ipv4_src_valid_mark=%s", "preserve_state_root=%s", "lan_members=%s", "ssh_was_enabled=%s", "ssh_was_active=%s", "90-gateway-vpn-ipv4-forwarding.conf", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "gateway-install-preflight", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
+	for _, required := range []string{"VERSION_ID:-} == 24.04", "manifest.sha256", "manifest.json", "release.sig", "--trusted-update-key", "release-verify", "release.json", "mihomo-api-secret", "--install-dependencies", "--dependency-preflight-only", "iproute2", "nftables", "wireguard-tools", "kmod", "procps", "dnsmasq-base", "openssh-server", "apt-get -s install --no-install-recommends --no-remove --no-upgrade", "APT Gateway dependency plan attempts to remove packages", "APT Gateway dependency plan attempts to upgrade installed packages", "full host preflight NOT_RUN", "ss -H -ltn \"sport = :53\"", "ss -H -lun \"sport = :53\"", "DHCP/DNS enable conflicts with an existing wildcard or Gateway LAN port 53 listener", "/run/lock/gateway-vpn-install.lock", "recover-gateway-install.sh", "gateway-vpn-install-recovery.service", "old_ipv4_forward=%s", "old_ipv4_src_valid_mark=%s", "preserve_state_root=%s", "lan_members=%s", "ssh_was_enabled=%s", "ssh_was_active=%s", "90-gateway-vpn-ipv4-forwarding.conf", "05-gateway-vpn-lan.network", "05-gateway-vpn-lan.netdev", "gateway-install-preflight", "initial-topology-check --token", "Initial topology token is required for a fresh Gateway installation", "INSTALLED_NOT_READY", "--apply", "nft --check", "nft --file /etc/gateway-vpn/nftables/boot.nft", "Gateway VPN requires Ubuntu 24.04"} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("installer missing %q", required)
 		}
+	}
+	if strings.Index(installer, "initial-topology-check --token") > strings.Index(installer, "if ((HOST_UPGRADE_REQUIRED))") {
+		t.Fatal("initial topology verification occurs after host-upgrade dispatch")
 	}
 	for _, required := range []string{
 		"APPLY == 0 || SIMULATION_RESULT != 10",
@@ -236,6 +239,9 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"Host upgrade cannot change SSH/SFTP policy",
 		"Host upgrade cannot change WireGuard ingress policy",
 		"Host upgrade cannot change boot or GRUB policy",
+		"--initial-topology-token TOKEN",
+		"REPORT_TOPOLOGY_TOKEN=$(report_string initial_topology_token)",
+		"topology token differs from the installed topology",
 		`database-verify --database "$ROOTFS/var/lib/gateway-vpn/state.db"`,
 		`/etc/systemd/system/multi-user.target.wants/gateway-vpn-host-upgrade-recovery.service`,
 		`install -m 0700 "$OLD_RELEASE/bin/gateway-vpnctl" "$TOOLING/old-gateway-vpnctl"`,

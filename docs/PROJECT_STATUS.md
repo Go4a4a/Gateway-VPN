@@ -23,7 +23,7 @@
 
 **Ограничение:** safe-apply backend для `ETHERNET_ETHERNET`, `ONE_ARM_WIREGUARD` и `MIXED` ещё не подключён, поэтому эти профили не предлагаются первой установкой и fail-closed отклоняются от текущего installer action. Token передаётся в текущую install/upgrade transaction, но пока не добавляется в публичный install report, чтобы не менять его schema без отдельной миграции; legacy upgrade без token остаётся совместимым только с сохранением прежней LAN-схемы.
 
-**Следующий шаг:** провести token через оставшиеся generated/upgrade command paths и добавить Linux-side integration fixture, затем выполнить полный local suite/vet перед новым immutable testing candidate. Stable channel и production key не затрагивались.
+**Следующий шаг:** добавить Linux-side integration fixture для shell preflight/apply ordering и затем выполнить release-level validation перед новым immutable testing candidate. Stable channel и production key не затрагивались.
 
 ## Правила ведения
 
