@@ -406,6 +406,21 @@
 
 ## Журнал разработки
 
+### Сессия 173 — фиксация Windows portability и контроль CI — 2026-09-04
+
+**Сделано:**
+
+- подтверждено, что изменения Windows portability из сессии 172 зафиксированы коммитом `f508ec9` и отправлены в `origin/main`;
+- исправлена устаревшая запись о том, что CI #82 ещё выполняется и код не отправлен: CI #82 (`33859374962`) завершился успешно, а новый код уже находится в remote;
+- новый CI #83 (`33861843233`, commit `f508ec9`) запущен GitHub Actions; до его завершения release/tag и новые privileged-действия не выполняются.
+
+**Граница:**
+
+- локальная Windows-среда и CI не заменяют clean Windows guest, физический Ubuntu Gateway/VPS, HiLink/Keenetic, реальные Ethernet/TUN/WireGuard/provider packet captures, USB/power/RTC recovery и 24/72-часовые endurance;
+- production key, testing/stable tag и GitHub Release не открывались и не изменялись.
+
+**Следующий шаг:** после завершения CI #83 зафиксировать его итог в журнале и перейти к clean Windows two-target deploy либо к подготовке hardware handoff; для нового подписанного candidate/release потребуется отдельное разрешение пользователя.
+
 ### Сессия 172 — Windows portability и project-local test temp — 2026-09-04
 
 **Сделано:**
@@ -420,7 +435,7 @@
 - `go test -count=1 ./internal/update` — PASS с внешним системным temp только для security-тестов, которые намеренно требуют отказа при размещении signing key внутри Git worktree; ключи не сохраняются, `t.TempDir` удаляется после тестов.
 - Все остальные пакеты `go test -count=1` с project-local `TEMP/TMP/TMPDIR`, а также `go vet ./...` и `git diff --check` — PASS. Никакие Docker-ресурсы, project cache, теги или релизы не удалялись/не создавались.
 
-**Граница:** локальная Windows-среда не заменяет clean Windows guest, Linux/VPS/hardware и 24/72-часовые gates. CI #82 для предыдущего документационного коммита на момент записи ещё выполняется; новый код пока не отправлен в remote.
+**Граница:** локальная Windows-среда не заменяет clean Windows guest, Linux/VPS/hardware и 24/72-часовые gates. На момент этой сессии CI #82 и отправка нового коммита ещё не были завершены; итог зафиксирован в сессии 173.
 
 **Следующий шаг:** зафиксировать эти изменения отдельным обычным коммитом, отправить его в `origin/main` и проверить новый CI; затем вернуться к clean Windows two-target deploy/hardware handoff. Production key, tag и Release не открывать/не менять без отдельного разрешения.
 
