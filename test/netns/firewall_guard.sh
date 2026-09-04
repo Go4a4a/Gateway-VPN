@@ -130,8 +130,13 @@ for _ in $(seq 1 50); do
   sleep 0.02
 done
 ip netns exec "$MODEM" ss -H -ltn 'sport = :18080' | grep -F . >/dev/null || { echo "MSS test server did not start" >&2; exit 1; }
-ip netns exec "$MODEM" timeout 5 tcpdump -i modem0 -nn -s 128 -c 1 'tcp[tcpflags] & tcp-syn != 0 and dst port 18080' -w "$WORK/mss.pcap" >"$WORK/mss-tcpdump.log" 2>&1 &
+ip netns exec "$MODEM" timeout 10 tcpdump -i modem0 -nn -s 128 -c 1 'tcp[tcpflags] & tcp-syn != 0 and dst port 18080' -w "$WORK/mss.pcap" >"$WORK/mss-tcpdump.log" 2>&1 &
 MSS_CAPTURE_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$WORK/mss.pcap" ]] && break
+  sleep 0.02
+done
+[[ -f "$WORK/mss.pcap" ]] || { echo "MSS tcpdump did not become ready" >&2; cat "$WORK/mss-tcpdump.log" >&2 || true; exit 1; }
 sleep 0.1
 ip netns exec "$CLIENT" python3 -c 'import socket; s=socket.create_connection(("192.168.8.1",18080),2); s.close()'
 wait "$MSS_SERVER_PID"
@@ -158,8 +163,13 @@ for _ in $(seq 1 50); do
   sleep 0.02
 done
 ip netns exec "$MODEM" ss -H -ltn 'sport = :18081' | grep -F . >/dev/null || { echo "MSS TUN test server did not start" >&2; exit 1; }
-ip netns exec "$MODEM" timeout 5 tcpdump -i tunpeer0 -nn -s 128 -c 1 'tcp[tcpflags] & tcp-syn != 0 and dst port 18081' -w "$WORK/mss-tun.pcap" >"$WORK/mss-tun-tcpdump.log" 2>&1 &
+ip netns exec "$MODEM" timeout 10 tcpdump -i tunpeer0 -nn -s 128 -c 1 'tcp[tcpflags] & tcp-syn != 0 and dst port 18081' -w "$WORK/mss-tun.pcap" >"$WORK/mss-tun-tcpdump.log" 2>&1 &
 MSS_TUN_CAPTURE_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$WORK/mss-tun.pcap" ]] && break
+  sleep 0.02
+done
+[[ -f "$WORK/mss-tun.pcap" ]] || { echo "MSS TUN tcpdump did not become ready" >&2; cat "$WORK/mss-tun-tcpdump.log" >&2 || true; exit 1; }
 sleep 0.1
 ip netns exec "$CLIENT" python3 -c 'import socket; s=socket.create_connection(("10.250.0.2",18081),2); s.close()'
 wait "$MSS_TUN_SERVER_PID"
