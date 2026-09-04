@@ -339,6 +339,14 @@ type engineFixture struct {
 
 func newEngineFixture(t *testing.T) *engineFixture {
 	t.Helper()
+	// VPS update lifecycle is a Linux release contract and relies on atomic
+	// relative symlinks for current/recovery pointers. Windows can run the
+	// portable parts of this package, but an ordinary user process may not be
+	// allowed to create symlinks (Developer Mode or SeCreateSymbolicLinkPrivilege
+	// is required). Skip only these symlink-dependent fixtures on that host so
+	// the Windows suite remains useful instead of reporting an environment
+	// privilege failure as a product regression; Linux CI executes them fully.
+	requireFixtureSymlinks(t)
 	root := t.TempDir()
 	stateDirectory := filepath.Join(root, "gateway-vpn-vps", "agent")
 	if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
@@ -355,12 +363,8 @@ func newEngineFixture(t *testing.T) *engineFixture {
 	if err := os.MkdirAll(releaseRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "current")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "recovery")); err != nil {
-		t.Fatal(err)
-	}
+	createFixtureSymlink(t, filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "current"))
+	createFixtureSymlink(t, filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "recovery"))
 	candidateRoot := writeSignedRelease(t, filepath.Join(root, "candidate"), "1.2.0", 4, privateKey, "new-binary")
 	clock := time.Date(2026, 8, 31, 10, 0, 0, 0, time.UTC)
 	stager := &Stager{StateDirectory: stateDirectory, ReleaseRoot: releaseRoot, TrustedKeyPath: keyPath, CurrentVersion: "1.1.0", CurrentSchema: 4, Profile: "ubuntu-24.04", Now: func() time.Time { return clock }}
@@ -400,6 +404,7 @@ type stagerFixture struct {
 
 func newStagerFixture(t *testing.T, candidateVersion string, mutate func(string)) stagerFixture {
 	t.Helper()
+	requireFixtureSymlinks(t)
 	root := t.TempDir()
 	stateDirectory := filepath.Join(root, "gateway-vpn-vps", "agent")
 	if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
@@ -412,9 +417,7 @@ func newStagerFixture(t *testing.T, candidateVersion string, mutate func(string)
 	keyPath := writePublicKey(t, stateDirectory, publicKey)
 	releaseRoot := filepath.Join(root, "opt", "gateway-vpn-vps")
 	writeSignedRelease(t, filepath.Join(releaseRoot, "releases", "v1.1.0"), "1.1.0", 4, privateKey, "old-binary")
-	if err := os.Symlink(filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "current")); err != nil {
-		t.Fatal(err)
-	}
+	createFixtureSymlink(t, filepath.FromSlash("releases/v1.1.0"), filepath.Join(releaseRoot, "current"))
 	candidateRoot := filepath.Join(root, "candidate")
 	writeUnsignedRelease(t, candidateRoot, candidateVersion, 4, "candidate-binary")
 	if mutate != nil {
@@ -424,6 +427,29 @@ func newStagerFixture(t *testing.T, candidateVersion string, mutate func(string)
 		t.Fatal(err)
 	}
 	return stagerFixture{stager: &Stager{StateDirectory: stateDirectory, ReleaseRoot: releaseRoot, TrustedKeyPath: keyPath, CurrentVersion: "1.1.0", CurrentSchema: 4, Profile: "ubuntu-24.04"}, candidateRoot: candidateRoot}
+}
+
+func requireFixtureSymlinks(t *testing.T) {
+	t.Helper()
+	probe := t.TempDir()
+	target := filepath.Join(probe, "target")
+	link := filepath.Join(probe, "link")
+	if err := os.WriteFile(target, []byte("probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink-dependent VPS lifecycle fixture requires Windows Developer Mode or SeCreateSymbolicLinkPrivilege: %v", err)
+		}
+		t.Fatalf("symlink capability probe failed: %v", err)
+	}
+}
+
+func createFixtureSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create fixture symlink: %v", err)
+	}
 }
 
 type fakeRuntime struct {

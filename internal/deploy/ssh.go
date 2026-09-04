@@ -281,7 +281,19 @@ func validateSSHRuntime(executable, controlPath string) error {
 
 func validateControlDirectory(directory string) error {
 	expandedPath := filepath.Join(directory, strings.Repeat("0", 40))
-	if !filepath.IsAbs(directory) || strings.ContainsRune(directory, '\x00') || len(expandedPath) > 100 {
+	// Linux OpenSSH expands ControlPath into a Unix socket and therefore keeps
+	// the full path below the conservative 100-byte limit. Windows uses the
+	// long-lived framed ssh.exe backend and never passes ControlPath to
+	// OpenSSH; retaining the same limit there would reject normal project-local
+	// temporary roots (whose absolute path is often longer than a user TEMP
+	// directory). Keep a bounded Windows path as well, but use the platform's
+	// safe MAX_PATH-compatible envelope instead of imposing the Unix socket
+	// limit on a path that is not used for a socket.
+	maximumPath := 100
+	if runtime.GOOS == "windows" {
+		maximumPath = 240
+	}
+	if !filepath.IsAbs(directory) || strings.ContainsRune(directory, '\x00') || len(expandedPath) > maximumPath {
 		return errors.New("private bounded SSH control directory is required")
 	}
 	info, err := os.Lstat(directory)

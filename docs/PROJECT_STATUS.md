@@ -406,6 +406,24 @@
 
 ## Журнал разработки
 
+### Сессия 172 — Windows portability и project-local test temp — 2026-09-04
+
+**Сделано:**
+
+- Windows `internal/vpsupdate` lifecycle fixtures теперь сначала проверяют наличие права на создание symlink. При обычном Windows-процессе без Developer Mode/`SeCreateSymbolicLinkPrivilege` пропускаются только symlink-зависимые VPS lifecycle-тесты с явным объяснением; Linux CI по-прежнему выполняет их полностью.
+- `internal/deploy` получил платформенный предел каталога persistent SSH: Linux сохраняет строгий 100-байтный предел для Unix `ControlPath`, Windows framed `ssh.exe` backend допускает bounded 240-байтный абсолютный путь. Это позволяет безопасно использовать project-local `.cache/tmp`, не включая Unix socket limit для пути, который Windows backend не передаёт OpenSSH.
+
+**Проверено:**
+
+- `go test -count=1 -v ./internal/vpsupdate` с `TEMP/TMP` внутри `.cache/tmp` — PASS; symlink-only tests корректно `SKIP`, остальные journal/status/runtime tests PASS.
+- `go test -count=1 -v ./internal/deploy` с project-local temp — PASS, включая Windows system OpenSSH readiness, persistent one-TCP session, cancellation и framing.
+- `go test -count=1 ./internal/update` — PASS с внешним системным temp только для security-тестов, которые намеренно требуют отказа при размещении signing key внутри Git worktree; ключи не сохраняются, `t.TempDir` удаляется после тестов.
+- Все остальные пакеты `go test -count=1` с project-local `TEMP/TMP/TMPDIR`, а также `go vet ./...` и `git diff --check` — PASS. Никакие Docker-ресурсы, project cache, теги или релизы не удалялись/не создавались.
+
+**Граница:** локальная Windows-среда не заменяет clean Windows guest, Linux/VPS/hardware и 24/72-часовые gates. CI #82 для предыдущего документационного коммита на момент записи ещё выполняется; новый код пока не отправлен в remote.
+
+**Следующий шаг:** зафиксировать эти изменения отдельным обычным коммитом, отправить его в `origin/main` и проверить новый CI; затем вернуться к clean Windows two-target deploy/hardware handoff. Production key, tag и Release не открывать/не менять без отдельного разрешения.
+
 ### Сессия 171 — полный CI gate после MSS/security инкремента — 2026-09-04
 
 **Внешний результат:** GitHub Actions run `33857428928` (`#81`) для `74573d804436a694ab50409b9b70562ad642b79c` завершился `Success` за `20m 40s`.
