@@ -86,3 +86,10 @@ nav button,.logout{text-align:left;justify-content:flex-start}
   .topology-role-row{grid-template-columns:minmax(190px,2fr) repeat(4,minmax(74px,.7fr)) minmax(135px,1fr);min-width:720px}
   .topology-profile{padding:14px}
 }
+
+.modem-state-cell{display:grid;gap:8px;min-width:min(360px,70vw);white-space:normal}
+.inline-warning{display:grid;gap:7px;padding:10px 12px;border:1px solid #80662b;border-radius:9px;background:#292313;color:var(--warn);white-space:normal;overflow-wrap:anywhere}
+.inline-warning>*{margin:0}
+.modem-conflict-help{max-width:560px;color:var(--text)}
+.modem-conflict-help strong{color:var(--warn)}
+.modem-conflict-help a{color:var(--blue);overflow-wrap:anywhere}

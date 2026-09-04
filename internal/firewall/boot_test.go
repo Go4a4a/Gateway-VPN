@@ -24,7 +24,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"table inet gateway_vpn",
 		"set firewall_schema_generation",
 		"type mark",
-		"elements = { 7 }",
+		"elements = { 8 }",
 		"set user_ingress_interfaces",
 		"elements = { \"enp2s0\", \"wg-ingress\" }",
 		"set wireguard_ingress_listeners",
@@ -52,6 +52,13 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"iifname @hilink_interfaces ct state { established, related } counter name service_download",
 		"oifname @hilink_interfaces ct state { established, related } counter name service_upload",
 		"hook input priority filter; policy drop",
+		"chain forward_mss",
+		"hook forward priority mangle; policy accept",
+		"tcp flags syn tcp option maxseg size set rt mtu",
+		"clamp LAN TCP MSS to verified TUN route",
+		"clamp allowed WireGuard TCP MSS to verified TUN route",
+		"clamp LAN TCP MSS to verified direct route",
+		"clamp allowed WireGuard TCP MSS to verified direct route",
 		"hook forward priority filter; policy drop",
 		"hook output priority filter; policy drop",
 		"iifname @hilink_interfaces ct state { established, related } meta mark set ct mark",
@@ -68,12 +75,12 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 		"iifname @local_management_interfaces tcp dport 8443 accept",
 		"iifname @local_management_interfaces tcp dport 22 accept",
 		"iifname \"wg-mgmt\" tcp dport 8443 accept",
-		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname @active_tun_interfaces",
+		"meta nfproto ipv4 iifname @user_ingress_interfaces iifname != \"wg-ingress\" oifname @active_tun_interfaces",
 		"meta nfproto ipv4 iifname \"wg-ingress\" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces",
 		"meta nfproto ipv4 iifname @active_tun_interfaces oifname \"enp2s0\"",
 		"meta nfproto ipv4 iifname @active_tun_interfaces oifname \"wg-ingress\" ip daddr @wireguard_ingress_allowed_v4",
 		"meta nfproto ipv4 iifname @user_ingress_interfaces meta mark set iifname map @active_direct_marks",
-		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname . meta mark @active_direct_context",
+		"meta nfproto ipv4 iifname @user_ingress_interfaces iifname != \"wg-ingress\" oifname . meta mark @active_direct_context",
 		"meta nfproto ipv4 iifname \"wg-ingress\" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context",
 		"meta nfproto ipv4 iifname @active_direct_interfaces oifname \"enp2s0\" oifname != \"wg-ingress\" ct state { established, related }",
 		"meta nfproto ipv4 iifname \"enp2s0\" iifname != \"wg-ingress\" oifname . meta mark @active_direct_context masquerade",
@@ -89,7 +96,7 @@ func TestBootRulesetIsFailClosedAndOwned(t *testing.T) {
 			t.Errorf("ruleset missing %q:\n%s", expected, ruleset.Text)
 		}
 	}
-	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "enp2s0\" oifname @hilink_interfaces accept"} {
+	for _, forbidden := range []string{"flush ruleset", "type integer", "enp2s0\" oifname @hilink_interfaces accept"} {
 		if strings.Contains(ruleset.Text, forbidden) {
 			t.Errorf("ruleset contains forbidden %q", forbidden)
 		}

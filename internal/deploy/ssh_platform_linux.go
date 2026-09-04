@@ -11,6 +11,10 @@ import (
 
 func platformSSHExecutable() string { return "/usr/bin/ssh" }
 
+func platformSSHUnavailableError(executable string) error {
+	return fmt.Errorf("fixed system OpenSSH client is missing or unsafe at %s", executable)
+}
+
 func platformNullDevice() string { return "/dev/null" }
 
 func platformControlDirectoryPrefix() string { return "gateway-vpn-ssh-control-" }

@@ -13,6 +13,10 @@ func platformSSHExecutable() string {
 	return `C:\Windows\System32\OpenSSH\ssh.exe`
 }
 
+func platformSSHUnavailableError(executable string) error {
+	return fmt.Errorf("Windows OpenSSH Client is missing or unsafe at %s; open PowerShell as Administrator, check it with Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*', and install it when State is NotPresent with Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0", executable)
+}
+
 func platformNullDevice() string { return "NUL" }
 
 // OpenSSH control paths are length-bounded. A short prefix keeps the hashed

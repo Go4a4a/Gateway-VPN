@@ -404,6 +404,8 @@ func WindowsDeployCommand(manifest Manifest, options WindowsDeployCommandOptions
 	}
 	body := []string{
 		"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+		"$ssh='C:\\Windows\\System32\\OpenSSH\\ssh.exe'",
+		"if (-not (Test-Path -LiteralPath $ssh -PathType Leaf)) { throw \"Windows OpenSSH Client отсутствует. Откройте PowerShell от имени администратора. Проверка: Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'. Установка: Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\" }",
 		"$root=Join-Path ([IO.Path]::GetTempPath()) ('gateway-vpn-deploy-'+[Guid]::NewGuid().ToString('N'))",
 		"[IO.Directory]::CreateDirectory($root) | Out-Null",
 		"$launcher=Join-Path $root " + powershellQuote(launcher.Filename),

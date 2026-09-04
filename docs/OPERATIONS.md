@@ -273,6 +273,20 @@ Windows 10/11 x64 launcher выпускается как один подписа
 
 Signed release дополнительно содержит `install-deploy-windows-<version>.command.txt`. Его содержимое копируется в уже открытый PowerShell — файл `.ps1` запускать и менять ExecutionPolicy не требуется. Команда выполняется в отдельном PowerShell scope, создаёт случайный temporary directory, через HTTPS загружает exact Windows EXE, raw manifest, detached signature и public signing key, сверяет опубликованные SHA-256 EXE и manifest **до запуска**, затем открывает русскоязычный `--interactive` wizard и гарантированно удаляет temporary files. После успеха или ошибки исходное окно не закрывается: команда показывает результат, сохраняет точный launcher code в `$LASTEXITCODE`, восстанавливает изменённую на время загрузки TLS-настройку и возвращает обычный prompt для диагностики. Перед использованием администратор независимо сверяет signer fingerprint и SSH host-key fingerprints с доверенным источником.
 
+До запуска проверьте штатный Windows OpenSSH Client в PowerShell:
+
+```powershell
+Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'
+```
+
+Если состояние `NotPresent`, откройте PowerShell **от имени администратора** и выполните:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+```
+
+Launcher повторно проверяет точный `C:\Windows\System32\OpenSSH\ssh.exe` до скачивания release и при отсутствии компонента останавливается без изменений Gateway/VPS. Он не включает capability автоматически и не просит ослаблять `ExecutionPolicy`.
+
 Мастер запрашивает только:
 
 - `USER@HOST` и SSH port Gateway/VPS;
@@ -995,7 +1009,7 @@ sudo systemctl kill -s SIGKILL gateway-vpn-mihomo.service
 
 После остановки Mihomo новый LAN traffic не должен попасть в HiLink напрямую. `nft flush ruleset`, reboot, unplug/replug обоих модемов и обратный USB-порядок входят в integration/hardware matrix и не заменяются unit-тестами.
 
-`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, текущую schema generation `7`, exact conntrack mark preserve/restore rules, точный набор локальных management-интерфейсов, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
+`gateway-vpn-firewall-guard.service` независимо от control plane слушает `nft monitor ruleset` и каждые две секунды проверяет owned table, три base chain с `policy drop`, отдельную user-only TCP MSS mangle chain, текущую schema generation `8`, exact conntrack mark preserve/restore rules, точный набор локальных management-интерфейсов, четыре named traffic counters, WireGuard-ingress listener set, Management Fabric sets/chains/jumps и критические rules. MSS clamping изменяет только TCP SYN из LAN либо разрешённого `wg-ingress`, уходящий в текущий verified TUN/direct egress, и берёт предел из route MTU; SSH, WebUI, Management Fabric, VPS service traffic, UDP и QUIC эта chain не затрагивает. Boot/recovery ruleset оставляет Management Fabric dynamic chains и generation пустыми, поэтому ни старые ACL, ни старые VPS links после восстановления автоматически не открываются. При исчезновении/повреждении table guard сохраняет root-only marker в `/run/gateway-vpn-firewall-guard/`, переводит transit LAN interface administratively down, атомарно загружает только `table inet gateway_vpn` в `PATH_BLOCKED`, повторно проверяет её и лишь затем возвращает link up. Если восстановление не прошло, marker и quarantine сохраняются через restart guard-процесса.
 
 Диагностика guard:
 

@@ -115,7 +115,7 @@ add element inet gateway_vpn active_direct_marks { "wg-ingress" : 0x00001101 }
 			"counter user_upload", "counter user_download", "counter service_upload", "counter service_download",
 			"wireguard_ingress_allowed_v4", "local_management_interfaces",
 		},
-		Forbidden: []string{"flush ruleset", "policy accept", "LAN to HiLink direct accept"},
+		Forbidden: []string{"flush ruleset", "LAN to HiLink direct accept"},
 	}
 	for name, content := range files {
 		if err := writeFixture(filepath.Join(directory, name), content); err != nil {
@@ -218,7 +218,10 @@ func createSchemaV1(path string, migration []byte) error {
 }
 
 func generateWALFixtures(directory string, clean []byte) error {
-	temporary, err := os.MkdirTemp("", "gateway-vpn-wal-fixture-")
+	// Keep fixture-generation state inside the repository. This is a deliberate
+	// exception to normal test t.TempDir usage: generation may run on a clean
+	// release builder, and no project artefact should spill into the host TEMP.
+	temporary, err := os.MkdirTemp(directory, ".wal-fixture-")
 	if err != nil {
 		return err
 	}

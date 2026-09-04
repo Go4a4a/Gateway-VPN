@@ -100,6 +100,59 @@ func TestAPIRequiresSessionAndCSRFAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestModemSubnetConflictReadModelProvidesStructuredSafeRemediation(t *testing.T) {
+	server, ctx := testServer(t)
+	if _, err := server.dependencies.Modems.Adopt(ctx, modem.AdoptInput{
+		ID: "modem-b", Name: "Backup LTE", IdentityKind: "hilink_serial_hash", IdentityHash: strings.Repeat("b", 64),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"modem-a", "modem-b"} {
+		if _, err := server.dependencies.Modems.ApplyLease(ctx, id, modem.LeaseInput{
+			InterfaceName: "enx" + id[len(id)-1:], ManagementCIDR: "192.168.8.0/24",
+			Gateway: "192.168.8.1", DNS: []string{"192.168.8.1"}, MTU: 1500, State: modem.StateSubnetConflict,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cookie, _ := login(t, server)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/modems", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("modem conflict response = %d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			ID             string `json:"id"`
+			SubnetConflict *struct {
+				ReasonCode             string `json:"reason_code"`
+				ObservedCIDR           string `json:"observed_cidr"`
+				SuggestedManagementURL string `json:"suggested_management_url"`
+				Conflicts              []struct {
+					ModemID        string `json:"modem_id"`
+					ManagementCIDR string `json:"management_cidr"`
+				} `json:"conflicts"`
+			} `json:"subnet_conflict"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("modem conflict item count = %d", len(payload.Items))
+	}
+	for _, item := range payload.Items {
+		if item.SubnetConflict == nil || item.SubnetConflict.ReasonCode != "OVERLAPS_OTHER_MODEM" || item.SubnetConflict.ObservedCIDR != "192.168.8.0/24" || item.SubnetConflict.SuggestedManagementURL != "http://192.168.8.1/" || len(item.SubnetConflict.Conflicts) != 1 || item.SubnetConflict.Conflicts[0].ModemID == item.ID || item.SubnetConflict.Conflicts[0].ManagementCIDR != "192.168.8.0/24" {
+			t.Fatalf("unsafe or incomplete modem conflict projection: %+v", item)
+		}
+	}
+	if strings.Contains(response.Body.String(), strings.Repeat("a", 64)) || strings.Contains(response.Body.String(), strings.Repeat("b", 64)) {
+		t.Fatal("modem conflict remediation exposed an identity hash")
+	}
+}
+
 type fakeManagementFabricAdmin struct {
 	status     networkapply.ManagementFabricStatus
 	syncs      int
@@ -2031,7 +2084,7 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	}
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/styles.css", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), "text-wrap:balance") || !strings.Contains(response.Body.String(), ".mobile-navigation{display:grid}") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") || !strings.Contains(response.Body.String(), ".topology-role-row{") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "[hidden]{display:none!important}") || !strings.Contains(response.Body.String(), "overflow-wrap:anywhere") || !strings.Contains(response.Body.String(), "text-wrap:balance") || !strings.Contains(response.Body.String(), ".mobile-navigation{display:grid}") || !strings.Contains(response.Body.String(), ".actions>.action") || !strings.Contains(response.Body.String(), ".table-wrap .actions{width:max-content") || !strings.Contains(response.Body.String(), "min-width:max-content;max-width:none;white-space:nowrap") || !strings.Contains(response.Body.String(), ".topology-role-row{") || !strings.Contains(response.Body.String(), ".modem-conflict-help{") || !strings.Contains(response.Body.String(), ".modem-state-cell{") {
 		t.Fatalf("static stylesheet does not preserve hidden layout semantics: %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()
@@ -2056,6 +2109,11 @@ func TestSessionRotationMatrixReadModelAndStaticSecurityHeaders(t *testing.T) {
 	for _, required := range []string{"showMandatoryPasswordChange", "/api/v1/auth/password", "/api/v1/auth/users", "/api/v1/auth/sessions", "delete-disabled-user", "Пользователи и активные сессии"} {
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("static auth management UI missing %q: %d", required, response.Code)
+		}
+	}
+	for _, required := range []string{"modemSubnetConflictHelp", "subnet_conflict", "Одинаковая подсеть у нескольких модемов", "измените LAN/DHCP-подсеть", "Открыть предполагаемый WebUI"} {
+		if !strings.Contains(response.Body.String(), required) {
+			t.Fatalf("static modem conflict guidance missing %q", required)
 		}
 	}
 	for _, required := range []string{"formatUTCTime", "timeZone:'UTC'", " UTC`"} {

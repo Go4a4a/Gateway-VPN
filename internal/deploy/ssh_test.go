@@ -24,6 +24,18 @@ func TestWindowsSystemOpenSSHSupportsRequiredClientOptions(t *testing.T) {
 	}
 }
 
+func TestWindowsMissingOpenSSHErrorProvidesReadinessCommands(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows OpenSSH remediation contract")
+	}
+	message := platformSSHUnavailableError(platformSSHExecutable()).Error()
+	for _, required := range []string{"Get-WindowsCapability", "OpenSSH.Client*", "Add-WindowsCapability", "OpenSSH.Client~~~~0.0.1.0"} {
+		if !strings.Contains(message, required) {
+			t.Errorf("missing OpenSSH remediation command %q: %s", required, message)
+		}
+	}
+}
+
 func TestValidateHostRejectsOptionInjectionSymlinkAndInsecureIdentity(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "keys with spaces")
 	if err := os.Mkdir(directory, 0o700); err != nil {

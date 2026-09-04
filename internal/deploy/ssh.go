@@ -260,7 +260,7 @@ func (executor *SSHExecutor) controlPath() string {
 func validateSSHRuntime(executable, controlPath string) error {
 	info, err := os.Lstat(executable)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return errors.New("fixed system OpenSSH client is unavailable or unsafe")
+		return platformSSHUnavailableError(executable)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

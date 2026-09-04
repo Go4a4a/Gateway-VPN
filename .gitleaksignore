@@ -1,0 +1,10 @@
+# Reviewed historical false positives. These exact findings are fixed test-only
+# Mihomo loopback API credentials in an isolated network-namespace harness; no
+# production credential, user value or external endpoint is present. Future
+# lines/commits remain subject to the full default Gitleaks ruleset.
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:174
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:181
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:196
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:217
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:242
+5180374948497b40c8fd4e9d03ded56b583a4cd6:test/netns/mihomo_tun.sh:curl-auth-header:273

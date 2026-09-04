@@ -20,15 +20,18 @@ func TestPackagingKeepsControlPlaneUnprivilegedAndFirewallBlocked(t *testing.T) 
 		}
 	}
 	boot := read(t, filepath.Join(root, "packaging", "nftables", "boot.nft.in"))
-	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 7 }", "user_ingress_interfaces", "local_management_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
+	for _, required := range []string{"table inet gateway_vpn", "firewall_schema_generation", "type mark", "elements = { 8 }", "user_ingress_interfaces", "local_management_interfaces", "wireguard_ingress_listeners", "active_direct_interfaces", "active_direct_context", "active_direct_marks", "active_route_generation", "management_fabric_interfaces", "management_fabric_endpoints", "management_fabric_generation", "management_fabric_input", "management_fabric_forward", "management_fabric_postrouting", "management_fabric_prerouting", "chain prerouting", "chain postrouting", "chain forward_mss", "hook forward priority mangle; policy accept", "tcp flags syn tcp option maxseg size set rt mtu", "counter user_upload", "counter user_download", "counter service_upload", "counter service_download", "chain input", "chain forward", "chain output", "policy drop", "gateway-vpn PATH_BLOCKED"} {
 		if !strings.Contains(boot, required) {
 			t.Errorf("boot ruleset missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"flush ruleset", "policy accept", "type integer", "oifname @hilink_interfaces accept", "@LAN_INTERFACE@"} {
+	for _, forbidden := range []string{"flush ruleset", "type integer", "oifname @hilink_interfaces accept", "@LAN_INTERFACE@"} {
 		if strings.Contains(boot, forbidden) {
 			t.Errorf("boot ruleset contains forbidden %q", forbidden)
 		}
+	}
+	if strings.Count(boot, "policy accept") != 1 || !strings.Contains(boot, "hook forward priority mangle; policy accept") {
+		t.Fatal("only the non-filtering MSS mangle hook may use policy accept")
 	}
 	for _, unitName := range []string{"gateway-vpn-firewall.service", "gateway-vpn-firewall-guard.service", "gateway-vpn-watchdog.service", "gateway-vpn-database-restore-boot.service", "gateway-vpn-network-broker.socket", "gateway-vpn.service", "gateway-vpn-mihomo.service", "gateway-vpn-dnsmasq.service"} {
 		unit := read(t, filepath.Join(root, "packaging", "systemd", unitName))
@@ -601,6 +604,7 @@ func TestReleaseBundleIsCanonicalReverifiedAndDraftOnly(t *testing.T) {
 func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	root := repositoryRoot(t)
 	workflow := read(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	gitleaksIgnore := read(t, filepath.Join(root, ".gitleaksignore"))
 	var parsed map[string]any
 	if err := yaml.Unmarshal([]byte(workflow), &parsed); err != nil {
 		t.Fatalf("parse GitHub CI workflow: %v", err)
@@ -610,7 +614,12 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n scripts/*.sh", "test/release-gate/*.sh",
 		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
 		"startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test",
-		"persist-credentials: false",
+		"persist-credentials: false", "fetch-depth: 0", "Repository secret history gate",
+		"needs: secret-scan",
+		"gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e", "GITHUB_TOKEN: ${{ github.token }}",
+		`GITLEAKS_VERSION: "8.29.0"`,
+		`GITLEAKS_ENABLE_COMMENTS: "false"`, `GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"`,
+		"FuzzImport", "FuzzNormalizeTarget", "FuzzGenerate", "FuzzExtractReleaseArchive", "-fuzztime=5s",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("GitHub CI workflow missing %q", required)
@@ -619,10 +628,13 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 	if strings.Contains(workflow, "pull_request_target") || strings.Contains(strings.ToLower(workflow), "release_signing") || strings.Contains(workflow, "secrets.") {
 		t.Fatal("GitHub CI can expose release secrets or runs privileged fork code with base context")
 	}
+	if !strings.Contains(gitleaksIgnore, "Reviewed historical false positives") || strings.Contains(gitleaksIgnore, "*") || strings.Contains(gitleaksIgnore, "test/**") || strings.Count(gitleaksIgnore, ":curl-auth-header:") != 6 {
+		t.Fatal("Gitleaks exceptions must remain six reviewed exact fingerprints, never a wildcard fixture exclusion")
+	}
 	usesPattern := regexp.MustCompile(`(?m)^\s*uses:\s*[^@\s]+@([0-9a-f]{40})(?:\s+#.*)?$`)
 	matches := usesPattern.FindAllStringSubmatch(workflow, -1)
-	if len(matches) != 6 {
-		t.Fatalf("expected six full-SHA official Action references, got %d", len(matches))
+	if len(matches) != 8 {
+		t.Fatalf("expected eight full-SHA reviewed Action references, got %d", len(matches))
 	}
 	if strings.Count(workflow, "uses:") != len(matches) {
 		t.Fatal("GitHub CI contains an unpinned Action reference")
@@ -1392,7 +1404,8 @@ func TestFirewallGuardNetNSHarnessCoversOwnedDeleteAndGlobalFlush(t *testing.T) 
 		"nft delete table inet gateway_vpn",
 		"nft flush ruleset",
 		"firewall_schema_generation",
-		`\[[[:space:]]*7[[:space:]]*\]`,
+		`\[[[:space:]]*8[[:space:]]*\]`,
+		"mss 1240",
 		"active_tun_interfaces",
 		"useradd --system --no-create-home --shell /usr/sbin/nologin",
 		"gateway-vpn-mihomo",

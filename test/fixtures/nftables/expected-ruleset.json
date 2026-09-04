@@ -2,7 +2,7 @@
   "format_version": 1,
   "generated_by": "go run ./test/fixtures/generate",
   "sha256": {
-    "boot-blocked.nft": "604f1980f28c3ff46595897d48a847c7dafbca09b01c03473bbe48d2b6a885f6",
+    "boot-blocked.nft": "a9d1d23a7b20450b2e4b04c0bbbdb24d0598f89f35548dc10afaf4de2b3cb4d4",
     "path-active-modem-a.nft": "cd84df003f644e81aa0c003fe549f9f6a86883468408f8f709bef6250a957726",
     "path-active-modem-b.nft": "735e51aa028c99323210dddcf1e2591e21c115a8542448165e6a0c3ce53a98f1",
     "path-direct-modem-a.nft": "96c9d399c4e560394a1d5e77e9113fb912ccc9fb5e2a0518f0677d4b53940831",
@@ -21,7 +21,6 @@
   ],
   "forbidden_markers": [
     "flush ruleset",
-    "policy accept",
     "LAN to HiLink direct accept"
   ]
 }

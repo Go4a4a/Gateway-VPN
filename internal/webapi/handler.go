@@ -2081,10 +2081,47 @@ func (server *Server) modems(writer http.ResponseWriter, request *http.Request) 
 			"management_reachability_state": item.ManagementReachabilityState,
 			"last_seen_at":                  item.LastSeenAt, "stable_since": item.StableSince,
 			"recovery_state": recoveryState, "recovery_reason": recoveryReason, "physical_failure": recoveryFailure,
-			"direct_path": directPath, "paths": modemPaths,
+			"subnet_conflict": modemSubnetConflictView(item, items),
+			"direct_path":     directPath, "paths": modemPaths,
 		})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": result})
+}
+
+func modemSubnetConflictView(current modem.Modem, items []modem.Modem) any {
+	if current.State != modem.StateSubnetConflict {
+		return nil
+	}
+	prefix, err := netip.ParsePrefix(current.ManagementCIDR)
+	if err != nil || !prefix.Addr().Is4() {
+		return map[string]any{"reason_code": "OBSERVED_SUBNET_INVALID", "conflicts": []any{}}
+	}
+	conflicts := make([]map[string]any, 0)
+	for _, other := range items {
+		if other.ID == current.ID || !other.Enabled || other.ManagementCIDR == "" {
+			continue
+		}
+		otherPrefix, parseErr := netip.ParsePrefix(other.ManagementCIDR)
+		if parseErr != nil || !otherPrefix.Addr().Is4() || !prefix.Overlaps(otherPrefix) {
+			continue
+		}
+		conflicts = append(conflicts, map[string]any{
+			"modem_id": other.ID, "number": other.DisplayNumber, "name": other.Name,
+			"interface_name": other.InterfaceName, "management_cidr": other.ManagementCIDR, "gateway": other.Gateway,
+		})
+	}
+	reason := "OVERLAPS_GATEWAY_NETWORK"
+	if len(conflicts) != 0 {
+		reason = "OVERLAPS_OTHER_MODEM"
+	}
+	managementURL := ""
+	if gateway, parseErr := netip.ParseAddr(current.Gateway); parseErr == nil && gateway.Is4() {
+		managementURL = "http://" + gateway.String() + "/"
+	}
+	return map[string]any{
+		"reason_code": reason, "observed_cidr": current.ManagementCIDR,
+		"suggested_management_url": managementURL, "conflicts": conflicts,
+	}
 }
 
 func (server *Server) discoveredModems(writer http.ResponseWriter, _ *http.Request) {

@@ -547,6 +547,7 @@ counter service_upload
 counter service_download
 chain prerouting { type filter hook prerouting priority mangle; meta mark set iifname map @active_direct_marks }
 chain input { iifname . udp dport @wireguard_ingress_listeners; }
+chain forward_mss { type filter hook forward priority mangle; policy accept; tcp flags syn tcp option maxseg size set rt mtu; }
 chain forward { type filter hook forward priority filter; policy drop;
 ip saddr @wireguard_ingress_allowed_v4
 oifname @active_tun_interfaces

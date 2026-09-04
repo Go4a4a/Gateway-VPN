@@ -10,6 +10,7 @@
 **Поправка 2026-08-27:** прямой Интернет стал штатным проверяемым методом доступа в едином priority list с подписками; добавлены server stickiness/overrides, resilient subscription refresh, FULL/LIMITED ranking, временный direct-only mode и настраиваемая стартовая блокировка
 **Поправка 2026-08-29:** watchdog расширен до фиксированного контура из 17 компонентов, включая отдельный `logging_pipeline`, с per-component recovery mode и классификацией внешних отказов; first-install SSH/SFTP стал рекомендуемым интерактивным default с явным opt-out; для Gateway закреплён owned management route `10.80.0.0/24 dev wg-mgmt protocol 186`
 **Поправка 2026-08-30:** односерверный `wg-mgmt` расширяется в successor до many-to-many Management Fabric `1..N Gateway ↔ 1..N VPS`; добавлены независимые одновременно активные management links, optional end-to-end `wg-admin` через VPS UDP relay, публикация Gateway/Keenetic/local resources с ACL и alias-prefix для пересекающихся домашних подсетей, несколько способов доступа в LAN без обязательной замены обычного WAN Keenetic, безопасное переключение topology profiles после установки, сгруппированная навигация WebUI, лёгкий VPS Hub/Agent, обязательное невмешательство в AmneziaVPN/чужие VPN и portable Windows deploy wizard после стабилизации core API
+**Поправка 2026-09-04:** закреплены route-aware TCP MSS clamping для всех пользовательских HiLink/Ethernet/TUN-путей, обязательный CI secret-history gate, bounded fuzz smoke критичных недоверенных форматов, понятная Windows OpenSSH readiness-диагностика и структурированное исправление конфликтов подсетей модемов
 
 ---
 
@@ -827,6 +828,8 @@ Installer применяет профиль до поднятия LAN services �
 | Gateway | subscription/bootstrap endpoints | выбранный modem context или active VPN path |
 | Gateway | NTP/bootstrap DNS | только настроенные endpoints и modem context |
 
+Отдельная owned chain с `forward`/`mangle` priority корректирует MSS только в TCP SYN пользовательских IPv4-соединений, пришедших из текущего LAN-набора либо от разрешённого `wg-ingress` peer и уходящих в активный verified TUN/direct egress. Предел вычисляется ядром по фактическому route MTU (`tcp option maxseg size set rt mtu`): при обычном Ethernet MTU 1500 правило оставляет нормальный MSS, а при HiLink, WireGuard, TUN либо другом меньшем MTU предотвращает зависание крупных TCP-передач. UDP/QUIC, локальный WebUI/SSH, Management Fabric/VPS и служебный output Gateway эта chain не изменяет. Наличие модема для работы clamping не требуется.
+
 Явно запрещено вне активной direct generation:
 
 ```text
@@ -890,6 +893,7 @@ PATH_DEGRADED
 - forwarded LAN packet без выбранного TUN/direct generation никогда не попадает в main/default route любого modem;
 - TUN и direct user gates не могут быть активны одновременно;
 - direct SNAT привязан к выбранному modem interface и его generation, а не к wildcard uplink set.
+- TCP MSS clamping ограничен динамическим `user_ingress_interfaces`, peer allowlist `wg-ingress` и текущим active egress; пустая active generation не изменяет пакеты.
 
 ### 8.6 Контроль целостности firewall
 
@@ -1979,7 +1983,7 @@ Web UI разделяется по предметным областям; одн
 2. **Интернет и VPN**
    - **Способы доступа:** ordered list `Прямой интернет + подписки`, enable/priority, FULL/LIMITED, startup gate и temporary direct-only.
    - **Выходы в интернет:** Ethernet/HiLink uplinks, priority, DHCP/static IPv4, direct/VPN summary, replacement и причина выбора.
-   - **Модемы:** HiLink discovery/adoption, operator/telemetry, hot-plug, recovery и статусы методов.
+   - **Модемы:** HiLink discovery/adoption, operator/telemetry, hot-plug, recovery и статусы методов; `MODEM_SUBNET_CONFLICT` показывает конфликтующий CIDR, номера/интерфейсы других модемов, предполагаемый management URL и универсальную пошаговую рекомендацию без предположения о производителе или меню прошивки.
    - **Подписки:** refresh/LKG, masked URL, candidate counts, server policies и статусы через каждый uplink.
    - **VPN-серверы:** `AUTO/INCLUDE/EXCLUDE`, preferred rank и per-uplink/target results.
    - **Матрица путей:** canonical `uplink × access method` с quality/freshness/reason/manual probe.
@@ -2092,6 +2096,8 @@ Operation panel показывает стадии `QUEUED → ROUTE_SELECTED →
 - если конкретный credential загружается systemd только при старте unit, допускается controlled restart владельца: nftables и отдельный Mihomo data plane продолжают обеспечивать fail-closed.
 
 ### 15.4 Supply chain
+
+CI выполняет обязательное сканирование полной Git history на private keys, production credentials и высокоэнтропийные secrets до остальных release gates. И Action, и версия scanner engine закреплены явно; плавающий `latest` запрещён. Локальный pre-commit может использовать ту же политику как раннюю подсказку, но не является границей доверия и не заменяет server-side gate. Исключения допускаются только точечно для явно искусственных canary/fixture значений с review; целые каталоги `test`/`fixtures` из сканирования не исключаются.
 
 - версии Gateway, Mihomo и Web UI фиксированы;
 - release artifacts имеют SHA-256 и подпись/release provenance;
@@ -2411,6 +2417,8 @@ Pointer-only application update и signed full host-contract installer/update о
 
 Первый production launcher поддерживает Linux/amd64. После стабилизации Management Fabric/VPS Agent/pairing API выпускается отдельный signed portable `gateway-vpn-deploy.exe` для Windows 10/11 x64 без обязательной установки: он использует только проверенный системный Windows OpenSSH Client, pinned host keys и выбранный пользователем SSH key, не сохраняет пароль/private key и проходит тот же signed-channel/dry-run/readiness contract. Windows GUI/wizard является последним delivery-слоем над уже замороженным API, а не альтернативной реализацией pairing/security rules.
 
+До скачивания release Windows launcher проверяет exact системный `C:\Windows\System32\OpenSSH\ssh.exe`. При его отсутствии он не меняет Windows автоматически и завершает preflight понятным сообщением: как открыть PowerShell от администратора, проверить `Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'` и при `NotPresent` выполнить `Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0`. Изменять `ExecutionPolicy` и запускать отдельный `.ps1` не требуется.
+
 Первый deploy создаёт один management link, но не закрепляет односерверную топологию навсегда. После установки Gateway WebUI может pair дополнительный VPS, а VPS Hub — дополнительный Gateway без переустановки любой роли. Installer VPS предлагает conflict-free management/admin/resource pools, проверяет их против host routes и существующих peers и никогда не перенумеровывает уже выданные site/link/admin prefixes автоматически. Повторный deploy существующей роли использует authenticated pairing/update transaction и не запускает clean-host wizard.
 
 VPS Hub после first install слушает только localhost и admin WireGuard address; публичный HTTPS bind является запрещённым default и не включается pairing bundle. Итоговая readiness проверка для management fabric отдельно подтверждает Gateway→каждый VPS handshake, admin→Gateway HTTPS, ACL deny между sites и отсутствие management prefixes в user Internet/NAT path.
@@ -2483,6 +2491,8 @@ Zero-to-ready workflow обязан:
 - parser/verification signed channel manifest и защита от version/hash downgrade;
 - zero-to-ready preflight не изменяет host при любой failed prerequisite;
 - идемпотентность и transaction resume/rollback deploy launcher.
+- bounded fuzz smoke для subscription import/URL normalization, Mihomo config generation и signed release archive extraction; найденный corpus сохраняется как обычный regression test, а длительный fuzzing запускается отдельно от каждого CI push;
+- Windows launcher/OpenSSH readiness messages содержат проверяемые команды диагностики и установки, но не устанавливают capability молча.
 
 ### 18.2 Integration tests
 
@@ -2523,6 +2533,7 @@ Linux network namespaces моделируют:
 - пересечение HiLink subnets помещает только конфликтующий modem в `MODEM_SUBNET_CONFLICT`;
 - reorder modem/subscription priority меняет ranking, но не инвалидирует fresh qualification и не обрывает active path вне правил failback/manual activation;
 - packet capture на каждом modem подтверждает соответствие `interface-name`, fwmark и routing table выбранной path cell;
+- packet-level namespace test с искусственно уменьшенным route MTU подтверждает, что только пользовательский TCP SYN на active HiLink/Ethernet/TUN egress получает route-aware MSS, а management/service/UDP traffic не затрагивается;
 - mixed Ethernet/HiLink uplinks имеют независимые DHCP/static routes, fwmarks/tables и ranking; Ethernet lease также не создаёт main-table default;
 - safe NIC replacement переносит role/LKG на новую stable identity, а timeout/reboot откатывает прежний persistent/runtime state;
 - single-NIC `wg-ingress` fixture доказывает `Keenetic → WG → TUN/direct → та же NIC → upstream` без route recursion и plaintext leak;
@@ -2586,6 +2597,7 @@ Linux network namespaces моделируют:
 - потеря mobile registration;
 - зависание WebUI/API при сохранении DHCP path;
 - исчерпание/обновление DHCP lease;
+- TCP download/upload через HiLink, Ethernet, Mihomo TUN и `wg-ingress` с реальным route MTU/packet capture; крупные HTTPS-передачи не зависают, а SSH/Management Fabric не попадают под MSS chain;
 - power loss Gateway;
 - смена IP VPS/DNS response;
 - длительный UDP/QUIC traffic;

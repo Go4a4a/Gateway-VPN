@@ -198,6 +198,7 @@ func TestArtifactFromFileAndGatewayInstallCommandPinCompleteTrustChain(t *testin
 		"--interactive", "$ErrorActionPreference='Stop'", "Remove-Item -LiteralPath $root",
 		"$global:LASTEXITCODE=$code", "This PowerShell window remains open for diagnostics",
 		"[Net.ServicePointManager]::SecurityProtocol=$previousSecurityProtocol",
+		"Test-Path -LiteralPath $ssh", "Get-WindowsCapability", "Add-WindowsCapability",
 	} {
 		if !strings.Contains(windowsCommand, required) {
 			t.Errorf("Windows deploy command missing %q", required)

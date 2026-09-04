@@ -16,7 +16,7 @@ import (
 
 const (
 	TableName        = "gateway_vpn"
-	SchemaGeneration = 7
+	SchemaGeneration = 8
 )
 
 type BootConfig struct {
@@ -198,6 +198,14 @@ func RenderBootBlocked(config BootConfig) (Ruleset, error) {
 		iifname . udp dport @wireguard_ingress_listeners accept comment "gateway-vpn selected WireGuard ingress listener"
         iifname @hilink_interfaces udp sport 67 udp dport 68 counter name service_download accept comment "gateway-vpn modem DHCP reply"
     }
+
+	chain forward_mss {
+		type filter hook forward priority mangle; policy accept;
+		meta nfproto ipv4 iifname @user_ingress_interfaces iifname != "wg-ingress" oifname @active_tun_interfaces tcp flags syn tcp option maxseg size set rt mtu comment "gateway-vpn clamp LAN TCP MSS to verified TUN route"
+		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname @active_tun_interfaces tcp flags syn tcp option maxseg size set rt mtu comment "gateway-vpn clamp allowed WireGuard TCP MSS to verified TUN route"
+		meta nfproto ipv4 iifname @user_ingress_interfaces iifname != "wg-ingress" oifname . meta mark @active_direct_context tcp flags syn tcp option maxseg size set rt mtu comment "gateway-vpn clamp LAN TCP MSS to verified direct route"
+		meta nfproto ipv4 iifname "wg-ingress" ip saddr @wireguard_ingress_allowed_v4 oifname . meta mark @active_direct_context tcp flags syn tcp option maxseg size set rt mtu comment "gateway-vpn clamp allowed WireGuard TCP MSS to verified direct route"
+	}
 
 	chain forward {
         type filter hook forward priority filter; policy drop;

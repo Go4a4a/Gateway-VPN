@@ -45,7 +45,7 @@ Gateway поддерживает `1..N` uplinks в любой разумной �
 
 ## Firewall и fail-closed
 
-- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `7`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
+- Owned table — только `inet gateway_vpn`; текущая firewall schema generation — `8`. Controller никогда не вызывает `nft flush ruleset` и не изменяет таблицы других приложений.
 - Direct и TUN gate взаимно исключаются. Direct открывается только для точного fresh `uplink + generation`; при active subscription прямой пользовательский выход закрыт.
 - Настройка startup blocking управляет только поведением до первого доказанного path. Она не отключает firewall integrity/quarantine: повреждённое или неизвестное состояние всегда закрывается.
 - IPv6 отключён sysctl и блокируется owned `inet` ruleset; IPv6 forwarding равен `0`.

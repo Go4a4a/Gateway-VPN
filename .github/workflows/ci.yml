@@ -15,10 +15,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secret-scan:
+    name: Repository secret history gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout complete history without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject committed credentials and private keys
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: "8.29.0"
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
   test:
     name: Go, packaging and syntax gates
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    needs: secret-scan
     steps:
       - name: Checkout exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,6 +63,14 @@ jobs:
         run: go test -race ./... -count=1
       - name: Run vet
         run: go vet ./...
+      - name: Run bounded fuzz smoke on untrusted formats
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/subscription -run='^$' -fuzz='^FuzzImport$' -fuzztime=5s
+          go test ./internal/bypass -run='^$' -fuzz='^FuzzNormalizeTarget$' -fuzztime=5s
+          go test ./internal/mihomo -run='^$' -fuzz='^FuzzGenerate$' -fuzztime=5s
+          go test ./internal/update -run='^$' -fuzz='^FuzzExtractReleaseArchive$' -fuzztime=5s
       - name: Build all Linux release entrypoints
         shell: bash
         run: |
@@ -74,6 +101,7 @@ jobs:
     name: Windows portable deploy contract
     runs-on: windows-2025
     timeout-minutes: 15
+    needs: secret-scan
     steps:
       - name: Checkout exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,7 +145,7 @@ jobs:
       - name: Refresh Ubuntu package indexes
         run: sudo apt-get update
       - name: Install netns test dependencies
-        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping wireguard-tools libcap2-bin
+        run: sudo apt-get install --yes --no-install-recommends --no-upgrade iproute2 nftables procps iputils-ping wireguard-tools libcap2-bin python3 tcpdump
       - name: Build native Linux netns binary
         shell: bash
         run: |
