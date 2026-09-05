@@ -157,6 +157,7 @@ jobs:
           go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
           go test -c -o /tmp/gateway-vpn-updatenet-test ./internal/updatenet
           go test -c -o /tmp/gateway-vpn-gatewayfabric-test ./internal/gatewayfabric
+          go test -c -o /tmp/gateway-vpn-command-test ./cmd/gateway-vpn
           go build -trimpath -o /tmp/gateway-vpn-vps-agent ./cmd/gateway-vpn-vps-agent
       - name: Prove owned firewall recovery and no direct route
         run: sudo ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
@@ -167,7 +168,7 @@ jobs:
       - name: Prove WireGuard ingress kernel lifecycle and handshake
         run: sudo ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
       - name: Prove initial topology handoff is read-only and precedes apply
-        run: sudo ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
+        run: sudo ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test /tmp/gateway-vpn-command-test
       - name: Prove topology rollback and peer-scoped one-arm firewall
         run: sudo ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
       - name: Prove signed-update service routes through exact HiLink and Ethernet contexts

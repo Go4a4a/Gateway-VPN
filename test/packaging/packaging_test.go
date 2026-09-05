@@ -675,6 +675,8 @@ func TestGitHubCIUsesPinnedActionsWithoutReleaseSecrets(t *testing.T) {
 		"go vet ./...", "CGO_ENABLED=0 GOOS=linux GOARCH=amd64", "node --check", "bash -n .githooks/pre-commit scripts/*.sh", "test/release-gate/*.sh",
 		"sudo apt-get install --yes --no-install-recommends --no-upgrade", "firewall_guard.sh /tmp/gateway-vpn-netns",
 		"startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test",
+		"go test -c -o /tmp/gateway-vpn-command-test ./cmd/gateway-vpn",
+		"initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test /tmp/gateway-vpn-command-test",
 		"persist-credentials: false", "fetch-depth: 0", "Repository secret history gate",
 		"needs: secret-scan",
 		"gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e", "GITHUB_TOKEN: ${{ github.token }}",

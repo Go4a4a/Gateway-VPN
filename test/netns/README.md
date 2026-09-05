@@ -16,12 +16,13 @@ CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-wgingress-test ./internal/wgingress
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-networkapply-test ./internal/networkapply
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-updatenet-test ./internal/updatenet
 CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-gatewayfabric-test ./internal/gatewayfabric
+CGO_ENABLED=0 go test -c -o /tmp/gateway-vpn-command-test ./cmd/gateway-vpn
 CGO_ENABLED=0 go build -o /tmp/gateway-vpn-mihomo-peer ./test/netns/cmd/mihomo-peer
 sudo bash ./test/netns/firewall_guard.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-dataplane-test
 sudo bash ./test/netns/startup_policy.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-app-test
 sudo bash ./test/netns/lan_bridge_ssh.sh /tmp/gateway-vpn-netns
 sudo bash ./test/netns/wireguard_ingress.sh /tmp/gateway-vpn-wgingress-test
-sudo bash ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
+sudo bash ./test/netns/initial_topology_preflight.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test /tmp/gateway-vpn-command-test
 sudo bash ./test/netns/topology_profiles.sh /tmp/gateway-vpn-netns /tmp/gateway-vpn-networkapply-test
 sudo bash ./test/netns/update_service_routes.sh /tmp/gateway-vpn-dataplane-test /tmp/gateway-vpn-updatenet-test
 sudo bash ./test/netns/management_resources.sh /tmp/gateway-vpn-gatewayfabric-test

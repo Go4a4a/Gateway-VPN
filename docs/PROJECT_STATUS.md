@@ -1,7 +1,7 @@
 # Gateway VPN — статус и журнал разработки
 
 **Последнее обновление:** 2026-09-05
-**Общее состояние:** `INITIAL_TOPOLOGY_EXTERNAL_CONFIRMATION_LOCAL_PASS / APPLIED_TOPOLOGY_UPGRADE_PRESERVATION_LOCAL_PASS / NEW_IMMUTABLE_CANDIDATE_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
+**Общее состояние:** `INITIAL_TOPOLOGY_EXTERNAL_CONFIRMATION_LOCAL_PASS / APPLIED_TOPOLOGY_UPGRADE_PRESERVATION_LOCAL_PASS / CI_FIX_PENDING / HARDWARE_AND_ENDURANCE_GATES_PENDING`
 **Текущий этап:** immutable testing release `v0.1.1-testing.f300b25` остаётся опубликованным и неизменным, а stable/latest остаётся `v0.1.0-successor.5723940`. Current source завершает безопасный initial-topology contract: automatic confirmation разрешён только при неизменном management origin, `external-wireguard` подтверждается реальным WebUI-запросом через новый WireGuard-путь, а `local-console` принимает только физическую Linux/serial console и точную одноразовую фразу. Без доказательства нового пути срабатывает rollback. Host upgrade теперь читает фактически активную topology, сохраняет принадлежащие ей nftables/dnsmasq/networkd assets, не выполняет initial apply повторно и проверяет candidate по фактическому LAN и DHCP/DNS-состоянию. Полный Go/shell source gate и privileged Linux netns fixture прошли локально. Новый immutable candidate ещё не собирался и current clean Windows two-target gate не засчитан. Для стандартной первой установки `ETHERNET_HILINK` следующий шаг — один release/gate этап и затем физический Ubuntu/HiLink/Keenetic запуск; полноценный remote zero-to-ready `ONE_ARM_WIREGUARD` по-прежнему требует создания и безопасной передачи первого Keenetic peer/config в мастере.
 
 **Оценка прогресса:** относительно прежнего schema-25 scope программная реализация остаётся примерно `98%`; относительно текущего расширенного обязательного scope программная часть ориентировочно `98%`. Готовность стандартного профиля к первой установке на физический стенд — примерно `97%`, полная production-готовность — примерно `84%`. Durable signed-update scheduler, service-route ladder, отдельный signed Mihomo maintenance discovery поверх полного immutable Gateway release, signed Gateway/VPS foundations, complete Gateway restore-point rollback, live Management Fabric observations, exact schema-34 lifecycle matrix и Windows portable delivery source имеют local evidence. Первый clean Windows guest выявил и точно локализовал mapped-key ACL defect без изменения targets; source fix локально проверен, но требует нового immutable candidate и повторения guest gate. Privileged Docker и local Windows 10 не заменяют физические Ubuntu Gateway/VPS, Mihomo/WireGuard/HiLink/Keenetic captures, hardware-validated firmware/USB recovery и RTC S5, а также несокращаемые 24/72-часовые endurance.
@@ -25,7 +25,21 @@
 
 **Ограничения:** новый commit/CI, production-signed testing candidate, exact tag и clean Windows guest gate ещё не выполнены. Физические Ubuntu Gateway/VPS, HiLink/Keenetic, USB/power-cut и 24/72-часовые endurance проверки не заменены локальным fixture. Мастер пока не создаёт и не передаёт первый Keenetic peer/config до удалённого `ONE_ARM_WIREGUARD` apply, поэтому этот профиль не объявляется zero-to-ready.
 
-**Следующий шаг:** зафиксировать validated source отдельным commit и отправить в `origin/main`; затем с отдельным разрешением собрать и опубликовать новый immutable testing candidate, повторить короткий clean Windows two-target installer gate и передать пользователю точную команду первой установки стандартного `ETHERNET_HILINK` профиля на физическое Ubuntu-железо.
+**Следующий шаг:** после исправления CI fixture повторно прогнать обязательный GitHub gate; только при полном успехе и отдельном разрешении собрать и опубликовать новый immutable testing candidate, повторить короткий clean Windows two-target installer gate и передать пользователю точную команду первой установки стандартного `ETHERNET_HILINK` профиля на физическое Ubuntu-железо.
+
+### Сессия 2026-09-05 — исправление обязательного Linux CI fixture после отказа run 33952475721
+
+**Сделано:**
+
+- failed run `33952475721` разобран по GitHub Actions API: secret-history, Go/packaging/syntax и Windows jobs завершились `success`; Linux job упал на шаге `Prove initial topology handoff is read-only and precedes apply` с кодом `2`;
+- причина — fixture после добавления console/durable-state проверок требует отдельный executable `gateway-vpn-command-test`, но workflow собирал только Gateway, `networkapply` и остальные integration binaries и не передавал третий аргумент;
+- `.github/workflows/ci.yml` теперь собирает `go test -c -o /tmp/gateway-vpn-command-test ./cmd/gateway-vpn` и явно передаёт его в `initial_topology_preflight.sh`;
+- `test/netns/README.md` синхронизирован с фактическим CI invocation;
+- `test/packaging/packaging_test.go` получил regression assertions на сборку и передачу command test binary, чтобы wiring больше не мог незаметно разойтись.
+
+**Проверено:** причина подтверждена API job/step statuses; после source patch локально повторяются `go test ./test/packaging -count=1`, `go vet ./...`, shell syntax и `git diff --check`. Исправленный CI run ещё не запускался.
+
+**Ограничения:** опубликованные `v0.1.1-testing.f300b25`, stable/latest, production key и tags не изменялись. Hardware/VPS/Keenetic/HiLink и endurance gates по-прежнему не выполнены.
 
 ### Сессия 2026-09-05 — transaction-owned first-install/profile Ethernet apply
 
