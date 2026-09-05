@@ -141,9 +141,10 @@ func (backend UbuntuBackend) PreviewTopology(ctx context.Context, manifest Manif
 		CurrentDesiredGeneration: current.DesiredGeneration, CandidateDesiredGeneration: current.DesiredGeneration + 1,
 		OldURL: manifest.OldURL, NewURL: manifest.NewURL,
 		RequiredPrerequisites: required, MissingPrerequisites: missing,
-		RequireWireGuardConfirmation: manifest.RequireWireGuardConfirmation,
-		ManagementInterfaces:         managementIfnames,
-		AffectedInterfaces:           topologyAffectedIfnames(interfaces, manifest.Topology, configuration.Network.LANInterface, manifest.Topology.LANInterfaceName),
+		RequireWireGuardConfirmation:  manifest.RequireWireGuardConfirmation,
+		AllowLocalConsoleConfirmation: manifest.AllowLocalConsoleConfirmation,
+		ManagementInterfaces:          managementIfnames,
+		AffectedInterfaces:            topologyAffectedIfnames(interfaces, manifest.Topology, configuration.Network.LANInterface, manifest.Topology.LANInterfaceName),
 	}, nil
 }
 
@@ -816,6 +817,9 @@ func (backend UbuntuBackend) validateTopologyManagementSafety(ctx context.Contex
 	}
 	if !manifest.RequireWireGuardConfirmation {
 		return errors.New("removing the last local management path requires confirmed WireGuard management")
+	}
+	if manifest.AllowLocalConsoleConfirmation {
+		return nil
 	}
 	reachable, err := backend.reachableManagementLink(ctx)
 	if err != nil {

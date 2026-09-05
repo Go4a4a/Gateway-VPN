@@ -15,6 +15,7 @@ LAN_INTERFACE=""
 LAN_MEMBERS=""
 LAN_ADDRESS=""
 INITIAL_TOPOLOGY_TOKEN=""
+INITIAL_TOPOLOGY_CONFIRMATION="automatic"
 LOG_READER_USER=""
 BOOT_NETWORK_POLICY=""
 GRUB_POLICY=""
@@ -24,7 +25,7 @@ WIREGUARD_LISTEN_PORT=""
 WIREGUARD_CLIENT_DNS=""
 
 usage() {
-  echo "Usage: upgrade-gateway-host.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --lan-address CIDR --log-reader-user USER --boot-network-policy POLICY --grub-policy POLICY [--lan-members LIST] [--initial-topology-token TOKEN] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress and its four values] [--apply]"
+  echo "Usage: upgrade-gateway-host.sh --release-dir DIR --trusted-update-key FILE --version VERSION --lan-interface IFACE --lan-address CIDR --log-reader-user USER --boot-network-policy POLICY --grub-policy POLICY [--lan-members LIST] [--initial-topology-token TOKEN] [--initial-topology-confirmation automatic|external-wireguard|local-console] [--install-dependencies] [--enable-dhcp] [--disable-ssh] [--enable-wireguard-ingress and its four values] [--apply]"
 }
 
 while (($#)); do
@@ -36,6 +37,7 @@ while (($#)); do
     --lan-members) LAN_MEMBERS=${2:?}; shift 2 ;;
     --lan-address) LAN_ADDRESS=${2:?}; shift 2 ;;
     --initial-topology-token) INITIAL_TOPOLOGY_TOKEN=${2:?}; shift 2 ;;
+    --initial-topology-confirmation) INITIAL_TOPOLOGY_CONFIRMATION=${2:?}; shift 2 ;;
     --log-reader-user) LOG_READER_USER=${2:?}; shift 2 ;;
     --boot-network-policy) BOOT_NETWORK_POLICY=${2:?}; shift 2 ;;
     --grub-policy) GRUB_POLICY=${2:?}; shift 2 ;;
@@ -59,6 +61,7 @@ VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za
 [[ $RELEASE_VERSION =~ $VERSION_PATTERN && $LAN_INTERFACE =~ ^[A-Za-z0-9_.:-]{1,15}$ && $LAN_ADDRESS =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([1-9]|[12][0-9]|30)$ ]] || { echo "Host-contract upgrade identity or LAN syntax is invalid" >&2; exit 2; }
 [[ $LOG_READER_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ && $LOG_READER_USER != root ]] || { echo "Host-contract upgrade log reader is invalid" >&2; exit 2; }
 [[ $BOOT_NETWORK_POLICY == gateway-nonblocking || $BOOT_NETWORK_POLICY == keep ]] || { echo "Host-contract upgrade boot-network policy is invalid" >&2; exit 2; }
+[[ $INITIAL_TOPOLOGY_CONFIRMATION == automatic || $INITIAL_TOPOLOGY_CONFIRMATION == external-wireguard || $INITIAL_TOPOLOGY_CONFIRMATION == local-console ]] || { echo "Host-contract upgrade topology confirmation mode is invalid" >&2; exit 2; }
 [[ $GRUB_POLICY == automatic-hidden || $GRUB_POLICY == menu-5s || $GRUB_POLICY == keep ]] || { echo "Host-contract upgrade GRUB policy is invalid" >&2; exit 2; }
 ((ENABLE_WIREGUARD_INGRESS == 1)) || [[ -z $WIREGUARD_ENDPOINT_HOST && -z $WIREGUARD_SUBNET && -z $WIREGUARD_LISTEN_PORT && -z $WIREGUARD_CLIENT_DNS ]] || { echo "WireGuard values require enabled ingress" >&2; exit 2; }
 
@@ -155,6 +158,20 @@ REPORT_GRUB=$(report_string grub_policy); REPORT_GRUB=${REPORT_GRUB:-keep}
 if ((ENABLE_WIREGUARD_INGRESS)); then
   [[ $(report_string wireguard_endpoint_host) == "$WIREGUARD_ENDPOINT_HOST" && $(report_string wireguard_subnet) == "$WIREGUARD_SUBNET" && $(release_number wireguard_listen_port /var/lib/gateway-vpn/install-report.json) == "$WIREGUARD_LISTEN_PORT" && $(report_string wireguard_client_dns) == "$WIREGUARD_CLIENT_DNS" ]] || { echo "Host upgrade cannot change WireGuard ingress values" >&2; exit 1; }
 fi
+TOPOLOGY_STATE_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" topology-state --config /etc/gateway-vpn/config.yaml) || { echo "Host upgrade requires a converged active topology" >&2; exit 1; }
+printf '%s\n' "$TOPOLOGY_STATE_OUTPUT"
+RUNTIME_TOPOLOGY_PROFILE=$(sed -n 's/.*profile=\([^ ]*\).*/\1/p' <<<"$TOPOLOGY_STATE_OUTPUT")
+RUNTIME_DHCP_TEXT=$(sed -n 's/.*dhcp_dns=\(true\|false\).*/\1/p' <<<"$TOPOLOGY_STATE_OUTPUT")
+[[ "$RUNTIME_TOPOLOGY_PROFILE" =~ ^(ETHERNET_HILINK|ETHERNET_ETHERNET|ONE_ARM_WIREGUARD|MIXED)$ && ( "$RUNTIME_DHCP_TEXT" == true || "$RUNTIME_DHCP_TEXT" == false ) ]] || { echo "Host upgrade topology service state is invalid" >&2; exit 1; }
+if [[ -z "$REPORT_TOPOLOGY_TOKEN" ]]; then
+  REQUESTED_TOPOLOGY_ARGS=(initial-topology-check --token "$INITIAL_TOPOLOGY_TOKEN" --allow-nondefault --lan-interface "$LAN_INTERFACE")
+  [[ -z "$LAN_MEMBERS" ]] || REQUESTED_TOPOLOGY_ARGS+=(--lan-members "$LAN_MEMBERS")
+  REQUESTED_TOPOLOGY_OUTPUT=$("$RELEASE_DIR/bin/gateway-vpn" "${REQUESTED_TOPOLOGY_ARGS[@]}") || { echo "Host upgrade initial topology handoff is invalid" >&2; exit 1; }
+  REQUESTED_TOPOLOGY_PROFILE=$(sed -n 's/.*profile=\([^ ]*\).*/\1/p' <<<"$REQUESTED_TOPOLOGY_OUTPUT")
+  [[ "$REQUESTED_TOPOLOGY_PROFILE" == "$RUNTIME_TOPOLOGY_PROFILE" ]] || { echo "A legacy install without a stored topology token can only be upgraded with its currently active profile" >&2; exit 1; }
+fi
+RUNTIME_DHCP_ENABLED=0
+[[ "$RUNTIME_DHCP_TEXT" == false ]] || RUNTIME_DHCP_ENABLED=1
 
 validate_completed_install_marker() {
   local marker=$1 expected_version=$2 field_count key value
@@ -347,8 +364,8 @@ trap 'rollback_upgrade 143' TERM
 write_marker APPLYING
 
 rm -f /opt/gateway-vpn/current /opt/gateway-vpn/recovery /opt/gateway-vpn/.current.new /opt/gateway-vpn/.recovery.new /var/lib/gateway-vpn/install-report.json
-rm -f /etc/gateway-vpn/update-signing.pub /etc/gateway-vpn/nftables/boot.nft /etc/gateway-vpn/dnsmasq.conf
-rm -f /etc/systemd/network/05-gateway-vpn-lan.network /etc/systemd/network/05-gateway-vpn-lan.netdev /etc/systemd/network/06-gateway-vpn-lan-*.network /etc/systemd/network/80-gateway-vpn-hilink.network
+rm -f /etc/gateway-vpn/update-signing.pub
+rm -f /etc/systemd/network/80-gateway-vpn-hilink.network
 rm -f /etc/systemd/system/systemd-networkd-wait-online.service.d/gateway-vpn.conf /etc/default/grub.d/90-gateway-vpn.cfg
 rm -f /etc/sysctl.d/90-gateway-vpn-ipv4-forwarding.conf /etc/sysctl.d/90-gateway-vpn-ipv6.conf /etc/systemd/journald@gateway-vpn.conf.d/retention.conf
 rm -f /usr/lib/sysusers.d/gateway-vpn.conf /usr/lib/tmpfiles.d/gateway-vpn.conf /usr/libexec/gateway-vpn-install-recovery /usr/libexec/gateway-vpn-uninstall-job
@@ -365,9 +382,10 @@ if ip link show dev wg-mgmt >/dev/null 2>&1; then ip link delete dev wg-mgmt; fi
 INNER_ARGS=(
   --release-dir "$RELEASE_DIR" --trusted-update-key "$TOOLING/update-signing.pub" --version "$RELEASE_VERSION"
   --lan-interface "$LAN_INTERFACE" --lan-address "$LAN_ADDRESS" --log-reader-user "$LOG_READER_USER"
-  --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY" --host-upgrade-inner
+  --boot-network-policy "$BOOT_NETWORK_POLICY" --grub-policy "$GRUB_POLICY" --host-upgrade-inner --preserve-applied-topology
 )
 [[ -z "$INITIAL_TOPOLOGY_TOKEN" ]] || INNER_ARGS+=(--initial-topology-token "$INITIAL_TOPOLOGY_TOKEN")
+INNER_ARGS+=(--initial-topology-confirmation "$INITIAL_TOPOLOGY_CONFIRMATION")
 [[ -z $LAN_MEMBERS ]] || INNER_ARGS+=(--lan-members "$LAN_MEMBERS")
 ((INSTALL_DEPENDENCIES == 0)) || INNER_ARGS+=(--install-dependencies)
 ((ENABLE_DHCP == 0)) || INNER_ARGS+=(--enable-dhcp)
@@ -388,7 +406,7 @@ for _ in {1..60}; do
      systemctl is-active --quiet gateway-vpn-network-broker.socket &&
      systemctl is-active --quiet gateway-vpn-network-broker.service &&
      systemctl is-active --quiet gateway-vpn.service &&
-     { ((ENABLE_DHCP == 0)) || systemctl is-active --quiet gateway-vpn-dnsmasq.service; } &&
+     { ((RUNTIME_DHCP_ENABLED == 0)) || systemctl is-active --quiet gateway-vpn-dnsmasq.service; } &&
      candidate_runtime_ready; then
     CANDIDATE_RUNTIME_READY=1
     break

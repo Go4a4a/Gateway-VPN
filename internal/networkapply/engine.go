@@ -18,16 +18,17 @@ import (
 )
 
 type Candidate struct {
-	InterfaceName                string
-	OldLANCIDR                   string
-	NewLANCIDR                   string
-	OldURL                       string
-	NewURL                       string
-	Ethernet                     *EthernetMutation
-	Topology                     *TopologyMutation
-	ManagementURL                string
-	ManagementDestinationIP      string
-	RequireWireGuardConfirmation bool
+	InterfaceName                 string
+	OldLANCIDR                    string
+	NewLANCIDR                    string
+	OldURL                        string
+	NewURL                        string
+	Ethernet                      *EthernetMutation
+	Topology                      *TopologyMutation
+	ManagementURL                 string
+	ManagementDestinationIP       string
+	RequireWireGuardConfirmation  bool
+	AllowLocalConsoleConfirmation bool
 }
 
 type SnapshotBackend interface {
@@ -64,20 +65,22 @@ type ConfirmEvidence struct {
 	Token              string
 	LocalDestinationIP string
 	ViaWireGuard       bool
+	ViaLocalConsole    bool
 }
 
 type TopologyPreview struct {
-	CurrentProfile               string   `json:"current_profile"`
-	CandidateProfile             string   `json:"candidate_profile"`
-	CurrentDesiredGeneration     int64    `json:"current_desired_generation"`
-	CandidateDesiredGeneration   int64    `json:"candidate_desired_generation"`
-	OldURL                       string   `json:"old_url"`
-	NewURL                       string   `json:"new_url"`
-	RequiredPrerequisites        []string `json:"required_prerequisites"`
-	MissingPrerequisites         []string `json:"missing_prerequisites"`
-	RequireWireGuardConfirmation bool     `json:"require_wireguard_confirmation"`
-	ManagementInterfaces         []string `json:"management_interfaces"`
-	AffectedInterfaces           []string `json:"affected_interfaces"`
+	CurrentProfile                string   `json:"current_profile"`
+	CandidateProfile              string   `json:"candidate_profile"`
+	CurrentDesiredGeneration      int64    `json:"current_desired_generation"`
+	CandidateDesiredGeneration    int64    `json:"candidate_desired_generation"`
+	OldURL                        string   `json:"old_url"`
+	NewURL                        string   `json:"new_url"`
+	RequiredPrerequisites         []string `json:"required_prerequisites"`
+	MissingPrerequisites          []string `json:"missing_prerequisites"`
+	RequireWireGuardConfirmation  bool     `json:"require_wireguard_confirmation"`
+	AllowLocalConsoleConfirmation bool     `json:"allow_local_console_confirmation"`
+	ManagementInterfaces          []string `json:"management_interfaces"`
+	AffectedInterfaces            []string `json:"affected_interfaces"`
 }
 
 type topologyPreviewBackend interface {
@@ -307,10 +310,24 @@ func (engine *Engine) Confirm(ctx context.Context, applyID string, evidence Conf
 	if err != nil || directoryErr != nil || status.Phase != PhaseApplied || !manifestMatchesTransaction(manifest, transaction, directory) {
 		return errors.New("network apply durable state is unavailable")
 	}
-	if manifest.RequireWireGuardConfirmation && !evidence.ViaWireGuard {
+	if evidence.ViaWireGuard && evidence.ViaLocalConsole {
 		return ErrConfirmSource
 	}
-	if !evidence.ViaWireGuard {
+	if evidence.ViaLocalConsole && !manifest.AllowLocalConsoleConfirmation {
+		return ErrConfirmSource
+	}
+	if manifest.RequireWireGuardConfirmation && !evidence.ViaWireGuard && !evidence.ViaLocalConsole {
+		return ErrConfirmSource
+	}
+	if evidence.ViaWireGuard {
+		local, parseErr := netip.ParseAddr(evidence.LocalDestinationIP)
+		managementWireGuard := parseErr == nil && netip.MustParsePrefix("10.80.0.0/24").Contains(local)
+		newDestination := parseErr == nil && local.Unmap().String() == transaction.NewDestinationIP
+		if !managementWireGuard && !newDestination {
+			return ErrConfirmSource
+		}
+	}
+	if !evidence.ViaWireGuard && !evidence.ViaLocalConsole {
 		local, parseErr := netip.ParseAddr(evidence.LocalDestinationIP)
 		if parseErr != nil || local.Unmap().String() != transaction.NewDestinationIP {
 			return ErrConfirmSource
@@ -516,7 +533,8 @@ func buildManifest(candidate Candidate) (Manifest, error) {
 			SchemaVersion: TopologyManifestSchema, OperationKind: OperationTopologyProfile,
 			OldURL: oldURL, NewURL: newURL,
 			NewDestinationIP: destination.String(), Topology: &mutation,
-			RequireWireGuardConfirmation: candidate.RequireWireGuardConfirmation,
+			RequireWireGuardConfirmation:  candidate.RequireWireGuardConfirmation,
+			AllowLocalConsoleConfirmation: candidate.AllowLocalConsoleConfirmation,
 		}, nil
 	}
 	if candidate.Ethernet == nil {

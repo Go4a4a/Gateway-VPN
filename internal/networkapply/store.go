@@ -44,20 +44,21 @@ const (
 )
 
 type Manifest struct {
-	SchemaVersion                int               `json:"schema_version"`
-	ID                           string            `json:"id"`
-	OperationKind                string            `json:"operation_kind,omitempty"`
-	InterfaceName                string            `json:"interface_name,omitempty"`
-	OldLANCIDR                   string            `json:"old_lan_cidr,omitempty"`
-	NewLANCIDR                   string            `json:"new_lan_cidr,omitempty"`
-	OldURL                       string            `json:"old_url"`
-	NewURL                       string            `json:"new_url"`
-	NewDestinationIP             string            `json:"new_destination_ip"`
-	Ethernet                     *EthernetMutation `json:"ethernet,omitempty"`
-	Topology                     *TopologyMutation `json:"topology,omitempty"`
-	RequireWireGuardConfirmation bool              `json:"require_wireguard_confirmation,omitempty"`
-	RollbackDeadline             string            `json:"rollback_deadline"`
-	CreatedAt                    string            `json:"created_at"`
+	SchemaVersion                 int               `json:"schema_version"`
+	ID                            string            `json:"id"`
+	OperationKind                 string            `json:"operation_kind,omitempty"`
+	InterfaceName                 string            `json:"interface_name,omitempty"`
+	OldLANCIDR                    string            `json:"old_lan_cidr,omitempty"`
+	NewLANCIDR                    string            `json:"new_lan_cidr,omitempty"`
+	OldURL                        string            `json:"old_url"`
+	NewURL                        string            `json:"new_url"`
+	NewDestinationIP              string            `json:"new_destination_ip"`
+	Ethernet                      *EthernetMutation `json:"ethernet,omitempty"`
+	Topology                      *TopologyMutation `json:"topology,omitempty"`
+	RequireWireGuardConfirmation  bool              `json:"require_wireguard_confirmation,omitempty"`
+	AllowLocalConsoleConfirmation bool              `json:"allow_local_console_confirmation,omitempty"`
+	RollbackDeadline              string            `json:"rollback_deadline"`
+	CreatedAt                     string            `json:"created_at"`
 }
 
 const (
@@ -288,7 +289,7 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("network transaction deadline must be after creation and at most 90 seconds")
 	}
 	if manifest.SchemaVersion == LegacyManifestSchema {
-		if manifest.OperationKind != "" && manifest.OperationKind != OperationLANAddress || manifest.Ethernet != nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation {
+		if manifest.OperationKind != "" && manifest.OperationKind != OperationLANAddress || manifest.Ethernet != nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation || manifest.AllowLocalConsoleConfirmation {
 			return errors.New("legacy LAN transaction manifest contains a foreign operation")
 		}
 		_, newPrefix, err := validateCandidate(Candidate{
@@ -317,6 +318,9 @@ func validateManifest(manifest Manifest) error {
 		if err := validateManagementURL(manifest.NewURL, destination); err != nil {
 			return errors.New("topology transaction new management URL is invalid")
 		}
+		if manifest.AllowLocalConsoleConfirmation && manifest.OldURL == manifest.NewURL {
+			return errors.New("local-console confirmation is reserved for a changed topology management origin")
+		}
 		parsedOld, err := url.Parse(manifest.OldURL)
 		if err != nil {
 			return errors.New("topology transaction old management URL is invalid")
@@ -327,7 +331,7 @@ func validateManifest(manifest Manifest) error {
 		}
 		return nil
 	}
-	if manifest.SchemaVersion != ManifestSchema || manifest.OperationKind != OperationEthernetUplink || manifest.InterfaceName != "" || manifest.OldLANCIDR != "" || manifest.NewLANCIDR != "" || manifest.Ethernet == nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation {
+	if manifest.SchemaVersion != ManifestSchema || manifest.OperationKind != OperationEthernetUplink || manifest.InterfaceName != "" || manifest.OldLANCIDR != "" || manifest.NewLANCIDR != "" || manifest.Ethernet == nil || manifest.Topology != nil || manifest.RequireWireGuardConfirmation || manifest.AllowLocalConsoleConfirmation {
 		return errors.New("network transaction manifest operation is invalid")
 	}
 	if err := validateEthernetMutation(*manifest.Ethernet); err != nil {

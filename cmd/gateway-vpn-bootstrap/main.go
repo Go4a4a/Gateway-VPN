@@ -58,6 +58,7 @@ func run(args []string) int {
 	lanMembers := flags.String("lan-members", "", "optional comma-separated physical LAN bridge members when lan-interface is gateway-vpn-lan")
 	lanAddress := flags.String("lan-address", "", "explicit Gateway transit LAN IPv4 CIDR; defaults to 192.168.200.1/24 in automation mode")
 	initialTopologyToken := flags.String("initial-topology-token", "", "bounded non-secret topology contract")
+	initialTopologyConfirmation := flags.String("initial-topology-confirmation", "automatic", "automatic, external-wireguard, or independent local-console confirmation")
 	enableDHCP := flags.Bool("enable-dhcp", false, "enable transit DHCP after validation")
 	disableSSH := flags.Bool("disable-ssh", false, "do not install/manage OpenSSH or open TCP/22 in the Gateway LAN firewall")
 	enableWGIngress := flags.Bool("enable-wireguard-ingress", false, "enable the standard ROUTED WireGuard client listener on the managed LAN")
@@ -137,6 +138,7 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "encode selected initial topology failed")
 			return 1
 		}
+		*initialTopologyConfirmation = selection.TopologyConfirmation
 		*enableDHCP = selection.EnableDHCP
 		*disableSSH = !selection.EnableSSH
 		*installDependencies = selection.InstallDependencies
@@ -169,7 +171,7 @@ func run(args []string) int {
 		selectedLANMembers = selection.LANMembers
 	}
 	options := bootstrapinstall.GatewayOptions{
-		LANInterface: *lanInterface, LANMembers: selectedLANMembers, LANAddress: *lanAddress, InitialTopologyToken: *initialTopologyToken, InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP,
+		LANInterface: *lanInterface, LANMembers: selectedLANMembers, LANAddress: *lanAddress, InitialTopologyToken: *initialTopologyToken, InitialTopologyConfirmation: *initialTopologyConfirmation, InstallDependencies: *installDependencies, EnableDHCP: *enableDHCP,
 		LogReaderUser: *logReaderUser,
 		DisableSSH:    *disableSSH, EnableWGIngress: *enableWGIngress, WGEndpointHost: *wgEndpointHost, WGSubnetCIDR: *wgSubnetCIDR,
 		WGListenPort: *wgListenPort, WGClientDNS: splitCommaValues(*wgClientDNS),
@@ -294,7 +296,7 @@ func runInstallVPS(args []string) int {
 func usage(output *os.File) {
 	fmt.Fprintln(output, "usage: gateway-vpn-bootstrap --version")
 	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --interactive")
-	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --lan-interface IFACE --initial-topology-token TOKEN --log-reader-user USER [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply] [--json]")
+	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-gateway --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --lan-interface IFACE --initial-topology-token TOKEN --initial-topology-confirmation automatic|external-wireguard|local-console --log-reader-user USER [--lan-members IFACE[,IFACE...]] [--lan-address CIDR] [--install-dependencies] [--enable-dhcp] [--apply] [--json]")
 	fmt.Fprintln(output, "       gateway-vpn-bootstrap install-vps --release-version VERSION --manifest-url HTTPS_URL --manifest-sha256 SHA256 --signature-url HTTPS_URL --public-key-url HTTPS_URL --signer-key-sha256 SHA256 --artifact-base-url HTTPS_URL/ --public-endpoint HOST:51821 --gateway-public-key KEY --admin-public-key KEY [--install-dependencies] [--allow-gateway-ssh] [--apply] [--json]")
 }
 

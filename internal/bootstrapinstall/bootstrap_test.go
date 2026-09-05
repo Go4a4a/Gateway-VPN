@@ -188,7 +188,7 @@ func TestGatewayInstallerRunsReadOnlyPreflightBeforeApplyWithTypedArguments(t *t
 		t.Fatalf("InstallGateway() = %+v,%v requests=%d", result, err, len(runner.requests))
 	}
 	first, second := runner.requests[0], runner.requests[1]
-	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--disable-ssh") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "--log-reader-user") || !contains(first.Arguments, "ubuntu") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(first.Arguments, "gateway-nonblocking") || !contains(first.Arguments, "automatic-hidden") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
+	if first.Executable != "/usr/bin/bash" || first.Directory != prepared.ReleaseRoot || contains(first.Arguments, "--apply") || !contains(first.Arguments, "--enable-dhcp") || !contains(first.Arguments, "--disable-ssh") || !contains(first.Arguments, "--install-dependencies") || !contains(first.Arguments, "--dependency-preflight-only") || !contains(first.Arguments, "--log-reader-user") || !contains(first.Arguments, "ubuntu") || !contains(first.Arguments, "enp2s0") || !contains(first.Arguments, "192.168.200.1/24") || !contains(first.Arguments, "gateway-nonblocking") || !contains(first.Arguments, "automatic-hidden") || !contains(first.Arguments, "--initial-topology-confirmation") || !contains(first.Arguments, "automatic") || !contains(second.Arguments, "--apply") || contains(second.Arguments, "--dependency-preflight-only") || strings.Join(first.Environment, "\n") != "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8" {
 		t.Fatalf("installer requests = %+v", runner.requests)
 	}
 	runner = &recordingRunner{failAt: 1, failErr: CommandError{ExitCode: 10}}
@@ -231,6 +231,12 @@ func TestGatewayInstallerRunsReadOnlyPreflightBeforeApplyWithTypedArguments(t *t
 	}
 	if _, err := (Installer{Runner: &recordingRunner{}, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{LANInterface: "enp2s0", LANAddress: "8.8.8.8/24"}); err == nil {
 		t.Fatal("public Gateway LAN was accepted")
+	}
+	if _, err := (Installer{Runner: &recordingRunner{}, Bash: "/usr/bin/bash"}).InstallGateway(context.Background(), prepared, GatewayOptions{
+		LANInterface: "enp2s0", LANAddress: "192.168.200.1/24", LogReaderUser: "ubuntu",
+		BootNetworkPolicy: "gateway-nonblocking", GRUBPolicy: "keep", InitialTopologyConfirmation: "local-console",
+	}); err == nil {
+		t.Fatal("local-console confirmation was accepted for a retained LAN topology")
 	}
 }
 

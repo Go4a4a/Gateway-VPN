@@ -25,29 +25,30 @@ var (
 )
 
 type GatewayInstallCommandOptions struct {
-	Repository              string
-	ReleaseTag              string
-	ManifestSHA256          string
-	SignerKeySHA256         string
-	Interactive             bool
-	LogReaderUser           string
-	LANInterface            string
-	LANMembers              []string
-	LANAddress              string
-	InitialTopologyToken    string
-	InstallDependencies     bool
-	EnableDHCP              bool
-	DisableSSH              bool
-	EnableWGIngress         bool
-	WGEndpointHost          string
-	WGSubnetCIDR            string
-	WGListenPort            int
-	WGClientDNS             []string
-	BootNetworkPolicy       string
-	GRUBPolicy              string
-	Apply                   bool
-	NonInteractiveRoot      bool
-	DependencyPreflightOnly bool
+	Repository                  string
+	ReleaseTag                  string
+	ManifestSHA256              string
+	SignerKeySHA256             string
+	Interactive                 bool
+	LogReaderUser               string
+	LANInterface                string
+	LANMembers                  []string
+	LANAddress                  string
+	InitialTopologyToken        string
+	InitialTopologyConfirmation string
+	InstallDependencies         bool
+	EnableDHCP                  bool
+	DisableSSH                  bool
+	EnableWGIngress             bool
+	WGEndpointHost              string
+	WGSubnetCIDR                string
+	WGListenPort                int
+	WGClientDNS                 []string
+	BootNetworkPolicy           string
+	GRUBPolicy                  string
+	Apply                       bool
+	NonInteractiveRoot          bool
+	DependencyPreflightOnly     bool
 }
 
 type VPSInstallCommandOptions struct {
@@ -135,6 +136,12 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 		if err != nil || installtopology.ValidateInstallerBinding(plan, options.LANInterface, options.LANMembers) != nil {
 			return "", errors.New("initial topology does not match the supported Gateway LAN action")
 		}
+		if options.InitialTopologyConfirmation == "" {
+			options.InitialTopologyConfirmation = "automatic"
+		}
+		if options.InitialTopologyConfirmation != "automatic" && options.InitialTopologyConfirmation != "external-wireguard" && options.InitialTopologyConfirmation != "local-console" || options.InitialTopologyConfirmation != "automatic" && !plan.UsesOneArmIngress() {
+			return "", errors.New("initial topology confirmation mode does not match the Gateway topology")
+		}
 	}
 	if !options.Interactive {
 		if options.EnableWGIngress {
@@ -184,6 +191,7 @@ func GatewayInstallCommand(manifest Manifest, options GatewayInstallCommandOptio
 	} else {
 		installCommand += " --lan-interface " + options.LANInterface + " --lan-address " + options.LANAddress +
 			" --initial-topology-token " + options.InitialTopologyToken +
+			" --initial-topology-confirmation " + options.InitialTopologyConfirmation +
 			" --boot-network-policy " + options.BootNetworkPolicy + " --grub-policy " + options.GRUBPolicy
 		if len(options.LANMembers) > 0 {
 			installCommand += " --lan-members " + strings.Join(options.LANMembers, ",")

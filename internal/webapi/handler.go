@@ -5433,7 +5433,7 @@ func (server *Server) deleteEthernetUplink(writer http.ResponseWriter, request *
 }
 
 func (server *Server) ethernetCandidate(request *http.Request, mutation networkapply.EthernetMutation) (networkapply.Candidate, error) {
-	localIP, _, err := confirmationDestination(request.Context())
+	localIP, _, err := confirmationDestination(request.Context(), server.dependencies.Database)
 	if err != nil {
 		return networkapply.Candidate{}, errors.New("не удалось определить текущий защищённый адрес управления")
 	}
@@ -5695,7 +5695,7 @@ func (server *Server) confirmNetworkApply(writer http.ResponseWriter, request *h
 		writeError(writer, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 		return
 	}
-	localIP, viaWireGuard, err := confirmationDestination(request.Context())
+	localIP, viaWireGuard, err := confirmationDestination(request.Context(), server.dependencies.Database)
 	if err != nil {
 		writeError(writer, http.StatusForbidden, "CONFIRM_SOURCE_INVALID", "Подтверждение должно прийти через новый адрес или WireGuard")
 		return
@@ -5708,7 +5708,7 @@ func (server *Server) confirmNetworkApply(writer http.ResponseWriter, request *h
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func confirmationDestination(ctx context.Context) (string, bool, error) {
+func confirmationDestination(ctx context.Context, database *sql.DB) (string, bool, error) {
 	local, ok := ctx.Value(http.LocalAddrContextKey).(net.Addr)
 	if !ok || local == nil {
 		return "", false, errors.New("HTTP local destination is unavailable")
@@ -5722,7 +5722,23 @@ func confirmationDestination(ctx context.Context) (string, bool, error) {
 		return "", false, errors.New("HTTP local destination is not private IPv4")
 	}
 	wireGuard := netip.MustParsePrefix("10.80.0.0/24").Contains(address)
+	if !wireGuard && database != nil {
+		var ingressCIDR string
+		err := database.QueryRowContext(ctx, `
+SELECT subnet_cidr FROM wireguard_ingress_servers
+WHERE enabled=1 ORDER BY created_at, id LIMIT 1`).Scan(&ingressCIDR)
+		if err == nil {
+			wireGuard = wireGuardConfirmationAddress(address, ingressCIDR)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return "", false, errors.New("configured WireGuard confirmation subnet is unavailable")
+		}
+	}
 	return address.String(), wireGuard, nil
+}
+
+func wireGuardConfirmationAddress(address netip.Addr, subnetCIDR string) bool {
+	prefix, err := netip.ParsePrefix(subnetCIDR)
+	return err == nil && prefix == prefix.Masked() && prefix.Addr().Is4() && prefix.Addr().IsPrivate() && prefix.Contains(address)
 }
 
 func trafficRange(request *http.Request, now time.Time) (string, string) {

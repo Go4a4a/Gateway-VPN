@@ -10,10 +10,12 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BINARY=${1:-$ROOT/dist/gateway-vpn-netns}
 NETWORKAPPLY_TEST=${2:-$ROOT/dist/gateway-vpn-networkapply-test}
+COMMAND_TEST=${3:-$ROOT/dist/gateway-vpn-command-test}
 [[ $EUID -eq 0 ]] || { echo "initial_topology_preflight.sh requires root" >&2; exit 1; }
 [[ -x $BINARY ]] || { echo "Gateway binary is required: $BINARY" >&2; exit 2; }
 [[ -x $NETWORKAPPLY_TEST ]] || { echo "networkapply test binary is required: $NETWORKAPPLY_TEST" >&2; exit 2; }
-for command in ip base64 sha256sum grep sed awk cmp mkdir date; do
+[[ -x $COMMAND_TEST ]] || { echo "Gateway command test binary is required: $COMMAND_TEST" >&2; exit 2; }
+for command in ip base64 sha256sum grep sed awk cmp mkdir date script; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 
@@ -97,9 +99,26 @@ INSTALLER="$ROOT/scripts/install-gateway.sh"
 early_line=$(grep -n 'TOPOLOGY_CHECK_ARGS=(initial-topology-check --token' "$INSTALLER" | head -n1 | cut -d: -f1)
 wg_probe_line=$(grep -n '^  "\$RELEASE_DIR/bin/gateway-vpn" wireguard-ingress-bootstrap' "$INSTALLER" | head -n1 | cut -d: -f1)
 apply_line=$(grep -n '^if ((APPLY)); then$' "$INSTALLER" | tail -n1 | cut -d: -f1)
-[[ $early_line =~ ^[0-9]+$ && $wg_probe_line =~ ^[0-9]+$ && $apply_line =~ ^[0-9]+$ ]] || { echo "installer ordering markers are missing" >&2; exit 1; }
+command_source="$ROOT/cmd/gateway-vpn/initial_topology_apply.go"
+console_gate_line=$(grep -n 'requireIndependentLocalConsole(os.Stdin)' "$command_source" | head -n1 | cut -d: -f1)
+stage_line=$(grep -n 'prepared, err := engine.Stage' "$command_source" | head -n1 | cut -d: -f1)
+[[ $early_line =~ ^[0-9]+$ && $wg_probe_line =~ ^[0-9]+$ && $apply_line =~ ^[0-9]+$ && $console_gate_line =~ ^[0-9]+$ && $stage_line =~ ^[0-9]+$ ]] || { echo "installer ordering markers are missing" >&2; exit 1; }
 ((early_line < wg_probe_line && early_line < apply_line)) || { echo "initial topology validation is not before probe/apply" >&2; exit 1; }
+((console_gate_line < stage_line)) || { echo "local-console identity is checked after topology staging" >&2; exit 1; }
 echo "PASS: installer validates initial topology before WireGuard probe and apply (lines $early_line < $wg_probe_line,$apply_line)"
+echo "PASS: independent local-console identity is required before durable topology staging (lines $console_gate_line < $stage_line)"
+
+# A pipe and an SSH-like pseudo-terminal must both be rejected as local-console
+# evidence. The test command only inspects its own stdin descriptor; it does
+# not stage or mutate a topology.
+"$COMMAND_TEST" -test.v -test.count=1 -test.run '^TestRequireIndependentLocalConsoleRejectsPipeOrPTY$' \
+  >"$EVIDENCE_ROOT/local-console-pipe.log"
+script -q -e -c "'$COMMAND_TEST' -test.v -test.count=1 -test.run '^TestRequireIndependentLocalConsoleRejectsPipeOrPTY$'" \
+  "$EVIDENCE_ROOT/local-console-pty.log" >/dev/null
+"$COMMAND_TEST" -test.v -test.count=1 -test.run \
+  '^(TestInitialTopologyIndependentConsoleContractRejectsSSHAndBoundsInput|TestWaitForExternalTopologyConfirmationObservesDurableTerminalState)$' \
+  >"$EVIDENCE_ROOT/confirmation-state.log"
+echo "PASS: pipe and /dev/pts confirmation sources are rejected before Stage; durable external confirm/rollback states are observed"
 
 # The durable network transaction tests prove that a topology apply is
 # confirmable, rolls back to LKG on timeout/partial failure, and rejects a

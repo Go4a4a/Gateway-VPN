@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	"gateway-vpn/internal/config"
+	"gateway-vpn/internal/db"
 	"gateway-vpn/internal/installtopology"
 )
 
@@ -51,4 +56,71 @@ func splitTopologyCommaValues(value string) []string {
 		return nil
 	}
 	return strings.Split(value, ",")
+}
+
+type currentTopologyState struct {
+	Profile           string
+	DesiredGeneration int64
+	AppliedGeneration int64
+	State             string
+	LANInterface      string
+	LANAddress        string
+	DHCPDNS           bool
+}
+
+// runTopologyState is a read-only bridge between the durable runtime topology
+// and the signed shell lifecycle. It prevents a reinstall or host-contract
+// upgrade from mistaking the immutable first-install handoff for the topology
+// that may have since been changed through WebUI safe apply.
+func runTopologyState(args []string) int {
+	flags := flag.NewFlagSet("gateway-vpn topology-state", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	configPath := flags.String("config", "/etc/gateway-vpn/config.yaml", "strict Gateway configuration")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
+	configuration, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load Gateway VPN configuration: %v\n", err)
+		return 1
+	}
+	database, err := db.OpenReadOnly(context.Background(), configuration.System.Database)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open Gateway VPN topology state: %v\n", err)
+		return 1
+	}
+	defer database.Close()
+	state, err := readConvergedTopologyState(context.Background(), database, configuration)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read Gateway VPN topology state: %v\n", err)
+		return 1
+	}
+	fmt.Printf("topology state: profile=%s desired_generation=%d applied_generation=%d state=%s lan_interface=%s lan_address=%s dhcp_dns=%t\n",
+		state.Profile, state.DesiredGeneration, state.AppliedGeneration, state.State, state.LANInterface, state.LANAddress, state.DHCPDNS)
+	return 0
+}
+
+func readConvergedTopologyState(ctx context.Context, database *sql.DB, configuration config.Config) (currentTopologyState, error) {
+	if database == nil {
+		return currentTopologyState{}, errors.New("topology database is unavailable")
+	}
+	state := currentTopologyState{LANInterface: configuration.Network.LANInterface, LANAddress: configuration.Network.LANAddress, DHCPDNS: configuration.Network.LANServiceMode == "dhcp_dns"}
+	if err := database.QueryRowContext(ctx, `
+SELECT active_profile,desired_generation,applied_generation,state
+FROM topology_profile_state WHERE singleton_id=1`).Scan(&state.Profile, &state.DesiredGeneration, &state.AppliedGeneration, &state.State); err != nil {
+		return currentTopologyState{}, err
+	}
+	if !validTopologyStateProfile(state.Profile) || state.DesiredGeneration < 1 || state.AppliedGeneration < 1 || state.DesiredGeneration != state.AppliedGeneration || state.State != "ACTIVE" {
+		return currentTopologyState{}, errors.New("topology is not a converged active profile")
+	}
+	return state, nil
+}
+
+func validTopologyStateProfile(value string) bool {
+	switch installtopology.Profile(value) {
+	case installtopology.ProfileEthernetHiLink, installtopology.ProfileEthernetEthernet, installtopology.ProfileOneArmWireGuard, installtopology.ProfileMixed:
+		return true
+	default:
+		return false
+	}
 }

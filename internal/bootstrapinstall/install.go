@@ -73,23 +73,24 @@ type Installer struct {
 }
 
 type GatewayOptions struct {
-	LANInterface            string
-	LANMembers              []string
-	LANAddress              string
-	InitialTopologyToken    string
-	LogReaderUser           string
-	InstallDependencies     bool
-	EnableDHCP              bool
-	DisableSSH              bool
-	EnableWGIngress         bool
-	WGEndpointHost          string
-	WGSubnetCIDR            string
-	WGListenPort            int
-	WGClientDNS             []string
-	BootNetworkPolicy       string
-	GRUBPolicy              string
-	Apply                   bool
-	DependencyPreflightOnly bool
+	LANInterface                string
+	LANMembers                  []string
+	LANAddress                  string
+	InitialTopologyToken        string
+	InitialTopologyConfirmation string
+	LogReaderUser               string
+	InstallDependencies         bool
+	EnableDHCP                  bool
+	DisableSSH                  bool
+	EnableWGIngress             bool
+	WGEndpointHost              string
+	WGSubnetCIDR                string
+	WGListenPort                int
+	WGClientDNS                 []string
+	BootNetworkPolicy           string
+	GRUBPolicy                  string
+	Apply                       bool
+	DependencyPreflightOnly     bool
 }
 
 type VPSOptions struct {
@@ -139,6 +140,15 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 	if err != nil || installtopology.ValidateInstallerBinding(plan, options.LANInterface, options.LANMembers) != nil {
 		return InstallResult{}, errors.New("initial Gateway topology does not match installer LAN arguments")
 	}
+	if options.InitialTopologyConfirmation == "" {
+		options.InitialTopologyConfirmation = "automatic"
+	}
+	if options.InitialTopologyConfirmation != "automatic" && options.InitialTopologyConfirmation != "external-wireguard" && options.InitialTopologyConfirmation != "local-console" {
+		return InstallResult{}, errors.New("initial Gateway topology confirmation mode is invalid")
+	}
+	if options.InitialTopologyConfirmation != "automatic" && !plan.UsesOneArmIngress() {
+		return InstallResult{}, errors.New("special confirmation is reserved for a one-arm initial topology")
+	}
 	if options.EnableWGIngress {
 		if err := wgingress.ValidateInitialServerOptions(options.WGEndpointHost, options.WGSubnetCIDR, options.WGListenPort, options.WGClientDNS); err != nil || prefixesOverlapCIDR(options.LANAddress, options.WGSubnetCIDR) {
 			return InstallResult{}, errors.New("explicit valid non-overlapping initial WireGuard ingress options are required")
@@ -157,6 +167,7 @@ func (installer Installer) InstallGateway(ctx context.Context, prepared Prepared
 		"--lan-interface", options.LANInterface,
 		"--lan-address", options.LANAddress,
 		"--initial-topology-token", options.InitialTopologyToken,
+		"--initial-topology-confirmation", options.InitialTopologyConfirmation,
 		"--log-reader-user", options.LogReaderUser,
 		"--boot-network-policy", options.BootNetworkPolicy,
 		"--grub-policy", options.GRUBPolicy,

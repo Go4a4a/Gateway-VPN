@@ -43,6 +43,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "initial-topology-check" {
 		return runInitialTopologyCheck(args[1:])
 	}
+	if len(args) > 0 && args[0] == "topology-state" {
+		return runTopologyState(args[1:])
+	}
 	if len(args) > 0 && args[0] == "initial-topology-apply" {
 		return runInitialTopologyApply(args[1:])
 	}
@@ -111,7 +114,7 @@ func run(args []string) int {
 		}
 		return 1
 	default:
-		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|wireguard-ingress-bootstrap|initial-topology-check|initial-topology-apply|watchdog|network-rollback|network-recover|database-restore|update-offline-check|update-lifecycle-check|update-apply|update-recover|update-rollback|update-finalize|serve]")
+		fmt.Fprintln(os.Stderr, "usage: gateway-vpn [--version|--check-defaults|--check-config PATH|preflight|firewall-boot|firewall-guard|network-broker|wireguard-ingress-bootstrap|initial-topology-check|topology-state|initial-topology-apply|watchdog|network-rollback|network-recover|database-restore|update-offline-check|update-lifecycle-check|update-apply|update-recover|update-rollback|update-finalize|serve]")
 		fmt.Fprintln(os.Stderr, "no network changes were made")
 		return 2
 	}

@@ -48,21 +48,22 @@ var (
 )
 
 type Selection struct {
-	Topology            installtopology.Plan
-	LANInterface        string
-	LANMembers          []string
-	LANAddress          string
-	EnableDHCP          bool
-	EnableSSH           bool
-	LogReaderUser       string
-	InstallDependencies bool
-	EnableWGIngress     bool
-	WGEndpointHost      string
-	WGSubnetCIDR        string
-	WGListenPort        int
-	WGClientDNS         []string
-	BootNetworkPolicy   BootNetworkPolicy
-	GRUBPolicy          GRUBPolicy
+	Topology             installtopology.Plan
+	TopologyConfirmation string
+	LANInterface         string
+	LANMembers           []string
+	LANAddress           string
+	EnableDHCP           bool
+	EnableSSH            bool
+	LogReaderUser        string
+	InstallDependencies  bool
+	EnableWGIngress      bool
+	WGEndpointHost       string
+	WGSubnetCIDR         string
+	WGListenPort         int
+	WGClientDNS          []string
+	BootNetworkPolicy    BootNetworkPolicy
+	GRUBPolicy           GRUBPolicy
 }
 
 type Session struct {
@@ -236,8 +237,9 @@ func (session *Session) Select(ctx context.Context) (Selection, error) {
 		return Selection{}, fmt.Errorf("validate initial topology selection: %w", err)
 	}
 	return Selection{
-		Topology:     topology,
-		LANInterface: LANInterface, LANMembers: interfaceNames(selected), LANAddress: lanAddress,
+		Topology:             topology,
+		TopologyConfirmation: "automatic",
+		LANInterface:         LANInterface, LANMembers: interfaceNames(selected), LANAddress: lanAddress,
 		EnableDHCP: enableDHCP, EnableSSH: enableSSH, InstallDependencies: installDependencies,
 		EnableWGIngress: enableWGIngress, WGEndpointHost: wgEndpointHost, WGSubnetCIDR: wgSubnetCIDR,
 		WGListenPort: wgListenPort, WGClientDNS: wgClientDNS,

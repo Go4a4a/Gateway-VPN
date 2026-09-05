@@ -208,6 +208,29 @@ func TestInstallerIsExplicitAndUbuntuScoped(t *testing.T) {
 	}
 }
 
+func TestInitialTopologyConfirmationIsExternalOrIndependentAndRollbackProtected(t *testing.T) {
+	root := repositoryRoot(t)
+	source := read(t, filepath.Join(root, "cmd", "gateway-vpn", "initial_topology_apply.go"))
+	consoleGate := strings.Index(source, "requireIndependentLocalConsole(os.Stdin)")
+	stage := strings.Index(source, "prepared, err := engine.Stage")
+	apply := strings.Index(source, "if err := engine.Apply")
+	externalWait := strings.Index(source, "waitForExternalTopologyConfirmation")
+	if consoleGate < 0 || stage < 0 || apply < 0 || externalWait < 0 || consoleGate > stage || stage > apply || apply > externalWait {
+		t.Fatal("initial topology confirmation is not ordered as console gate, durable stage, apply, external confirmation")
+	}
+	for _, required := range []string{
+		`"external-wireguard"`,
+		`"local-console"`,
+		"automatic rollback remains armed",
+		"The fragment is not sent in an HTTP request",
+		"evidence.ViaLocalConsole = true",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("initial topology confirmation contract missing %q", required)
+		}
+	}
+}
+
 func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	root := repositoryRoot(t)
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
@@ -249,6 +272,7 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		`NEW_METADATA_VERSION=$(release_string gateway_version`,
 		`"$OLD_RELEASE/bin/gateway-vpnctl" release-verify`,
 		`"$RELEASE_DIR/bin/gateway-vpnctl" release-verify`,
+		`"$RELEASE_DIR/bin/gateway-vpn" topology-state --config /etc/gateway-vpn/config.yaml`,
 		"validate_completed_install_marker",
 		"Host upgrade cannot combine release replacement with LAN reconfiguration",
 		"Host upgrade cannot change DHCP policy",
@@ -265,6 +289,7 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 		"write_marker APPLYING",
 		"write_marker CANDIDATE_READY",
 		`GATEWAY_VPN_HOST_UPGRADE_INNER=1 "$RELEASE_DIR/scripts/install-gateway.sh"`,
+		"--preserve-applied-topology",
 		`--trusted-update-key "$TOOLING/update-signing.pub"`,
 		"candidate_runtime_ready",
 		"status_age <= 30 && control_age >= -5 && control_age <= 30",
@@ -284,6 +309,20 @@ func TestGatewayHostContractUpgradeIsSignedColdAndRecoverable(t *testing.T) {
 	}
 	if strings.Contains(upgrader, "rm -rf /etc/gateway-vpn") {
 		t.Fatal("host upgrade destroys persistent Gateway configuration instead of preserving it")
+	}
+	for _, activeTopologyAsset := range []string{
+		"rm -f /etc/gateway-vpn/nftables/boot.nft",
+		"rm -f /etc/gateway-vpn/dnsmasq.conf",
+		"rm -f /etc/systemd/network/05-gateway-vpn-lan.network",
+		"rm -f /etc/systemd/network/05-gateway-vpn-lan.netdev",
+		"rm -f /etc/systemd/network/06-gateway-vpn-lan-*.network",
+	} {
+		if strings.Contains(upgrader, activeTopologyAsset) {
+			t.Errorf("host upgrade removes the active WebUI topology before the preserving installer transaction: %q", activeTopologyAsset)
+		}
+	}
+	if !strings.Contains(installer, `"initial_topology_token": "%s"`) {
+		t.Fatal("Gateway install report does not preserve the immutable initial topology handoff")
 	}
 	if strings.Contains(upgrader, `old_or_default ssh_socket_was_enabled`) || strings.Contains(upgrader, `new_marker_value ssh_socket_was_enabled`) {
 		t.Fatal("host upgrade guesses unknown legacy pre-install ssh.socket state from the post-install marker")
@@ -367,7 +406,7 @@ func TestGatewayInstallerPinsRuntimeLANAndActivatesNetworkBroker(t *testing.T) {
 	installer := read(t, filepath.Join(root, "scripts", "install-gateway.sh"))
 	for _, required := range []string{
 		`sed -E -e "s|^([[:space:]]*)lan_interface:.*|\1lan_interface: $LAN_INTERFACE|"`,
-		`grep -Fxq "  lan_interface: $LAN_INTERFACE" /etc/gateway-vpn/config.yaml`,
+		`grep -Fxq "  lan_interface: $EFFECTIVE_LAN_INTERFACE" /etc/gateway-vpn/config.yaml`,
 		`"$DEST/bin/gateway-vpn" --check-config /etc/gateway-vpn/config.yaml`,
 		"systemctl restart gateway-vpn-network-broker.socket",
 		"systemctl is-active --quiet gateway-vpn-network-broker.socket",
@@ -1694,7 +1733,7 @@ func TestIsolatedDataPlaneUsersHaveSeparatedStateDirectories(t *testing.T) {
 	}
 	for _, required := range []string{
 		`$(stat -c '%U:%G:%a' /var/lib/gateway-vpn-dnsmasq/dnsmasq.leases) == "gateway-vpn-dns:gateway-vpn:644"`,
-		`Installed Gateway dnsmasq config differs from the requested LAN policy`,
+		`Installed Gateway dnsmasq config differs from the runtime LAN policy`,
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("existing-install dnsmasq audit missing %q", required)

@@ -194,11 +194,44 @@ func TestEnginePersistsTopologyManifestAndRequiresWireGuardConfirmation(t *testi
 	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, LocalDestinationIP: "192.168.210.1"}); !errors.Is(err, ErrConfirmSource) {
 		t.Fatalf("local topology confirmation error = %v", err)
 	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, ViaLocalConsole: true}); !errors.Is(err, ErrConfirmSource) {
+		t.Fatalf("unapproved local-console confirmation error = %v", err)
+	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, ViaWireGuard: true, ViaLocalConsole: true}); !errors.Is(err, ErrConfirmSource) {
+		t.Fatalf("ambiguous confirmation evidence error = %v", err)
+	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, LocalDestinationIP: "10.90.0.1", ViaWireGuard: true}); !errors.Is(err, ErrConfirmSource) {
+		t.Fatalf("unrelated ingress WireGuard confirmation error = %v", err)
+	}
 	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, LocalDestinationIP: "10.80.0.2", ViaWireGuard: true}); err != nil {
 		t.Fatalf("WireGuard topology confirmation error = %v", err)
 	}
 	if got := strings.Join(*backend.calls, ","); got != "snapshot,arm,apply,disarm,commit" {
 		t.Fatalf("topology operation order = %s", got)
+	}
+}
+
+func TestEngineAcceptsOnlyExplicitDurableLocalConsoleTopologyConfirmation(t *testing.T) {
+	ctx, database := networkApplyDatabase(t)
+	engine, backend, _ := testEngine(t, database)
+	candidate := validTopologyCandidate()
+	candidate.AllowLocalConsoleConfirmation = true
+	prepared, err := engine.Stage(ctx, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _, err := engine.Store.Load(prepared.ApplyID)
+	if err != nil || !manifest.RequireWireGuardConfirmation || !manifest.AllowLocalConsoleConfirmation {
+		t.Fatalf("durable local-console policy = %+v, %v", manifest, err)
+	}
+	if err := engine.Apply(ctx, prepared.ApplyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Confirm(ctx, prepared.ApplyID, ConfirmEvidence{Token: prepared.ConfirmToken, ViaLocalConsole: true}); err != nil {
+		t.Fatalf("local-console confirmation error = %v", err)
+	}
+	if got := strings.Join(*backend.calls, ","); got != "snapshot,arm,apply,disarm,commit" {
+		t.Fatalf("local-console operation order = %s", got)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	runtimepkg "runtime"
@@ -2201,6 +2202,34 @@ func TestSafeNetworkApplyReturnsTokenBeforeAsyncApplyAndUsesSocketDestination(t 
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || broker.confirmed.LocalDestinationIP != "192.168.210.1" || broker.confirmed.ViaWireGuard {
 		t.Fatalf("new-destination confirm = %d %+v", response.Code, broker.confirmed)
+	}
+}
+
+func TestWireGuardConfirmationRecognizesConfiguredIngressSubnet(t *testing.T) {
+	if !wireGuardConfirmationAddress(netip.MustParseAddr("10.90.0.1"), "10.90.0.0/24") {
+		t.Fatal("configured wg-ingress destination was not recognized")
+	}
+	for _, candidate := range []string{"10.80.0.0/24", "10.90.0.1/24", "203.0.113.0/24", "invalid"} {
+		if wireGuardConfirmationAddress(netip.MustParseAddr("10.90.0.1"), candidate) {
+			t.Fatalf("invalid or foreign ingress subnet was accepted: %s", candidate)
+		}
+	}
+}
+
+func TestConfirmationDestinationUsesEnabledIngressSubnetFromDatabase(t *testing.T) {
+	server, ctx := testServer(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := server.dependencies.Database.ExecContext(ctx, `
+INSERT INTO wireguard_ingress_servers(
+  id,enabled,name,interface_name,subnet_cidr,listen_port,private_key_secret_ref,created_at,updated_at
+) VALUES ('wg-ingress-test',1,'Test ingress','wg-ingress','10.90.0.0/24',51820,'/test/private',?,?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestContext := context.WithValue(ctx, http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("10.90.0.1"), Port: 8443})
+	local, viaWireGuard, err := confirmationDestination(requestContext, server.dependencies.Database)
+	if err != nil || local != "10.90.0.1" || !viaWireGuard {
+		t.Fatalf("configured ingress confirmation = %q, %t, %v", local, viaWireGuard, err)
 	}
 }
 
